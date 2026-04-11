@@ -88,7 +88,7 @@ class PhotoFilterProxy(QSortFilterProxyModel):
         if not record.is_pruned and not s.show_unpruned:
             return False
 
-        rec_date = record.modified_time.date()
+        rec_date = record.shot_time.date()
         if s.date_from is not None and rec_date < s.date_from:
             return False
         if s.date_to is not None   and rec_date > s.date_to:
@@ -112,4 +112,4 @@ class PhotoFilterProxy(QSortFilterProxyModel):
         if key == "size":
             return rl.file_size < rr.file_size
         # "date" (default)
-        return rl.modified_time < rr.modified_time
+        return rl.shot_time < rr.shot_time

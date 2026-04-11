@@ -1,8 +1,10 @@
 """
 Single-image viewer (Phase 3).
 
-_Overlay        Opaque child-widget that holds one pre-rendered frame.
-                Animated via QPropertyAnimation on its `pos` property.
+_SlideOverlay   Single opaque child-widget that holds both the outgoing and
+                incoming pre-rendered frames.  A float `progress` (0→1)
+                drives the slide; both frames are drawn in one paintEvent,
+                halving compositor work vs. the previous two-widget approach.
 
 _ImageView      QGraphicsView — zoom, pan, fit.
                 slide_to(old, new, dir)  plays the push transition.
@@ -41,17 +43,13 @@ from typing import List, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
-    QParallelAnimationGroup,
-    QPoint,
-    QPropertyAnimation,
     QSize,
     Qt,
-    QUrl,
+    QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import (
     QColor,
-    QDesktopServices,
     QPainter,
     QPixmap,
 )
@@ -383,8 +381,8 @@ def _read_exif_fields(
 
 
 # Animation tuning
-_ANIM_MS   = 200                        # total duration in milliseconds
-_ANIM_EASE = QEasingCurve.OutQuart     # sharper deceleration — snappy, modern
+_ANIM_MS   = 220                        # total duration in milliseconds
+_ANIM_EASE = QEasingCurve.OutCubic     # fast start, cushioned landing
 
 
 def _fmt_size(n: int) -> str:
@@ -396,27 +394,46 @@ def _fmt_size(n: int) -> str:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Overlay widget (one animation frame)
+# Slide overlay (both animation frames in a single widget)
 # ──────────────────────────────────────────────────────────────────────────────
 
-class _Overlay(QWidget):
+class _SlideOverlay(QWidget):
     """
-    Opaque child-widget of the viewport that draws exactly one pre-rendered
-    QPixmap at its own size.  Its `pos` property is animated by the slide
-    transition; nothing else touches it.
+    Single opaque child-widget that draws both the outgoing and incoming
+    frames in one paintEvent.  A float `progress` (0.0→1.0) controls how
+    far the frames have slid; `direction` is +1 (forward) or -1 (backward).
+
+    Using one widget instead of two halves the per-frame compositing work
+    compared to the previous two-`_Overlay` approach.
     """
 
-    def __init__(self, pixmap: QPixmap, parent: QWidget) -> None:
+    def __init__(
+        self,
+        old_shot: QPixmap,
+        new_shot: QPixmap,
+        direction: int,
+        parent: QWidget,
+    ) -> None:
         super().__init__(parent)
-        self._pixmap = pixmap
-        # Opaque so it fully covers the view behind it
+        self._old = old_shot
+        self._new = new_shot
+        self._direction = direction
+        self._progress: float = 0.0
         self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.setAttribute(Qt.WA_NoSystemBackground)
 
+    def set_progress(self, p: float) -> None:
+        self._progress = p
+        self.update()
+
     def paintEvent(self, _event) -> None:
+        w = self.width()
         p = QPainter(self)
-        # pixmap was pre-rendered at viewport size — draw 1:1, no scaling
-        p.drawPixmap(0, 0, self._pixmap)
+        # old frame slides out
+        p.drawPixmap(int(-w * self._progress * self._direction), 0, self._old)
+        # new frame slides in from the opposite side
+        p.drawPixmap(int(w * (1.0 - self._progress) * self._direction), 0, self._new)
+        p.end()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -459,8 +476,8 @@ class _ImageView(QGraphicsView):
         self._status.hide()
 
         # Animation state
-        self._anim_group: Optional[QParallelAnimationGroup] = None
-        self._anim_overlays: List[_Overlay] = []
+        self._anim: Optional[QVariantAnimation] = None
+        self._anim_overlay: Optional[_SlideOverlay] = None
 
         self._fit_mode = True
 
@@ -472,6 +489,10 @@ class _ImageView(QGraphicsView):
         self.setFrameShape(QFrame.NoFrame)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        # Full repaint each frame during overlay animations — prevents
+        # partial-update artifacts when the slide overlays move.
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        self.setOptimizationFlag(QGraphicsView.DontAdjustForAntialiasing, True)
 
         # Single-pixel scroll steps so drag-scroll and keyboard pan are smooth
         self.verticalScrollBar().setSingleStep(1)
@@ -555,12 +576,13 @@ class _ImageView(QGraphicsView):
         direction  +1 → old exits left,  new enters from right  (forward)
                    -1 → old exits right, new enters from left   (backward)
 
-        Any in-flight animation is cancelled first, so rapid key presses
-        stay perfectly responsive.
+        A single _SlideOverlay draws both frames in one paintEvent so Qt
+        only composites one child widget per frame instead of two.
+        Any in-flight animation is cancelled first for responsive rapid nav.
         """
         self._cancel_anim()
 
-        # Plant the new image in the underlying view (hidden behind overlays)
+        # Plant the new image in the underlying view (hidden behind the overlay)
         self._status.hide()
         self._item.setPixmap(new_pixmap)
         self._scene.setSceneRect(self._item.boundingRect())
@@ -570,38 +592,32 @@ class _ImageView(QGraphicsView):
         vp   = self.viewport()
         w, h = vp.width(), vp.height()
 
-        # Pre-render the new image at fit scale for its overlay
+        # Pre-render the incoming frame at fit scale
         new_shot = self._render_fit(new_pixmap, QSize(w, h))
 
-        # Build overlays
-        old_ov = _Overlay(old_shot, vp)
-        old_ov.setGeometry(0, 0, w, h)
-        old_ov.show()
-        old_ov.raise_()
+        # Single overlay paints both frames itself
+        ov = _SlideOverlay(old_shot, new_shot, direction, vp)
+        ov.setGeometry(0, 0, w, h)
+        ov.show()
+        ov.raise_()
+        self._anim_overlay = ov
 
-        new_ov = _Overlay(new_shot, vp)
-        new_ov.setGeometry(w * direction, 0, w, h)
-        new_ov.show()
-        new_ov.raise_()
+        # Animate a float 0→1 progress value
+        anim = QVariantAnimation(self)
+        anim.setDuration(_ANIM_MS)
+        anim.setEasingCurve(_ANIM_EASE)
+        anim.setStartValue(0.0)
+        anim.setEndValue(1.0)
+        anim.valueChanged.connect(ov.set_progress)
 
-        self._anim_overlays = [old_ov, new_ov]
+        def _on_done() -> None:
+            self._cancel_anim()
+            self.setViewportUpdateMode(QGraphicsView.MinimalViewportUpdate)
 
-        # Build parallel animation group
-        group = QParallelAnimationGroup(self)
-        for ov, start, end in [
-            (old_ov, QPoint(0, 0),              QPoint(-w * direction, 0)),
-            (new_ov, QPoint(w * direction, 0),  QPoint(0, 0)),
-        ]:
-            a = QPropertyAnimation(ov, b"pos", group)
-            a.setDuration(_ANIM_MS)
-            a.setEasingCurve(_ANIM_EASE)
-            a.setStartValue(start)
-            a.setEndValue(end)
-            group.addAnimation(a)
-
-        group.finished.connect(self._cancel_anim)
-        group.start()
-        self._anim_group = group
+        anim.finished.connect(_on_done)
+        self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
+        anim.start()
+        self._anim = anim
 
     # ------------------------------------------------------------------ #
     # Zoom API                                                             #
@@ -675,14 +691,14 @@ class _ImageView(QGraphicsView):
         self._status.raise_()
 
     def _cancel_anim(self) -> None:
-        """Stop in-flight animation and clean up overlay widgets."""
-        if self._anim_group is not None:
-            self._anim_group.stop()
-            self._anim_group.deleteLater()
-            self._anim_group = None
-        for ov in self._anim_overlays:
-            ov.deleteLater()
-        self._anim_overlays = []
+        """Stop in-flight animation and clean up the overlay widget."""
+        if self._anim is not None:
+            self._anim.stop()
+            self._anim.deleteLater()
+            self._anim = None
+        if self._anim_overlay is not None:
+            self._anim_overlay.deleteLater()
+            self._anim_overlay = None
 
     @staticmethod
     def _render_fit(pixmap: QPixmap, size: QSize) -> QPixmap:
@@ -731,8 +747,8 @@ class ImageViewer(QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         screen = QApplication.primaryScreen().availableGeometry()
-        w = int(screen.width()  * 0.72)
-        h = int(screen.height() * 0.78)
+        w = int(screen.width()  * 0.58)
+        h = int(screen.height() * 0.64)
         self.resize(w, h)
         self.move(
             screen.x() + (screen.width()  - w) // 2,
@@ -775,6 +791,10 @@ class ImageViewer(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
+        # Build bottom bar first so self._btn_zoom* / _btn_info are real
+        # buttons before _build_controls references them as placeholders.
+        bottom_bar = self._build_bottom_bar()
+
         root.addWidget(self._build_controls())
         self._prune_banner = self._build_prune_banner()
         root.addWidget(self._prune_banner)
@@ -790,7 +810,7 @@ class ImageViewer(QWidget):
         mid_lay.addWidget(self._exif_panel)
         root.addWidget(middle, 1)
 
-        root.addWidget(self._build_metadata_bar())
+        root.addWidget(bottom_bar)
 
         self._btn_prev.clicked.connect(self.go_prev)
         self._btn_next.clicked.connect(self.go_next)
@@ -850,18 +870,6 @@ class ImageViewer(QWidget):
         self._lbl_name.setStyleSheet("color:#f0f0f0;font-weight:bold;font-size:13px;")
         self._lbl_pos    = QLabel()
         self._lbl_pos.setStyleSheet("color:#44445a;font-size:12px;")
-        self._lbl_zoom   = QLabel("—")
-        self._lbl_zoom.setStyleSheet(
-            "color:#7878a0;font-size:12px;min-width:52px;"
-        )
-        self._lbl_zoom.setAlignment(Qt.AlignCenter)
-        self._btn_zoomout = _tool("−")
-        self._btn_zoomin  = _tool("+")
-        self._btn_fit     = _tool("Fit")
-        ic_fit = _icon("expand", size=12)
-        if not ic_fit.isNull():
-            self._btn_fit.setIcon(ic_fit)
-        self._btn_actual  = _tool("1:1")
 
         self._btn_prune = QPushButton("Mark")
         self._btn_prune.setFixedSize(62, 28)
@@ -892,12 +900,6 @@ class ImageViewer(QWidget):
             "border-color:rgba(255,109,0,0.45);}"
         )
 
-        self._btn_info = QPushButton("Info")
-        self._btn_info.setFixedSize(42, 28)
-        self._btn_info.setCheckable(True)
-        self._btn_info.setChecked(True)
-        self._btn_info.setStyleSheet(self._info_btn_style(True))
-
         lay.addWidget(self._btn_prev)
         lay.addWidget(self._btn_next)
         lay.addSpacing(10)
@@ -910,15 +912,6 @@ class ImageViewer(QWidget):
         lay.addWidget(self._btn_show_folder)
         lay.addSpacing(4)
         lay.addWidget(self._btn_prune)
-        lay.addSpacing(10)
-        lay.addWidget(self._btn_info)
-        lay.addSpacing(6)
-        lay.addWidget(self._lbl_zoom)
-        lay.addWidget(self._btn_zoomout)
-        lay.addWidget(self._btn_zoomin)
-        lay.addSpacing(6)
-        lay.addWidget(self._btn_fit)
-        lay.addWidget(self._btn_actual)
         return bar
 
     def _build_prune_banner(self) -> QWidget:
@@ -950,15 +943,87 @@ class ImageViewer(QWidget):
         bar.hide()
         return bar
 
-    def _build_metadata_bar(self) -> QWidget:
+    def _build_bottom_bar(self) -> QWidget:
+        """
+        Bottom strip: metadata text on the left, zoom+info controls on the right.
+        """
         bar = QWidget()
         bar.setStyleSheet(
             "background:#0e0e1a;border-top:1px solid rgba(255,109,0,0.08);"
         )
+        outer_lay = QVBoxLayout(bar)
+        outer_lay.setContentsMargins(0, 0, 0, 0)
+        outer_lay.setSpacing(0)
+
+        # ── control row ────────────────────────────────────────────────── #
+        ctrl = QWidget()
+        ctrl.setStyleSheet(
+            "background:#0e0e1a;border-bottom:1px solid rgba(255,109,0,0.06);"
+        )
+        ctrl_lay = QHBoxLayout(ctrl)
+        ctrl_lay.setContentsMargins(8, 4, 8, 4)
+        ctrl_lay.setSpacing(4)
+
+        _btn_qss = (
+            "QPushButton{background:rgba(255,109,0,0.08);color:#8888a8;"
+            "border:1px solid rgba(255,109,0,0.18);border-radius:4px;"
+            "font-size:12px;min-width:28px;padding:1px 6px;}"
+            "QPushButton:hover{background:rgba(255,109,0,0.18);color:#f0f0f0;"
+            "border-color:rgba(255,109,0,0.45);}"
+            "QPushButton:checked{background:rgba(255,109,0,0.22);color:#ff6d00;"
+            "border-color:rgba(255,109,0,0.55);}"
+        )
+
+        # Re-create the real zoom / info buttons here (replacing placeholders)
+        self._btn_zoomout = QPushButton("−")
+        self._btn_zoomout.setFixedSize(30, 24)
+        self._btn_zoomout.setStyleSheet(_btn_qss)
+
+        self._lbl_zoom = QLabel("—")
+        self._lbl_zoom.setStyleSheet(
+            "color:#7878a0;font-size:11px;min-width:48px;"
+        )
+        self._lbl_zoom.setAlignment(Qt.AlignCenter)
+
+        self._btn_zoomin = QPushButton("+")
+        self._btn_zoomin.setFixedSize(30, 24)
+        self._btn_zoomin.setStyleSheet(_btn_qss)
+
+        self._btn_fit = QPushButton("Fit")
+        self._btn_fit.setFixedSize(36, 24)
+        ic_fit = _icon("expand", size=12)
+        if not ic_fit.isNull():
+            self._btn_fit.setIcon(ic_fit)
+            self._btn_fit.setText("")
+        self._btn_fit.setStyleSheet(_btn_qss)
+
+        self._btn_actual = QPushButton("1:1")
+        self._btn_actual.setFixedSize(36, 24)
+        self._btn_actual.setStyleSheet(_btn_qss)
+
+        self._btn_info = QPushButton("Info")
+        self._btn_info.setFixedSize(42, 24)
+        self._btn_info.setCheckable(True)
+        self._btn_info.setChecked(True)
+        self._btn_info.setStyleSheet(_btn_qss)
+
+        ctrl_lay.addWidget(self._btn_zoomout)
+        ctrl_lay.addWidget(self._lbl_zoom)
+        ctrl_lay.addWidget(self._btn_zoomin)
+        ctrl_lay.addSpacing(6)
+        ctrl_lay.addWidget(self._btn_fit)
+        ctrl_lay.addWidget(self._btn_actual)
+        ctrl_lay.addStretch()
+        ctrl_lay.addWidget(self._btn_info)
+
+        outer_lay.addWidget(ctrl)
+
+        # ── metadata text rows ─────────────────────────────────────────── #
+        meta = QWidget()
         from PySide6.QtWidgets import QVBoxLayout as _QVBox
-        outer = _QVBox(bar)
-        outer.setContentsMargins(12, 3, 12, 3)
-        outer.setSpacing(1)
+        meta_lay = _QVBox(meta)
+        meta_lay.setContentsMargins(12, 3, 12, 3)
+        meta_lay.setSpacing(1)
 
         self._lbl_meta = QLabel("—")
         self._lbl_meta.setStyleSheet("color:#44445a;font-size:11px;")
@@ -968,14 +1033,14 @@ class ImageViewer(QWidget):
         self._lbl_exif.hide()
 
         self._lbl_pair_paths = QLabel("")
-        self._lbl_pair_paths.setStyleSheet(
-            "color:#5a5a7a;font-size:10px;"
-        )
+        self._lbl_pair_paths.setStyleSheet("color:#5a5a7a;font-size:10px;")
         self._lbl_pair_paths.hide()
 
-        outer.addWidget(self._lbl_meta)
-        outer.addWidget(self._lbl_exif)
-        outer.addWidget(self._lbl_pair_paths)
+        meta_lay.addWidget(self._lbl_meta)
+        meta_lay.addWidget(self._lbl_exif)
+        meta_lay.addWidget(self._lbl_pair_paths)
+        outer_lay.addWidget(meta)
+
         return bar
 
     def _build_exif_panel(self) -> QScrollArea:
@@ -1291,17 +1356,40 @@ class ImageViewer(QWidget):
         import subprocess, sys
         record = self._records[self._index]
         path = record.path
+
         if sys.platform.startswith("win"):
             subprocess.Popen(["explorer", "/select,", str(path)])
-        elif sys.platform == "darwin":
+            return
+
+        if sys.platform == "darwin":
             subprocess.Popen(["open", "-R", str(path)])
-        else:
-            # Linux: try to select the file in the file manager; fall back to
-            # opening the parent folder if the manager doesn't support --select.
-            try:
-                subprocess.Popen(["xdg-open", str(path.parent)])
-            except Exception:
-                QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
+            return
+
+        # Linux: use the org.freedesktop.FileManager1 DBus interface —
+        # Dolphin, Nautilus, Nemo, and Thunar all implement it and will
+        # open with the specific file selected/highlighted.
+        # Avoids Qt's portal integration entirely (which fails for unregistered apps).
+        file_uri = path.as_uri()
+        try:
+            result = subprocess.run(
+                [
+                    "dbus-send", "--session", "--print-reply",
+                    "--dest=org.freedesktop.FileManager1",
+                    "/org/freedesktop/FileManager1",
+                    "org.freedesktop.FileManager1.ShowItems",
+                    f"array:string:{file_uri}",
+                    "string:",
+                ],
+                timeout=3,
+                capture_output=True,
+            )
+            if result.returncode == 0:
+                return
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+        # Fallback: just open the containing folder
+        subprocess.Popen(["xdg-open", str(path.parent)])
 
     def _unmark(self) -> None:
         record = self._records[self._index]

@@ -20,6 +20,7 @@ The caller picks a strategy via SeparationPlan.set_conflict_strategy().
 """
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -137,7 +138,15 @@ class SeparationPlan:
 
             try:
                 op.final_dest.parent.mkdir(parents=True, exist_ok=True)
+                # Capture timestamps before the move so we can restore them
+                # if the OS copy-path resets mtime (e.g. cross-device move).
+                st = src.stat()
                 shutil.move(str(src), str(op.final_dest))
+                # Restore atime + mtime so the file date is unchanged.
+                try:
+                    os.utime(str(op.final_dest), (st.st_atime, st.st_mtime))
+                except OSError:
+                    pass
                 succeeded.append((op.record, op.final_dest))
             except Exception as exc:  # noqa: BLE001
                 failed.append((op.record, str(exc)))
