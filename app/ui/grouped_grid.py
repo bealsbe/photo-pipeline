@@ -50,6 +50,25 @@ from app.thumbnails.generator import ThumbnailGenerator
 from app.ui.proxy import FilterState, PhotoFilterProxy
 from app.ui.thumbnail_grid import PhotoGridModel, ThumbnailDelegate
 
+
+def _canonical_parent(path: Path) -> Path:
+    """Strip trailing RAW/ or JPG/ so separated pairs share the same key."""
+    return path.parent.parent if path.parent.name.upper() in ("RAW", "JPG") else path.parent
+
+
+def _dedup_pairs(records: List[PhotoRecord]) -> List[PhotoRecord]:
+    """Return *records* with RAW entries removed when a JPG counterpart exists."""
+    jpg_keys = {
+        (_canonical_parent(r.path), r.pair_stem)
+        for r in records
+        if r.pair_stem and r.file_type == FileType.JPG
+    }
+    return [
+        r for r in records
+        if not (r.pair_stem and r.file_type == FileType.RAW
+                and (_canonical_parent(r.path), r.pair_stem) in jpg_keys)
+    ]
+
 _QMAX = 16_777_215   # Qt's QWIDGETSIZE_MAX
 
 
@@ -597,11 +616,12 @@ class GroupedGridView(QScrollArea):
         return out
 
     def all_visible_records(self) -> List[PhotoRecord]:
-        return [
+        raw = [
             self._proxy.index(row, 0).data(Qt.UserRole)
             for row in range(self._proxy.rowCount())
             if self._proxy.index(row, 0).data(Qt.UserRole)
         ]
+        return _dedup_pairs(raw)
 
     # ------------------------------------------------------------------ #
     # Internal rebuild                                                     #
@@ -622,20 +642,9 @@ class GroupedGridView(QScrollArea):
             if r:
                 all_visible.append(r)
 
-        # Deduplicate pairs: for a RAW+JPG pair show only the JPG (faster
-        # thumbnails, better colour rendering).  Fall back to RAW-only if
-        # there is no JPG counterpart.
-        jpg_pair_keys = {
-            (r.path.parent, r.pair_stem)
-            for r in all_visible
-            if r.pair_stem and r.file_type == FileType.JPG
-        }
-        visible: List[PhotoRecord] = []
-        for r in all_visible:
-            if r.pair_stem and r.file_type == FileType.RAW and \
-                    (r.path.parent, r.pair_stem) in jpg_pair_keys:
-                continue   # JPG counterpart will be shown instead
-            visible.append(r)
+        # Deduplicate pairs: show only the JPG when a RAW+JPG pair exists.
+        # Falls back to RAW-only when there is no JPG counterpart.
+        visible = _dedup_pairs(all_visible)
 
         # Group by EXIF shot date (falls back to mtime when EXIF is absent)
         groups: Dict[_pydate, List[PhotoRecord]] = {}
