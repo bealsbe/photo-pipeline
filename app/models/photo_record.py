@@ -62,6 +62,11 @@ class PhotoRecord:
     # ------------------------------------------------------------------ #
 
     @property
+    def shot_time(self) -> datetime:
+        """Best available date: EXIF capture time, falling back to mtime."""
+        return self.capture_time if self.capture_time is not None else self.modified_time
+
+    @property
     def filename(self) -> str:
         return self.path.name
 

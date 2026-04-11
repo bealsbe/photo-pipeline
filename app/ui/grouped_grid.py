@@ -30,6 +30,7 @@ from PySide6.QtCore import (
     QSize,
     Qt,
     QTimer,
+    QVariantAnimation,
     Signal,
 )
 from PySide6.QtGui import QCursor
@@ -119,9 +120,15 @@ class _SectionGrid(QListView):
     def update_thumb_size(self, size: int) -> None:
         """Update delegate + grid metrics without rebuilding the whole section."""
         self._thumb_size = size
-        self.setItemDelegate(ThumbnailDelegate(size, self))
+        # Reuse the existing delegate — avoids a new object per animation frame
+        d = self.itemDelegate()
+        if isinstance(d, ThumbnailDelegate):
+            d.thumb_size = size
+        else:
+            self.setItemDelegate(ThumbnailDelegate(size, self))
         self._update_grid_size()
         self.updateGeometry()
+        self.viewport().update()
 
     # ------------------------------------------------------------------ #
     # Sizing                                                               #
@@ -182,6 +189,19 @@ class _SectionGrid(QListView):
                 for r in records:
                     r.is_pruned = not all_pruned
                 self.prune_toggled.emit(records)
+        elif event.key() in (
+            Qt.Key_Up, Qt.Key_Down,
+            Qt.Key_PageUp, Qt.Key_PageDown,
+            Qt.Key_Home, Qt.Key_End,
+        ):
+            # Forward scroll keys to the parent GroupedGridView
+            p = self.parent()
+            while p is not None:
+                if isinstance(p, GroupedGridView):
+                    p.keyPressEvent(event)
+                    return
+                p = p.parent()
+            super().keyPressEvent(event)
         else:
             super().keyPressEvent(event)
 
@@ -326,8 +346,8 @@ class _DateSection(QWidget):
             self._anim = None
 
         anim = QPropertyAnimation(self._grid, b"maximumHeight", self)
-        anim.setDuration(160)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setDuration(110)
+        anim.setEasingCurve(QEasingCurve.OutExpo)
         anim.setStartValue(start)
         anim.setEndValue(target)
         if not collapsed:
@@ -404,6 +424,20 @@ class GroupedGridView(QScrollArea):
         self._resize_timer.setInterval(250)
         self._resize_timer.timeout.connect(self._rebuild)
 
+        # Smooth-scroll animation — accumulates target so rapid events feel fluid
+        self._scroll_anim = QVariantAnimation(self)
+        self._scroll_anim.setDuration(180)
+        self._scroll_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._scroll_anim.valueChanged.connect(
+            lambda v: self.verticalScrollBar().setValue(int(v))
+        )
+
+        # Zoom animation — interpolates thumb_size so resize feels fluid
+        self._zoom_anim = QVariantAnimation(self)
+        self._zoom_anim.setDuration(160)
+        self._zoom_anim.setEasingCurve(QEasingCurve.OutQuint)
+        self._zoom_anim.valueChanged.connect(self._on_zoom_tick)
+
         # Scroll area
         self.setWidgetResizable(True)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -423,17 +457,71 @@ class GroupedGridView(QScrollArea):
     # ------------------------------------------------------------------ #
 
     def set_thumb_size(self, size: int) -> None:
-        """Change thumbnail size.
+        """Animate from the current thumb size to *size*.
 
-        Updates existing section delegates immediately so the grid repaints
-        at the new size right away.  A full widget rebuild (which recalculates
-        row counts and section heights) is deferred 250 ms so it only fires
-        once the user has stopped dragging the slider.
+        Rapid calls (slider drag, Ctrl+scroll bursts) are accumulated:
+        if the animation is already running its end value is updated so
+        the thumbnail cells smoothly chase the latest target without
+        stuttering.  A full widget rebuild is deferred until input stops.
         """
+        size = max(80, min(280, size))
+        if size == self._thumb_size and self._zoom_anim.state() != QVariantAnimation.Running:
+            return
+        if self._zoom_anim.state() == QVariantAnimation.Running:
+            # Accumulate — redirect the running animation to the new target
+            self._zoom_anim.setEndValue(float(size))
+        else:
+            self._zoom_anim.stop()
+            self._zoom_anim.setStartValue(float(self._thumb_size))
+            self._zoom_anim.setEndValue(float(size))
+            self._zoom_anim.start()
+        self._resize_timer.start()   # full rebuild once input stops
+
+    def _on_zoom_tick(self, value: float) -> None:
+        """Called on every animation frame — update delegates, no full rebuild."""
+        size = int(round(value))
+        if size == self._thumb_size:
+            return
         self._thumb_size = size
         for sec in self._sections:
             sec.update_thumb_size(size)
-        self._resize_timer.start()   # restarts if already running
+
+    def _smooth_scroll_to(self, target: int) -> None:
+        """Animate the scrollbar to *target*, accumulating rapid events."""
+        sb  = self.verticalScrollBar()
+        end = max(sb.minimum(), min(sb.maximum(), target))
+        # Start value: wherever the animation currently is (feels continuous)
+        cur = (int(self._scroll_anim.currentValue())
+               if self._scroll_anim.state() == QVariantAnimation.Running
+               else sb.value())
+        if cur == end:
+            return
+        self._scroll_anim.stop()
+        self._scroll_anim.setStartValue(cur)
+        self._scroll_anim.setEndValue(end)
+        self._scroll_anim.start()
+
+    def keyPressEvent(self, event) -> None:
+        sb  = self.verticalScrollBar()
+        key = event.key()
+        # Use current anim target (if running) as base so rapid presses accumulate
+        base = (int(self._scroll_anim.endValue())
+                if self._scroll_anim.state() == QVariantAnimation.Running
+                else sb.value())
+        if key == Qt.Key_Up:
+            self._smooth_scroll_to(base - 90)
+        elif key == Qt.Key_Down:
+            self._smooth_scroll_to(base + 90)
+        elif key == Qt.Key_PageUp:
+            self._smooth_scroll_to(base - self.viewport().height())
+        elif key == Qt.Key_PageDown:
+            self._smooth_scroll_to(base + self.viewport().height())
+        elif key == Qt.Key_Home:
+            self._smooth_scroll_to(sb.minimum())
+        elif key == Qt.Key_End:
+            self._smooth_scroll_to(sb.maximum())
+        else:
+            super().keyPressEvent(event)
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.ControlModifier:
@@ -449,11 +537,14 @@ class GroupedGridView(QScrollArea):
                 self.thumb_size_changed.emit(new_size)
             event.accept()
         else:
-            # Normal scroll — 90 px per wheel notch feels natural
+            # Smooth scroll — accumulate rapid wheel ticks into one animation
             delta = event.angleDelta().y()
             if delta:
-                sb = self.verticalScrollBar()
-                sb.setValue(sb.value() - round(delta / 120 * 90))
+                sb   = self.verticalScrollBar()
+                base = (int(self._scroll_anim.endValue())
+                        if self._scroll_anim.state() == QVariantAnimation.Running
+                        else sb.value())
+                self._smooth_scroll_to(base - round(delta / 120 * 100))
             event.accept()
 
     def source_model(self) -> PhotoGridModel:
@@ -517,7 +608,7 @@ class GroupedGridView(QScrollArea):
     # ------------------------------------------------------------------ #
 
     def _rebuild(self) -> None:
-        """Read proxy output, group by date, replace section widgets."""
+        """Read proxy output, group by shot date, replace section widgets."""
         scroll_pos = self.verticalScrollBar().value()
 
         # Snapshot collapse state
@@ -531,27 +622,31 @@ class GroupedGridView(QScrollArea):
             if r:
                 all_visible.append(r)
 
-        # Deduplicate pairs: for a RAW+JPG pair show only the RAW.
-        # Collect (parent_dir, pair_stem) for every RAW that has a pair.
-        raw_pair_keys = {
+        # Deduplicate pairs: for a RAW+JPG pair show only the JPG (faster
+        # thumbnails, better colour rendering).  Fall back to RAW-only if
+        # there is no JPG counterpart.
+        jpg_pair_keys = {
             (r.path.parent, r.pair_stem)
             for r in all_visible
-            if r.pair_stem and r.file_type == FileType.RAW
+            if r.pair_stem and r.file_type == FileType.JPG
         }
         visible: List[PhotoRecord] = []
         for r in all_visible:
-            if r.pair_stem and r.file_type == FileType.JPG and \
-                    (r.path.parent, r.pair_stem) in raw_pair_keys:
-                continue   # RAW counterpart is shown instead
+            if r.pair_stem and r.file_type == FileType.RAW and \
+                    (r.path.parent, r.pair_stem) in jpg_pair_keys:
+                continue   # JPG counterpart will be shown instead
             visible.append(r)
 
-        # Group, preserving proxy order within each date
+        # Group by EXIF shot date (falls back to mtime when EXIF is absent)
         groups: Dict[_pydate, List[PhotoRecord]] = {}
         for r in visible:
-            d = r.modified_time.date()
+            d = r.shot_time.date()
             if d not in groups:
                 groups[d] = []
             groups[d].append(r)
+
+        # Suppress repaints while we tear down / rebuild widgets to avoid flash
+        self._container.setUpdatesEnabled(False)
 
         # Remove old sections
         for sec in self._sections:
@@ -582,5 +677,6 @@ class GroupedGridView(QScrollArea):
             insert_at += 1
 
         self._container.updateGeometry()
+        self._container.setUpdatesEnabled(True)
         # Restore scroll position — widget churn would otherwise reset it to 0
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_pos))

@@ -23,6 +23,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QSlider,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -36,7 +39,7 @@ from app.scanning.scanner import ScanWorker
 from app.thumbnails.generator import ThumbnailGenerator
 from app.ui.file_list import FileListWidget
 from app.ui.filter_bar import FilterBar
-from app.ui.icons import icon
+from app.ui.icons import icon, pixmap as icon_pixmap
 from app.ui.import_dialog import ImportDialog
 from app.ui.prune_review import PruneReviewDialog
 from app.ui.separate_dialog import SeparateDialog
@@ -65,7 +68,8 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Photo Pipeline")
-        self.setWindowIcon(icon("retro-camera", size=48))
+        from app.ui.icons import tinted_icon
+        self.setWindowIcon(tinted_icon("retro-camera", "#ff6d00", size=48))
         self.resize(1200, 780)
 
         self._collection = PhotoCollection()
@@ -89,7 +93,8 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
-        # Wire Ctrl+scroll zoom signal now that both toolbar and grid exist
+        # Wire Ctrl+scroll zoom now that both toolbar and grid exist
+        self._grid_view.thumb_size_changed.connect(self._zoom_slider.setValue)
         self._restore_session()
 
     # ------------------------------------------------------------------ #
@@ -130,9 +135,9 @@ class MainWindow(QMainWindow):
         review_act.triggered.connect(self._open_review)
         prune_menu.addAction(review_act)
 
-        separate_act = QAction("&Separate RAW / JPG…", self)
+        separate_act = QAction("&Link RAW + JPG…", self)
         separate_act.setShortcut("Ctrl+Shift+S")
-        separate_act.setStatusTip("Move RAW files into RAW/ and JPG files into JPG/ subfolders")
+        separate_act.setStatusTip("Sort into RAW/ and JPG/ subfolders and link matching pairs")
         separate_act.triggered.connect(self._open_separate)
         prune_menu.addAction(separate_act)
 
@@ -211,9 +216,9 @@ class MainWindow(QMainWindow):
         review_act_tb.triggered.connect(self._open_review)
         tb.addAction(review_act_tb)
 
-        separate_act_tb = QAction(icon("fork"), "Separate", self)
+        separate_act_tb = QAction(icon("fork"), "Link", self)
         separate_act_tb.setShortcut("Ctrl+Shift+S")
-        separate_act_tb.setToolTip("Separate RAW and JPG into subfolders  (Ctrl+Shift+S)")
+        separate_act_tb.setToolTip("Link RAW + JPG pairs  (Ctrl+Shift+S)")
         separate_act_tb.triggered.connect(self._open_separate)
         tb.addAction(separate_act_tb)
 
@@ -250,6 +255,16 @@ class MainWindow(QMainWindow):
         tb.addAction(self._act_cull)
         _set_text_beside_icon(tb, self._act_cull)
 
+        # ── spacer pushes zoom to the right ──────────────────────────── #
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        spacer.setStyleSheet("background: transparent;")
+        self._zoom_spacer_action = tb.addWidget(spacer)
+
+        # ── grid zoom controls (hidden in list view) ──────────────────── #
+        self._zoom_widget = self._build_zoom_widget(tb)
+        self._zoom_tb_action = tb.addWidget(self._zoom_widget)
+
     def _build_central(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -279,6 +294,76 @@ class MainWindow(QMainWindow):
         self._grid_view.prune_toggled.connect(self._on_prune_toggled)
 
         self._stack.setCurrentIndex(_VIEW_LIST)
+
+    def _build_zoom_widget(self, toolbar: "QToolBar") -> QWidget:
+        """Magnifying-glass icon + − [slider] + widget in the toolbar."""
+        w = QWidget()
+        w.setStyleSheet("QWidget { background: transparent; }")
+        w.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        lay = QHBoxLayout(w)
+        lay.setContentsMargins(4, 0, 4, 0)
+        lay.setSpacing(3)
+
+        # ── zoom icon ─────────────────────────────────────────────── #
+        ic_lbl = QLabel()
+        ic_lbl.setPixmap(icon_pixmap("search", size=16))
+        ic_lbl.setStyleSheet("background: transparent;")
+        ic_lbl.setFixedSize(18, 28)
+        ic_lbl.setAlignment(Qt.AlignCenter)
+
+        # ── buttons ───────────────────────────────────────────────── #
+        _btn_qss = (
+            "QPushButton {"
+            "  background: rgba(255,109,0,0.08);"
+            "  color: #8888a8;"
+            "  border: 1px solid rgba(255,109,0,0.18);"
+            "  border-radius: 4px;"
+            "  font-size: 14px; font-weight: bold;"
+            "  padding: 0;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(255,109,0,0.20); color: #f0f0f0;"
+            "  border-color: rgba(255,109,0,0.45);"
+            "}"
+            "QPushButton:pressed { background: rgba(255,109,0,0.30); }"
+        )
+        btn_out = QPushButton("−")
+        btn_out.setFixedSize(26, 26)
+        btn_out.setStyleSheet(_btn_qss)
+
+        btn_in = QPushButton("+")
+        btn_in.setFixedSize(26, 26)
+        btn_in.setStyleSheet(_btn_qss)
+
+        # ── slider ────────────────────────────────────────────────── #
+        self._zoom_slider = QSlider(Qt.Horizontal)
+        self._zoom_slider.setRange(80, 280)
+        self._zoom_slider.setSingleStep(20)
+        self._zoom_slider.setPageStep(20)
+        self._zoom_slider.setValue(_THUMB_SIZE)
+        self._zoom_slider.setFixedWidth(100)
+        self._zoom_slider.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            "  background: #1e1e2e; border-radius: 3px; height: 4px; }"
+            "QSlider::handle:horizontal {"
+            "  background: #ff6d00; border-radius: 5px;"
+            "  width: 12px; height: 12px; margin: -4px 0; }"
+            "QSlider::sub-page:horizontal {"
+            "  background: rgba(255,109,0,0.45); border-radius: 3px; }"
+        )
+
+        btn_out.clicked.connect(
+            lambda: self._zoom_slider.setValue(max(80,  self._zoom_slider.value() - 20)))
+        btn_in.clicked.connect(
+            lambda: self._zoom_slider.setValue(min(280, self._zoom_slider.value() + 20)))
+        self._zoom_slider.valueChanged.connect(self._on_thumb_size_changed)
+
+        lay.addWidget(ic_lbl)
+        lay.addSpacing(5)
+        lay.addWidget(btn_out)
+        lay.addWidget(self._zoom_slider)
+        lay.addWidget(btn_in)
+        return w
 
     def _build_statusbar(self) -> None:
         self._statusbar = QStatusBar()
@@ -333,7 +418,14 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         self._act_list.setChecked(idx == _VIEW_LIST)
         self._act_grid.setChecked(idx == _VIEW_GRID)
+        self._zoom_tb_action.setVisible(idx == _VIEW_GRID)
+        self._zoom_spacer_action.setVisible(idx == _VIEW_GRID)
         self._update_status_count()
+
+    def _on_thumb_size_changed(self, size: int) -> None:
+        snapped = max(80, min(280, (size // 20) * 20))
+        self._generator.thumb_size = snapped
+        self._grid_view.set_thumb_size(snapped)
 
     # ------------------------------------------------------------------ #
     # Filtering                                                            #
@@ -445,8 +537,10 @@ class MainWindow(QMainWindow):
         plan = SeparationPlan(all_records)
         succeeded, failed = plan.execute()
 
-        # Snapshot old paths before any mutation, then update collection
+        # Snapshot old→new path pairs BEFORE update_path mutates record.path
         moves = [(record, record.path, new_path) for record, new_path in succeeded]
+        moved = sum(1 for _, old, new in moves if old != new)
+
         for record, old_path, new_path in moves:
             self._collection.update_path(old_path, new_path)
 
@@ -460,12 +554,11 @@ class MainWindow(QMainWindow):
         self._update_status_count()
         self._load_prune_marks()
 
-        moved = sum(1 for r, p in succeeded if r.path != p)
         pairs = self._collection.stats["paired"] // 2
         msg = (
             f"Import complete — {scan_count} file{'s' if scan_count != 1 else ''}, "
             f"{moved} moved, "
-            f"{pairs} pair{'s' if pairs != 1 else ''}"
+            f"{pairs} pair{'s' if pairs != 1 else ''} linked"
         )
         if failed:
             msg += f"  ({len(failed)} move{'s' if len(failed) != 1 else ''} failed)"
@@ -630,22 +723,27 @@ class MainWindow(QMainWindow):
         dlg.exec()
 
     def _on_separated(self, succeeded, failed) -> None:
-        """Update paths for moved records and refresh both models."""
+        """Update paths for moved records, rebuild pairs, and refresh both models."""
+        # Capture moved count BEFORE update_path mutates record.path
         moves = [(record, record.path, new_path) for record, new_path in succeeded]
+        moved = sum(1 for _, old, new in moves if old != new)
+
         for record, old_path, new_path in moves:
             self._collection.update_path(old_path, new_path)
-        # Re-pair after path updates so new RAW//JPG/ structure is recognised
+
+        # Rebuild pairs — RAW/ and JPG/ canonical-parent logic links separated files
         self._collection.build_pairs()
         all_records = self._collection.all()
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
         self._update_stats()
         self._update_status_count()
-        n = len(succeeded)
-        self._statusbar.showMessage(
-            f"{n} file{'s' if n != 1 else ''} moved into RAW/ or JPG/ subfolders"
-            + (f"  ({len(failed)} failed)" if failed else "")
-        )
+
+        pairs = self._collection.stats["paired"] // 2
+        msg = f"{moved} file{'s' if moved != 1 else ''} moved — {pairs} pair{'s' if pairs != 1 else ''} linked"
+        if failed:
+            msg += f"  ({len(failed)} failed)"
+        self._statusbar.showMessage(msg)
 
     def _unmark_all(self) -> None:
         records = self._collection.pruned()
