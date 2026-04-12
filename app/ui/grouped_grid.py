@@ -34,7 +34,7 @@ from PySide6.QtCore import (
     QVariantAnimation,
     Signal,
 )
-from PySide6.QtGui import QCursor
+from PySide6.QtGui import QCursor, QNativeGestureEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
@@ -796,7 +796,11 @@ class GroupedGridView(QScrollArea):
         all_selected: List[PhotoRecord] = []
         for sec in self._sections:
             all_selected.extend(sec.selected_records())
-        self._sel_bar.update_count(len(all_selected))
+        # Only drive the sel-bar when the user has explicitly entered select
+        # mode.  Outside of it, clicking an item still selects it in the Qt
+        # model (so keyboard nav works), but the HUD should stay hidden.
+        if self._select_mode:
+            self._sel_bar.update_count(len(all_selected))
         self.selection_changed.emit(all_selected)
 
     def _reposition_sel_bar(self) -> None:
@@ -832,20 +836,15 @@ class GroupedGridView(QScrollArea):
 
         # ── Trackpad pinch (NativeGesture) ───────────────────────────────
         if ev.type() == QEvent.NativeGesture:
-            try:
-                from PySide6.QtCore import QNativeGestureEvent
-                if isinstance(ev, QNativeGestureEvent):
-                    if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-                        if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-                            factor   = 1.0 + ev.value()
-                            new_size = max(80, min(280, int(self._thumb_size * factor)))
-                            if new_size != self._thumb_size:
-                                self.set_thumb_size(new_size)
-                                self.thumb_size_changed.emit(new_size)
-                        ev.accept()
-                        return True
-            except (ImportError, AttributeError):
-                pass
+            if isinstance(ev, QNativeGestureEvent):
+                if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                    factor   = 1.0 + ev.value()
+                    new_size = max(80, min(280, int(self._thumb_size * factor)))
+                    if new_size != self._thumb_size:
+                        self.set_thumb_size(new_size)
+                        self.thumb_size_changed.emit(new_size)
+                    ev.accept()
+                    return True
 
         return super().event(ev)
 

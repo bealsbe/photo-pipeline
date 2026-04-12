@@ -467,8 +467,12 @@ class _ExifReadWorker(QRunnable):
 
 
 # Animation tuning
-_ANIM_MS   = 220                        # total duration in milliseconds
-_ANIM_EASE = QEasingCurve.OutCubic     # fast start, cushioned landing
+_ANIM_MS          = 320
+_ANIM_EASE        = QEasingCurve(QEasingCurve.OutCubic)
+_ZOOM_EASE        = QEasingCurve(QEasingCurve.OutCubic)
+_DRAG_COMMIT_EASE = QEasingCurve(QEasingCurve.OutCubic)
+_DRAG_CANCEL_EASE = QEasingCurve(QEasingCurve.OutCubic)
+
 
 
 def _fmt_size(n: int) -> str:
@@ -647,11 +651,12 @@ class _ImageView(QGraphicsView):
         # Zoom animation (double-tap / animated fit↔actual)
         self._zoom_anim: Optional[QVariantAnimation] = None
 
-        # Touch / trackpad: accept touch events on viewport so Qt delivers
-        # both PinchGesture (touchscreen) and NativeGesture (trackpad) events.
+        # WA_AcceptTouchEvents on the viewport lets raw touch points reach Qt's
+        # gesture recogniser.  grabGesture only on the view itself — calling it
+        # on the viewport too would consume the Gesture event there before it
+        # could bubble up to _ImageView.event().
         self.viewport().setAttribute(Qt.WA_AcceptTouchEvents, True)
         self.grabGesture(Qt.PinchGesture)
-        self.viewport().grabGesture(Qt.PinchGesture)
         self._pinch_start_scale: float = 1.0
         # Live-drag gesture state
         self._drag_origin: Optional[QPointF] = None
@@ -917,10 +922,10 @@ class _ImageView(QGraphicsView):
         if ov is None:
             return
         start    = self._drag_progress
-        duration = max(40, int(150 * (1.0 - start)))
+        duration = max(60, int(220 * (1.0 - start)))
         anim = QVariantAnimation(self)
         anim.setDuration(duration)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(_DRAG_COMMIT_EASE)
         anim.setStartValue(start)
         anim.setEndValue(1.0)
         anim.valueChanged.connect(ov.set_progress)
@@ -939,10 +944,10 @@ class _ImageView(QGraphicsView):
         if ov is None:
             return
         start    = self._drag_progress
-        duration = max(60, int(200 * start))
+        duration = max(80, int(280 * start))
         anim = QVariantAnimation(self)
         anim.setDuration(duration)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(_DRAG_CANCEL_EASE)
         anim.setStartValue(start)
         anim.setEndValue(0.0)
         anim.valueChanged.connect(ov.set_progress)
@@ -1067,7 +1072,7 @@ class _ImageView(QGraphicsView):
 
         anim = QVariantAnimation(self)
         anim.setDuration(260)
-        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.setEasingCurve(_ZOOM_EASE)
         anim.setStartValue(start)
         anim.setEndValue(target)
 
