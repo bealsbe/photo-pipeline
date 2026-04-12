@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 
 from PySide6.QtCore import (
     QEasingCurve,
+    QEvent,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -36,10 +37,13 @@ from PySide6.QtCore import (
 from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QListView,
+    QPushButton,
     QScrollArea,
+    QScroller,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -92,8 +96,9 @@ class _SectionGrid(QListView):
     The parent QScrollArea handles all scrolling.
     """
 
-    item_activated: Signal = Signal(object)   # PhotoRecord
-    prune_toggled:  Signal = Signal(object)   # List[PhotoRecord]
+    item_activated:   Signal = Signal(object)   # PhotoRecord
+    prune_toggled:    Signal = Signal(object)   # List[PhotoRecord]
+    selection_changed: Signal = Signal(list)     # List[PhotoRecord] — current selection
 
     def __init__(
         self,
@@ -123,7 +128,11 @@ class _SectionGrid(QListView):
             "QListView { background: #0a0a12; border: none; outline: none; }"
         )
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Opt out of raw touch so QListView doesn't fight QScroller on the
+        # parent scroll area.  Selection still works via synthesized mouse events.
+        self.viewport().setAttribute(Qt.WA_AcceptTouchEvents, False)
         self._update_grid_size()
+        self._select_mode: bool = False
 
         self.activated.connect(self._on_activated)
 
@@ -147,6 +156,9 @@ class _SectionGrid(QListView):
             self.setItemDelegate(ThumbnailDelegate(size, self))
         self._update_grid_size()
         self.updateGeometry()
+        # Drop scaled-pixmap cache; entries at old size are wrong.
+        from app.ui.thumbnail_grid import _SCALED_CACHE
+        _SCALED_CACHE.clear()
         self.viewport().update()
 
     # ------------------------------------------------------------------ #
@@ -180,6 +192,32 @@ class _SectionGrid(QListView):
         ts = self._thumb_size
         self.setGridSize(QSize(ts + p * 2 + 6, ts + lh + p * 2 + 6))
         self.setIconSize(QSize(ts, ts))
+
+    # ------------------------------------------------------------------ #
+    # Selection                                                           #
+    # ------------------------------------------------------------------ #
+
+    def selectionChanged(self, selected, deselected) -> None:
+        super().selectionChanged(selected, deselected)
+        records = [
+            idx.data(Qt.UserRole)
+            for idx in self.selectionModel().selectedIndexes()
+            if idx.data(Qt.UserRole)
+        ]
+        self.selection_changed.emit(records)
+
+    def selected_records(self) -> List[PhotoRecord]:
+        return [
+            idx.data(Qt.UserRole)
+            for idx in self.selectionModel().selectedIndexes()
+            if idx.data(Qt.UserRole)
+        ]
+
+    def select_all(self) -> None:
+        self.selectAll()
+
+    def deselect_all(self) -> None:
+        self.clearSelection()
 
     # ------------------------------------------------------------------ #
     # Input                                                                #
@@ -226,16 +264,29 @@ class _SectionGrid(QListView):
 
     def _on_activated(self, index) -> None:
         r = index.data(Qt.UserRole)
-        if r:
+        if not r:
+            return
+        if self._select_mode:
+            # In select mode, tap toggles selection instead of opening viewer
+            sm = self.selectionModel()
+            if sm.isSelected(index):
+                sm.select(index, sm.Deselect)
+            else:
+                sm.select(index, sm.Select)
+        else:
             self.item_activated.emit(r)
 
 
 # ── date header ───────────────────────────────────────────────────────────── #
 
 class _DateHeader(QWidget):
-    """Clickable header row:  [▼/▶]  [date label]  [n items chip]  [── line]"""
+    """Clickable header row:  [▼/▶]  [date label]  [n items chip]  [── line]
+    Clicking the chip selects / deselects all items in the section.
+    Clicking anywhere else toggles collapse.
+    """
 
-    collapse_toggled: Signal = Signal(bool)   # new collapsed state
+    collapse_toggled:   Signal = Signal(bool)   # new collapsed state
+    select_all_toggled: Signal = Signal()        # chip was clicked
 
     def __init__(
         self,
@@ -246,7 +297,7 @@ class _DateHeader(QWidget):
     ) -> None:
         super().__init__(parent)
         self._collapsed = collapsed
-        self.setFixedHeight(36)
+        self.setFixedHeight(44)
         self.setCursor(QCursor(Qt.PointingHandCursor))
         self.setStyleSheet("QWidget { background: #0e0e1a; }")
 
@@ -264,13 +315,19 @@ class _DateHeader(QWidget):
             "color: #f0f0f0; font-size: 12px; font-weight: 600;"
         )
 
-        self._chip = QLabel(str(count))
+        self._chip = QPushButton(str(count))
+        self._chip.setFlat(True)
+        self._chip.setCursor(QCursor(Qt.PointingHandCursor))
         self._chip.setStyleSheet(
-            "color: #9898b8; background: rgba(255,109,0,0.10);"
+            "QPushButton { color: #9898b8; background: rgba(255,109,0,0.10);"
             " border: 1px solid rgba(255,109,0,0.20);"
             " border-radius: 3px; padding: 1px 8px;"
-            " font-size: 11px; font-weight: 600;"
+            " font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background: rgba(255,109,0,0.22);"
+            " border-color: rgba(255,109,0,0.50); color: #ff6d00; }"
         )
+        self._chip_selected = 0   # items selected in this section
+        self._chip.clicked.connect(self.select_all_toggled)
 
         rule = QWidget()
         rule.setFixedHeight(1)
@@ -285,14 +342,40 @@ class _DateHeader(QWidget):
     def update_count(self, count: int) -> None:
         self._chip.setText(str(count))
 
+    def set_selection_indicator(self, n_selected: int, n_total: int) -> None:
+        """Update the chip to reflect how many items in the section are selected."""
+        self._chip_selected = n_selected
+        if n_selected == 0:
+            self._chip.setText(str(n_total))
+            self._chip.setStyleSheet(
+                "QPushButton { color: #9898b8; background: rgba(255,109,0,0.10);"
+                " border: 1px solid rgba(255,109,0,0.20);"
+                " border-radius: 3px; padding: 1px 8px;"
+                " font-size: 11px; font-weight: 600; }"
+                "QPushButton:hover { background: rgba(255,109,0,0.22);"
+                " border-color: rgba(255,109,0,0.50); color: #ff6d00; }"
+            )
+        else:
+            label = f"✓ {n_selected}/{n_total}" if n_selected < n_total else f"✓ {n_total}"
+            self._chip.setText(label)
+            self._chip.setStyleSheet(
+                "QPushButton { color: #ff6d00; background: rgba(255,109,0,0.20);"
+                " border: 1px solid rgba(255,109,0,0.55);"
+                " border-radius: 3px; padding: 1px 8px;"
+                " font-size: 11px; font-weight: 700; }"
+                "QPushButton:hover { background: rgba(255,109,0,0.32); }"
+            )
+
+    def mousePressEvent(self, event) -> None:
+        # Chip has its own click handler — only toggle collapse on non-chip clicks
+        if not self._chip.geometry().contains(event.position().toPoint()):
+            self._collapsed = not self._collapsed
+            self._arrow.setText("▶" if self._collapsed else "▼")
+            self.collapse_toggled.emit(self._collapsed)
+
     def set_collapsed(self, collapsed: bool) -> None:
         self._collapsed = collapsed
         self._arrow.setText("▶" if collapsed else "▼")
-
-    def mousePressEvent(self, _event) -> None:
-        self._collapsed = not self._collapsed
-        self._arrow.setText("▶" if self._collapsed else "▼")
-        self.collapse_toggled.emit(self._collapsed)
 
 
 # ── date section ──────────────────────────────────────────────────────────── #
@@ -300,8 +383,9 @@ class _DateHeader(QWidget):
 class _DateSection(QWidget):
     """One date group: header + collapsible thumbnail grid."""
 
-    item_activated: Signal = Signal(object)
-    prune_toggled:  Signal = Signal(object)
+    item_activated:   Signal = Signal(object)
+    prune_toggled:    Signal = Signal(object)
+    selection_changed: Signal = Signal(list)   # List[PhotoRecord] from this section
 
     def __init__(
         self,
@@ -324,15 +408,29 @@ class _DateSection(QWidget):
         self._header = _DateHeader(_fmt_date(date_key), len(records), collapsed)
         self._grid   = _SectionGrid(records, generator, thumb_size, self)
 
+        # Clip container: only this widget's height is animated, so Qt does not
+        # need to re-run the outer VBoxLayout geometry pass on every anim tick.
+        # _grid lives inside clip with no height constraint; clip does the clipping.
+        self._clip = QWidget(self)
+        self._clip.setStyleSheet("background: transparent;")
+        clip_lay = QVBoxLayout(self._clip)
+        clip_lay.setContentsMargins(0, 0, 0, 0)
+        clip_lay.setSpacing(0)
+        clip_lay.addWidget(self._grid)
+
         lay.addWidget(self._header)
-        lay.addWidget(self._grid)
+        lay.addWidget(self._clip)
 
         self._grid.item_activated.connect(self.item_activated)
         self._grid.prune_toggled.connect(self.prune_toggled)
+        self._grid.selection_changed.connect(self._on_grid_selection_changed)
         self._header.collapse_toggled.connect(self._on_toggle)
+        self._header.select_all_toggled.connect(self._on_select_all_toggled)
 
         if collapsed:
-            self._grid.setMaximumHeight(0)
+            self._clip.setFixedHeight(0)
+        else:
+            self._clip.setMaximumHeight(_QMAX)
 
     # ------------------------------------------------------------------ #
 
@@ -350,33 +448,207 @@ class _DateSection(QWidget):
     def update_thumb_size(self, size: int) -> None:
         self._grid.update_thumb_size(size)
 
+    def set_select_mode(self, enabled: bool) -> None:
+        self._grid._select_mode = enabled
+
+    def select_all(self) -> None:
+        self._grid.select_all()
+
+    def deselect_all(self) -> None:
+        self._grid.deselect_all()
+
+    def selected_records(self) -> List[PhotoRecord]:
+        return self._grid.selected_records()
+
+    def record_count(self) -> int:
+        return self._grid.section_model().rowCount()
+
     # ------------------------------------------------------------------ #
+
+    def _on_select_all_toggled(self) -> None:
+        """Chip clicked — toggle select-all / deselect-all for this section."""
+        n_sel   = len(self._grid.selected_records())
+        n_total = self._grid.section_model().rowCount()
+        if n_sel == n_total:
+            self._grid.deselect_all()
+        else:
+            self._grid.select_all()
+
+    def _on_grid_selection_changed(self, records: list) -> None:
+        n_total = self._grid.section_model().rowCount()
+        self._header.set_selection_indicator(len(records), n_total)
+        self.selection_changed.emit(records)
 
     def _on_toggle(self, collapsed: bool) -> None:
         self._collapsed = collapsed
-        start  = self._grid.height()
+        start  = self._clip.height()
         target = 0 if collapsed else self._grid.sizeHint().height()
 
         if self._anim is not None:
             try:
                 self._anim.stop()
             except RuntimeError:
-                pass   # C++ object already deleted by DeleteWhenStopped
+                pass
             self._anim = None
 
-        anim = QPropertyAnimation(self._grid, b"maximumHeight", self)
+        # Animate the clip container's fixed height.  The outer VBoxLayout sees
+        # a widget with a fixed height changing, which is a single geometry
+        # update per tick — far cheaper than maximumHeight which triggers a full
+        # constraint solve on every frame.
+        anim = QPropertyAnimation(self._clip, b"maximumHeight", self)
         anim.setDuration(110)
         anim.setEasingCurve(QEasingCurve.OutExpo)
         anim.setStartValue(start)
         anim.setEndValue(target)
         if not collapsed:
-            anim.finished.connect(lambda: self._grid.setMaximumHeight(_QMAX))
+            anim.finished.connect(lambda: self._clip.setMaximumHeight(_QMAX))
         anim.finished.connect(self._on_anim_finished)
         anim.start(QPropertyAnimation.DeleteWhenStopped)
         self._anim = anim
 
     def _on_anim_finished(self) -> None:
         self._anim = None
+
+
+# ── floating selection HUD ────────────────────────────────────────────────── #
+
+class _SelectionBar(QFrame):
+    """
+    Floating pill at the bottom of the grid viewport.
+
+    Shows:  [N selected]  [Tap to select / Done]  [Prune]  [✕ Clear]
+
+    Fades in when ≥ 1 item is selected (or when select-mode is active),
+    fades out when selection is cleared and select-mode is off.
+    """
+
+    prune_requested:       Signal = Signal()
+    clear_requested:       Signal = Signal()
+    select_mode_toggled:   Signal = Signal(bool)   # new mode state
+
+    _BTN = (
+        "QPushButton{background:rgba(255,109,0,0.12);color:#c8c8e0;"
+        "border:1px solid rgba(255,109,0,0.28);border-radius:5px;"
+        "font-size:11px;padding:4px 10px;}"
+        "QPushButton:hover{background:rgba(255,109,0,0.26);color:#fff;"
+        "border-color:rgba(255,109,0,0.60);}"
+        "QPushButton:pressed{background:rgba(255,109,0,0.38);}"
+    )
+    _BTN_ACTIVE = (
+        "QPushButton{background:rgba(255,109,0,0.30);color:#ff6d00;"
+        "border:1px solid rgba(255,109,0,0.65);border-radius:5px;"
+        "font-size:11px;font-weight:700;padding:4px 10px;}"
+        "QPushButton:hover{background:rgba(255,109,0,0.42);}"
+        "QPushButton:pressed{background:rgba(255,109,0,0.55);}"
+    )
+    _BTN_PRUNE = (
+        "QPushButton{background:rgba(200,30,30,0.15);color:#ff8888;"
+        "border:1px solid rgba(200,30,30,0.35);border-radius:5px;"
+        "font-size:11px;padding:4px 10px;}"
+        "QPushButton:hover{background:rgba(200,30,30,0.30);color:#fff;"
+        "border-color:rgba(200,30,30,0.60);}"
+        "QPushButton:disabled{color:#444;border-color:#222;background:transparent;}"
+    )
+    _BTN_CLEAR = (
+        "QPushButton{background:transparent;color:#55556a;"
+        "border:1px solid rgba(255,255,255,0.08);border-radius:5px;"
+        "font-size:12px;font-weight:bold;padding:4px 8px;}"
+        "QPushButton:hover{color:#c8c8e0;border-color:rgba(255,255,255,0.22);}"
+    )
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedHeight(48)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setStyleSheet(
+            "QFrame{background:rgba(14,14,26,0.92);"
+            "border:1px solid rgba(255,109,0,0.20);"
+            "border-radius:12px;}"
+        )
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(14, 0, 8, 0)
+        lay.setSpacing(6)
+
+        self._lbl = QLabel("0 selected")
+        self._lbl.setStyleSheet("color:#c0c0d8;font-size:12px;font-weight:600;"
+                                "background:transparent;border:none;")
+
+        self._btn_mode = QPushButton("Tap to select")
+        self._btn_mode.setStyleSheet(self._BTN)
+        self._btn_mode.setCheckable(True)
+
+        self._btn_prune = QPushButton("Prune")
+        self._btn_prune.setStyleSheet(self._BTN_PRUNE)
+        self._btn_prune.setEnabled(False)
+
+        self._btn_clear = QPushButton("✕")
+        self._btn_clear.setStyleSheet(self._BTN_CLEAR)
+        self._btn_clear.setFixedWidth(32)
+
+        lay.addWidget(self._lbl)
+        lay.addStretch()
+        lay.addWidget(self._btn_mode)
+        lay.addWidget(self._btn_prune)
+        lay.addWidget(self._btn_clear)
+
+        self._btn_mode.toggled.connect(self._on_mode_toggled)
+        self._btn_prune.clicked.connect(self.prune_requested)
+        self._btn_clear.clicked.connect(self.clear_requested)
+
+        self._count        = 0
+        self._mode         = False
+        self._hide_on_done = False
+        self._opacity_anim = QVariantAnimation(self)
+        self._opacity_anim.setDuration(160)
+        self._opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
+        self._opacity_anim.valueChanged.connect(
+            lambda v: self.setWindowOpacity(float(v))
+        )
+        self._opacity_anim.finished.connect(self._on_fade_out_done)
+        self.setWindowOpacity(0.0)
+
+    def update_count(self, count: int) -> None:
+        self._count = count
+        self._lbl.setText(f"{count} selected" if count else
+                          ("Select mode" if self._mode else "0 selected"))
+        self._btn_prune.setEnabled(count > 0)
+        self._maybe_toggle_visibility()
+
+    def set_select_mode(self, enabled: bool) -> None:
+        self._mode = enabled
+        self._btn_mode.blockSignals(True)
+        self._btn_mode.setChecked(enabled)
+        self._btn_mode.blockSignals(False)
+        self._btn_mode.setText("Done" if enabled else "Tap to select")
+        self._btn_mode.setStyleSheet(self._BTN_ACTIVE if enabled else self._BTN)
+        if enabled:
+            self._lbl.setText(f"{self._count} selected" if self._count else "Select mode")
+        self._maybe_toggle_visibility()
+
+    def _maybe_toggle_visibility(self) -> None:
+        should_show = self._count > 0 or self._mode
+        if should_show and not self.isVisible():
+            self.show()
+            self.raise_()
+            self._animate_opacity(1.0)
+        elif not should_show and self.isVisible():
+            self._animate_opacity(0.0, hide_on_done=True)
+
+    def _animate_opacity(self, target: float, hide_on_done: bool = False) -> None:
+        self._hide_on_done = hide_on_done
+        self._opacity_anim.stop()
+        self._opacity_anim.setStartValue(self.windowOpacity())
+        self._opacity_anim.setEndValue(target)
+        self._opacity_anim.start()
+
+    def _on_fade_out_done(self) -> None:
+        if self._hide_on_done:
+            self.hide()
+            self._hide_on_done = False
+
+    def _on_mode_toggled(self, checked: bool) -> None:
+        self.select_mode_toggled.emit(checked)
 
 
 # ── main scroll area ──────────────────────────────────────────────────────── #
@@ -407,6 +679,7 @@ class GroupedGridView(QScrollArea):
     item_activated:     Signal = Signal(object)   # PhotoRecord
     prune_toggled:      Signal = Signal(object)   # List[PhotoRecord]
     thumb_size_changed: Signal = Signal(int)       # new size from Ctrl+scroll
+    selection_changed:  Signal = Signal(list)      # List[PhotoRecord] — full current selection
 
     def __init__(
         self,
@@ -470,6 +743,111 @@ class GroupedGridView(QScrollArea):
         self._vlay.setSpacing(0)
         self._vlay.addStretch()
         self.setWidget(self._container)
+
+        # Touch: kinetic scroll via QScroller + pinch-to-zoom gesture
+        self._pinch_start_size: int = self._thumb_size
+        self.grabGesture(Qt.PinchGesture)
+        QScroller.grabGesture(self, QScroller.TouchGesture)
+
+        # Multi-select state
+        self._select_mode: bool = False
+        self._sel_bar = _SelectionBar(self.viewport())
+        self._sel_bar.hide()
+        self._sel_bar.prune_requested.connect(self._on_sel_bar_prune)
+        self._sel_bar.clear_requested.connect(self.clear_selection)
+        self._sel_bar.select_mode_toggled.connect(self.set_selection_mode)
+
+    # ------------------------------------------------------------------ #
+    # Multi-select                                                        #
+    # ------------------------------------------------------------------ #
+
+    def set_selection_mode(self, enabled: bool) -> None:
+        """Toggle select mode: tap toggles selection instead of opening viewer."""
+        self._select_mode = enabled
+        for sec in self._sections:
+            sec.set_select_mode(enabled)
+        self._sel_bar.set_select_mode(enabled)
+        if not enabled and self._sel_bar._count == 0:
+            self.clear_selection()
+
+    def select_all(self) -> None:
+        """Select all visible items across every section."""
+        for sec in self._sections:
+            if not sec.is_collapsed:
+                sec.select_all()
+
+    def clear_selection(self) -> None:
+        """Clear selection in all sections."""
+        for sec in self._sections:
+            sec.deselect_all()
+
+    def _on_sel_bar_prune(self) -> None:
+        records = self.selected_records()
+        if not records:
+            return
+        all_pruned = all(r.is_pruned for r in records)
+        for r in records:
+            r.is_pruned = not all_pruned
+        self.prune_toggled.emit(records)
+        self.notify_records_changed(records)
+
+    def _on_section_selection_changed(self, _records: list) -> None:
+        """Any section's selection changed — aggregate and notify."""
+        all_selected: List[PhotoRecord] = []
+        for sec in self._sections:
+            all_selected.extend(sec.selected_records())
+        self._sel_bar.update_count(len(all_selected))
+        self.selection_changed.emit(all_selected)
+
+    def _reposition_sel_bar(self) -> None:
+        vp = self.viewport()
+        bar_w = min(vp.width() - 32, 520)
+        x = (vp.width() - bar_w) // 2
+        y = vp.height() - self._sel_bar.height() - 14
+        self._sel_bar.setGeometry(x, y, bar_w, self._sel_bar.height())
+        self._sel_bar.raise_()
+
+    def resizeEvent(self, ev) -> None:
+        super().resizeEvent(ev)
+        self._reposition_sel_bar()
+
+    # ------------------------------------------------------------------ #
+    # Touch gestures                                                      #
+    # ------------------------------------------------------------------ #
+
+    def event(self, ev) -> bool:
+        # ── Touchscreen pinch ────────────────────────────────────────────
+        if ev.type() == QEvent.Gesture:
+            pinch = ev.gesture(Qt.PinchGesture)
+            if pinch:
+                if pinch.state() == Qt.GestureStarted:
+                    self._pinch_start_size = self._thumb_size
+                new_size = max(80, min(280,
+                    int(self._pinch_start_size * pinch.totalScaleFactor())))
+                if new_size != self._thumb_size:
+                    self.set_thumb_size(new_size)
+                    self.thumb_size_changed.emit(new_size)
+            ev.accept()
+            return True
+
+        # ── Trackpad pinch (NativeGesture) ───────────────────────────────
+        if ev.type() == QEvent.NativeGesture:
+            try:
+                from PySide6.QtCore import QNativeGestureEvent
+                if isinstance(ev, QNativeGestureEvent):
+                    if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                        if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
+                            factor   = 1.0 + ev.value()
+                            new_size = max(80, min(280, int(self._thumb_size * factor)))
+                            if new_size != self._thumb_size:
+                                self.set_thumb_size(new_size)
+                                self.thumb_size_changed.emit(new_size)
+                        ev.accept()
+                        return True
+            except (ImportError, AttributeError):
+                pass
+
+        return super().event(ev)
 
     # ------------------------------------------------------------------ #
     # Public interface (mirrors ThumbnailGridView)                        #
@@ -539,6 +917,12 @@ class GroupedGridView(QScrollArea):
             self._smooth_scroll_to(sb.minimum())
         elif key == Qt.Key_End:
             self._smooth_scroll_to(sb.maximum())
+        elif key == Qt.Key_A and event.modifiers() & Qt.ControlModifier:
+            self.select_all()
+        elif key == Qt.Key_Escape:
+            self.clear_selection()
+            if self._select_mode:
+                self.set_selection_mode(False)
         else:
             super().keyPressEvent(event)
 
@@ -628,10 +1012,18 @@ class GroupedGridView(QScrollArea):
     # ------------------------------------------------------------------ #
 
     def _rebuild(self) -> None:
-        """Read proxy output, group by shot date, replace section widgets."""
+        """
+        Synchronise section widgets with the current proxy output.
+
+        Uses a diff strategy: sections whose date key AND record identity set
+        are unchanged are kept in place (no widget churn).  Only new/removed
+        date groups cause widget creation/deletion.  This turns a 200–500 ms
+        full teardown into a sub-millisecond no-op for simple filter toggles
+        that don't actually change which dates are visible.
+        """
         scroll_pos = self.verticalScrollBar().value()
 
-        # Snapshot collapse state
+        # Snapshot collapse state from live sections
         for sec in self._sections:
             self._collapsed[sec.date_key] = sec.is_collapsed
 
@@ -642,50 +1034,77 @@ class GroupedGridView(QScrollArea):
             if r:
                 all_visible.append(r)
 
-        # Deduplicate pairs: show only the JPG when a RAW+JPG pair exists.
-        # Falls back to RAW-only when there is no JPG counterpart.
         visible = _dedup_pairs(all_visible)
 
-        # Group by EXIF shot date (falls back to mtime when EXIF is absent)
+        # Group by shot date
         groups: Dict[_pydate, List[PhotoRecord]] = {}
         for r in visible:
             d = r.shot_time.date()
-            if d not in groups:
-                groups[d] = []
-            groups[d].append(r)
+            groups.setdefault(d, []).append(r)
 
-        # Suppress repaints while we tear down / rebuild widgets to avoid flash
+        state = self._proxy.state
+        reverse_sections = (state.sort_key == "date" and not state.sort_asc)
+        ordered_dates = sorted(groups.keys(), reverse=reverse_sections)
+
+        # Build a lookup of existing sections by date key
+        existing: Dict[_pydate, _DateSection] = {
+            sec.date_key: sec for sec in self._sections
+        }
+
         self._container.setUpdatesEnabled(False)
 
-        # Remove old sections
-        for sec in self._sections:
-            self._vlay.removeWidget(sec)
-            sec.setParent(None)
-            sec.deleteLater()
+        # Remove sections for dates that no longer appear
+        for old_date, sec in list(existing.items()):
+            if old_date not in groups:
+                self._vlay.removeWidget(sec)
+                sec.setParent(None)
+                sec.deleteLater()
+                del existing[old_date]
+
+        # Insert / update sections in the correct order
         self._sections.clear()
         self._path_to_sec.clear()
 
-        # Insert new sections — section order follows sort direction when
-        # sort key is "date"; for name/size, sections stay date-ascending.
-        state = self._proxy.state
-        reverse_sections = (state.sort_key == "date" and not state.sort_asc)
-        insert_at = 0   # before the trailing stretch
-        for d in sorted(groups.keys(), reverse=reverse_sections):
-            records   = groups[d]
-            collapsed = self._collapsed.get(d, False)
-            sec = _DateSection(
-                d, records, self._generator, self._thumb_size,
-                collapsed=collapsed, parent=self._container,
-            )
-            sec.item_activated.connect(self.item_activated)
-            sec.prune_toggled.connect(self.prune_toggled)
-            self._vlay.insertWidget(insert_at, sec)
+        for insert_at, d in enumerate(ordered_dates):
+            records = groups[d]
+            record_paths = {r.path for r in records}
+
+            if d in existing:
+                sec = existing[d]
+                # Move to correct position if needed
+                current_pos = self._vlay.indexOf(sec)
+                if current_pos != insert_at:
+                    self._vlay.removeWidget(sec)
+                    self._vlay.insertWidget(insert_at, sec)
+                # Check if the record set changed
+                old_paths = {
+                    idx.data(Qt.UserRole).path
+                    for row in range(sec.section_model().rowCount())
+                    for idx in [sec.section_model().index(row)]
+                    if idx.data(Qt.UserRole)
+                }
+                if old_paths != record_paths:
+                    sec.section_model().reset_records(records)
+                    sec._header.update_count(len(records))
+                    # Rebuild path index for this section
+                sec.set_select_mode(self._select_mode)
+            else:
+                collapsed = self._collapsed.get(d, False)
+                sec = _DateSection(
+                    d, records, self._generator, self._thumb_size,
+                    collapsed=collapsed, parent=self._container,
+                )
+                sec.item_activated.connect(self.item_activated)
+                sec.prune_toggled.connect(self.prune_toggled)
+                sec.selection_changed.connect(self._on_section_selection_changed)
+                sec.set_select_mode(self._select_mode)
+                self._vlay.insertWidget(insert_at, sec)
+
             self._sections.append(sec)
             for r in records:
                 self._path_to_sec[r.path] = sec
-            insert_at += 1
 
         self._container.updateGeometry()
         self._container.setUpdatesEnabled(True)
-        # Restore scroll position — widget churn would otherwise reset it to 0
+        # Restore scroll position after layout settles
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_pos))

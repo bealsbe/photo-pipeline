@@ -40,7 +40,7 @@ try:
 except ImportError:
     _RAWPY_AVAILABLE = False
 
-_CACHE_LIMIT = 3     # full-res images are large; keep only 3
+_CACHE_LIMIT = 9     # ~100–300 MB at typical JPEG sizes; negligible on modern hardware
 _PRIO_NOW    = 10
 _PRIO_AHEAD  = 1
 
@@ -174,7 +174,7 @@ class ImageLoader(QObject):
     def __init__(self, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(2)   # 1 main + 1 preload
+        self._pool.setMaxThreadCount(3)   # 1 current + 2 preload
         self._cache = _LRU(_CACHE_LIMIT)
         self._loading: Set[Path] = set()
         self._signals = _Signals()
@@ -202,6 +202,14 @@ class ImageLoader(QObject):
         self._loading.add(record.path)
         self._pool.start(FullImageWorker(record, self._signals), _PRIO_AHEAD)
 
+    def preload_range(self, records: list, center: int, radius: int = 2) -> None:
+        """Preload *radius* images on each side of *center* index."""
+        lo = max(0, center - radius)
+        hi = min(len(records) - 1, center + radius)
+        for i in range(lo, hi + 1):
+            if i != center:
+                self.preload(records[i])
+
     def get_cached(self, path: Path) -> Optional[QPixmap]:
         return self._cache.get(path)
 
@@ -211,7 +219,11 @@ class ImageLoader(QObject):
         self._loading.clear()
 
     def shutdown(self) -> None:
-        self._pool.waitForDone(2000)
+        # Drop queued-but-not-started workers so we don't wait for them.
+        # Any worker already running holds no Qt UI references and will
+        # finish safely in the background after this returns.
+        self._pool.clear()
+        self._pool.waitForDone(0)
 
     # ------------------------------------------------------------------ #
     # Slots                                                                #
