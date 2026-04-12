@@ -156,25 +156,43 @@ class PhotoTableModel(QAbstractTableModel):
 
     def remove_records(self, records: List[PhotoRecord]) -> None:
         path_set = {r.path for r in records}
-        new_rows: List[_PairRow] = []
-        changed = False
-        for prow in self._rows:
+        # Rows where both sides are removed → surgical row deletion.
+        # Rows where only one side is removed → in-place mutation + dataChanged.
+        fully_gone: list[int] = []
+        mutated: list[int]    = []
+
+        for i, prow in enumerate(self._rows):
             raw_gone = prow.raw is not None and prow.raw.path in path_set
             jpg_gone = prow.jpg is not None and prow.jpg.path in path_set
             if raw_gone and jpg_gone:
-                changed = True
+                fully_gone.append(i)
             elif raw_gone:
-                new_rows.append(_PairRow(raw=None, jpg=prow.jpg))
-                changed = True
+                prow.raw = None
+                mutated.append(i)
             elif jpg_gone:
-                new_rows.append(_PairRow(raw=prow.raw, jpg=None))
-                changed = True
+                prow.jpg = None
+                mutated.append(i)
+
+        # Emit dataChanged for mutated rows
+        n_cols = len(HEADERS)
+        for i in mutated:
+            self.dataChanged.emit(self.index(i, 0), self.index(i, n_cols - 1))
+
+        # Remove fully-gone rows in reverse order (contiguous runs where possible)
+        if not fully_gone:
+            return
+        runs: list[tuple[int, int]] = []
+        start = fully_gone[0]; end = fully_gone[0]
+        for r in fully_gone[1:]:
+            if r == end + 1:
+                end = r
             else:
-                new_rows.append(prow)
-        if changed:
-            self.beginResetModel()
-            self._rows = new_rows
-            self.endResetModel()
+                runs.append((start, end)); start = end = r
+        runs.append((start, end))
+        for first, last in reversed(runs):
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self._rows[first:last + 1]
+            self.endRemoveRows()
 
     def notify_records_changed(self, records: List[PhotoRecord]) -> None:
         path_set = {r.path for r in records}

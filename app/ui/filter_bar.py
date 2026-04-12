@@ -87,37 +87,36 @@ class _ToggleButton(QPushButton):
     def __init__(self, label: str, accent: str, *, checked: bool = True) -> None:
         super().__init__(label)
         self.setCheckable(True)
-        self._accent = accent
         r, g, b = int(accent[1:3], 16), int(accent[3:5], 16), int(accent[5:7], 16)
-        self._tint       = f"rgba({r},{g},{b},35)"
-        self._tint_hover = f"rgba({r},{g},{b},60)"
+        tint       = f"rgba({r},{g},{b},35)"
+        tint_hover = f"rgba({r},{g},{b},60)"
+        # Pre-compute both states once — avoids string work on every toggle
+        self._ss_on = (
+            f"QPushButton {{"
+            f"  background: {tint}; color: #ddd;"
+            f"  border: 1px solid {accent};"
+            f"  border-radius: 4px; padding: 2px 11px;"
+            f"  font-size: 11px; font-weight: 600;"
+            f"}}"
+            f"QPushButton:hover {{ background: {tint_hover}; }}"
+        )
+        self._ss_off = (
+            "QPushButton {"
+            "  background: transparent; color: #44445a;"
+            "  border: 1px solid #1e1e2e; border-radius: 4px;"
+            "  padding: 2px 11px; font-size: 11px; font-weight: 600;"
+            "}"
+            "QPushButton:hover {"
+            "  background: rgba(255,109,0,0.06); color: #7878a0;"
+            "  border-color: rgba(255,109,0,0.20);"
+            "}"
+        )
         self.setChecked(checked)
         self._refresh()
         self.toggled.connect(self._refresh)
 
     def _refresh(self) -> None:
-        if self.isChecked():
-            self.setStyleSheet(
-                f"QPushButton {{"
-                f"  background: {self._tint}; color: #ddd;"
-                f"  border: 1px solid {self._accent};"
-                f"  border-radius: 4px; padding: 2px 11px;"
-                f"  font-size: 11px; font-weight: 600;"
-                f"}}"
-                f"QPushButton:hover {{ background: {self._tint_hover}; }}"
-            )
-        else:
-            self.setStyleSheet(
-                "QPushButton {"
-                "  background: transparent; color: #44445a;"
-                "  border: 1px solid #1e1e2e; border-radius: 4px;"
-                "  padding: 2px 11px; font-size: 11px; font-weight: 600;"
-                "}"
-                "QPushButton:hover {"
-                "  background: rgba(255,109,0,0.06); color: #7878a0;"
-                "  border-color: rgba(255,109,0,0.20);"
-                "}"
-            )
+        self.setStyleSheet(self._ss_on if self.isChecked() else self._ss_off)
 
 
 class _SortButton(QPushButton):
@@ -170,32 +169,33 @@ class _SortButton(QPushButton):
     # Style                                                                #
     # ------------------------------------------------------------------ #
 
+    # Class-level pre-computed stylesheets (shared across all instances)
+    _SS_ACTIVE = (
+        "QPushButton {"
+        "  background: rgba(255,109,0,0.12); color: #ff6d00;"
+        "  border: 1px solid rgba(255,109,0,0.40);"
+        "  border-radius: 4px; padding: 2px 10px;"
+        "  font-size: 11px; font-weight: 600;"
+        "}"
+        "QPushButton:hover { background: rgba(255,109,0,0.20); }"
+    )
+    _SS_INACTIVE = (
+        "QPushButton {"
+        "  background: transparent; color: #44445a;"
+        "  border: 1px solid transparent;"
+        "  border-radius: 4px; padding: 2px 10px;"
+        "  font-size: 11px; font-weight: 600;"
+        "}"
+        "QPushButton:hover {"
+        "  background: rgba(255,109,0,0.06); color: #7878a0;"
+        "  border-color: rgba(255,109,0,0.15);"
+        "}"
+    )
+
     def _refresh(self) -> None:
         text = self._label + (" ↑" if self._asc else " ↓") if self._active else self._label
         self.setText(text)
-        if self._active:
-            self.setStyleSheet(
-                "QPushButton {"
-                "  background: rgba(255,109,0,0.12); color: #ff6d00;"
-                "  border: 1px solid rgba(255,109,0,0.40);"
-                "  border-radius: 4px; padding: 2px 10px;"
-                "  font-size: 11px; font-weight: 600;"
-                "}"
-                "QPushButton:hover { background: rgba(255,109,0,0.20); }"
-            )
-        else:
-            self.setStyleSheet(
-                "QPushButton {"
-                "  background: transparent; color: #44445a;"
-                "  border: 1px solid transparent;"
-                "  border-radius: 4px; padding: 2px 10px;"
-                "  font-size: 11px; font-weight: 600;"
-                "}"
-                "QPushButton:hover {"
-                "  background: rgba(255,109,0,0.06); color: #7878a0;"
-                "  border-color: rgba(255,109,0,0.15);"
-                "}"
-            )
+        self.setStyleSheet(self._SS_ACTIVE if self._active else self._SS_INACTIVE)
 
 
 # ── main widget ───────────────────────────────────────────────────────────── #

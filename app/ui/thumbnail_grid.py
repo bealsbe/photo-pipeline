@@ -54,6 +54,29 @@ from app.ui.proxy import FilterState, PhotoFilterProxy
 
 _PREFETCH_LOOKAHEAD = 30   # rows to preload beyond the visible viewport edge
 
+# Scaled-thumbnail cache: (path, width, height) → QPixmap
+# Avoids re-running SmoothTransformation on every paintEvent for the same cell.
+_SCALED_CACHE: Dict[tuple, QPixmap] = {}
+_SCALED_CACHE_MAX = 512
+
+def _get_scaled(pixmap: QPixmap, path: Path, size: QSize) -> QPixmap:
+    key = (path, size.width(), size.height())
+    cached = _SCALED_CACHE.get(key)
+    if cached is not None:
+        return cached
+    scaled = pixmap.scaled(size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    if len(_SCALED_CACHE) >= _SCALED_CACHE_MAX:
+        # Evict oldest ~10 % when full
+        for k in list(_SCALED_CACHE)[:_SCALED_CACHE_MAX // 10]:
+            del _SCALED_CACHE[k]
+    _SCALED_CACHE[key] = scaled
+    return scaled
+
+def invalidate_scaled_cache(path: Path) -> None:
+    """Remove all entries for *path* (call when a thumbnail is replaced)."""
+    for key in [k for k in _SCALED_CACHE if k[0] == path]:
+        del _SCALED_CACHE[key]
+
 OPACITY_ROLE = Qt.UserRole + 1   # kept for role-numbering consistency
 
 
@@ -147,10 +170,11 @@ class ThumbnailDelegate(QStyledItemDelegate):
         thumb_rect = QRect(rect.x() + p, rect.y() + p, ts, ts)
 
         if pixmap and not pixmap.isNull():
-            scaled = pixmap.scaled(
-                thumb_rect.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation,
+            path = record.path if record else None
+            scaled = (
+                _get_scaled(pixmap, path, thumb_rect.size())
+                if path else
+                pixmap.scaled(thumb_rect.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
             x = thumb_rect.x() + (thumb_rect.width()  - scaled.width())  // 2
             y = thumb_rect.y() + (thumb_rect.height() - scaled.height()) // 2
@@ -301,11 +325,34 @@ class PhotoGridModel(QAbstractListModel):
         return self._records[row]
 
     def remove_records(self, records: List[PhotoRecord]) -> None:
-        """Remove records from the model by path."""
+        """Remove records from the model using surgical row operations."""
         path_set = {r.path for r in records}
-        new_records = [r for r in self._records if r.path not in path_set]
-        if len(new_records) != len(self._records):
-            self.reset_records(new_records)
+        # Collect contiguous runs of rows to remove so we issue as few
+        # beginRemoveRows calls as possible (Qt is happiest with contiguous spans).
+        rows_to_remove = sorted(
+            i for i, r in enumerate(self._records) if r.path in path_set
+        )
+        if not rows_to_remove:
+            return
+        # Walk runs in reverse so indices stay valid as we remove
+        runs: list[tuple[int, int]] = []
+        start = rows_to_remove[0]
+        end   = rows_to_remove[0]
+        for r in rows_to_remove[1:]:
+            if r == end + 1:
+                end = r
+            else:
+                runs.append((start, end))
+                start = end = r
+        runs.append((start, end))
+
+        for first, last in reversed(runs):
+            self.beginRemoveRows(QModelIndex(), first, last)
+            del self._records[first:last + 1]
+            self.endRemoveRows()
+
+        # Rebuild path→row index after removal
+        self._path_row = {r.path: i for i, r in enumerate(self._records)}
 
     def notify_records_changed(self, records: List[PhotoRecord]) -> None:
         """Emit dataChanged for rows whose records are in *records*."""
@@ -358,6 +405,7 @@ class PhotoGridModel(QAbstractListModel):
     # ------------------------------------------------------------------ #
 
     def _on_thumbnail_ready(self, path: Path, _pixmap: QPixmap) -> None:
+        invalidate_scaled_cache(path)
         row = self._path_row.get(path)
         if row is not None:
             idx = self.index(row)

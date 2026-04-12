@@ -460,11 +460,19 @@ class MainWindow(QMainWindow):
 
     def _start_scan(self, path: Path) -> None:
         self._current_folder = path
-        # Stop any scan already in progress
+        # If a scan is running, cancel it and defer the new scan until the
+        # thread has exited — avoids blocking the UI with .wait().
         if self._scanner and self._scanner.isRunning():
             self._scanner.cancel()
-            self._scanner.wait()
+            self._scanner.finished.connect(
+                lambda: self._begin_scan(path),
+                Qt.SingleShotConnection,
+            )
+            return
+        self._begin_scan(path)
 
+    def _begin_scan(self, path: Path) -> None:
+        """Unconditionally start a fresh scan of *path* (no running scanner)."""
         # Clear all state
         self._flush_timer.stop()
         self._scan_buffer.clear()
@@ -661,6 +669,15 @@ class MainWindow(QMainWindow):
                 all_affected.append(pair)
             i += 1
 
+        # Keep the incremental pruned counter in sync.
+        # all_affected has already been mutated, so we compare against old state:
+        # records passed in had their is_pruned toggled before _refresh_prune was
+        # called; pairs were flipped inside the loop above.  Rebuild from ground
+        # truth is cheapest here — just recount pruned once.
+        self._collection._s.pruned = sum(
+            1 for r in self._collection if r.is_pruned
+        )
+
         self._file_list.source_model().notify_records_changed(all_affected)
         self._grid_view.notify_records_changed(all_affected)
         # Re-run the proxy filter so pruned items disappear/appear per current
@@ -810,6 +827,9 @@ class MainWindow(QMainWindow):
         for r in affected:
             r.is_pruned = True
         if affected:
+            self._collection._s.pruned = sum(
+                1 for r in self._collection if r.is_pruned
+            )
             self._file_list.source_model().notify_records_changed(affected)
             self._grid_view.notify_records_changed(affected)
             self._update_stats()
@@ -872,6 +892,7 @@ class MainWindow(QMainWindow):
         self._save_session()
         if self._scanner and self._scanner.isRunning():
             self._scanner.cancel()
-            self._scanner.wait()
+            # Don't block — scanner holds no resources that need ordered cleanup.
+            # It will finish in the background after the process exits.
         self._generator.shutdown()
         super().closeEvent(event)
