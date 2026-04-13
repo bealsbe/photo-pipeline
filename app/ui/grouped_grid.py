@@ -27,6 +27,7 @@ from typing import Dict, List, Optional
 from PySide6.QtCore import (
     QEasingCurve,
     QEvent,
+    QItemSelectionModel,
     QPropertyAnimation,
     QSize,
     Qt,
@@ -38,6 +39,7 @@ from PySide6.QtGui import QCursor, QNativeGestureEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QFrame,
+    QGraphicsOpacityEffect,
     QHBoxLayout,
     QLabel,
     QListView,
@@ -205,6 +207,10 @@ class _SectionGrid(QListView):
             if idx.data(Qt.UserRole)
         ]
         self.selection_changed.emit(records)
+        # Dirty rects from super() can get lost when this fires as a side-effect
+        # of another section's selection change.  Force a full viewport repaint
+        # after the signal chain settles so stale highlights are always cleared.
+        self.viewport().update()
 
     def selected_records(self) -> List[PhotoRecord]:
         return [
@@ -218,10 +224,39 @@ class _SectionGrid(QListView):
 
     def deselect_all(self) -> None:
         self.clearSelection()
+        self.viewport().update()
 
     # ------------------------------------------------------------------ #
     # Input                                                                #
     # ------------------------------------------------------------------ #
+
+    def mousePressEvent(self, event) -> None:
+        if self._select_mode and event.button() == Qt.LeftButton:
+            index = self.indexAt(event.position().toPoint())
+            if index.isValid():
+                sm = self.selectionModel()
+                if sm.isSelected(index):
+                    sm.select(index, QItemSelectionModel.Deselect)
+                else:
+                    sm.select(index, QItemSelectionModel.Select)
+            # Accept and return — don't call super() so Qt doesn't
+            # clear-and-reselect via its ExtendedSelection logic.
+            event.accept()
+            return
+        # Outside select mode: clicking empty space (no item hit) should
+        # clear the selection so the orange border doesn't linger.
+        if event.button() == Qt.LeftButton:
+            if not self.indexAt(event.position().toPoint()).isValid():
+                self.clearSelection()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        """Clear selection when this grid loses focus (user clicked elsewhere)."""
+        super().focusOutEvent(event)
+        if not self._select_mode:
+            self.deselect_all()  # includes viewport().update()
 
     def wheelEvent(self, event) -> None:
         # Don't consume — walk up to GroupedGridView and let it handle
@@ -264,16 +299,7 @@ class _SectionGrid(QListView):
 
     def _on_activated(self, index) -> None:
         r = index.data(Qt.UserRole)
-        if not r:
-            return
-        if self._select_mode:
-            # In select mode, tap toggles selection instead of opening viewer
-            sm = self.selectionModel()
-            if sm.isSelected(index):
-                sm.select(index, sm.Deselect)
-            else:
-                sm.select(index, sm.Select)
-        else:
+        if r and not self._select_mode:
             self.item_activated.emit(r)
 
 
@@ -450,6 +476,10 @@ class _DateSection(QWidget):
 
     def set_select_mode(self, enabled: bool) -> None:
         self._grid._select_mode = enabled
+        d = self._grid.itemDelegate()
+        if isinstance(d, ThumbnailDelegate):
+            d.select_mode = enabled
+        self._grid.viewport().update()
 
     def select_all(self) -> None:
         self._grid.select_all()
@@ -467,6 +497,8 @@ class _DateSection(QWidget):
 
     def _on_select_all_toggled(self) -> None:
         """Chip clicked — toggle select-all / deselect-all for this section."""
+        if not self._grid._select_mode:
+            return
         n_sel   = len(self._grid.selected_records())
         n_total = self._grid.section_model().rowCount()
         if n_sel == n_total:
@@ -522,106 +554,64 @@ class _SelectionBar(QFrame):
     fades out when selection is cleared and select-mode is off.
     """
 
-    prune_requested:       Signal = Signal()
-    clear_requested:       Signal = Signal()
     select_mode_toggled:   Signal = Signal(bool)   # new mode state
 
-    _BTN = (
-        "QPushButton{background:rgba(255,109,0,0.12);color:#c8c8e0;"
-        "border:1px solid rgba(255,109,0,0.28);border-radius:5px;"
-        "font-size:11px;padding:4px 10px;}"
-        "QPushButton:hover{background:rgba(255,109,0,0.26);color:#fff;"
-        "border-color:rgba(255,109,0,0.60);}"
-        "QPushButton:pressed{background:rgba(255,109,0,0.38);}"
-    )
-    _BTN_ACTIVE = (
+    _BTN_DONE = (
         "QPushButton{background:rgba(255,109,0,0.30);color:#ff6d00;"
         "border:1px solid rgba(255,109,0,0.65);border-radius:5px;"
-        "font-size:11px;font-weight:700;padding:4px 10px;}"
+        "font-size:11px;font-weight:700;padding:4px 14px;}"
         "QPushButton:hover{background:rgba(255,109,0,0.42);}"
         "QPushButton:pressed{background:rgba(255,109,0,0.55);}"
     )
-    _BTN_PRUNE = (
-        "QPushButton{background:rgba(200,30,30,0.15);color:#ff8888;"
-        "border:1px solid rgba(200,30,30,0.35);border-radius:5px;"
-        "font-size:11px;padding:4px 10px;}"
-        "QPushButton:hover{background:rgba(200,30,30,0.30);color:#fff;"
-        "border-color:rgba(200,30,30,0.60);}"
-        "QPushButton:disabled{color:#444;border-color:#222;background:transparent;}"
-    )
-    _BTN_CLEAR = (
-        "QPushButton{background:transparent;color:#55556a;"
-        "border:1px solid rgba(255,255,255,0.08);border-radius:5px;"
-        "font-size:12px;font-weight:bold;padding:4px 8px;}"
-        "QPushButton:hover{color:#c8c8e0;border-color:rgba(255,255,255,0.22);}"
-    )
-
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(48)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setFixedHeight(44)
         self.setStyleSheet(
-            "QFrame{background:rgba(14,14,26,0.92);"
-            "border:1px solid rgba(255,109,0,0.20);"
-            "border-radius:12px;}"
+            "QFrame{background:#0e0e1a;"
+            "border:1px solid rgba(255,109,0,0.40);"
+            "border-radius:8px;}"
         )
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(14, 0, 8, 0)
-        lay.setSpacing(6)
+        lay.setSpacing(8)
 
         self._lbl = QLabel("0 selected")
         self._lbl.setStyleSheet("color:#c0c0d8;font-size:12px;font-weight:600;"
                                 "background:transparent;border:none;")
 
-        self._btn_mode = QPushButton("Tap to select")
-        self._btn_mode.setStyleSheet(self._BTN)
-        self._btn_mode.setCheckable(True)
-
-        self._btn_prune = QPushButton("Prune")
-        self._btn_prune.setStyleSheet(self._BTN_PRUNE)
-        self._btn_prune.setEnabled(False)
-
-        self._btn_clear = QPushButton("✕")
-        self._btn_clear.setStyleSheet(self._BTN_CLEAR)
-        self._btn_clear.setFixedWidth(32)
+        self._btn_done = QPushButton("Done")
+        self._btn_done.setStyleSheet(self._BTN_DONE)
 
         lay.addWidget(self._lbl)
         lay.addStretch()
-        lay.addWidget(self._btn_mode)
-        lay.addWidget(self._btn_prune)
-        lay.addWidget(self._btn_clear)
+        lay.addWidget(self._btn_done)
 
-        self._btn_mode.toggled.connect(self._on_mode_toggled)
-        self._btn_prune.clicked.connect(self.prune_requested)
-        self._btn_clear.clicked.connect(self.clear_requested)
+        self._btn_done.clicked.connect(lambda: self.select_mode_toggled.emit(False))
 
         self._count        = 0
         self._mode         = False
         self._hide_on_done = False
+
+        self._fx = QGraphicsOpacityEffect(self)
+        self._fx.setOpacity(0.0)
+        self.setGraphicsEffect(self._fx)
+
         self._opacity_anim = QVariantAnimation(self)
-        self._opacity_anim.setDuration(160)
+        self._opacity_anim.setDuration(180)
         self._opacity_anim.setEasingCurve(QEasingCurve.OutCubic)
         self._opacity_anim.valueChanged.connect(
-            lambda v: self.setWindowOpacity(float(v))
+            lambda v: self._fx.setOpacity(float(v))
         )
         self._opacity_anim.finished.connect(self._on_fade_out_done)
-        self.setWindowOpacity(0.0)
 
     def update_count(self, count: int) -> None:
         self._count = count
-        self._lbl.setText(f"{count} selected" if count else
-                          ("Select mode" if self._mode else "0 selected"))
-        self._btn_prune.setEnabled(count > 0)
+        self._lbl.setText(f"{count} selected" if count else "Select mode")
         self._maybe_toggle_visibility()
 
     def set_select_mode(self, enabled: bool) -> None:
         self._mode = enabled
-        self._btn_mode.blockSignals(True)
-        self._btn_mode.setChecked(enabled)
-        self._btn_mode.blockSignals(False)
-        self._btn_mode.setText("Done" if enabled else "Tap to select")
-        self._btn_mode.setStyleSheet(self._BTN_ACTIVE if enabled else self._BTN)
         if enabled:
             self._lbl.setText(f"{self._count} selected" if self._count else "Select mode")
         self._maybe_toggle_visibility()
@@ -638,7 +628,7 @@ class _SelectionBar(QFrame):
     def _animate_opacity(self, target: float, hide_on_done: bool = False) -> None:
         self._hide_on_done = hide_on_done
         self._opacity_anim.stop()
-        self._opacity_anim.setStartValue(self.windowOpacity())
+        self._opacity_anim.setStartValue(self._fx.opacity())
         self._opacity_anim.setEndValue(target)
         self._opacity_anim.start()
 
@@ -646,9 +636,6 @@ class _SelectionBar(QFrame):
         if self._hide_on_done:
             self.hide()
             self._hide_on_done = False
-
-    def _on_mode_toggled(self, checked: bool) -> None:
-        self.select_mode_toggled.emit(checked)
 
 
 # ── main scroll area ──────────────────────────────────────────────────────── #
@@ -676,10 +663,11 @@ class GroupedGridView(QScrollArea):
     needs minimal changes.
     """
 
-    item_activated:     Signal = Signal(object)   # PhotoRecord
-    prune_toggled:      Signal = Signal(object)   # List[PhotoRecord]
-    thumb_size_changed: Signal = Signal(int)       # new size from Ctrl+scroll
-    selection_changed:  Signal = Signal(list)      # List[PhotoRecord] — full current selection
+    item_activated:        Signal = Signal(object)   # PhotoRecord
+    prune_toggled:         Signal = Signal(object)   # List[PhotoRecord]
+    thumb_size_changed:    Signal = Signal(int)       # new size from Ctrl+scroll
+    selection_changed:     Signal = Signal(list)      # List[PhotoRecord] — full current selection
+    selection_mode_changed: Signal = Signal(bool)     # select mode on/off
 
     def __init__(
         self,
@@ -751,10 +739,12 @@ class GroupedGridView(QScrollArea):
 
         # Multi-select state
         self._select_mode: bool = False
-        self._sel_bar = _SelectionBar(self.viewport())
+        # Parent to self (the QScrollArea), NOT the viewport.
+        # The viewport's content widget always paints over other viewport
+        # children regardless of z-order; parenting to the scroll area itself
+        # keeps the bar above the viewport in the widget stack.
+        self._sel_bar = _SelectionBar(self)
         self._sel_bar.hide()
-        self._sel_bar.prune_requested.connect(self._on_sel_bar_prune)
-        self._sel_bar.clear_requested.connect(self.clear_selection)
         self._sel_bar.select_mode_toggled.connect(self.set_selection_mode)
 
     # ------------------------------------------------------------------ #
@@ -767,8 +757,11 @@ class GroupedGridView(QScrollArea):
         for sec in self._sections:
             sec.set_select_mode(enabled)
         self._sel_bar.set_select_mode(enabled)
-        if not enabled and self._sel_bar._count == 0:
+        if not enabled:
             self.clear_selection()
+            self._sel_bar.update_count(0)   # force bar to hide
+        self.selection_mode_changed.emit(enabled)
+        self._reposition_sel_bar()
 
     def select_all(self) -> None:
         """Select all visible items across every section."""
@@ -781,33 +774,28 @@ class GroupedGridView(QScrollArea):
         for sec in self._sections:
             sec.deselect_all()
 
-    def _on_sel_bar_prune(self) -> None:
-        records = self.selected_records()
-        if not records:
-            return
-        all_pruned = all(r.is_pruned for r in records)
-        for r in records:
-            r.is_pruned = not all_pruned
-        self.prune_toggled.emit(records)
-        self.notify_records_changed(records)
-
-    def _on_section_selection_changed(self, _records: list) -> None:
+    def _on_section_selection_changed(self, records: list) -> None:
         """Any section's selection changed — aggregate and notify."""
+        if not self._select_mode and records:
+            # Outside select mode only one item should be highlighted at a time.
+            # Deselect every section except the one that just emitted so
+            # highlights can't pile up across sections.
+            source = self.sender()
+            for sec in self._sections:
+                if sec is not source:
+                    sec.deselect_all()
+
         all_selected: List[PhotoRecord] = []
         for sec in self._sections:
             all_selected.extend(sec.selected_records())
-        # Only drive the sel-bar when the user has explicitly entered select
-        # mode.  Outside of it, clicking an item still selects it in the Qt
-        # model (so keyboard nav works), but the HUD should stay hidden.
         if self._select_mode:
             self._sel_bar.update_count(len(all_selected))
         self.selection_changed.emit(all_selected)
 
     def _reposition_sel_bar(self) -> None:
-        vp = self.viewport()
-        bar_w = min(vp.width() - 32, 520)
-        x = (vp.width() - bar_w) // 2
-        y = vp.height() - self._sel_bar.height() - 14
+        bar_w = min(self.width() - 32, 520)
+        x = (self.width() - bar_w) // 2
+        y = self.height() - self._sel_bar.height() - 14
         self._sel_bar.setGeometry(x, y, bar_w, self._sel_bar.height())
         self._sel_bar.raise_()
 
@@ -1105,5 +1093,11 @@ class GroupedGridView(QScrollArea):
 
         self._container.updateGeometry()
         self._container.setUpdatesEnabled(True)
-        # Restore scroll position after layout settles
+        # Clear stale Qt selection state on rebuild unless in select mode
+        if not self._select_mode:
+            for sec in self._sections:
+                sec.deselect_all()
+        # Restore scroll position after layout settles, then re-raise the
+        # sel_bar so freshly inserted section widgets don't cover it.
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_pos))
+        QTimer.singleShot(0, self._reposition_sel_bar)
