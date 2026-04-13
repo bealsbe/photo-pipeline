@@ -30,7 +30,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import (
     QCheckBox,
-    QComboBox,
     QDialog,
     QFileDialog,
     QFrame,
@@ -45,7 +44,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.photo_record import FileType, PhotoRecord
-from app.ops.library import LibraryPlan, PlannedOp, Resolution
+from app.ops.library import LibraryPlan, Resolution
 
 
 # ── colour / style constants ───────────────────────────────────────────────── #
@@ -127,7 +126,7 @@ class ExportDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Export to Library")
-        self.setMinimumSize(620, 580)
+        self.setMinimumSize(700, 640)
         self.setModal(True)
         self.setStyleSheet(
             f"QDialog {{ background:{_BG_DIALOG}; color:{_TEXT_PRI}; }}"
@@ -143,7 +142,7 @@ class ExportDialog(QDialog):
         self._library_folder = library_folder
         self._pair_lookup    = pair_lookup
         self._plan: Optional[LibraryPlan] = None
-        self._conflict_combos: dict[Path, QComboBox] = {}
+        self._bulk_btns: dict[Resolution, QPushButton] = {}
 
         self._build_ui()
         self._rebuild_plan()
@@ -245,61 +244,49 @@ class ExportDialog(QDialog):
         self._preview_scroll.setWidget(self._preview_inner)
         root.addWidget(self._preview_scroll, 1)
 
-        # ── Conflict section ──────────────────────────────────────────── #
+        # ── Conflict bar (compact single row) ─────────────────────────── #
         self._conflict_section = QWidget()
-        self._conflict_section.setObjectName("card")
+        self._conflict_section.setObjectName("cbar")
         self._conflict_section.setStyleSheet(
-            "#card { background:#18100c; border:1px solid rgba(200,140,0,0.28);"
+            "#cbar { background:#18100c; border:1px solid rgba(200,140,0,0.28);"
             " border-radius:6px; }"
         )
-        cs_lay = QVBoxLayout(self._conflict_section)
-        cs_lay.setContentsMargins(14, 12, 14, 12)
-        cs_lay.setSpacing(8)
+        cbar_lay = QHBoxLayout(self._conflict_section)
+        cbar_lay.setContentsMargins(14, 10, 14, 10)
+        cbar_lay.setSpacing(10)
 
-        conflict_hdr = QHBoxLayout()
-        conflict_hdr.setSpacing(10)
         self._conflict_hdr_lbl = QLabel()
         self._conflict_hdr_lbl.setStyleSheet("font-size:12px; color:#c8a040; font-weight:600;")
-        conflict_hdr.addWidget(self._conflict_hdr_lbl)
-        conflict_hdr.addStretch()
+        cbar_lay.addWidget(self._conflict_hdr_lbl)
+        cbar_lay.addStretch()
 
         bulk_lbl = QLabel("Apply to all:")
         bulk_lbl.setStyleSheet(f"font-size:11px; color:{_TEXT_SEC};")
-        conflict_hdr.addWidget(bulk_lbl)
+        cbar_lay.addWidget(bulk_lbl)
+
+        _inactive_qss = (
+            "QPushButton { background:#1e1a10; color:#a09060;"
+            " border:1px solid rgba(200,140,0,0.25); border-radius:3px;"
+            " font-size:11px; padding:0 10px; }"
+            "QPushButton:hover { background:#2a2010; color:#d0b060;"
+            " border-color:rgba(200,140,0,0.55); }"
+        )
+        _active_qss = (
+            "QPushButton { background:rgba(200,140,0,0.25); color:#e0c070;"
+            " border:1px solid rgba(200,140,0,0.65); border-radius:3px;"
+            " font-size:11px; font-weight:700; padding:0 10px; }"
+        )
         for label, res in (("Skip", Resolution.SKIP),
                            ("Overwrite", Resolution.OVERWRITE),
                            ("Rename", Resolution.RENAME)):
             b = QPushButton(label)
             b.setFixedHeight(24)
-            b.setStyleSheet(
-                "QPushButton { background:#1e1a10; color:#a09060;"
-                " border:1px solid rgba(200,140,0,0.25); border-radius:3px;"
-                " font-size:11px; padding:0 10px; }"
-                "QPushButton:hover { background:#2a2010; color:#d0b060;"
-                " border-color:rgba(200,140,0,0.55); }"
-            )
+            b.setStyleSheet(_inactive_qss)
+            b.setProperty("_inactive_qss", _inactive_qss)
+            b.setProperty("_active_qss", _active_qss)
             b.clicked.connect(lambda _=False, r=res: self._bulk_resolve(r))
-            conflict_hdr.addWidget(b)
-
-        cs_lay.addLayout(conflict_hdr)
-
-        self._conflict_scroll = QScrollArea()
-        self._conflict_scroll.setWidgetResizable(True)
-        self._conflict_scroll.setMaximumHeight(150)
-        self._conflict_scroll.setStyleSheet(
-            "QScrollArea { background:#100e0a; border:1px solid rgba(200,140,0,0.15);"
-            " border-radius:4px; }"
-            "QScrollBar:vertical { background:#0c0a08; width:6px; border:none; }"
-            "QScrollBar::handle:vertical { background:#3a3020; border-radius:3px; }"
-            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height:0; }"
-        )
-        self._conflict_rows_widget = QWidget()
-        self._conflict_rows_widget.setStyleSheet("background:#100e0a;")
-        self._conflict_rows_lay = QVBoxLayout(self._conflict_rows_widget)
-        self._conflict_rows_lay.setContentsMargins(10, 6, 10, 6)
-        self._conflict_rows_lay.setSpacing(4)
-        self._conflict_scroll.setWidget(self._conflict_rows_widget)
-        cs_lay.addWidget(self._conflict_scroll)
+            cbar_lay.addWidget(b)
+            self._bulk_btns[res] = b
 
         self._conflict_section.hide()
         root.addWidget(self._conflict_section)
@@ -478,14 +465,16 @@ class ExportDialog(QDialog):
 
         n_unp_raw = sum(1 for r in records if r.file_type == FileType.RAW and not r.is_paired)
         n_unp_jpg = sum(1 for r in records if r.file_type == FileType.JPG and not r.is_paired)
+        n_pruned  = sum(1 for r in records if r.is_pruned) if self._chk_pruned.isChecked() else 0
 
-        self._refresh_stats(self._plan.total, self._plan.conflict_count, n_unp_raw, n_unp_jpg)
+        self._refresh_stats(self._plan.total, self._plan.conflict_count, n_unp_raw, n_unp_jpg, n_pruned)
         self._refresh_preview(self._plan.grouped())
         self._refresh_conflict_section()
         self._update_export_button()
 
     def _refresh_stats(self, n_total: int, n_conflict: int,
-                       n_unp_raw: int, n_unp_jpg: int) -> None:
+                       n_unp_raw: int, n_unp_jpg: int,
+                       n_pruned: int = 0) -> None:
         while self._stats_lay.count():
             item = self._stats_lay.takeAt(0)
             if item.widget():
@@ -519,6 +508,10 @@ class ExportDialog(QDialog):
         if n_unp_jpg:
             self._stats_lay.addWidget(
                 chip(f"{n_unp_jpg} unpaired JPG", "#0e1e14", "#388850")
+            )
+        if n_pruned:
+            self._stats_lay.addWidget(
+                chip(f"✕ {n_pruned} pruned", "#1a0a0a", "#c04040")
             )
         self._stats_lay.addStretch()
 
@@ -563,13 +556,18 @@ class ExportDialog(QDialog):
         self._preview_lay.addSpacing(2)
 
         sep_html = f'<span style="color:{_TEXT_DIM}"> / </span>'
+        show_pruned = self._chk_pruned.isChecked()
 
         for g in groups:
+            has_pruned = show_pruned and g.pruned_count > 0
             row_w = QWidget()
-            row_w.setStyleSheet("background:transparent;")
+            row_w.setStyleSheet(
+                "background: rgba(180,40,40,0.07); border-radius:3px;"
+                if has_pruned else "background:transparent;"
+            )
             row_w.setFixedHeight(26)
             row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(0, 0, 0, 0)
+            row_lay.setContentsMargins(4 if has_pruned else 0, 0, 4 if has_pruned else 0, 0)
             row_lay.setSpacing(0)
 
             type_color = "#5888c0" if g.type_label == "RAW" else "#488858"
@@ -579,12 +577,12 @@ class ExportDialog(QDialog):
                 f'<span style="color:{type_color}; font-weight:600">{g.type_label}</span>'
             )
             path_lbl.setTextFormat(Qt.RichText)
-            path_lbl.setStyleSheet("font-size:12px;")
+            path_lbl.setStyleSheet("font-size:12px; background:transparent;")
             path_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
             count_lbl = QLabel(str(g.file_count))
             count_lbl.setStyleSheet(
-                f"font-size:12px; color:{_TEXT_SEC}; min-width:28px;"
+                f"font-size:12px; color:{_TEXT_SEC}; min-width:28px; background:transparent;"
             )
             count_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
@@ -593,10 +591,20 @@ class ExportDialog(QDialog):
 
             if g.conflict_count:
                 warn = QLabel(f"  ⚠ {g.conflict_count}")
-                warn.setStyleSheet("font-size:11px; color:#b89030; min-width:44px;")
+                warn.setStyleSheet("font-size:11px; color:#b89030; min-width:44px; background:transparent;")
                 row_lay.addWidget(warn)
             else:
                 row_lay.addSpacing(44)
+
+            if has_pruned:
+                prune_lbl = QLabel(f"  ✕ {g.pruned_count}")
+                prune_lbl.setStyleSheet(
+                    "font-size:11px; color:#c04040; font-weight:600;"
+                    " min-width:40px; background:transparent;"
+                )
+                row_lay.addWidget(prune_lbl)
+            else:
+                row_lay.addSpacing(40)
 
             self._preview_lay.addWidget(row_w)
 
@@ -607,74 +615,27 @@ class ExportDialog(QDialog):
             self._conflict_section.hide()
             return
 
-        conflicts = self._plan.conflicts
-        n = len(conflicts)
+        n = self._plan.conflict_count
         self._conflict_hdr_lbl.setText(
             f"⚠  {n} conflict{'s' if n != 1 else ''} — "
             "file already exists at destination"
         )
-
-        while self._conflict_rows_lay.count():
-            item = self._conflict_rows_lay.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        self._conflict_combos.clear()
-
-        for op in conflicts:
-            row_w = QWidget()
-            row_w.setStyleSheet("background:transparent;")
-            row_w.setFixedHeight(28)
-            row_lay = QHBoxLayout(row_w)
-            row_lay.setContentsMargins(0, 0, 0, 0)
-            row_lay.setSpacing(10)
-
-            file_lbl = QLabel(op.record.filename)
-            file_lbl.setStyleSheet(f"font-size:11px; color:{_TEXT_SEC}; min-width:140px;")
-
-            dest_lbl = QLabel(_elide(op.dest, 48))
-            dest_lbl.setStyleSheet(f"font-size:10px; color:{_TEXT_DIM};")
-            dest_lbl.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-            dest_lbl.setToolTip(str(op.dest))
-
-            combo = QComboBox()
-            combo.addItems(["Skip", "Overwrite", "Rename"])
-            combo.setCurrentIndex(0)
-            combo.setFixedWidth(100)
-            combo.setFixedHeight(24)
-            combo.setStyleSheet(
-                f"QComboBox {{ background:#1a1810; color:{_TEXT_SEC};"
-                " border:1px solid rgba(200,140,0,0.25); border-radius:3px;"
-                " font-size:11px; padding:0 6px; }"
-                "QComboBox:hover { border-color:rgba(200,140,0,0.55); }"
-                "QComboBox::drop-down { border:none; }"
-                f"QComboBox QAbstractItemView {{ background:#1a1810; color:{_TEXT_PRI};"
-                " selection-background-color:rgba(200,140,0,0.20); }}"
-            )
-            combo.currentIndexChanged.connect(
-                lambda idx, o=op: self._on_combo_changed(o, idx)
-            )
-            self._conflict_combos[op.src] = combo
-
-            row_lay.addWidget(file_lbl)
-            row_lay.addWidget(dest_lbl, 1)
-            row_lay.addWidget(combo)
-            self._conflict_rows_lay.addWidget(row_w)
-
+        # Reset all bulk buttons to inactive
+        for b in self._bulk_btns.values():
+            b.setStyleSheet(b.property("_inactive_qss"))
         self._conflict_section.show()
-
-    def _on_combo_changed(self, op: PlannedOp, idx: int) -> None:
-        op.set_resolution([Resolution.SKIP, Resolution.OVERWRITE, Resolution.RENAME][idx])
 
     def _bulk_resolve(self, r: Resolution) -> None:
         if not self._plan:
             return
-        idx = {Resolution.SKIP: 0, Resolution.OVERWRITE: 1, Resolution.RENAME: 2}[r]
         for op in self._plan.conflicts:
             op.set_resolution(r)
-            if combo := self._conflict_combos.get(op.src):
-                combo.blockSignals(True)
-                combo.setCurrentIndex(idx)
-                combo.blockSignals(False)
+        # Highlight chosen button
+        for res, b in self._bulk_btns.items():
+            b.setStyleSheet(
+                b.property("_active_qss") if res == r
+                else b.property("_inactive_qss")
+            )
 
     # ──────────────────────────────────────────────────────────────────────
     # UI state
@@ -692,11 +653,13 @@ class ExportDialog(QDialog):
             self._btn_export.setText("Export")
 
         if self._plan:
-            records = self._active_records()
+            records  = self._active_records()
+            n_pruned = sum(1 for r in records if r.is_pruned) if self._chk_pruned.isChecked() else 0
             self._refresh_stats(
                 self._plan.total, self._plan.conflict_count,
                 sum(1 for r in records if r.file_type == FileType.RAW and not r.is_paired),
                 sum(1 for r in records if r.file_type == FileType.JPG and not r.is_paired),
+                n_pruned,
             )
 
     # ──────────────────────────────────────────────────────────────────────

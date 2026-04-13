@@ -174,6 +174,10 @@ class OpGroup:
     def conflict_count(self) -> int:
         return sum(1 for op in self.ops if op.conflict)
 
+    @property
+    def pruned_count(self) -> int:
+        return sum(1 for op in self.ops if op.record.is_pruned)
+
 
 # ── library plan ──────────────────────────────────────────────────────────────
 
@@ -361,5 +365,27 @@ class LibraryPlan:
 
             if progress:
                 progress(n, total)
+
+        # After a move, silently remove any source directories that are now empty.
+        # Walk bottom-up through every parent that lost a file so nested empties
+        # are cleaned up too (e.g. RAW/ inside a now-empty shoot folder).
+        if mode == "move" and succeeded:
+            dirs_to_check: set[Path] = set()
+            for op in succeeded:
+                dirs_to_check.add(op.src.parent)
+
+            # Expand upward so we catch grandparent folders too, up to _root
+            expanded: set[Path] = set()
+            for d in dirs_to_check:
+                p = d
+                while p != self._root and p != p.parent:
+                    expanded.add(p)
+                    p = p.parent
+
+            for d in sorted(expanded, key=lambda p: len(p.parts), reverse=True):
+                try:
+                    d.rmdir()   # no-op if the directory is not empty
+                except OSError:
+                    pass
 
         return succeeded, failed
