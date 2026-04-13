@@ -79,7 +79,7 @@ class SeparateDialog(QDialog):
 
     def __init__(self, records: List[PhotoRecord], parent=None) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Link RAW + JPG")
+        self.setWindowTitle("Sort Files")
         self.setMinimumSize(680, 520)
         self.setModal(True)
         self.setStyleSheet("background:#0e0e1a; color:#c8c8d8;")
@@ -92,17 +92,19 @@ class SeparateDialog(QDialog):
     # Internal helpers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _pair_count(self) -> int:
-        """Number of RAW+JPG pairs present among the ops."""
-        # Group by (canonical_parent, stem) and count groups with both types
+    @staticmethod
+    def _canonical_parent(path: Path) -> Path:
+        if path.parent.name.upper() in ("RAW", "JPG"):
+            return path.parent.parent
+        return path.parent
+
+    def _stem_group_count(self) -> int:
+        """Number of groups where both a RAW and a JPG share the same stem."""
         groups: dict = defaultdict(set)
         for op in self._plan.ops:
             r = op.record
-            if r.is_paired:
-                parent = r.path.parent
-                if parent.name.upper() in ("RAW", "JPG"):
-                    parent = parent.parent
-                groups[(parent, r.pair_stem or r.stem.lower())].add(r.file_type)
+            key = (self._canonical_parent(r.path), r.stem.lower())
+            groups[key].add(r.file_type)
         return sum(
             1 for types in groups.values()
             if FileType.RAW in types and FileType.JPG in types
@@ -111,33 +113,29 @@ class SeparateDialog(QDialog):
     def _group_ops(self):
         """
         Return ops in display order:
-          1. Paired groups — both RAW and JPG ops adjacent, sorted by stem
-          2. Unpaired singles — sorted by filename
-        Each paired group is a list of 2 ops; singles are lists of 1 op.
+          1. Stem groups — RAW and JPG with the same stem, sorted by stem
+          2. Singles — files with no same-stem partner, sorted by filename
+        Groups with both types are shown adjacent so the user can see which
+        files will land in sibling RAW/ and JPG/ folders after sorting.
         """
-        paired_groups: dict = defaultdict(list)
+        stem_groups: dict = defaultdict(list)
         singles: list = []
 
         for op in self._plan.ops:
             r = op.record
-            if r.is_paired:
-                parent = r.path.parent
-                if parent.name.upper() in ("RAW", "JPG"):
-                    parent = parent.parent
-                key = (parent, r.pair_stem or r.stem.lower())
-                paired_groups[key].append(op)
-            else:
-                singles.append(op)
-
-        # Sort: pairs by stem, singles by filename
-        ordered_pairs = sorted(paired_groups.values(), key=lambda g: g[0].record.stem.lower())
-        singles.sort(key=lambda op: op.record.filename.lower())
+            key = (self._canonical_parent(r.path), r.stem.lower())
+            stem_groups[key].append(op)
 
         result = []
-        for group in ordered_pairs:
-            # Put RAW before JPG within each pair group
-            group.sort(key=lambda op: (0 if op.record.file_type == FileType.RAW else 1))
-            result.append(group)
+        for key, group in sorted(stem_groups.items(), key=lambda kv: kv[0][1]):
+            types = {op.record.file_type for op in group}
+            if FileType.RAW in types and FileType.JPG in types:
+                group.sort(key=lambda op: (0 if op.record.file_type == FileType.RAW else 1))
+                result.append(group)
+            else:
+                singles.extend(group)
+
+        singles.sort(key=lambda op: op.record.filename.lower())
         for op in singles:
             result.append([op])
         return result
@@ -151,16 +149,16 @@ class SeparateDialog(QDialog):
         root.setSpacing(10)
         root.setContentsMargins(16, 14, 16, 14)
 
-        n_move   = sum(1 for op in self._plan.ops if op.record.path != op.dest)
-        n_skip   = self._plan.already_in_place_count()
-        n_pairs  = self._pair_count()
+        n_move        = sum(1 for op in self._plan.ops if op.record.path != op.dest)
+        n_skip        = self._plan.already_in_place_count()
+        n_stem_groups = self._stem_group_count()
 
         # ── stat chips row ─────────────────────────────────────────────── #
         chips_row = QHBoxLayout()
         chips_row.setSpacing(8)
 
         move_lbl = QLabel(
-            f"<b>Link {n_move} file{'s' if n_move != 1 else ''}</b>"
+            f"<b>Sort {n_move} file{'s' if n_move != 1 else ''}</b>"
         )
         move_lbl.setStyleSheet("font-size:13px; color:#e0e0f0;")
         chips_row.addWidget(move_lbl)
@@ -170,9 +168,9 @@ class SeparateDialog(QDialog):
                 _chip(f"{n_skip} already sorted",
                       "rgba(255,255,255,0.06)", "#7070a0")
             )
-        if n_pairs:
+        if n_stem_groups:
             chips_row.addWidget(
-                _chip(f"⇄  {n_pairs} pair{'s' if n_pairs != 1 else ''} will be linked",
+                _chip(f"⇄  {n_stem_groups} stem group{'s' if n_stem_groups != 1 else ''}",
                       "rgba(255,109,0,0.14)", "#ffaa55")
             )
 
@@ -183,12 +181,12 @@ class SeparateDialog(QDialog):
         sub_parts = []
         if n_move:
             sub_parts.append(
-                "Files will be sorted into <b>RAW/</b> and <b>JPG/</b> subfolders."
+                "Files will be moved into <b>RAW/</b> and <b>JPG/</b> subfolders."
             )
-        if n_pairs:
+        if n_stem_groups:
             sub_parts.append(
-                f"{n_pairs} RAW+JPG pair{'s' if n_pairs != 1 else ''} "
-                "will be linked — highlighted in orange below."
+                f"{n_stem_groups} RAW+JPG stem group{'s' if n_stem_groups != 1 else ''} "
+                "highlighted in orange — these share a filename stem."
             )
         if sub_parts:
             sub = QLabel("  ".join(sub_parts))
@@ -265,7 +263,7 @@ class SeparateDialog(QDialog):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self._btn_execute = QPushButton("Link Files")
+        self._btn_execute = QPushButton("Sort Files")
         self._btn_execute.setStyleSheet(
             "QPushButton{background:#2e5a8e;color:#fff;border:none;"
             "border-radius:4px;padding:6px 18px;font-weight:bold;font-size:12px;}"
@@ -307,7 +305,6 @@ class SeparateDialog(QDialog):
         src = op.record.path
 
         if src == op.dest:
-            # Already in place
             text = f"  ✓  {op.record.filename:<30s}  already in place"
             item = QListWidgetItem(text)
             item.setForeground(_FG_INPLACE)
@@ -322,27 +319,24 @@ class SeparateDialog(QDialog):
             return item
 
         if is_pair:
-            # Paired files — show link bracket on the right
+            # Same-stem group — bracket shows they share a filename stem
             if op.conflict:
                 status = "⚠  renamed"
                 fg = _FG_WARN
             else:
-                # Bracket: ┐ on first row, ┘ on last, │ in between
                 if pair_size == 2:
                     bracket = "┐" if pair_index == 0 else "┘"
                 else:
                     bracket = "┐" if pair_index == 0 else ("┘" if pair_index == pair_size - 1 else "│")
-                status = f"{bracket} linked"
+                status = f"{bracket} same stem"
                 fg = _FG_PAIR
 
             text = f"  ⇄  {op.record.filename:<30s}  →  {dest_label:<28s}  {status}"
             item = QListWidgetItem(text)
             item.setForeground(fg)
-            # Alternating pair group backgrounds
             bg = _BG_PAIR if pair_index % 2 == 0 else _BG_PAIR2
             item.setBackground(bg)
         else:
-            # Single / unpaired file
             if op.conflict:
                 text = f"  ⚠  {op.record.filename:<30s}  →  {dest_label:<28s}  renamed"
                 item = QListWidgetItem(text)
@@ -369,24 +363,16 @@ class SeparateDialog(QDialog):
         self._btn_execute.setEnabled(n_actual > 0)
 
     def _execute(self) -> None:
-        n_move  = sum(1 for op in self._plan.ops if op.record.path != op.dest and not op.skipped)
-        n_pairs = self._pair_count()
-
-        pair_line = (
-            f"<br><br><b>{n_pairs} RAW+JPG pair{'s' if n_pairs != 1 else ''}</b> "
-            "will remain linked after separation."
-            if n_pairs else ""
-        )
+        n_move = sum(1 for op in self._plan.ops if op.record.path != op.dest and not op.skipped)
 
         reply = QMessageBox.question(
             self,
-            "Link Files",
-            f"Link <b>{n_move} file{'s' if n_move != 1 else ''}</b>?"
-            f"{pair_line}"
+            "Sort Files",
+            f"Move <b>{n_move} file{'s' if n_move != 1 else ''}</b> into "
+            "<b>RAW/</b> and <b>JPG/</b> subfolders?"
             "<br><br>"
-            "<small>Files are sorted into <b>RAW/</b> and <b>JPG/</b> subfolders "
-            "so they can be tracked as linked pairs. "
-            "Files can be moved back manually if needed.</small>",
+            "<small>Files can be moved back manually if needed. "
+            "Use the <b>Pair</b> button to record RAW+JPG relationships.</small>",
             QMessageBox.Ok | QMessageBox.Cancel,
             QMessageBox.Cancel,
         )
@@ -394,7 +380,7 @@ class SeparateDialog(QDialog):
             return
 
         self._btn_execute.setEnabled(False)
-        self._btn_execute.setText("Linking…")
+        self._btn_execute.setText("Sorting…")
 
         succeeded, failed = self._plan.execute()
 

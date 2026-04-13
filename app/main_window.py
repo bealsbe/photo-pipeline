@@ -42,6 +42,7 @@ from app.ui.filter_bar import FilterBar
 from app.ui.icons import icon, pixmap as icon_pixmap
 from app.ui.import_dialog import ImportDialog
 from app.ui.prune_review import PruneReviewDialog
+from app.ui.pair_dialog import PairDialog
 from app.ui.separate_dialog import SeparateDialog
 from app.ui.shortcuts_dialog import KeyboardShortcutsDialog
 from app.ui.grouped_grid import GroupedGridView
@@ -49,7 +50,8 @@ from app.ui.viewer import ImageViewer
 
 _SETTINGS_ORG = "PhotoPipeline"
 _SETTINGS_APP = "PhotoPipeline"
-_PRUNE_FILE   = ".photo_pipeline.json"   # sidecar stored in the folder root
+_PRUNE_FILE   = ".photo_pipeline.json"       # sidecar: prune marks
+_PAIRS_FILE   = ".photo-pipeline-pairs.json" # sidecar: persistent pair marks
 
 
 def _set_text_beside_icon(toolbar, action) -> None:
@@ -135,11 +137,17 @@ class MainWindow(QMainWindow):
         review_act.triggered.connect(self._open_review)
         prune_menu.addAction(review_act)
 
-        separate_act = QAction("&Link RAW + JPG…", self)
+        separate_act = QAction("&Sort into RAW/JPG…", self)
         separate_act.setShortcut("Ctrl+Shift+S")
-        separate_act.setStatusTip("Sort into RAW/ and JPG/ subfolders and link matching pairs")
-        separate_act.triggered.connect(self._open_separate)
+        separate_act.setStatusTip("Sort files into RAW/ and JPG/ subfolders")
+        separate_act.triggered.connect(self._open_sort)
         prune_menu.addAction(separate_act)
+
+        pair_act = QAction("&Pair RAW + JPG…", self)
+        pair_act.setShortcut("Ctrl+Shift+P")
+        pair_act.setStatusTip("Pair RAW and JPG files by stem and save to sidecar")
+        pair_act.triggered.connect(self._open_pair)
+        prune_menu.addAction(pair_act)
 
         help_menu = mb.addMenu("&Help")
         shortcuts_act = QAction("&Keyboard Shortcuts…", self)
@@ -216,11 +224,19 @@ class MainWindow(QMainWindow):
         review_act_tb.triggered.connect(self._open_review)
         tb.addAction(review_act_tb)
 
-        separate_act_tb = QAction(icon("fork"), "Link", self)
-        separate_act_tb.setShortcut("Ctrl+Shift+S")
-        separate_act_tb.setToolTip("Link RAW + JPG pairs  (Ctrl+Shift+S)")
-        separate_act_tb.triggered.connect(self._open_separate)
-        tb.addAction(separate_act_tb)
+        sort_act_tb = QAction(icon("fork"), "Sort", self)
+        sort_act_tb.setShortcut("Ctrl+Shift+S")
+        sort_act_tb.setToolTip("Sort into RAW/ and JPG/ subfolders  (Ctrl+Shift+S)")
+        sort_act_tb.triggered.connect(self._open_sort)
+        tb.addAction(sort_act_tb)
+        _set_text_beside_icon(tb, sort_act_tb)
+
+        pair_act_tb = QAction(icon("link"), "Pair", self)
+        pair_act_tb.setShortcut("Ctrl+Shift+P")
+        pair_act_tb.setToolTip("Pair RAW+JPG by stem and save  (Ctrl+Shift+P)")
+        pair_act_tb.triggered.connect(self._open_pair)
+        tb.addAction(pair_act_tb)
+        _set_text_beside_icon(tb, pair_act_tb)
 
         tb.addSeparator()
 
@@ -247,8 +263,16 @@ class MainWindow(QMainWindow):
         grp.addAction(self._act_list)
         grp.addAction(self._act_grid)
 
-        # ── cull button ───────────────────────────────────────────────── #
+        # ── select + cull buttons ─────────────────────────────────────── #
         tb.addSeparator()
+        self._act_select = QAction(icon("plus"), "Select", self)
+        self._act_select.setCheckable(True)
+        self._act_select.setShortcut("S")
+        self._act_select.setToolTip("Multi-select mode  (S)")
+        self._act_select.toggled.connect(self._on_select_mode_toggled)
+        tb.addAction(self._act_select)
+        _set_text_beside_icon(tb, self._act_select)
+
         self._act_cull = QAction(icon("times-circle"), "Prune", self)
         self._act_cull.setToolTip("Mark selected as pruned  (P)")
         self._act_cull.triggered.connect(self._toggle_prune_selected)
@@ -292,6 +316,9 @@ class MainWindow(QMainWindow):
 
         self._file_list.prune_toggled.connect(self._on_prune_toggled)
         self._grid_view.prune_toggled.connect(self._on_prune_toggled)
+
+        # Keep toolbar Select button in sync when mode exits via Done/Escape
+        self._grid_view.selection_mode_changed.connect(self._on_grid_select_mode_changed)
 
         self._stack.setCurrentIndex(_VIEW_LIST)
 
@@ -522,7 +549,8 @@ class MainWindow(QMainWindow):
             self._run_import_separation(count)
             return
 
-        self._collection.build_pairs()
+        pinned_keys = self._load_pair_marks()
+        self._collection.build_pairs(pinned_keys=pinned_keys)
         all_records = self._collection.all()
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
@@ -552,8 +580,9 @@ class MainWindow(QMainWindow):
         for record, old_path, new_path in moves:
             self._collection.update_path(old_path, new_path)
 
-        # Re-pair using updated (post-separation) paths
-        self._collection.build_pairs()
+        # Auto-detect natural pairs after import sort, then persist them
+        self._collection.build_pairs(auto_detect=True)
+        self._save_pair_marks()
         all_records = self._collection.all()
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
@@ -632,6 +661,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Prune                                                                #
     # ------------------------------------------------------------------ #
+
+    def _on_select_mode_toggled(self, checked: bool) -> None:
+        """Toolbar Select button toggled — enter or exit multi-select mode."""
+        self._grid_view.set_selection_mode(checked)
+
+    def _on_grid_select_mode_changed(self, enabled: bool) -> None:
+        """Grid exited select mode via Done/Escape — sync toolbar button."""
+        self._act_select.blockSignals(True)
+        self._act_select.setChecked(enabled)
+        self._act_select.blockSignals(False)
 
     def _toggle_prune_selected(self) -> None:
         """Cull toolbar button — toggle prune on all selected grid items."""
@@ -727,19 +766,17 @@ class MainWindow(QMainWindow):
             f"{n} file{'s' if n != 1 else ''} moved to Trash"
         )
 
-    def _open_separate(self) -> None:
+    def _open_sort(self) -> None:
         from PySide6.QtWidgets import QMessageBox
         all_records = self._collection.all()
         if not all_records:
-            QMessageBox.information(
-                self, "No Files", "Open a folder first."
-            )
+            QMessageBox.information(self, "No Files", "Open a folder first.")
             return
         dlg = SeparateDialog(all_records, parent=self)
-        dlg.separated.connect(self._on_separated)
+        dlg.separated.connect(self._on_sorted)
         dlg.exec()
 
-    def _on_separated(self, succeeded, failed) -> None:
+    def _on_sorted(self, succeeded, failed) -> None:
         """Update paths for moved records, rebuild pairs, and refresh both models."""
         # Capture moved count BEFORE update_path mutates record.path
         moves = [(record, record.path, new_path) for record, new_path in succeeded]
@@ -748,8 +785,10 @@ class MainWindow(QMainWindow):
         for record, old_path, new_path in moves:
             self._collection.update_path(old_path, new_path)
 
-        # Rebuild pairs — RAW/ and JPG/ canonical-parent logic links separated files
-        self._collection.build_pairs()
+        # Rebuild pairs — canonical-parent logic strips RAW/JPG so keys are
+        # Reload sidecar to preserve explicit pairs after sort
+        pinned_keys = self._load_pair_marks()
+        self._collection.build_pairs(pinned_keys=pinned_keys)
         all_records = self._collection.all()
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
@@ -757,10 +796,35 @@ class MainWindow(QMainWindow):
         self._update_status_count()
 
         pairs = self._collection.stats["paired"] // 2
-        msg = f"{moved} file{'s' if moved != 1 else ''} moved — {pairs} pair{'s' if pairs != 1 else ''} linked"
+        msg = f"{moved} file{'s' if moved != 1 else ''} sorted — {pairs} pair{'s' if pairs != 1 else ''} linked"
         if failed:
             msg += f"  ({len(failed)} failed)"
         self._statusbar.showMessage(msg)
+
+    def _open_pair(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        all_records = self._collection.all()
+        if not all_records:
+            QMessageBox.information(self, "No Files", "Open a folder first.")
+            return
+        dlg = PairDialog(all_records, parent=self)
+        dlg.pairs_saved.connect(self._on_pairs_saved)
+        dlg.exec()
+
+    def _on_pairs_saved(self, pair_keys) -> None:
+        """Persist pair keys to sidecar, rebuild pairs, and refresh models."""
+        self._save_pair_marks(pair_keys)
+        self._collection.build_pairs(pinned_keys=pair_keys)
+        all_records = self._collection.all()
+        self._file_list.source_model().reset_records(all_records)
+        self._grid_view.reset_records(all_records)
+        self._update_stats()
+        self._update_status_count()
+
+        n = len(pair_keys)
+        self._statusbar.showMessage(
+            f"{n} pair{'s' if n != 1 else ''} saved"
+        )
 
     def _unmark_all(self) -> None:
         records = self._collection.pruned()
@@ -834,6 +898,21 @@ class MainWindow(QMainWindow):
             self._grid_view.notify_records_changed(affected)
             self._update_stats()
             self._update_status_count()
+
+    def _save_pair_marks(self, pair_keys=None) -> None:
+        """Write pair keys to sidecar.  If pair_keys is None, use current collection."""
+        if not self._current_folder:
+            return
+        from app.models.sidecar import write_paired_keys
+        keys = pair_keys if pair_keys is not None else self._collection.current_pair_keys()
+        write_paired_keys(self._current_folder, keys)
+
+    def _load_pair_marks(self):
+        """Read pair keys from sidecar.  Returns set or empty set."""
+        if not self._current_folder:
+            return set()
+        from app.models.sidecar import read_paired_keys
+        return read_paired_keys(self._current_folder)
 
     def _save_session(self) -> None:
         from datetime import date as _pydate

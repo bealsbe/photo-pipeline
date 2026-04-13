@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterator, List, Optional
+from typing import Dict, Iterator, List, Optional, Set, Tuple
 
 from .photo_record import FileType, PhotoRecord
 
@@ -172,19 +172,40 @@ class PhotoCollection:
             return path.parent.parent
         return path.parent
 
-    def build_pairs(self) -> None:
+    def build_pairs(
+        self,
+        pinned_keys: Optional[Set[Tuple[str, str]]] = None,
+        auto_detect: bool = False,
+    ) -> None:
         """
-        Match RAW and JPG records by (canonical_parent, lowercase_stem).
+        Mark RAW and JPG records as paired.
 
-        Works both before separation (files in the same dir) and after
-        (RAW in .../RAW/, JPG in .../JPG/).
+        Parameters
+        ----------
+        pinned_keys
+            Set of (canonical_parent_abs_str, lowercase_stem) tuples loaded
+            from the pairs sidecar (explicit user-confirmed pairs).
+            Both file types must still be present — stale sidecar entries for
+            missing files are silently skipped.
+        auto_detect
+            If True, also pair any records that share (canonical_parent, stem)
+            AND have both RAW and JPG present — regardless of the sidecar.
+            Used after import/sort operations where auto-detecting natural
+            pairs is expected behaviour.  Default False so that a fresh scan
+            of a folder without a sidecar shows nothing as paired until the
+            user explicitly clicks Pair.
         """
-        # _pair_index is already populated by add(); reuse it for grouping
         paired_count = 0
-        for records in self._pair_index.values():
-            types = {r.file_type for r in records}
-            if FileType.RAW in types and FileType.JPG in types:
-                stem = records[0].stem.lower()
+        for (canonical_parent, stem), records in self._pair_index.items():
+            types       = {r.file_type for r in records}
+            has_both    = FileType.RAW in types and FileType.JPG in types
+            is_natural  = auto_detect and has_both
+            is_pinned   = (
+                pinned_keys is not None
+                and (str(canonical_parent), stem) in pinned_keys
+                and has_both   # sidecar entry only applies if both files exist
+            )
+            if is_natural or is_pinned:
                 for r in records:
                     r.pair_stem = stem
                 paired_count += len(records)
@@ -194,6 +215,17 @@ class PhotoCollection:
 
         self._s.paired   = paired_count
         self._s.unpaired = self._s.total - paired_count
+
+    def current_pair_keys(self) -> Set[Tuple[str, str]]:
+        """
+        Return the set of (canonical_parent_abs_str, stem) for all currently
+        paired records.  Used to persist pairs to the sidecar.
+        """
+        keys: Set[Tuple[str, str]] = set()
+        for (canonical_parent, stem), records in self._pair_index.items():
+            if any(r.is_paired for r in records):
+                keys.add((str(canonical_parent), stem))
+        return keys
 
     def find_pair(self, record: PhotoRecord) -> Optional[PhotoRecord]:
         """Return the RAW/JPG partner of *record*, or None if unpaired. O(1)."""

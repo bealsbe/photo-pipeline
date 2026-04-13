@@ -33,6 +33,7 @@ from PySide6.QtGui import (
     QFont,
     QFontMetrics,
     QPainter,
+    QPen,
     QPixmap,
 )
 from PySide6.QtWidgets import (
@@ -128,12 +129,15 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
     def __init__(self, thumb_size: int = 160, parent=None) -> None:
         super().__init__(parent)
-        self.thumb_size = thumb_size
+        self.thumb_size  = thumb_size
+        self.select_mode = False   # set by _SectionGrid when mode is toggled
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
-        w = self.thumb_size + self.PAD * 2
-        h = self.thumb_size + self.LABEL_H + self.PAD + 2  # 2 px bottom margin
-        return QSize(w, h)
+        # Must match gridSize() exactly so Qt's dirty-rect tracking covers the
+        # full painted area.  A mismatch leaves stale highlight strips when a
+        # cell transitions between selected / normal states.
+        return QSize(self.thumb_size + self.PAD * 2 + 6,
+                     self.thumb_size + self.LABEL_H + self.PAD * 2 + 6)
 
     def paint(
         self,
@@ -191,6 +195,25 @@ class ThumbnailDelegate(QStyledItemDelegate):
             xf.setBold(True)
             painter.setFont(xf)
             painter.drawText(thumb_rect, Qt.AlignCenter, "\u2715")
+
+        # ── checkbox overlay (select mode) ──────────────────────────────── #
+        if self.select_mode:
+            cb = max(16, min(24, ts // 7))   # scale with thumb size, 16–24 px
+            cb_rect = QRect(rect.x() + p + 5, rect.y() + p + 5, cb, cb)
+            if selected:
+                painter.setBrush(QColor(0xff, 0x6d, 0x00))
+                painter.setPen(Qt.NoPen)
+                painter.drawEllipse(cb_rect)
+                painter.setPen(QPen(Qt.white, max(1.5, cb / 12)))
+                cf = QFont()
+                cf.setPointSize(max(7, cb // 2 - 1))
+                cf.setBold(True)
+                painter.setFont(cf)
+                painter.drawText(cb_rect, Qt.AlignCenter, "\u2713")
+            else:
+                painter.setBrush(QColor(0, 0, 0, 110))
+                painter.setPen(QPen(QColor(200, 200, 220, 180), max(1.0, cb / 14)))
+                painter.drawEllipse(cb_rect)
 
         # ── label row: filename  [badge(s)] ──────────────────────────── #
         bw = self._BW
