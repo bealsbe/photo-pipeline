@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import date as _pydate
 from typing import List, Optional
 
-from PySide6.QtCore import QDate, Signal
+from PySide6.QtCore import QDate, Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QDateEdit,
@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSlider,
     QWidget,
 )
 
@@ -211,12 +212,13 @@ class FilterBar(QWidget):
     """
 
     filter_changed: Signal = Signal(object)
+    zoom_changed:   Signal = Signal(int)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setStyleSheet(
-            "FilterBar { background: #0e0e1a;"
-            " border-bottom: 1px solid rgba(255,109,0,0.08); }"
+            "FilterBar { background: #14142a;"
+            " border-bottom: 1px solid rgba(255,109,0,0.15); }"
         )
 
         lay = QHBoxLayout(self)
@@ -288,9 +290,39 @@ class FilterBar(QWidget):
         all_btn.clicked.connect(self._reset_all)
         lay.addWidget(all_btn)
 
+        # ── zoom slider ───────────────────────────────────────────── #
+        lay.addWidget(_vline())
+        self._zoom_slider = QSlider(Qt.Horizontal)
+        self._zoom_slider.setRange(120, 480)
+        self._zoom_slider.setSingleStep(20)
+        self._zoom_slider.setPageStep(20)
+        self._zoom_slider.setValue(180)
+        self._zoom_slider.setFixedWidth(90)
+        self._zoom_slider.setToolTip("Thumbnail size  (Ctrl+scroll)")
+        self._zoom_slider.setStyleSheet(
+            "QSlider::groove:horizontal {"
+            "  background: rgba(255,109,0,0.15); border-radius: 2px; height: 3px; }"
+            "QSlider::handle:horizontal {"
+            "  background: #ff6d00; border-radius: 4px;"
+            "  width: 10px; height: 10px; margin: -4px 0; }"
+            "QSlider::sub-page:horizontal {"
+            "  background: rgba(255,109,0,0.50); border-radius: 2px; }"
+            "QSlider:disabled { opacity: 0.3; }"
+        )
+        self._zoom_slider.valueChanged.connect(self.zoom_changed)
+        lay.addWidget(self._zoom_slider)
+
     # ------------------------------------------------------------------ #
     # Public API                                                           #
     # ------------------------------------------------------------------ #
+
+    def set_zoom(self, size: int) -> None:
+        self._zoom_slider.blockSignals(True)
+        self._zoom_slider.setValue(size)
+        self._zoom_slider.blockSignals(False)
+
+    def set_zoom_enabled(self, enabled: bool) -> None:
+        self._zoom_slider.setEnabled(enabled)
 
     def current_state(self) -> FilterState:
         # sort

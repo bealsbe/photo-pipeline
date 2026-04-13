@@ -290,7 +290,11 @@ def _exif_from_pillow(path: str) -> dict:
     return out
 
 
-_EXIFTOOL_LENS_TAGS = [
+_EXIFTOOL_TAGS = [
+    "-Make", "-Model", "-ISO", "-ExposureTime", "-FNumber",
+    "-FocalLength", "-FocalLengthIn35mmFormat", "-ExposureBiasValue",
+    "-MeteringMode", "-Flash", "-WhiteBalance", "-ExposureProgram",
+    "-ExposureMode", "-SceneCaptureType",
     "-LensID", "-LensModel", "-LensMake", "-LensSpec",
     "-Lens", "-LensType",
 ]
@@ -301,7 +305,7 @@ class _ExiftoolSignals(QObject):
 
 
 class _ExiftoolWorker(QRunnable):
-    """Run exiftool in a thread-pool worker; emit lens fields when done."""
+    """Run exiftool in a thread-pool worker; emit all EXIF fields when done."""
 
     def __init__(self, path: Path, signals: _ExiftoolSignals) -> None:
         super().__init__()
@@ -313,7 +317,7 @@ class _ExiftoolWorker(QRunnable):
         import subprocess, json as _json
         try:
             result = subprocess.run(
-                ["exiftool", "-j", "-n"] + _EXIFTOOL_LENS_TAGS + [str(self.path)],
+                ["exiftool", "-j", "-n"] + _EXIFTOOL_TAGS + [str(self.path)],
                 capture_output=True, text=True, timeout=5,
             )
             if result.returncode != 0 or not result.stdout.strip():
@@ -323,6 +327,39 @@ class _ExiftoolWorker(QRunnable):
                 return
             d = data[0]
             out: dict = {}
+
+            # Camera
+            make  = str(d.get("Make") or "").strip()
+            model = str(d.get("Model") or "").strip()
+            if make and model.upper().startswith(make.upper()):
+                model = model[len(make):].strip()
+            if make:
+                out["Make"] = make
+            if model:
+                out["Model"] = model
+
+            # Exposure
+            iso = d.get("ISO")
+            if iso:
+                out["ISO"] = str(int(iso))
+            et = d.get("ExposureTime")
+            if et:
+                s = float(et)
+                out["Shutter"] = f"1/{round(1/s)} s" if 0 < s < 1.0 else f"{s:g} s"
+            fn = d.get("FNumber")
+            if fn:
+                out["Aperture"] = f"f/{float(fn):g}"
+            fl = d.get("FocalLength")
+            if fl:
+                out["Focal Length"] = f"{float(fl):g} mm"
+            fl35 = d.get("FocalLengthIn35mmFormat")
+            if fl35:
+                out["35mm Equiv"] = f"{float(fl35):g} mm"
+            ev = d.get("ExposureBiasValue")
+            if ev is not None:
+                out["EV Comp"] = f"{float(ev):+g} EV"
+
+            # Lens
             lmodel = str(d.get("LensModel") or d.get("LensID") or d.get("Lens") or "").strip()
             lmake  = str(d.get("LensMake") or "").strip()
             if lmake and lmodel.upper().startswith(lmake.upper()):
@@ -334,34 +371,211 @@ class _ExiftoolWorker(QRunnable):
             spec_raw = d.get("LensSpec") or d.get("LensType") or ""
             if spec_raw and not lmodel:
                 out["Lens Model"] = str(spec_raw).strip()
+
             if out:
                 self.signals.done.emit(self.path, out)
         except Exception:
             pass
 
 
-def _exif_from_rawpy(path: str) -> dict:
-    """Read basic EXIF from a RAW file via rawpy (fallback when Pillow can't parse)."""
+def _exif_from_tiff(path: str) -> dict:
+    """
+    Read EXIF fields from a TIFF-container RAW file (ARW, CR2, NEF, DNG …)
+    using a minimal IFD walker.  No pixel decode — header reads only.
+    """
+    import struct as _s
+
+    # tag → (output_key, type)
+    # type: 'str', 'short', 'rational', 'srational'
+    _IFD0_TAGS: dict = {
+        271: ("Make",  "str"),
+        272: ("Model", "str"),
+        305: ("Software", "str"),
+    }
+    _EXIF_TAGS: dict = {
+        33434: ("_et",   "rational"),   # ExposureTime  (raw, formatted below)
+        33437: ("_fn",   "rational"),   # FNumber
+        34855: ("ISO",   "short"),      # ISOSpeedRatings
+        37378: ("_av",   "rational"),   # ApertureValue (APEX)
+        37380: ("_ev",   "srational"),  # ExposureBiasValue
+        37383: ("_mm",   "short"),      # MeteringMode
+        37385: ("_fl",   "short"),      # Flash
+        37386: ("Focal Length", "rational"),  # FocalLength
+        41987: ("_wb",   "short"),      # WhiteBalance
+        41989: ("35mm Equiv", "short"), # FocalLengthIn35mmFilm
+        41986: ("_em",   "short"),      # ExposureMode
+        41985: ("_ep",   "short"),      # ExposureProgram (CustomRendered shares tag space)
+        41990: ("_sc",   "short"),      # SceneCaptureType
+    }
+    _EXIF_IFD_TAG = 0x8769
+
+    _METERING = {0: "Unknown", 1: "Average", 2: "Center-weighted",
+                 3: "Spot", 4: "Multi-spot", 5: "Multi-segment", 6: "Partial"}
+    _FLASH_MAP = {0: "Off", 1: "Fired", 5: "Fired (no return)", 7: "Fired (return)",
+                  16: "Off (flash)", 24: "Off (auto)", 25: "Fired (auto)",
+                  29: "Fired (auto, no return)", 31: "Fired (auto, return)",
+                  32: "No flash", 65: "Fired (red-eye)", 71: "Fired (red-eye, no return)"}
+    _WB = {0: "Auto", 1: "Manual"}
+    _EXPMODE = {0: "Auto", 1: "Manual", 2: "Auto bracket"}
+    _EXPPROG = {1: "Manual", 2: "Program", 3: "Aperture priority",
+                4: "Shutter priority", 5: "Creative", 6: "Action", 7: "Portrait",
+                8: "Landscape"}
+    _SCENE = {0: "Standard", 1: "Landscape", 2: "Portrait", 3: "Night"}
+
     out: dict = {}
-    with _rawpy.imread(path) as raw:
-        m = raw.metadata
-        make  = (m.camera_make  or "").strip()
-        model = (m.camera_model or "").strip()
-        if make and model.upper().startswith(make.upper()):
-            model = model[len(make):].strip()
-        if make:
-            out["Make"] = make
-        if model:
-            out["Model"] = model
-        if m.iso:
-            out["ISO"] = str(int(m.iso))
-        if m.aperture:
-            out["Aperture"] = f"f/{m.aperture:g}"
-        if m.shutter:
-            s = m.shutter
-            out["Shutter"] = f"1/{round(1/s)} s" if 0 < s < 1.0 else f"{s:g} s"
-        if m.focal_len:
-            out["Focal Length"] = f"{m.focal_len:g} mm"
+    try:
+        with open(path, "rb") as f:
+            hdr = f.read(8)
+            if len(hdr) < 8:
+                return out
+            if hdr[:2] == b'II':
+                end = '<'
+            elif hdr[:2] == b'MM':
+                end = '>'
+            else:
+                return out
+
+            ifd0 = _s.unpack_from(end + 'I', hdr, 4)[0]
+
+            def read_str(offset: int, count: int) -> str:
+                f.seek(offset)
+                return f.read(count).rstrip(b'\x00').decode('ascii', errors='replace').strip()
+
+            def read_rational(offset: int) -> Optional[float]:
+                f.seek(offset)
+                buf = f.read(8)
+                if len(buf) < 8:
+                    return None
+                num, den = _s.unpack(end + 'II', buf)
+                return num / den if den else None
+
+            def read_srational(offset: int) -> Optional[float]:
+                f.seek(offset)
+                buf = f.read(8)
+                if len(buf) < 8:
+                    return None
+                num, den = _s.unpack(end + 'ii', buf)
+                return num / den if den else None
+
+            def read_short_inline(val_off: int) -> int:
+                # SHORT stored inline: lower 2 bytes in little-endian, upper in big
+                if end == '<':
+                    return val_off & 0xFFFF
+                else:
+                    return (val_off >> 16) & 0xFFFF
+
+            def walk(offset: int, tag_map: dict) -> dict:
+                result: dict = {}
+                f.seek(offset)
+                buf = f.read(2)
+                if len(buf) < 2:
+                    return result
+                n = _s.unpack(end + 'H', buf)[0]
+                for _ in range(n):
+                    e = f.read(12)
+                    if len(e) < 12:
+                        break
+                    tag, typ, cnt, val_off = _s.unpack(end + 'HHII', e)
+                    if tag not in tag_map:
+                        continue
+                    key, ttype = tag_map[tag]
+                    if ttype == 'str':
+                        if cnt > 4:
+                            result[key] = read_str(val_off, cnt)
+                        # cnt <= 4: value inline in val_off bytes (rare for these tags)
+                    elif ttype == 'short':
+                        result[key] = read_short_inline(val_off)
+                    elif ttype == 'rational':
+                        result[key] = read_rational(val_off)
+                    elif ttype == 'srational':
+                        result[key] = read_srational(val_off)
+                return result
+
+            exif_ifd_ptr: Optional[int] = None
+            f.seek(ifd0)
+            buf = f.read(2)
+            n = _s.unpack(end + 'H', buf)[0]
+            for _ in range(n):
+                e = f.read(12)
+                if len(e) < 12:
+                    break
+                tag, typ, cnt, val_off = _s.unpack(end + 'HHII', e)
+                if tag == _EXIF_IFD_TAG:
+                    exif_ifd_ptr = val_off
+                elif tag in _IFD0_TAGS:
+                    key, ttype = _IFD0_TAGS[tag]
+                    if ttype == 'str' and cnt > 4:
+                        out[key] = read_str(val_off, cnt)
+
+            if exif_ifd_ptr:
+                raw = walk(exif_ifd_ptr, _EXIF_TAGS)
+
+                # Normalise Make/Model
+                make  = out.get("Make", "").strip()
+                model = out.get("Model", "").strip()
+                if make and model.upper().startswith(make.upper()):
+                    out["Model"] = model[len(make):].strip()
+
+                # ISO
+                if "_et" not in raw and "ISO" in raw:
+                    out["ISO"] = str(int(raw["ISO"]))
+                elif "ISO" in raw:
+                    out["ISO"] = str(int(raw["ISO"]))
+
+                # Shutter
+                et = raw.get("_et")
+                if et and et > 0:
+                    out["Shutter"] = f"1/{round(1/et)} s" if et < 1.0 else f"{et:g} s"
+
+                # Aperture
+                fn = raw.get("_fn")
+                if fn and fn > 0:
+                    out["Aperture"] = f"f/{fn:g}"
+
+                # Focal length
+                fl = raw.get("Focal Length")
+                if fl and fl > 0:
+                    out["Focal Length"] = f"{fl:g} mm"
+                fl35 = raw.get("35mm Equiv")
+                if fl35 and fl35 > 0:
+                    out["35mm Equiv"] = f"{int(fl35)} mm"
+
+                # EV comp
+                ev = raw.get("_ev")
+                if ev is not None:
+                    out["EV Comp"] = f"{ev:+g} EV"
+
+                # Metering
+                mm = raw.get("_mm")
+                if mm is not None:
+                    out["Metering"] = _METERING.get(mm, str(mm))
+
+                # Flash
+                fl_raw = raw.get("_fl")
+                if fl_raw is not None:
+                    out["Flash"] = _FLASH_MAP.get(fl_raw, f"0x{fl_raw:02x}")
+
+                # White balance
+                wb = raw.get("_wb")
+                if wb is not None:
+                    out["White Balance"] = _WB.get(wb, str(wb))
+
+                # Exposure mode / program
+                em = raw.get("_em")
+                if em is not None:
+                    out["Exp Mode"] = _EXPMODE.get(em, str(em))
+                ep = raw.get("_ep")
+                if ep is not None:
+                    out["Exp Program"] = _EXPPROG.get(ep, str(ep))
+
+                # Scene
+                sc = raw.get("_sc")
+                if sc is not None:
+                    out["Scene"] = _SCENE.get(sc, str(sc))
+
+    except Exception:
+        pass
+
     return out
 
 
@@ -383,11 +597,11 @@ def _read_exif_fields(
         except Exception:
             pass
 
-    if record.file_type == FileType.RAW and _RAWPY:
+    if record.file_type == FileType.RAW:
         try:
-            rp = _exif_from_rawpy(str(record.path))
+            rp = _exif_from_tiff(str(record.path))
             for k, v in rp.items():
-                flat.setdefault(k, v)   # rawpy fills gaps Pillow couldn't cover
+                flat.setdefault(k, v)   # TIFF walker fills gaps Pillow couldn't cover
         except Exception:
             pass
 
@@ -1644,13 +1858,15 @@ class ImageViewer(QWidget):
             _section_hdr(section_name)
             _form([(lbl.lower(), val) for lbl, val in rows])
 
-        # Kick off exiftool async if no lens data yet
+        # Kick off exiftool async for RAW files (fills lens + any gaps the TIFF
+        # walker missed), or if lens data is absent for any file type.
         _LENS_KEYS = {"Lens Make", "Lens Model", "Lens Spec"}
         has_lens = "LENS" in sections or any(
             any(lbl in _LENS_KEYS for lbl, _ in rows)
             for rows in sections.values()
         )
-        if not has_lens:
+        need_exiftool = (record.file_type == FileType.RAW) or (not has_lens)
+        if need_exiftool:
             self._et_pending = record.path
             self._et_pool.clear()
             self._et_pool.start(_ExiftoolWorker(record.path, self._et_signals))
@@ -1679,11 +1895,14 @@ class ImageViewer(QWidget):
         ) else None
         self._inject_exif_sections(sections, record, jpg_pair)
 
-    def _on_lens_ready(self, path: Path, lens_flat: dict) -> None:
-        """Receive async exiftool result and append a LENS section to the panel."""
+    def _on_lens_ready(self, path: Path, et_flat: dict) -> None:
+        """Receive async exiftool result; merge all fields and re-populate the panel."""
         if path != self._et_pending:
             return  # navigated away before exiftool finished
         self._et_pending = None
+
+        if not et_flat:
+            return
 
         # Determine the cache key for the current display state
         jpg_pair = self._pair_record if (
@@ -1691,60 +1910,49 @@ class ImageViewer(QWidget):
         ) else None
         cache_key = (path, jpg_pair.path if jpg_pair else None)
 
-        # Merge into the cached sections dict so future opens are instant
-        sections = self._exif_cache.get(cache_key, {})
-        _LENS_KEYS = ["Lens Make", "Lens Model", "Lens Spec", "Focal Length", "35mm Equiv"]
-        # Merge lens_flat into existing LENS section rows (or create one)
-        existing_lens = dict(sections.get("LENS", []))
-        for k in ("Lens Make", "Lens Model", "Lens Spec"):
-            if k in lens_flat:
-                existing_lens.setdefault(k, lens_flat[k])
-        if not existing_lens:
-            return  # nothing useful came back
-        lens_rows = [(k, existing_lens[k]) for k in _LENS_KEYS if k in existing_lens]
-        sections["LENS"] = lens_rows
-        if cache_key in self._exif_cache:
-            self._exif_cache[cache_key] = sections
+        # Flatten the existing cached sections back to a key→value dict,
+        # then fill any missing fields from exiftool results.
+        existing_sections = self._exif_cache.get(cache_key, {})
+        existing_flat: dict = {
+            lbl: val
+            for rows in existing_sections.values()
+            for lbl, val in rows
+        }
+        merged_flat = dict(existing_flat)
+        for k, v in et_flat.items():
+            merged_flat.setdefault(k, v)
 
-        # Remove the trailing stretch, inject LENS section, re-add stretch
-        # Find and remove the last stretch item
-        count = self._exif_layout.count()
-        last = self._exif_layout.itemAt(count - 1)
-        if last and last.spacerItem():
-            self._exif_layout.takeAt(count - 1)
+        # Rebuild sections from the merged flat dict (same logic as _read_exif_fields)
+        _CAMERA_KEYS   = ["Make", "Model", "Software"]
+        _EXPOSURE_KEYS = ["Date", "ISO", "Aperture", "Shutter", "EV Comp",
+                          "Exp Program", "Exp Mode", "Metering", "Flash",
+                          "White Balance", "Scene", "Subject Dist"]
+        _LENS_KEYS     = ["Lens Make", "Lens Model", "Lens Spec",
+                          "Focal Length", "35mm Equiv"]
+        _GEO_KEYS      = ["GPS"]
 
-        # Divider
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setFixedHeight(1)
-        line.setStyleSheet("background: rgba(255,109,0,0.10);")
-        self._exif_layout.addWidget(line)
+        new_sections: dict = {}
+        for name, keys in [
+            ("CAMERA",   _CAMERA_KEYS),
+            ("EXPOSURE", _EXPOSURE_KEYS),
+            ("LENS",     _LENS_KEYS),
+            ("GPS",      _GEO_KEYS),
+        ]:
+            rows = [(k, merged_flat[k]) for k in keys if k in merged_flat]
+            if rows:
+                new_sections[name] = rows
 
-        # Section header
-        hdr = QLabel("LENS")
-        hdr.setContentsMargins(0, 10, 0, 2)
-        hdr.setStyleSheet(
-            "color: rgba(255,109,0,0.70); font-size: 9px; font-weight: bold;"
-            "letter-spacing: 2px; background: transparent;"
-        )
-        self._exif_layout.addWidget(hdr)
+        if not new_sections:
+            return
 
-        # Form rows
-        form = QFormLayout()
-        form.setContentsMargins(2, 1, 2, 4)
-        form.setHorizontalSpacing(10)
-        form.setVerticalSpacing(3)
-        form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
-        for lbl, val in lens_rows:
-            lw = QLabel(lbl.lower())
-            lw.setStyleSheet("color: #40405a; font-size: 11px;")
-            vw = QLabel(val)
-            vw.setStyleSheet("color: #b8b8d0; font-size: 11px;")
-            vw.setWordWrap(True)
-            form.addRow(lw, vw)
-        self._exif_layout.addLayout(form)
-        self._exif_layout.addStretch()
+        # Update cache with the enriched result
+        self._exif_cache[cache_key] = new_sections
+
+        # Re-populate the panel for the current record (cache hit — instant)
+        record = self._records[self._index] if self._records else None
+        if record is None or record.path != path:
+            return
+        self._populate_exif_panel(record, self._pair_record)
 
     def _toggle_exif_panel(self) -> None:
         visible = self._btn_info.isChecked()

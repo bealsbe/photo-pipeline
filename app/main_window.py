@@ -1,14 +1,5 @@
 """
 MainWindow — top-level application window.
-
-Phase 2 additions on top of Phase 1:
-  • ThumbnailGenerator (background pixmap generation + in-memory cache)
-  • FilterBar (RAW / JPG / Paired / Unpaired toggles)
-  • ThumbnailGridView (icon-mode grid with custom delegate)
-  • QStackedWidget to switch between List and Grid views
-  • Toolbar view-toggle buttons (List | Grid)
-  • Both views share the same filter state; filter bar drives both proxies
-  • Status bar shows "Showing X of Y" counts
 """
 from __future__ import annotations
 
@@ -23,9 +14,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QMainWindow,
-    QPushButton,
-    QSizePolicy,
-    QSlider,
     QStackedWidget,
     QStatusBar,
     QToolBar,
@@ -39,8 +27,8 @@ from app.scanning.scanner import ScanWorker
 from app.thumbnails.generator import ThumbnailGenerator
 from app.ui.file_list import FileListWidget
 from app.ui.filter_bar import FilterBar
-from app.ui.icons import icon, pixmap as icon_pixmap
-from app.ui.import_dialog import ImportDialog
+from app.ui.folder_bar import FolderBar
+from app.ui.icons import icon
 from app.ui.prune_review import PruneReviewDialog
 from app.ui.pair_dialog import PairDialog
 from app.ui.separate_dialog import SeparateDialog
@@ -54,14 +42,12 @@ _PRUNE_FILE   = ".photo_pipeline.json"       # sidecar: prune marks
 _PAIRS_FILE   = ".photo-pipeline-pairs.json" # sidecar: persistent pair marks
 
 
-def _set_text_beside_icon(toolbar, action) -> None:
-    """Set a single toolbar button to show text beside its icon."""
-    from PySide6.QtWidgets import QToolButton
-    btn = toolbar.widgetForAction(action)
-    if isinstance(btn, QToolButton):
-        btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
-_THUMB_SIZE = 160
+_THUMB_SIZE      = 180   # default display size
+_GENERATION_SIZE = 300   # fixed thumbnail generation + cache size
+_ZOOM_MIN        = 120
+_ZOOM_MAX        = 480
+_ZOOM_STEP       = 20
 _VIEW_LIST = 0
 _VIEW_GRID = 1
 
@@ -76,11 +62,10 @@ class MainWindow(QMainWindow):
 
         self._collection = PhotoCollection()
         self._scanner: ScanWorker | None = None
-        self._generator = ThumbnailGenerator(thumb_size=_THUMB_SIZE, parent=self)
+        self._generator = ThumbnailGenerator(thumb_size=_GENERATION_SIZE, parent=self)
         self._viewer: ImageViewer | None = None
-        self._import_mode: bool = False
-        self._recursive: bool = True
         self._current_folder: Path | None = None
+        self._library_folder: Path | None = None
 
         # Scan buffer: accumulate file_found records and flush in batches
         # to avoid thousands of individual model-insert signals per second.
@@ -95,8 +80,9 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_central()
         self._build_statusbar()
-        # Wire Ctrl+scroll zoom now that both toolbar and grid exist
-        self._grid_view.thumb_size_changed.connect(self._zoom_slider.setValue)
+        # Keep filter-bar zoom slider in sync with Ctrl+scroll / pinch
+        self._grid_view.thumb_size_changed.connect(self._filter_bar.set_zoom)
+        self._filter_bar.zoom_changed.connect(self._on_thumb_size_changed)
         self._restore_session()
 
     # ------------------------------------------------------------------ #
@@ -108,17 +94,9 @@ class MainWindow(QMainWindow):
 
         file_menu = mb.addMenu("&File")
 
-        import_act = QAction("&Import…", self)
-        import_act.setShortcut("Ctrl+I")
-        import_act.setStatusTip(
-            "Choose a folder to import — files will be auto-separated into RAW/ and JPG/"
-        )
-        import_act.triggered.connect(self.import_folder)
-        file_menu.addAction(import_act)
-
-        open_act = QAction("&Open…", self)
+        open_act = QAction("&Open Working Folder…", self)
         open_act.setShortcut("Ctrl+O")
-        open_act.setStatusTip("Open an already-organised working directory (no separation)")
+        open_act.setStatusTip("Open a folder to browse and cull")
         open_act.triggered.connect(self.open_folder)
         file_menu.addAction(open_act)
 
@@ -149,6 +127,14 @@ class MainWindow(QMainWindow):
         pair_act.triggered.connect(self._open_pair)
         prune_menu.addAction(pair_act)
 
+        prune_menu.addSeparator()
+
+        export_act = QAction("&Export to Library…", self)
+        export_act.setShortcut("Ctrl+E")
+        export_act.setStatusTip("Export working folder to the library structure")
+        export_act.triggered.connect(self._open_export)
+        prune_menu.addAction(export_act)
+
         help_menu = mb.addMenu("&Help")
         shortcuts_act = QAction("&Keyboard Shortcuts…", self)
         shortcuts_act.setShortcut("?")
@@ -167,6 +153,16 @@ class MainWindow(QMainWindow):
         grid_act.triggered.connect(lambda: self._switch_view(_VIEW_GRID))
         view_menu.addAction(grid_act)
 
+        view_menu.addSeparator()
+
+        self._act_folder_bar = QAction("&Folder Bar", self)
+        self._act_folder_bar.setShortcut("Ctrl+B")
+        self._act_folder_bar.setCheckable(True)
+        self._act_folder_bar.setChecked(True)
+        self._act_folder_bar.setStatusTip("Show/hide the working and library folder bar")
+        self._act_folder_bar.toggled.connect(self._on_folder_bar_toggled)
+        view_menu.addAction(self._act_folder_bar)
+
     def _build_toolbar(self) -> None:
         tb = self._toolbar = QToolBar("Main")
         tb.setObjectName("MainToolBar")
@@ -175,18 +171,18 @@ class MainWindow(QMainWindow):
         tb.setIconSize(QSize(18, 18))
         tb.setStyleSheet("""
             QToolBar {
-                background: #0e0e1a;
-                border-bottom: 1px solid rgba(255,109,0,0.12);
-                padding: 3px 4px;
-                spacing: 1px;
+                background: #14142a;
+                border-right: 1px solid rgba(255,109,0,0.15);
+                padding: 4px 3px;
+                spacing: 2px;
             }
             QToolButton {
                 background: transparent;
                 border: none;
                 border-radius: 5px;
-                padding: 5px 7px;
-                min-width: 28px;
-                min-height: 28px;
+                padding: 7px 6px;
+                min-width: 32px;
+                min-height: 32px;
                 color: #c8c8d8;
             }
             QToolButton:hover   { background: rgba(255,109,0,0.10); }
@@ -197,28 +193,28 @@ class MainWindow(QMainWindow):
             }
             QToolBar::separator {
                 background: rgba(255,109,0,0.12);
-                width: 1px;
-                margin: 5px 4px;
+                height: 1px;
+                margin: 4px 6px;
             }
         """)
-        self.addToolBar(tb)
-        tb.toggleViewAction().setVisible(False)   # hide from context menu so it can't be accidentally hidden
-
-        import_act_tb = QAction(icon("file-import"), "Import", self)
-        import_act_tb.setShortcut("Ctrl+I")
-        import_act_tb.setToolTip("Import folder — auto-separate RAW/JPG  (Ctrl+I)")
-        import_act_tb.triggered.connect(self.import_folder)
-        tb.addAction(import_act_tb)
+        self.addToolBar(Qt.LeftToolBarArea, tb)
+        tb.toggleViewAction().setVisible(False)
 
         open_act_tb = QAction(icon("folder-open"), "Open", self)
         open_act_tb.setShortcut("Ctrl+O")
-        open_act_tb.setToolTip("Open working directory  (Ctrl+O)")
+        open_act_tb.setToolTip("Open working folder  (Ctrl+O)")
         open_act_tb.triggered.connect(self.open_folder)
         tb.addAction(open_act_tb)
 
+        export_act_tb = QAction(icon("file-import"), "Export", self)
+        export_act_tb.setShortcut("Ctrl+E")
+        export_act_tb.setToolTip("Export to library  (Ctrl+E)")
+        export_act_tb.triggered.connect(self._open_export)
+        tb.addAction(export_act_tb)
+
         tb.addSeparator()
 
-        review_act_tb = QAction(icon("trash"), "Review", self)
+        review_act_tb = QAction(icon("trash"), "Review Pruned", self)
         review_act_tb.setShortcut("Ctrl+R")
         review_act_tb.setToolTip("Review pruned files → Trash  (Ctrl+R)")
         review_act_tb.triggered.connect(self._open_review)
@@ -229,14 +225,12 @@ class MainWindow(QMainWindow):
         sort_act_tb.setToolTip("Sort into RAW/ and JPG/ subfolders  (Ctrl+Shift+S)")
         sort_act_tb.triggered.connect(self._open_sort)
         tb.addAction(sort_act_tb)
-        _set_text_beside_icon(tb, sort_act_tb)
 
         pair_act_tb = QAction(icon("link"), "Pair", self)
         pair_act_tb.setShortcut("Ctrl+Shift+P")
         pair_act_tb.setToolTip("Pair RAW+JPG by stem and save  (Ctrl+Shift+P)")
         pair_act_tb.triggered.connect(self._open_pair)
         tb.addAction(pair_act_tb)
-        _set_text_beside_icon(tb, pair_act_tb)
 
         tb.addSeparator()
 
@@ -247,7 +241,6 @@ class MainWindow(QMainWindow):
         self._act_list.setToolTip("List view  (Ctrl+1)")
         self._act_list.triggered.connect(lambda: self._switch_view(_VIEW_LIST))
         tb.addAction(self._act_list)
-        _set_text_beside_icon(tb, self._act_list)
 
         self._act_grid = QAction(icon("grid"), "Grid", self)
         self._act_grid.setCheckable(True)
@@ -256,54 +249,55 @@ class MainWindow(QMainWindow):
         self._act_grid.setToolTip("Grid view  (Ctrl+2)")
         self._act_grid.triggered.connect(lambda: self._switch_view(_VIEW_GRID))
         tb.addAction(self._act_grid)
-        _set_text_beside_icon(tb, self._act_grid)
 
         grp = QActionGroup(self)
         grp.setExclusive(True)
         grp.addAction(self._act_list)
         grp.addAction(self._act_grid)
 
-        # ── select + cull buttons ─────────────────────────────────────── #
         tb.addSeparator()
+
         self._act_select = QAction(icon("plus"), "Select", self)
         self._act_select.setCheckable(True)
         self._act_select.setShortcut("S")
         self._act_select.setToolTip("Multi-select mode  (S)")
         self._act_select.toggled.connect(self._on_select_mode_toggled)
         tb.addAction(self._act_select)
-        _set_text_beside_icon(tb, self._act_select)
 
         self._act_cull = QAction(icon("times-circle"), "Prune", self)
         self._act_cull.setToolTip("Mark selected as pruned  (P)")
         self._act_cull.triggered.connect(self._toggle_prune_selected)
         tb.addAction(self._act_cull)
-        _set_text_beside_icon(tb, self._act_cull)
-
-        # ── spacer pushes zoom to the right ──────────────────────────── #
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        spacer.setStyleSheet("background: transparent;")
-        self._zoom_spacer_action = tb.addWidget(spacer)
-
-        # ── grid zoom controls (hidden in list view) ──────────────────── #
-        self._zoom_widget = self._build_zoom_widget(tb)
-        self._zoom_tb_action = tb.addWidget(self._zoom_widget)
 
     def _build_central(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(4)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # ── folder bar ────────────────────────────────────────────── #
+        self._folder_bar = FolderBar()
+        layout.addWidget(self._folder_bar)
+        self._folder_bar.working_folder_requested.connect(self.open_folder)
+        self._folder_bar.library_folder_changed.connect(self._on_library_folder_changed)
+        self._folder_bar.collapsed_changed.connect(self._on_folder_bar_collapsed)
+
+        # ── inner widget holds filter bar + views ─────────────────── #
+        inner = QWidget()
+        layout.addWidget(inner, 1)
+        inner_layout = QVBoxLayout(inner)
+        inner_layout.setContentsMargins(0, 0, 0, 0)
+        inner_layout.setSpacing(0)
 
         # ── filter bar ────────────────────────────────────────────── #
         self._filter_bar = FilterBar()
-        layout.addWidget(self._filter_bar)
+        inner_layout.addWidget(self._filter_bar)
         self._filter_bar.filter_changed.connect(self._on_filter_changed)
 
         # ── stacked views ─────────────────────────────────────────── #
         self._stack = QStackedWidget()
-        layout.addWidget(self._stack)
+        inner_layout.addWidget(self._stack)
 
         self._file_list = FileListWidget()
         self._grid_view = GroupedGridView(self._generator, thumb_size=_THUMB_SIZE)
@@ -320,91 +314,19 @@ class MainWindow(QMainWindow):
         # Keep toolbar Select button in sync when mode exits via Done/Escape
         self._grid_view.selection_mode_changed.connect(self._on_grid_select_mode_changed)
 
-        self._stack.setCurrentIndex(_VIEW_LIST)
-
-    def _build_zoom_widget(self, toolbar: "QToolBar") -> QWidget:
-        """Magnifying-glass icon + − [slider] + widget in the toolbar."""
-        w = QWidget()
-        w.setStyleSheet("QWidget { background: transparent; }")
-        w.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        lay = QHBoxLayout(w)
-        lay.setContentsMargins(4, 0, 4, 0)
-        lay.setSpacing(3)
-
-        # ── zoom icon ─────────────────────────────────────────────── #
-        ic_lbl = QLabel()
-        ic_lbl.setPixmap(icon_pixmap("search", size=16))
-        ic_lbl.setStyleSheet("background: transparent;")
-        ic_lbl.setFixedSize(18, 28)
-        ic_lbl.setAlignment(Qt.AlignCenter)
-
-        # ── buttons ───────────────────────────────────────────────── #
-        _btn_qss = (
-            "QPushButton {"
-            "  background: rgba(255,109,0,0.08);"
-            "  color: #8888a8;"
-            "  border: 1px solid rgba(255,109,0,0.18);"
-            "  border-radius: 4px;"
-            "  font-size: 14px; font-weight: bold;"
-            "  padding: 0;"
-            "}"
-            "QPushButton:hover {"
-            "  background: rgba(255,109,0,0.20); color: #f0f0f0;"
-            "  border-color: rgba(255,109,0,0.45);"
-            "}"
-            "QPushButton:pressed { background: rgba(255,109,0,0.30); }"
-        )
-        btn_out = QPushButton("−")
-        btn_out.setFixedSize(26, 26)
-        btn_out.setStyleSheet(_btn_qss)
-
-        btn_in = QPushButton("+")
-        btn_in.setFixedSize(26, 26)
-        btn_in.setStyleSheet(_btn_qss)
-
-        # ── slider ────────────────────────────────────────────────── #
-        self._zoom_slider = QSlider(Qt.Horizontal)
-        self._zoom_slider.setRange(80, 280)
-        self._zoom_slider.setSingleStep(20)
-        self._zoom_slider.setPageStep(20)
-        self._zoom_slider.setValue(_THUMB_SIZE)
-        self._zoom_slider.setFixedWidth(100)
-        self._zoom_slider.setStyleSheet(
-            "QSlider::groove:horizontal {"
-            "  background: #1e1e2e; border-radius: 3px; height: 4px; }"
-            "QSlider::handle:horizontal {"
-            "  background: #ff6d00; border-radius: 5px;"
-            "  width: 12px; height: 12px; margin: -4px 0; }"
-            "QSlider::sub-page:horizontal {"
-            "  background: rgba(255,109,0,0.45); border-radius: 3px; }"
-        )
-
-        btn_out.clicked.connect(
-            lambda: self._zoom_slider.setValue(max(80,  self._zoom_slider.value() - 20)))
-        btn_in.clicked.connect(
-            lambda: self._zoom_slider.setValue(min(280, self._zoom_slider.value() + 20)))
-        self._zoom_slider.valueChanged.connect(self._on_thumb_size_changed)
-
-        lay.addWidget(ic_lbl)
-        lay.addSpacing(5)
-        lay.addWidget(btn_out)
-        lay.addWidget(self._zoom_slider)
-        lay.addWidget(btn_in)
-        return w
-
     def _build_statusbar(self) -> None:
         self._statusbar = QStatusBar()
         self._statusbar.setStyleSheet(
             "QStatusBar {"
-            "  background: #0e0e1a;"
-            "  border-top: 1px solid rgba(255,109,0,0.10);"
+            "  background: #14142a;"
+            "  border-top: 1px solid rgba(255,109,0,0.15);"
             "  color: #7878a0; font-size: 11px;"
             "}"
             "QStatusBar::item { border: none; }"
         )
         self.setStatusBar(self._statusbar)
 
-        # ── stats chips (permanent — right-aligned, never hidden by messages) #
+        # ── stats chips (permanent — right-aligned) ───────────────── #
         stats_container = QWidget()
         stats_container.setStyleSheet("QWidget { background: transparent; }")
         sc_lay = QHBoxLayout(stats_container)
@@ -445,13 +367,13 @@ class MainWindow(QMainWindow):
         self._stack.setCurrentIndex(idx)
         self._act_list.setChecked(idx == _VIEW_LIST)
         self._act_grid.setChecked(idx == _VIEW_GRID)
-        self._zoom_tb_action.setVisible(idx == _VIEW_GRID)
-        self._zoom_spacer_action.setVisible(idx == _VIEW_GRID)
+        self._filter_bar.set_zoom_enabled(idx == _VIEW_GRID)
         self._update_status_count()
 
     def _on_thumb_size_changed(self, size: int) -> None:
-        snapped = max(80, min(280, (size // 20) * 20))
-        self._generator.thumb_size = snapped
+        snapped = max(_ZOOM_MIN, min(_ZOOM_MAX, (size // _ZOOM_STEP) * _ZOOM_STEP))
+        # Don't touch generator.thumb_size — it stays fixed at _GENERATION_SIZE
+        # so the disk cache is always valid regardless of display zoom.
         self._grid_view.set_thumb_size(snapped)
 
     # ------------------------------------------------------------------ #
@@ -467,26 +389,19 @@ class MainWindow(QMainWindow):
     # Scanning                                                             #
     # ------------------------------------------------------------------ #
 
-    def import_folder(self) -> None:
-        dlg = ImportDialog(parent=self)
-        if dlg.exec() and dlg.chosen_path():
-            self._recursive = dlg.recursive()
-            self._import_mode = True
-            self._start_scan(dlg.chosen_path())
-
     def open_folder(self) -> None:
         folder = QFileDialog.getExistingDirectory(
             self,
-            "Open Working Directory",
-            QDir.homePath(),
+            "Open Working Folder",
+            str(self._current_folder or QDir.homePath()),
             QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks,
         )
         if folder:
-            self._import_mode = False
             self._start_scan(Path(folder))
 
     def _start_scan(self, path: Path) -> None:
         self._current_folder = path
+        self._folder_bar.set_working_folder(path)
         # If a scan is running, cancel it and defer the new scan until the
         # thread has exited — avoids blocking the UI with .wait().
         if self._scanner and self._scanner.isRunning():
@@ -511,7 +426,7 @@ class MainWindow(QMainWindow):
         self._statusbar.showMessage("Scanning…")
         self._update_stats()
 
-        self._scanner = ScanWorker(path, recursive=self._recursive)
+        self._scanner = ScanWorker(path, recursive=True)
         self._scanner.file_found.connect(self._on_file_found)
         self._scanner.progress.connect(self._on_scan_progress)
         self._scanner.scan_complete.connect(self._on_scan_complete)
@@ -544,11 +459,6 @@ class MainWindow(QMainWindow):
         self._flush_timer.stop()
         self._flush_scan_buffer()   # drain any remainder
 
-        if self._import_mode:
-            self._import_mode = False
-            self._run_import_separation(count)
-            return
-
         pinned_keys = self._load_pair_marks()
         self._collection.build_pairs(pinned_keys=pinned_keys)
         all_records = self._collection.all()
@@ -563,43 +473,6 @@ class MainWindow(QMainWindow):
             f"{pairs} pair{'s' if pairs != 1 else ''}"
         )
         self._update_status_count()
-
-    def _run_import_separation(self, scan_count: int) -> None:
-        """Separate RAW/JPG after an import scan, then rebuild pairs."""
-        from app.ops.separate import SeparationPlan
-        self._statusbar.showMessage("Separating RAW and JPG files…")
-
-        all_records = self._collection.all()
-        plan = SeparationPlan(all_records)
-        succeeded, failed = plan.execute()
-
-        # Snapshot old→new path pairs BEFORE update_path mutates record.path
-        moves = [(record, record.path, new_path) for record, new_path in succeeded]
-        moved = sum(1 for _, old, new in moves if old != new)
-
-        for record, old_path, new_path in moves:
-            self._collection.update_path(old_path, new_path)
-
-        # Auto-detect natural pairs after import sort, then persist them
-        self._collection.build_pairs(auto_detect=True)
-        self._save_pair_marks()
-        all_records = self._collection.all()
-        self._file_list.source_model().reset_records(all_records)
-        self._grid_view.reset_records(all_records)
-
-        self._update_stats()
-        self._update_status_count()
-        self._load_prune_marks()
-
-        pairs = self._collection.stats["paired"] // 2
-        msg = (
-            f"Import complete — {scan_count} file{'s' if scan_count != 1 else ''}, "
-            f"{moved} moved, "
-            f"{pairs} pair{'s' if pairs != 1 else ''} linked"
-        )
-        if failed:
-            msg += f"  ({len(failed)} move{'s' if len(failed) != 1 else ''} failed)"
-        self._statusbar.showMessage(msg)
 
     def _on_scan_error(self, msg: str) -> None:
         self._statusbar.showMessage(f"Scan error: {msg}")
@@ -661,6 +534,16 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
     # Prune                                                                #
     # ------------------------------------------------------------------ #
+
+    def _on_folder_bar_toggled(self, visible: bool) -> None:
+        self._folder_bar.setVisible(visible)
+
+    def _on_folder_bar_collapsed(self, collapsed: bool) -> None:
+        from PySide6.QtCore import QSettings
+        QSettings(_SETTINGS_ORG, _SETTINGS_APP).setValue("folder_bar_collapsed", collapsed)
+
+    def _on_library_folder_changed(self, path: Path) -> None:
+        self._library_folder = path
 
     def _on_select_mode_toggled(self, checked: bool) -> None:
         """Toolbar Select button toggled — enter or exit multi-select mode."""
@@ -811,6 +694,34 @@ class MainWindow(QMainWindow):
         dlg.pairs_saved.connect(self._on_pairs_saved)
         dlg.exec()
 
+    def _open_export(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        from app.ui.export_dialog import ExportDialog
+        all_records = self._collection.all()
+        if not all_records:
+            QMessageBox.information(self, "No Files", "Open a folder first.")
+            return
+
+        # If no library folder set, the dialog handles it inline.
+        dlg = ExportDialog(
+            records        = all_records,
+            working_folder = self._current_folder,
+            library_folder = self._library_folder,
+            pair_lookup    = self._collection.find_pair,
+            parent         = self,
+        )
+        dlg.library_folder_changed.connect(self._on_library_folder_changed)
+        dlg.library_folder_changed.connect(self._folder_bar.set_library_folder)
+        dlg.exported.connect(self._on_exported)
+        dlg.exec()
+
+    def _on_exported(self, succeeded: list, failed: list) -> None:
+        n = len(succeeded)
+        msg = f"{n} file{'s' if n != 1 else ''} exported to library"
+        if failed:
+            msg += f"  ({len(failed)} failed)"
+        self._statusbar.showMessage(msg)
+
     def _on_pairs_saved(self, pair_keys) -> None:
         """Persist pair keys to sidecar, rebuild pairs, and refresh models."""
         self._save_pair_marks(pair_keys)
@@ -930,6 +841,9 @@ class MainWindow(QMainWindow):
                    state.date_to.isoformat()   if state.date_to   else "")
         s.setValue("last_folder",
                    str(self._current_folder) if self._current_folder else "")
+        s.setValue("library_folder",
+                   str(self._library_folder) if self._library_folder else "")
+        s.setValue("folder_bar_visible", self._act_folder_bar.isChecked())
 
     def _restore_session(self) -> None:
         from datetime import date as _pydate
@@ -938,6 +852,8 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
         if state := s.value("window_state"):
             self.restoreState(state)
+        # Always force the toolbar to the left regardless of saved state
+        self.addToolBar(Qt.LeftToolBarArea, self._toolbar)
         self._toolbar.setVisible(True)   # never let saved state hide the toolbar
         view_idx = s.value("view_index", _VIEW_GRID, type=int)
         self._switch_view(view_idx)
@@ -956,11 +872,26 @@ class MainWindow(QMainWindow):
             date_to     = _parse_date(s.value("filter/date_to",   "", type=str)),
         )
 
+        # Restore library folder
+        lib = s.value("library_folder", "", type=str)
+        if lib:
+            p = Path(lib)
+            if p.exists() and p.is_dir():
+                self._library_folder = p
+                self._folder_bar.set_library_folder(p)
+
+        # Restore folder bar visibility + collapsed state
+        bar_visible = s.value("folder_bar_visible", True, type=bool)
+        self._act_folder_bar.setChecked(bar_visible)
+        self._folder_bar.setVisible(bar_visible)
+        bar_collapsed = s.value("folder_bar_collapsed", False, type=bool)
+        self._folder_bar.set_collapsed(bar_collapsed)
+
+        # Restore last working folder
         last = s.value("last_folder", "", type=str)
         if last:
             p = Path(last)
             if p.exists() and p.is_dir():
-                self._import_mode = False
                 self._start_scan(p)
 
     # ------------------------------------------------------------------ #

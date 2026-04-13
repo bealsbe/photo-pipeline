@@ -734,6 +734,9 @@ class GroupedGridView(QScrollArea):
 
         # Touch: kinetic scroll via QScroller + pinch-to-zoom gesture
         self._pinch_start_size: int = self._thumb_size
+        # Trackpad pinch accumulator — base size + cumulative scale factor
+        self._pinch_base_size: int  = self._thumb_size
+        self._pinch_accum:   float  = 1.0
         self.grabGesture(Qt.PinchGesture)
         QScroller.grabGesture(self, QScroller.TouchGesture)
 
@@ -814,27 +817,42 @@ class GroupedGridView(QScrollArea):
             if pinch:
                 if pinch.state() == Qt.GestureStarted:
                     self._pinch_start_size = self._thumb_size
-                new_size = max(80, min(280,
+                new_size = max(120, min(480,
                     int(self._pinch_start_size * pinch.totalScaleFactor())))
                 if new_size != self._thumb_size:
-                    self.set_thumb_size(new_size)
+                    self._apply_thumb_size(new_size)
                     self.thumb_size_changed.emit(new_size)
             ev.accept()
             return True
 
         # ── Trackpad pinch (NativeGesture) ───────────────────────────────
+        # NativeGestureEvents are dispatched to the viewport widget, not the
+        # scroll area — viewportEvent() forwards them here.
         if ev.type() == QEvent.NativeGesture:
             if isinstance(ev, QNativeGestureEvent):
-                if ev.gestureType() == Qt.NativeGestureType.ZoomNativeGesture:
-                    factor   = 1.0 + ev.value()
-                    new_size = max(80, min(280, int(self._thumb_size * factor)))
+                gt = ev.gestureType()
+                if gt == Qt.NativeGestureType.BeginNativeGesture:
+                    # Snapshot the size at the start of each gesture so
+                    # accumulated incremental deltas always reference a stable base.
+                    self._pinch_base_size = self._thumb_size
+                    self._pinch_accum = 1.0
+                elif gt == Qt.NativeGestureType.ZoomNativeGesture:
+                    self._pinch_accum *= (1.0 + ev.value())
+                    new_size = max(120, min(480,
+                        int(self._pinch_base_size * self._pinch_accum)))
                     if new_size != self._thumb_size:
-                        self.set_thumb_size(new_size)
+                        self._apply_thumb_size(new_size)
                         self.thumb_size_changed.emit(new_size)
-                    ev.accept()
-                    return True
+                ev.accept()
+                return True
 
         return super().event(ev)
+
+    def viewportEvent(self, ev) -> bool:
+        """Forward NativeGestureEvents from the viewport to this widget's event()."""
+        if ev.type() == QEvent.NativeGesture:
+            return self.event(ev)
+        return super().viewportEvent(ev)
 
     # ------------------------------------------------------------------ #
     # Public interface (mirrors ThumbnailGridView)                        #
@@ -848,7 +866,7 @@ class GroupedGridView(QScrollArea):
         the thumbnail cells smoothly chase the latest target without
         stuttering.  A full widget rebuild is deferred until input stops.
         """
-        size = max(80, min(280, size))
+        size = max(120, min(480, size))
         if size == self._thumb_size and self._zoom_anim.state() != QVariantAnimation.Running:
             return
         if self._zoom_anim.state() == QVariantAnimation.Running:
@@ -860,6 +878,16 @@ class GroupedGridView(QScrollArea):
             self._zoom_anim.setEndValue(float(size))
             self._zoom_anim.start()
         self._resize_timer.start()   # full rebuild once input stops
+
+    def _apply_thumb_size(self, size: int) -> None:
+        """Directly update thumb size without animation — used for pinch gestures."""
+        size = max(120, min(480, size))
+        if self._zoom_anim.state() == QVariantAnimation.Running:
+            self._zoom_anim.stop()
+        self._thumb_size = size
+        for sec in self._sections:
+            sec.update_thumb_size(size)
+        self._resize_timer.start()
 
     def _on_zoom_tick(self, value: float) -> None:
         """Called on every animation frame — update delegates, no full rebuild."""
@@ -921,7 +949,7 @@ class GroupedGridView(QScrollArea):
                 return
             step = 20
             new_size = self._thumb_size + (step if delta > 0 else -step)
-            new_size = max(80, min(280, (new_size // step) * step))
+            new_size = max(120, min(480, (new_size // step) * step))
             if new_size != self._thumb_size:
                 self.set_thumb_size(new_size)
                 self.thumb_size_changed.emit(new_size)
