@@ -135,6 +135,12 @@ class MainWindow(QMainWindow):
         export_act.triggered.connect(self._open_export)
         prune_menu.addAction(export_act)
 
+        autosort_act = QAction("&Auto-sort Folder…", self)
+        autosort_act.setShortcut("Ctrl+Shift+A")
+        autosort_act.setStatusTip("Scan any folder and sort it into the library structure")
+        autosort_act.triggered.connect(self._open_autosort)
+        prune_menu.addAction(autosort_act)
+
         help_menu = mb.addMenu("&Help")
         shortcuts_act = QAction("&Keyboard Shortcuts…", self)
         shortcuts_act.setShortcut("?")
@@ -211,6 +217,12 @@ class MainWindow(QMainWindow):
         export_act_tb.setToolTip("Export to library  (Ctrl+E)")
         export_act_tb.triggered.connect(self._open_export)
         tb.addAction(export_act_tb)
+
+        autosort_act_tb = QAction(icon("fork"), "Auto-sort", self)
+        autosort_act_tb.setShortcut("Ctrl+Shift+A")
+        autosort_act_tb.setToolTip("Auto-sort folder into library  (Ctrl+Shift+A)")
+        autosort_act_tb.triggered.connect(self._open_autosort)
+        tb.addAction(autosort_act_tb)
 
         tb.addSeparator()
 
@@ -714,6 +726,25 @@ class MainWindow(QMainWindow):
         dlg.library_folder_changed.connect(self._folder_bar.set_library_folder)
         dlg.exported.connect(self._on_exported)
         dlg.exec()
+
+    def _open_autosort(self) -> None:
+        from app.ui.autosort_dialog import AutoSortDialog
+        dlg = AutoSortDialog(
+            working_folder = self._current_folder,
+            library_folder = self._library_folder,
+            parent         = self,
+        )
+        dlg.library_folder_changed.connect(self._on_library_folder_changed)
+        dlg.library_folder_changed.connect(self._folder_bar.set_library_folder)
+        dlg.sorted.connect(self._on_autosorted)
+        dlg.exec()
+
+    def _on_autosorted(self, succeeded: list, failed: list) -> None:
+        n = len(succeeded)
+        msg = f"{n} file{'s' if n != 1 else ''} sorted into library"
+        if failed:
+            msg += f"  ({len(failed)} failed)"
+        self._statusbar.showMessage(msg)
 
     def _on_exported(self, succeeded: list, failed: list) -> None:
         n = len(succeeded)
