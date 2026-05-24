@@ -54,10 +54,13 @@ class DiskThumbnailCache:
         """Write *image* to the disk cache for *record* (no-op if already cached)."""
         p = self._cache_path(record)
         if not p.exists():
+            import os
+            tmp = p.with_suffix(".tmp")
             try:
-                image.save(str(p), "PNG")
+                image.save(str(tmp), "PNG")
+                os.replace(str(tmp), str(p))
             except Exception:  # noqa: BLE001
-                pass  # disk full, permissions, etc. — degrade silently
+                tmp.unlink(missing_ok=True)
 
     def clear(self) -> None:
         """Delete all cached thumbnails for this thumb_size."""

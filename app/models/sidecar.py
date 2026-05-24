@@ -16,8 +16,21 @@ Key design decisions:
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Set, Tuple
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    """Write *content* to *path* atomically via a temp file + os.replace().
+
+    A crash between the two steps leaves an orphaned .tmp file; the original
+    file is untouched.  os.replace() is atomic on POSIX and near-atomic on
+    Windows.
+    """
+    tmp = path.with_suffix(path.suffix + ".~tmp")
+    tmp.write_text(content)
+    os.replace(str(tmp), str(path))
 
 _PAIRS_FILE = ".photo-pipeline-pairs.json"
 
@@ -71,6 +84,6 @@ def write_paired_keys(folder: Path, keys: Set[PairKey]) -> None:
                 rel = abs_parent_str    # absolute fallback
             entries.append({"parent": rel, "stem": stem})
         data = {"paired_stems": entries}
-        (folder / _PAIRS_FILE).write_text(json.dumps(data, indent=2))
-    except Exception:
-        pass
+        atomic_write_text(folder / _PAIRS_FILE, json.dumps(data, indent=2))
+    except Exception as exc:
+        raise OSError(f"Could not save pair marks: {exc}") from exc

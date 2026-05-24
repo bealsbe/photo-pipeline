@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable, List, Optional
 
 from PySide6.QtCore import (
+    QDate,
     QDir,
     QObject,
     QRunnable,
@@ -30,6 +31,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtWidgets import (
     QCheckBox,
+    QDateEdit,
     QDialog,
     QFileDialog,
     QFrame,
@@ -44,7 +46,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.photo_record import FileType, PhotoRecord
-from app.ops.library import LibraryPlan, Resolution
+from app.ops.library import LibraryPlan, Resolution, best_date
 
 
 # ── colour / style constants ───────────────────────────────────────────────── #
@@ -95,17 +97,20 @@ class _ExecSignals(QObject):
 
 
 class _ExecWorker(QRunnable):
-    def __init__(self, plan: LibraryPlan, mode: str, signals: _ExecSignals) -> None:
+    def __init__(self, plan: LibraryPlan, mode: str, signals: _ExecSignals,
+                 source_root: Optional[Path] = None) -> None:
         super().__init__()
-        self._plan    = plan
-        self._mode    = mode
-        self._signals = signals
+        self._plan        = plan
+        self._mode        = mode
+        self._signals     = signals
+        self._source_root = source_root
         self.setAutoDelete(True)
 
     def run(self) -> None:
         succeeded, failed = self._plan.execute(
             self._mode,
             progress=lambda d, t: self._signals.progress.emit(d, t),
+            source_root=self._source_root,
         )
         self._signals.finished.emit(succeeded, failed)
 
@@ -143,6 +148,20 @@ class ExportDialog(QDialog):
         self._pair_lookup    = pair_lookup
         self._plan: Optional[LibraryPlan] = None
         self._bulk_btns: dict[Resolution, QPushButton] = {}
+
+        # Precompute best_date for each record once — used by the date filter
+        # and matches what LibraryPlan will use internally.
+        self._record_dates = {
+            id(r): best_date(r, pair_lookup(r) if pair_lookup else None)
+            for r in self._all_records
+        }
+        if self._record_dates:
+            self._date_min = min(self._record_dates.values())
+            self._date_max = max(self._record_dates.values())
+        else:
+            from datetime import date as _d
+            today = _d.today()
+            self._date_min = self._date_max = today
 
         self._build_ui()
         self._rebuild_plan()
@@ -216,6 +235,10 @@ class ExportDialog(QDialog):
             f" border-color:rgba(255,109,0,0.70); }}"
         )
         op_lay.addWidget(self._chk_pruned)
+
+        # Date range filter
+        op_lay.addLayout(self._build_date_range_row())
+
         root.addWidget(op_card)
 
         # ── Stats row ─────────────────────────────────────────────────── #
@@ -359,6 +382,87 @@ class ExportDialog(QDialog):
     # Widget helpers
     # ──────────────────────────────────────────────────────────────────────
 
+    def _build_date_range_row(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.setContentsMargins(0, 0, 0, 0)
+
+        self._chk_date_range = QCheckBox("Limit to date range")
+        self._chk_date_range.setChecked(False)
+        self._chk_date_range.setStyleSheet(
+            f"QCheckBox {{ color:{_TEXT_SEC}; font-size:12px; spacing:8px; }}"
+            f"QCheckBox::indicator {{ width:15px; height:15px; border-radius:3px;"
+            f" border:1px solid rgba(255,109,0,0.28); background:#0a0a14; }}"
+            f"QCheckBox::indicator:hover {{ border-color:rgba(255,109,0,0.55); }}"
+            f"QCheckBox::indicator:checked {{ background:rgba(255,109,0,0.35);"
+            f" border-color:rgba(255,109,0,0.70); }}"
+        )
+
+        qd_min = QDate(self._date_min.year, self._date_min.month, self._date_min.day)
+        qd_max = QDate(self._date_max.year, self._date_max.month, self._date_max.day)
+
+        date_qss = (
+            f"QDateEdit {{ background:#0a0a14; color:{_TEXT_PRI};"
+            f" border:1px solid rgba(255,109,0,0.25); border-radius:3px;"
+            " font-size:11px; padding:2px 6px; min-width:110px; }"
+            "QDateEdit:hover { border-color:rgba(255,109,0,0.55); }"
+            f"QDateEdit:disabled {{ color:{_TEXT_DIM};"
+            " border-color:rgba(255,109,0,0.08); background:#08080f; }}"
+            "QDateEdit::drop-down { width:14px; border:none; }"
+        )
+
+        self._date_from = QDateEdit(qd_min)
+        self._date_from.setCalendarPopup(True)
+        self._date_from.setDisplayFormat("yyyy-MM-dd")
+        self._date_from.setMinimumDate(qd_min)
+        self._date_from.setMaximumDate(qd_max)
+        self._date_from.setStyleSheet(date_qss)
+        self._date_from.setEnabled(False)
+
+        self._date_to = QDateEdit(qd_max)
+        self._date_to.setCalendarPopup(True)
+        self._date_to.setDisplayFormat("yyyy-MM-dd")
+        self._date_to.setMinimumDate(qd_min)
+        self._date_to.setMaximumDate(qd_max)
+        self._date_to.setStyleSheet(date_qss)
+        self._date_to.setEnabled(False)
+
+        sep = QLabel("→")
+        sep.setStyleSheet(f"color:{_TEXT_DIM}; font-size:12px;")
+
+        self._chk_date_range.toggled.connect(self._on_date_range_toggled)
+        self._date_from.dateChanged.connect(self._on_date_from_changed)
+        self._date_to.dateChanged.connect(self._on_date_to_changed)
+
+        row.addWidget(self._chk_date_range)
+        row.addSpacing(4)
+        row.addWidget(self._date_from)
+        row.addWidget(sep)
+        row.addWidget(self._date_to)
+        row.addStretch()
+        return row
+
+    def _on_date_range_toggled(self, on: bool) -> None:
+        self._date_from.setEnabled(on)
+        self._date_to.setEnabled(on)
+        self._rebuild_plan()
+
+    def _on_date_from_changed(self, d: QDate) -> None:
+        if d > self._date_to.date():
+            self._date_to.blockSignals(True)
+            self._date_to.setDate(d)
+            self._date_to.blockSignals(False)
+        if self._chk_date_range.isChecked():
+            self._rebuild_plan()
+
+    def _on_date_to_changed(self, d: QDate) -> None:
+        if d < self._date_from.date():
+            self._date_from.blockSignals(True)
+            self._date_from.setDate(d)
+            self._date_from.blockSignals(False)
+        if self._chk_date_range.isChecked():
+            self._rebuild_plan()
+
     def _make_path_row(self, emoji: str, label: str, path: Optional[Path],
                        link: str = ""):
         """Returns (path_label, layout[, link_btn])."""
@@ -447,9 +551,20 @@ class ExportDialog(QDialog):
     # ──────────────────────────────────────────────────────────────────────
 
     def _active_records(self) -> List[PhotoRecord]:
-        if self._chk_pruned.isChecked():
-            return self._all_records
-        return [r for r in self._all_records if not r.is_pruned]
+        records = self._all_records if self._chk_pruned.isChecked() else \
+                  [r for r in self._all_records if not r.is_pruned]
+
+        if self._chk_date_range.isChecked():
+            qd_from = self._date_from.date()
+            qd_to   = self._date_to.date()
+            from datetime import date as _d
+            d_from = _d(qd_from.year(), qd_from.month(), qd_from.day())
+            d_to   = _d(qd_to.year(),   qd_to.month(),   qd_to.day())
+            records = [
+                r for r in records
+                if d_from <= self._record_dates[id(r)] <= d_to
+            ]
+        return records
 
     def _rebuild_plan(self) -> None:
         if not self._library_folder:
@@ -690,7 +805,8 @@ class ExportDialog(QDialog):
             return
 
         for w in (self._btn_export, self._btn_cancel, self._chk_pruned,
-                  self._btn_copy, self._btn_move):
+                  self._btn_copy, self._btn_move,
+                  self._chk_date_range, self._date_from, self._date_to):
             w.setEnabled(False)
         self._conflict_section.hide()
         self._progress_widget.show()
@@ -701,7 +817,8 @@ class ExportDialog(QDialog):
         self._exec_signals.progress.connect(self._on_exec_progress)
         self._exec_signals.finished.connect(self._on_exec_finished)
         QThreadPool.globalInstance().start(
-            _ExecWorker(self._plan, self._current_mode(), self._exec_signals)
+            _ExecWorker(self._plan, self._current_mode(), self._exec_signals,
+                       source_root=self._working_folder)
         )
 
     def _on_exec_progress(self, done: int, total: int) -> None:

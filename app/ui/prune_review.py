@@ -93,6 +93,15 @@ class PruneReviewDialog(QDialog):
         warn.setWordWrap(True)
         root.addWidget(warn)
 
+        if self._has_remote_files():
+            remote_warn = QLabel(
+                "\u26a0\ufe0f  Some files are on a <b>network or removable drive</b>."
+                "  Trash may not be available — files could be <b>permanently deleted</b>."
+            )
+            remote_warn.setStyleSheet("color:#e05050;font-size:11px;")
+            remote_warn.setWordWrap(True)
+            root.addWidget(remote_warn)
+
         # ── buttons ──────────────────────────────────────────────────── #
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
@@ -127,6 +136,26 @@ class PruneReviewDialog(QDialog):
         btn_row.addStretch()
         btn_row.addWidget(btn_close)
         root.addLayout(btn_row)
+
+    def _has_remote_files(self) -> bool:
+        """True if any record is on a different device than the user's home dir."""
+        import os
+        from pathlib import Path
+        try:
+            home_dev = os.stat(Path.home()).st_dev
+        except OSError:
+            return False
+        return any(
+            self._file_on_different_device(r, home_dev) for r in self._records
+        )
+
+    @staticmethod
+    def _file_on_different_device(record: "PhotoRecord", home_dev: int) -> bool:
+        import os
+        try:
+            return os.stat(record.path).st_dev != home_dev
+        except OSError:
+            return False
 
     def _populate_list(self) -> None:
         self._list.clear()

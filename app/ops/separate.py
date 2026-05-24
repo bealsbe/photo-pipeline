@@ -136,12 +136,32 @@ class SeparationPlan:
             if op.skipped:
                 continue
 
+            if not src.exists():
+                failed.append((op.record, f"source file no longer exists: {src.name}"))
+                continue
+
             try:
                 op.final_dest.parent.mkdir(parents=True, exist_ok=True)
-                # Capture timestamps before the move so we can restore them
-                # if the OS copy-path resets mtime (e.g. cross-device move).
                 st = src.stat()
-                shutil.move(str(src), str(op.final_dest))
+
+                # Prefer os.rename (atomic, instant on same filesystem)
+                try:
+                    os.rename(str(src), str(op.final_dest))
+                except OSError:
+                    # Cross-device: copy to temp, verify, atomic replace, delete src
+                    tmp = op.final_dest.with_suffix(op.final_dest.suffix + ".~tmp")
+                    try:
+                        shutil.copy2(str(src), str(tmp))
+                        if tmp.stat().st_size != st.st_size:
+                            raise RuntimeError(
+                                f"size mismatch after copy: {src.name}"
+                            )
+                        os.replace(str(tmp), str(op.final_dest))
+                    except Exception:
+                        tmp.unlink(missing_ok=True)
+                        raise
+                    src.unlink()
+
                 # Restore atime + mtime so the file date is unchanged.
                 try:
                     os.utime(str(op.final_dest), (st.st_atime, st.st_mtime))

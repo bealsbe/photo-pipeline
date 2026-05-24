@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.collection import PhotoCollection
+from app.models.sidecar import atomic_write_text
 from app.models.photo_record import FileType
 from app.scanning.scanner import ScanWorker
 from app.thumbnails.generator import ThumbnailGenerator
@@ -806,11 +807,14 @@ class MainWindow(QMainWindow):
             except ValueError:
                 pruned.append(str(r.path))   # absolute fallback
         try:
-            (self._current_folder / _PRUNE_FILE).write_text(
-                json.dumps({"pruned": pruned}, indent=2)
+            atomic_write_text(
+                self._current_folder / _PRUNE_FILE,
+                json.dumps({"pruned": pruned}, indent=2),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._statusbar.showMessage(
+                f"\u26a0 Could not save prune marks: {exc}", 8000
+            )
 
     def _load_prune_marks(self) -> None:
         """Apply saved prune marks from .photo_pipeline.json after a scan completes."""
@@ -847,7 +851,12 @@ class MainWindow(QMainWindow):
             return
         from app.models.sidecar import write_paired_keys
         keys = pair_keys if pair_keys is not None else self._collection.current_pair_keys()
-        write_paired_keys(self._current_folder, keys)
+        try:
+            write_paired_keys(self._current_folder, keys)
+        except Exception as exc:
+            self._statusbar.showMessage(
+                f"\u26a0 Could not save pair marks: {exc}", 8000
+            )
 
     def _load_pair_marks(self):
         """Read pair keys from sidecar.  Returns set or empty set."""

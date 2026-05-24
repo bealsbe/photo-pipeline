@@ -127,6 +127,26 @@ def _next_free(dest: Path) -> Path:
         n += 1
 
 
+# ── safe copy helper ──────────────────────────────────────────────────────
+
+def _safe_copy(src: Path, dest: Path, stat: os.stat_result) -> None:
+    """Copy *src* → *dest* atomically via a temp file + os.replace().
+
+    Writes to a ``.~tmp`` sibling, verifies the size matches *stat*, then
+    atomically replaces *dest*.  If anything fails before the replace, the
+    original *dest* (if any) is untouched and the temp file is cleaned up.
+    """
+    tmp_dest = dest.with_suffix(dest.suffix + ".~tmp")
+    try:
+        shutil.copy2(str(src), str(tmp_dest))
+        if tmp_dest.stat().st_size != stat.st_size:
+            raise RuntimeError(f"size mismatch after copy: {src.name}")
+        os.replace(str(tmp_dest), str(dest))
+    except Exception:
+        tmp_dest.unlink(missing_ok=True)
+        raise
+
+
 # ── planned operation ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -288,7 +308,8 @@ class LibraryPlan:
     def execute(
         self,
         mode:     str,                                          # "copy" | "move"
-        progress: Optional[Callable[[int, int], None]] = None, # (done, total)
+        progress:    Optional[Callable[[int, int], None]] = None, # (done, total)
+        source_root: Optional[Path] = None,                       # bound for empty-dir cleanup
     ) -> Tuple[
         List[PlannedOp],                  # succeeded
         List[Tuple[PlannedOp, str]],      # failed: (op, error_message)
@@ -331,25 +352,33 @@ class LibraryPlan:
         for n, op in enumerate(active, 1):
             try:
                 dest = op.final_dest
+
+                # Guard against destinations that appeared after the plan was built
+                if op.resolution != Resolution.OVERWRITE and dest.exists():
+                    failed.append((op, f"destination appeared after plan: {dest.name}"))
+                    if progress:
+                        progress(n, total)
+                    continue
+
                 dest.parent.mkdir(parents=True, exist_ok=True)
 
-                src  = op.src
+                src = op.src
+                if not src.exists():
+                    failed.append((op, f"source file no longer exists: {src.name}"))
+                    if progress:
+                        progress(n, total)
+                    continue
                 stat = src.stat()
 
                 if mode == "copy":
-                    shutil.copy2(str(src), str(dest))
+                    _safe_copy(src, dest, stat)
                 else:
                     # Prefer os.rename (atomic, instant on same filesystem)
                     try:
                         os.rename(str(src), str(dest))
                     except OSError:
-                        # Cross-device move: copy, verify size, then delete src
-                        shutil.copy2(str(src), str(dest))
-                        if dest.stat().st_size != stat.st_size:
-                            dest.unlink(missing_ok=True)
-                            raise RuntimeError(
-                                f"size mismatch after copy: {src.name}"
-                            )
+                        # Cross-device move: safe copy then delete src
+                        _safe_copy(src, dest, stat)
                         src.unlink()
 
                 # Restore mtime so the file date is stable in the library
@@ -374,13 +403,17 @@ class LibraryPlan:
             for op in succeeded:
                 dirs_to_check.add(op.src.parent)
 
-            # Expand upward so we catch grandparent folders too, up to _root
+            # Expand upward so we catch grandparent folders too, up to source_root.
+            # Without a source_root we skip cleanup entirely — walking to the
+            # filesystem root is never safe.
+            bound = source_root
             expanded: set[Path] = set()
-            for d in dirs_to_check:
-                p = d
-                while p != self._root and p != p.parent:
-                    expanded.add(p)
-                    p = p.parent
+            if bound is not None:
+                for d in dirs_to_check:
+                    p = d
+                    while p != bound and p != p.parent:
+                        expanded.add(p)
+                        p = p.parent
 
             for d in sorted(expanded, key=lambda p: len(p.parts), reverse=True):
                 try:

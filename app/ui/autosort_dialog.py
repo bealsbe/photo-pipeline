@@ -92,17 +92,20 @@ class _ExecSignals(QObject):
 
 
 class _ExecWorker(QRunnable):
-    def __init__(self, plan: LibraryPlan, mode: str, signals: _ExecSignals) -> None:
+    def __init__(self, plan: LibraryPlan, mode: str, signals: _ExecSignals,
+                 source_root: Optional[Path] = None) -> None:
         super().__init__()
-        self._plan    = plan
-        self._mode    = mode
-        self._signals = signals
+        self._plan        = plan
+        self._mode        = mode
+        self._signals     = signals
+        self._source_root = source_root
         self.setAutoDelete(True)
 
     def run(self) -> None:
         succeeded, failed = self._plan.execute(
             self._mode,
             progress=lambda d, t: self._signals.progress.emit(d, t),
+            source_root=self._source_root,
         )
         self._signals.finished.emit(succeeded, failed)
 
@@ -779,7 +782,8 @@ class AutoSortDialog(QDialog):
         self._exec_signals.progress.connect(self._on_exec_progress)
         self._exec_signals.finished.connect(self._on_exec_finished)
         QThreadPool.globalInstance().start(
-            _ExecWorker(self._plan, self._current_mode(), self._exec_signals)
+            _ExecWorker(self._plan, self._current_mode(), self._exec_signals,
+                       source_root=self._source_folder)
         )
 
     def _on_exec_progress(self, done: int, total: int) -> None:
