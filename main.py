@@ -6,7 +6,7 @@ Usage:
 """
 import sys
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QLoggingCategory
 from PySide6.QtGui import QColor, QImageReader, QPalette
 from PySide6.QtWidgets import QApplication
 
@@ -60,6 +60,10 @@ def _apply_dark_palette(app: QApplication) -> None:
 # ──────────────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    # Silence KDE icon-theme probe warnings (Qt looks for several themes by
+    # name and logs a warning for each one it can't find — pure noise).
+    QLoggingCategory.setFilterRules("kf.iconthemes.warning=false")
+
     # Enable HiDPI scaling on Qt 5-compat paths (no-op on Qt 6)
     QApplication.setHighDpiScaleFactorRoundingPolicy(
         Qt.HighDpiScaleFactorRoundingPolicy.PassThrough

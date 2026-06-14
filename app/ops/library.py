@@ -51,6 +51,26 @@ def _valid(dt: datetime) -> bool:
 
 # ── date selection ────────────────────────────────────────────────────────────
 
+def best_datetime(
+    record: PhotoRecord,
+    pair:   Optional[PhotoRecord] = None,
+) -> datetime:
+    """
+    Return the most reliable shot *datetime* for *record* — same priority
+    rules as :func:`best_date` but without truncating to a date.
+    """
+    jpg = record if record.file_type == FileType.JPG else pair
+    raw = record if record.file_type == FileType.RAW else pair
+
+    if jpg and jpg.capture_time and _valid(jpg.capture_time):
+        return jpg.capture_time
+    if raw and raw.capture_time and _valid(raw.capture_time):
+        return raw.capture_time
+    if raw and _valid(raw.modified_time):
+        return raw.modified_time
+    return record.modified_time
+
+
 def best_date(
     record: PhotoRecord,
     pair:   Optional[PhotoRecord] = None,
@@ -68,16 +88,7 @@ def best_date(
     If either file's capture_time fails the plausibility check (pre-1990,
     factory default 0001-01-01, far future) it is treated as absent.
     """
-    jpg = record if record.file_type == FileType.JPG else pair
-    raw = record if record.file_type == FileType.RAW else pair
-
-    if jpg and jpg.capture_time and _valid(jpg.capture_time):
-        return jpg.capture_time.date()
-    if raw and raw.capture_time and _valid(raw.capture_time):
-        return raw.capture_time.date()
-    if raw and _valid(raw.modified_time):
-        return raw.modified_time.date()
-    return record.modified_time.date()
+    return best_datetime(record, pair).date()
 
 
 # ── path building ─────────────────────────────────────────────────────────────

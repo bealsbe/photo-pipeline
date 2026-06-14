@@ -22,16 +22,18 @@ from typing import Callable, List, Optional
 
 from PySide6.QtCore import (
     QDate,
+    QDateTime,
     QDir,
     QObject,
     QRunnable,
     Qt,
     QThreadPool,
+    QTime,
     Signal,
 )
 from PySide6.QtWidgets import (
     QCheckBox,
-    QDateEdit,
+    QDateTimeEdit,
     QDialog,
     QFileDialog,
     QFrame,
@@ -46,7 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.photo_record import FileType, PhotoRecord
-from app.ops.library import LibraryPlan, Resolution, best_date
+from app.ops.library import LibraryPlan, Resolution, best_datetime
 
 
 # ── colour / style constants ───────────────────────────────────────────────── #
@@ -149,19 +151,19 @@ class ExportDialog(QDialog):
         self._plan: Optional[LibraryPlan] = None
         self._bulk_btns: dict[Resolution, QPushButton] = {}
 
-        # Precompute best_date for each record once — used by the date filter
-        # and matches what LibraryPlan will use internally.
+        # Precompute best_datetime for each record once — used by the date
+        # range filter and matches what LibraryPlan will use internally.
         self._record_dates = {
-            id(r): best_date(r, pair_lookup(r) if pair_lookup else None)
+            id(r): best_datetime(r, pair_lookup(r) if pair_lookup else None)
             for r in self._all_records
         }
         if self._record_dates:
             self._date_min = min(self._record_dates.values())
             self._date_max = max(self._record_dates.values())
         else:
-            from datetime import date as _d
-            today = _d.today()
-            self._date_min = self._date_max = today
+            from datetime import datetime as _dt
+            now = _dt.now()
+            self._date_min = self._date_max = now
 
         self._build_ui()
         self._rebuild_plan()
@@ -398,41 +400,48 @@ class ExportDialog(QDialog):
             f" border-color:rgba(255,109,0,0.70); }}"
         )
 
-        qd_min = QDate(self._date_min.year, self._date_min.month, self._date_min.day)
-        qd_max = QDate(self._date_max.year, self._date_max.month, self._date_max.day)
-
-        date_qss = (
-            f"QDateEdit {{ background:#0a0a14; color:{_TEXT_PRI};"
-            f" border:1px solid rgba(255,109,0,0.25); border-radius:3px;"
-            " font-size:11px; padding:2px 6px; min-width:110px; }"
-            "QDateEdit:hover { border-color:rgba(255,109,0,0.55); }"
-            f"QDateEdit:disabled {{ color:{_TEXT_DIM};"
-            " border-color:rgba(255,109,0,0.08); background:#08080f; }}"
-            "QDateEdit::drop-down { width:14px; border:none; }"
+        qdt_min = QDateTime(
+            QDate(self._date_min.year, self._date_min.month, self._date_min.day),
+            QTime(self._date_min.hour, self._date_min.minute),
+        )
+        qdt_max = QDateTime(
+            QDate(self._date_max.year, self._date_max.month, self._date_max.day),
+            QTime(self._date_max.hour, self._date_max.minute),
         )
 
-        self._date_from = QDateEdit(qd_min)
-        self._date_from.setCalendarPopup(True)
-        self._date_from.setDisplayFormat("yyyy-MM-dd")
-        self._date_from.setMinimumDate(qd_min)
-        self._date_from.setMaximumDate(qd_max)
-        self._date_from.setStyleSheet(date_qss)
-        self._date_from.setEnabled(False)
+        date_qss = (
+            f"QDateTimeEdit {{ background:#0a0a14; color:{_TEXT_PRI};"
+            f" border:1px solid rgba(255,109,0,0.25); border-radius:3px;"
+            " font-size:11px; padding:2px 22px 2px 6px; min-width:170px; }"
+            "QDateTimeEdit:hover { border-color:rgba(255,109,0,0.55); }"
+            f"QDateTimeEdit:disabled {{ color:{_TEXT_DIM};"
+            " border-color:rgba(255,109,0,0.08); background:#08080f; }}"
+            "QDateTimeEdit::drop-down { subcontrol-origin: padding;"
+            " subcontrol-position: top right; width: 18px; border: none;"
+            " background: rgba(255,109,0,0.12);"
+            " border-top-right-radius:3px; border-bottom-right-radius:3px; }"
+            "QDateTimeEdit::drop-down:hover { background: rgba(255,109,0,0.25); }"
+            "QDateTimeEdit::drop-down:disabled { background: transparent; }"
+        )
 
-        self._date_to = QDateEdit(qd_max)
-        self._date_to.setCalendarPopup(True)
-        self._date_to.setDisplayFormat("yyyy-MM-dd")
-        self._date_to.setMinimumDate(qd_min)
-        self._date_to.setMaximumDate(qd_max)
-        self._date_to.setStyleSheet(date_qss)
-        self._date_to.setEnabled(False)
+        self._date_from = QDateTimeEdit(qdt_min)
+        self._date_to   = QDateTimeEdit(qdt_max)
+
+        for de in (self._date_from, self._date_to):
+            de.setCalendarPopup(True)
+            de.setDisplayFormat("yyyy-MM-dd  HH:mm")
+            de.setMinimumDateTime(qdt_min)
+            de.setMaximumDateTime(qdt_max)
+            de.setStyleSheet(date_qss)
+            de.setEnabled(False)
+            self._style_calendar_popup(de)
 
         sep = QLabel("→")
         sep.setStyleSheet(f"color:{_TEXT_DIM}; font-size:12px;")
 
         self._chk_date_range.toggled.connect(self._on_date_range_toggled)
-        self._date_from.dateChanged.connect(self._on_date_from_changed)
-        self._date_to.dateChanged.connect(self._on_date_to_changed)
+        self._date_from.dateTimeChanged.connect(self._on_date_from_changed)
+        self._date_to.dateTimeChanged.connect(self._on_date_to_changed)
 
         row.addWidget(self._chk_date_range)
         row.addSpacing(4)
@@ -442,23 +451,61 @@ class ExportDialog(QDialog):
         row.addStretch()
         return row
 
+    @staticmethod
+    def _style_calendar_popup(date_edit: QDateTimeEdit) -> None:
+        """Apply dark-theme styling to the calendar popup widget."""
+        cal = date_edit.calendarWidget()
+        if cal is None:
+            return
+        cal.setStyleSheet(
+            # Whole popup background
+            f"QCalendarWidget QWidget {{ alternate-background-color:#12121f;"
+            f" color:{_TEXT_PRI}; }}"
+            f"QCalendarWidget {{ background:{_BG_CARD}; }}"
+            # Day cells (the table view)
+            f"QCalendarWidget QAbstractItemView:enabled {{ background:#0e0e1c;"
+            f" color:{_TEXT_PRI}; selection-background-color:rgba(255,109,0,0.40);"
+            f" selection-color:#fff; gridline-color:transparent;"
+            f" outline:none; }}"
+            f"QCalendarWidget QAbstractItemView:disabled {{ color:{_TEXT_DIM}; }}"
+            # Navigation bar (top, with month/year + arrows)
+            f"QCalendarWidget QWidget#qt_calendar_navigationbar {{"
+            f" background:#181828; border-bottom:1px solid {_BORDER}; }}"
+            # Month/year drop-downs & arrow buttons
+            "QCalendarWidget QToolButton {"
+            f" color:{_TEXT_PRI}; background:transparent; border:none;"
+            " padding:4px 10px; margin:2px; font-size:12px; font-weight:600; }"
+            "QCalendarWidget QToolButton:hover {"
+            " background:rgba(255,109,0,0.18); border-radius:3px; }"
+            "QCalendarWidget QToolButton::menu-indicator { image:none; }"
+            # Spin box inside the year selector when it opens
+            f"QCalendarWidget QSpinBox {{ background:#0a0a14; color:{_TEXT_PRI};"
+            f" border:1px solid {_BORDER}; border-radius:3px;"
+            " padding:2px 4px; font-size:12px; }"
+            # Month menu popup
+            f"QCalendarWidget QMenu {{ background:{_BG_CARD};"
+            f" color:{_TEXT_PRI}; border:1px solid {_BORDER}; }}"
+            "QCalendarWidget QMenu::item:selected {"
+            " background:rgba(255,109,0,0.25); }"
+        )
+
     def _on_date_range_toggled(self, on: bool) -> None:
         self._date_from.setEnabled(on)
         self._date_to.setEnabled(on)
         self._rebuild_plan()
 
-    def _on_date_from_changed(self, d: QDate) -> None:
-        if d > self._date_to.date():
+    def _on_date_from_changed(self, dt: QDateTime) -> None:
+        if dt > self._date_to.dateTime():
             self._date_to.blockSignals(True)
-            self._date_to.setDate(d)
+            self._date_to.setDateTime(dt)
             self._date_to.blockSignals(False)
         if self._chk_date_range.isChecked():
             self._rebuild_plan()
 
-    def _on_date_to_changed(self, d: QDate) -> None:
-        if d < self._date_from.date():
+    def _on_date_to_changed(self, dt: QDateTime) -> None:
+        if dt < self._date_from.dateTime():
             self._date_from.blockSignals(True)
-            self._date_from.setDate(d)
+            self._date_from.setDateTime(dt)
             self._date_from.blockSignals(False)
         if self._chk_date_range.isChecked():
             self._rebuild_plan()
@@ -555,11 +602,18 @@ class ExportDialog(QDialog):
                   [r for r in self._all_records if not r.is_pruned]
 
         if self._chk_date_range.isChecked():
-            qd_from = self._date_from.date()
-            qd_to   = self._date_to.date()
-            from datetime import date as _d
-            d_from = _d(qd_from.year(), qd_from.month(), qd_from.day())
-            d_to   = _d(qd_to.year(),   qd_to.month(),   qd_to.day())
+            qdt_from = self._date_from.dateTime()
+            qdt_to   = self._date_to.dateTime()
+            from datetime import datetime as _dt
+            d_from = _dt(
+                qdt_from.date().year(), qdt_from.date().month(), qdt_from.date().day(),
+                qdt_from.time().hour(), qdt_from.time().minute(),
+            )
+            d_to = _dt(
+                qdt_to.date().year(), qdt_to.date().month(), qdt_to.date().day(),
+                qdt_to.time().hour(), qdt_to.time().minute(),
+                59, 999999,   # include the whole final minute
+            )
             records = [
                 r for r in records
                 if d_from <= self._record_dates[id(r)] <= d_to
