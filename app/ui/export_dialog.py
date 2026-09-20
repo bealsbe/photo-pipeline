@@ -122,6 +122,7 @@ class _ExecWorker(QRunnable):
 class ExportDialog(QDialog):
     exported:               Signal = Signal(object, object)
     library_folder_changed: Signal = Signal(object)
+    marks_cleared:          Signal = Signal(object)   # List[PhotoRecord]
 
     def __init__(
         self,
@@ -237,6 +238,47 @@ class ExportDialog(QDialog):
             f" border-color:rgba(255,109,0,0.70); }}"
         )
         op_lay.addWidget(self._chk_pruned)
+
+        # Marked-for-export only checkbox (auto-enabled if any records are marked)
+        self._chk_marked_only = QCheckBox("Only export files marked for export")
+        self._chk_marked_only.setStyleSheet(
+            f"QCheckBox {{ color:{_TEXT_SEC}; font-size:12px; spacing:8px; }}"
+            f"QCheckBox::indicator {{ width:15px; height:15px; border-radius:3px;"
+            f" border:1px solid rgba(58,201,106,0.35); background:#0a0a14; }}"
+            f"QCheckBox::indicator:hover {{ border-color:rgba(58,201,106,0.70); }}"
+            f"QCheckBox::indicator:checked {{ background:rgba(58,201,106,0.35);"
+            f" border-color:rgba(58,201,106,0.75); }}"
+            f"QCheckBox:disabled {{ color:{_TEXT_DIM}; }}"
+        )
+        has_marked = any(r.is_marked_for_export for r in self._all_records)
+        self._chk_marked_only.setEnabled(has_marked)
+        self._chk_marked_only.setChecked(has_marked)
+        if not has_marked:
+            self._chk_marked_only.setToolTip("No files are marked for export (press M on selected files)")
+
+        # Clear-marks button (only enabled when something is marked)
+        self._btn_clear_marks = QPushButton("Clear All Marks")
+        self._btn_clear_marks.setCursor(Qt.PointingHandCursor)
+        self._btn_clear_marks.setFixedHeight(22)
+        self._btn_clear_marks.setStyleSheet(
+            "QPushButton { background:transparent; color:#8fb39c;"
+            " border:1px solid rgba(58,201,106,0.25); border-radius:3px;"
+            " font-size:11px; padding:0 10px; }"
+            "QPushButton:hover { background:rgba(58,201,106,0.10); color:#bce0c8;"
+            " border-color:rgba(58,201,106,0.55); }"
+            f"QPushButton:disabled {{ color:{_TEXT_DIM};"
+            " border-color:rgba(58,201,106,0.06); }}"
+        )
+        self._btn_clear_marks.setEnabled(has_marked)
+        self._btn_clear_marks.clicked.connect(self._clear_all_marks)
+
+        marked_row = QHBoxLayout()
+        marked_row.setSpacing(8)
+        marked_row.setContentsMargins(0, 0, 0, 0)
+        marked_row.addWidget(self._chk_marked_only)
+        marked_row.addStretch()
+        marked_row.addWidget(self._btn_clear_marks)
+        op_lay.addLayout(marked_row)
 
         # Date range filter
         op_lay.addLayout(self._build_date_range_row())
@@ -379,6 +421,7 @@ class ExportDialog(QDialog):
         # ── Wire signals ──────────────────────────────────────────────── #
         self._btn_change_lib.clicked.connect(self._pick_library)
         self._chk_pruned.toggled.connect(lambda _: self._rebuild_plan())
+        self._chk_marked_only.toggled.connect(lambda _: self._rebuild_plan())
 
     # ──────────────────────────────────────────────────────────────────────
     # Widget helpers
@@ -593,6 +636,35 @@ class ExportDialog(QDialog):
         qss = self._btn_move.styleSheet()
         return "move" if "rgba(255,109,0,0.12)" in qss else "copy"
 
+    def _clear_all_marks(self) -> None:
+        from PySide6.QtWidgets import QMessageBox
+        marked = [r for r in self._all_records if r.is_marked_for_export]
+        if not marked:
+            return
+        n = len(marked)
+        reply = QMessageBox.question(
+            self,
+            "Clear Marks",
+            f"Clear the export mark from <b>{n} file{'s' if n != 1 else ''}</b>?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        for r in marked:
+            r.is_marked_for_export = False
+        self.marks_cleared.emit(marked)
+
+        self._chk_marked_only.blockSignals(True)
+        self._chk_marked_only.setChecked(False)
+        self._chk_marked_only.setEnabled(False)
+        self._chk_marked_only.setToolTip(
+            "No files are marked for export (press M on selected files)"
+        )
+        self._chk_marked_only.blockSignals(False)
+        self._btn_clear_marks.setEnabled(False)
+        self._rebuild_plan()
+
     # ──────────────────────────────────────────────────────────────────────
     # Plan management
     # ──────────────────────────────────────────────────────────────────────
@@ -600,6 +672,9 @@ class ExportDialog(QDialog):
     def _active_records(self) -> List[PhotoRecord]:
         records = self._all_records if self._chk_pruned.isChecked() else \
                   [r for r in self._all_records if not r.is_pruned]
+
+        if self._chk_marked_only.isChecked():
+            records = [r for r in records if r.is_marked_for_export]
 
         if self._chk_date_range.isChecked():
             qdt_from = self._date_from.dateTime()

@@ -20,7 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 # Icons are stored alongside this module: app/ui/icons/<size>px/<name>.png
 _ICON_DIR = Path(__file__).parent / "icons"
@@ -56,6 +56,25 @@ def pixmap(name: str, size: int = 24, style: str = "regular") -> QPixmap:
     if not path.exists():
         return QPixmap()
     return QPixmap(str(path))
+
+
+def check_icon(color: str = "#3ac96a", size: int = 24) -> QIcon:
+    """Procedurally draw a check-mark glyph as a QIcon."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.6, size / 11))
+    pen.setCapStyle(Qt.RoundCap)
+    pen.setJoinStyle(Qt.RoundJoin)
+    p.setPen(pen)
+    # Check mark: down-stroke from upper-left, up-stroke to upper-right
+    u = size / 24.0
+    p.drawLine(int(5 * u), int(13 * u), int(10 * u), int(18 * u))
+    p.drawLine(int(10 * u), int(18 * u), int(19 * u), int(7 * u))
+    p.end()
+    return QIcon(pm)
 
 
 def tinted_icon(

@@ -55,6 +55,7 @@ class PhotoRecord:
 
     # Mutable state (changes during a session)
     is_pruned: bool = False
+    is_marked_for_export: bool = False
     pair_stem: Optional[str] = None  # lowercase stem shared with a paired file
 
     # ------------------------------------------------------------------ #

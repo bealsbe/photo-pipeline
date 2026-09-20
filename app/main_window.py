@@ -29,7 +29,7 @@ from app.thumbnails.generator import ThumbnailGenerator
 from app.ui.file_list import FileListWidget
 from app.ui.filter_bar import FilterBar
 from app.ui.folder_bar import FolderBar
-from app.ui.icons import icon
+from app.ui.icons import check_icon, icon
 from app.ui.prune_review import PruneReviewDialog
 from app.ui.pair_dialog import PairDialog
 from app.ui.separate_dialog import SeparateDialog
@@ -41,6 +41,7 @@ _SETTINGS_ORG = "PhotoPipeline"
 _SETTINGS_APP = "PhotoPipeline"
 _PRUNE_FILE   = ".photo_pipeline.json"       # sidecar: prune marks
 _PAIRS_FILE   = ".photo-pipeline-pairs.json" # sidecar: persistent pair marks
+_EXPORT_FILE  = ".photo-pipeline-export.json"  # sidecar: marked-for-export marks
 
 
 
@@ -282,6 +283,11 @@ class MainWindow(QMainWindow):
         self._act_cull.triggered.connect(self._toggle_prune_selected)
         tb.addAction(self._act_cull)
 
+        self._act_mark = QAction(check_icon("#3ac96a", size=24), "Mark", self)
+        self._act_mark.setToolTip("Mark selected for export  (M)")
+        self._act_mark.triggered.connect(self._toggle_mark_selected)
+        tb.addAction(self._act_mark)
+
     def _build_central(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
@@ -324,6 +330,9 @@ class MainWindow(QMainWindow):
         self._file_list.prune_toggled.connect(self._on_prune_toggled)
         self._grid_view.prune_toggled.connect(self._on_prune_toggled)
 
+        self._file_list.mark_toggled.connect(self._on_mark_toggled)
+        self._grid_view.mark_toggled.connect(self._on_mark_toggled)
+
         # Keep toolbar Select button in sync when mode exits via Done/Escape
         self._grid_view.selection_mode_changed.connect(self._on_grid_select_mode_changed)
 
@@ -360,9 +369,10 @@ class MainWindow(QMainWindow):
         self._lbl_jpg    = _chip("#0d2014", "#4a9a5a")
         self._lbl_paired = _chip("rgba(255,109,0,0.12)", "#ff6d00")
         self._lbl_pruned = _chip("#2a0d0d", "#cc4848")
+        self._lbl_marked = _chip("#0d201a", "#3ac96a")
 
         for lbl in (self._lbl_total, self._lbl_raw, self._lbl_jpg,
-                    self._lbl_paired, self._lbl_pruned):
+                    self._lbl_paired, self._lbl_pruned, self._lbl_marked):
             sc_lay.addWidget(lbl)
 
         self._statusbar.addPermanentWidget(stats_container)
@@ -478,6 +488,7 @@ class MainWindow(QMainWindow):
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
         self._load_prune_marks()
+        self._load_export_marks()
 
         self._update_stats()
         pairs = self._collection.stats["paired"] // 2
@@ -501,6 +512,7 @@ class MainWindow(QMainWindow):
         self._lbl_jpg.setText(f"{s['jpg']}  JPG")
         self._lbl_paired.setText(f"{s['paired'] // 2}  pairs")
         self._lbl_pruned.setText(f"{s['pruned']}  pruned")
+        self._lbl_marked.setText(f"{s['marked']}  marked")
 
     def _update_status_count(self) -> None:
         """Update the status bar with 'Showing X of Y' for the active view."""
@@ -536,6 +548,7 @@ class MainWindow(QMainWindow):
                 parent=self,
             )
             self._viewer.prune_toggled.connect(self._on_viewer_prune_toggled)
+            self._viewer.mark_toggled.connect(self._on_viewer_mark_toggled)
             self._viewer.destroyed.connect(lambda: setattr(self, "_viewer", None))
             self._viewer.show()
         else:
@@ -577,6 +590,16 @@ class MainWindow(QMainWindow):
         for r in records:
             r.is_pruned = not all_pruned
         self._refresh_prune(records)
+
+    def _toggle_mark_selected(self) -> None:
+        """Mark toolbar button — toggle mark-for-export on all selected grid items."""
+        records = self._grid_view.selected_records()
+        if not records:
+            return
+        all_marked = all(r.is_marked_for_export for r in records)
+        for r in records:
+            r.is_marked_for_export = not all_marked
+        self._refresh_mark(records)
 
     def _on_prune_toggled(self, records) -> None:
         """Handle prune toggle from list or grid view (receives a list)."""
@@ -629,6 +652,46 @@ class MainWindow(QMainWindow):
         self._update_stats()
         self._update_status_count()
         self._save_prune_marks()
+
+    def _on_mark_toggled(self, records) -> None:
+        """Handle mark-for-export toggle from list or grid view (receives a list)."""
+        self._refresh_mark(records)
+
+    def _on_viewer_mark_toggled(self, record) -> None:
+        """Handle mark toggle from the image viewer (receives a single record)."""
+        self._refresh_mark([record])
+
+    def _on_export_marks_cleared(self, cleared_records) -> None:
+        """ExportDialog cleared all marks — refresh views + sidecar."""
+        self._refresh_mark(cleared_records)
+
+    def _refresh_mark(self, records) -> None:
+        """Propagate mark state to paired files, repaint models, save sidecar."""
+        all_affected = list(records)
+        i = 0
+        while i < len(all_affected):
+            r = all_affected[i]
+            pair = self._collection.find_pair(r)
+            if pair is not None and pair.is_marked_for_export != r.is_marked_for_export:
+                pair.is_marked_for_export = r.is_marked_for_export
+                all_affected.append(pair)
+            i += 1
+
+        self._collection._s.marked = sum(
+            1 for r in self._collection if r.is_marked_for_export
+        )
+
+        self._file_list.source_model().notify_records_changed(all_affected)
+        self._grid_view.notify_records_changed(all_affected)
+        if self._viewer and self._viewer.isVisible():
+            idx = self._viewer._index
+            if 0 <= idx < len(self._viewer._records):
+                current = self._viewer._records[idx]
+                if any(r.path == current.path for r in all_affected):
+                    self._viewer._sync_mark_btn(current)
+        self._update_stats()
+        self._update_status_count()
+        self._save_export_marks()
 
     def _open_review(self) -> None:
         pruned = self._collection.pruned()
@@ -726,6 +789,7 @@ class MainWindow(QMainWindow):
         dlg.library_folder_changed.connect(self._on_library_folder_changed)
         dlg.library_folder_changed.connect(self._folder_bar.set_library_folder)
         dlg.exported.connect(self._on_exported)
+        dlg.marks_cleared.connect(self._on_export_marks_cleared)
         dlg.exec()
 
     def _open_autosort(self) -> None:
@@ -845,6 +909,56 @@ class MainWindow(QMainWindow):
             self._update_stats()
             self._update_status_count()
 
+    def _save_export_marks(self) -> None:
+        """Write current export marks to .photo-pipeline-export.json."""
+        if not self._current_folder:
+            return
+        import json
+        marked = []
+        for r in self._collection.marked():
+            try:
+                marked.append(str(r.path.relative_to(self._current_folder)))
+            except ValueError:
+                marked.append(str(r.path))
+        try:
+            atomic_write_text(
+                self._current_folder / _EXPORT_FILE,
+                json.dumps({"marked": marked}, indent=2),
+            )
+        except Exception as exc:
+            self._statusbar.showMessage(
+                f"⚠ Could not save export marks: {exc}", 8000
+            )
+
+    def _load_export_marks(self) -> None:
+        """Apply saved export marks from .photo-pipeline-export.json after a scan."""
+        if not self._current_folder:
+            return
+        import json
+        sidecar = self._current_folder / _EXPORT_FILE
+        if not sidecar.exists():
+            return
+        try:
+            data = json.loads(sidecar.read_text())
+            marked_paths = set()
+            for rel in data.get("marked", []):
+                p = Path(rel)
+                marked_paths.add(p if p.is_absolute() else self._current_folder / p)
+        except Exception:
+            return
+
+        affected = [r for r in self._collection.all() if r.path in marked_paths]
+        for r in affected:
+            r.is_marked_for_export = True
+        if affected:
+            self._collection._s.marked = sum(
+                1 for r in self._collection if r.is_marked_for_export
+            )
+            self._file_list.source_model().notify_records_changed(affected)
+            self._grid_view.notify_records_changed(affected)
+            self._update_stats()
+            self._update_status_count()
+
     def _save_pair_marks(self, pair_keys=None) -> None:
         """Write pair keys to sidecar.  If pair_keys is None, use current collection."""
         if not self._current_folder:
@@ -873,6 +987,7 @@ class MainWindow(QMainWindow):
         s.setValue("view_index", self._stack.currentIndex())
         state = self._filter_bar.current_state()
         s.setValue("filter/pruned", state.show_pruned)
+        s.setValue("filter/marked_only", not state.show_unmarked)
         s.setValue("sort/key", state.sort_key)
         s.setValue("sort/asc", state.sort_asc)
         s.setValue("filter/date_from",
@@ -906,6 +1021,7 @@ class MainWindow(QMainWindow):
 
         self._filter_bar.restore_state(
             show_pruned = s.value("filter/pruned", False, type=bool),
+            marked_only = s.value("filter/marked_only", False, type=bool),
             sort_key    = s.value("sort/key", "date", type=str),
             sort_asc    = s.value("sort/asc", True,   type=bool),
             date_from   = _parse_date(s.value("filter/date_from", "", type=str)),

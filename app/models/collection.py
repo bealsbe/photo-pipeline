@@ -22,6 +22,7 @@ class _Stats:
     paired:   int = 0   # individual records that are paired (both RAW and JPG sides)
     unpaired: int = 0
     pruned:   int = 0
+    marked:   int = 0
 
     def as_dict(self) -> dict:
         return {
@@ -31,6 +32,7 @@ class _Stats:
             "paired":   self.paired,
             "unpaired": self.unpaired,
             "pruned":   self.pruned,
+            "marked":   self.marked,
         }
 
 
@@ -62,6 +64,8 @@ class PhotoCollection:
             self._s.unpaired += 1
         if record.is_pruned:
             self._s.pruned += 1
+        if record.is_marked_for_export:
+            self._s.marked += 1
         # pair index
         key = (self._canonical_parent(record.path), record.stem.lower())
         self._pair_index.setdefault(key, []).append(record)
@@ -86,6 +90,8 @@ class PhotoCollection:
             self._s.unpaired -= 1
         if record.is_pruned:
             self._s.pruned -= 1
+        if record.is_marked_for_export:
+            self._s.marked -= 1
         key = (self._canonical_parent(record.path), record.stem.lower())
         bucket = self._pair_index.get(key)
         if bucket:
@@ -102,6 +108,13 @@ class PhotoCollection:
             self._s.pruned += 1
         elif not record.is_pruned and was_pruned:
             self._s.pruned -= 1
+
+    def notify_marked(self, record: PhotoRecord, was_marked: bool) -> None:
+        """Call after flipping record.is_marked_for_export to keep the counter accurate."""
+        if record.is_marked_for_export and not was_marked:
+            self._s.marked += 1
+        elif not record.is_marked_for_export and was_marked:
+            self._s.marked -= 1
 
     def update_path(self, old_path: Path, new_path: Path) -> None:
         """Re-key a record after its file has been moved."""
@@ -148,6 +161,9 @@ class PhotoCollection:
 
     def unpruned(self) -> List[PhotoRecord]:
         return [r for r in self._records.values() if not r.is_pruned]
+
+    def marked(self) -> List[PhotoRecord]:
+        return [r for r in self._records.values() if r.is_marked_for_export]
 
     def __len__(self) -> int:
         return len(self._records)

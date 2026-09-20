@@ -100,6 +100,7 @@ class _SectionGrid(QListView):
 
     item_activated:   Signal = Signal(object)   # PhotoRecord
     prune_toggled:    Signal = Signal(object)   # List[PhotoRecord]
+    mark_toggled:     Signal = Signal(object)   # List[PhotoRecord]
     selection_changed: Signal = Signal(list)     # List[PhotoRecord] — current selection
 
     def __init__(
@@ -281,6 +282,17 @@ class _SectionGrid(QListView):
                 for r in records:
                     r.is_pruned = not all_pruned
                 self.prune_toggled.emit(records)
+        elif event.key() == Qt.Key_M:
+            records = [
+                idx.data(Qt.UserRole)
+                for idx in self.selectionModel().selectedIndexes()
+                if idx.data(Qt.UserRole)
+            ]
+            if records:
+                all_marked = all(r.is_marked_for_export for r in records)
+                for r in records:
+                    r.is_marked_for_export = not all_marked
+                self.mark_toggled.emit(records)
         elif event.key() in (
             Qt.Key_Up, Qt.Key_Down,
             Qt.Key_PageUp, Qt.Key_PageDown,
@@ -411,6 +423,7 @@ class _DateSection(QWidget):
 
     item_activated:   Signal = Signal(object)
     prune_toggled:    Signal = Signal(object)
+    mark_toggled:     Signal = Signal(object)
     selection_changed: Signal = Signal(list)   # List[PhotoRecord] from this section
 
     def __init__(
@@ -449,6 +462,7 @@ class _DateSection(QWidget):
 
         self._grid.item_activated.connect(self.item_activated)
         self._grid.prune_toggled.connect(self.prune_toggled)
+        self._grid.mark_toggled.connect(self.mark_toggled)
         self._grid.selection_changed.connect(self._on_grid_selection_changed)
         self._header.collapse_toggled.connect(self._on_toggle)
         self._header.select_all_toggled.connect(self._on_select_all_toggled)
@@ -665,6 +679,7 @@ class GroupedGridView(QScrollArea):
 
     item_activated:        Signal = Signal(object)   # PhotoRecord
     prune_toggled:         Signal = Signal(object)   # List[PhotoRecord]
+    mark_toggled:          Signal = Signal(object)   # List[PhotoRecord]
     thumb_size_changed:    Signal = Signal(int)       # new size from Ctrl+scroll
     selection_changed:     Signal = Signal(list)      # List[PhotoRecord] — full current selection
     selection_mode_changed: Signal = Signal(bool)     # select mode on/off
@@ -1111,6 +1126,7 @@ class GroupedGridView(QScrollArea):
                 )
                 sec.item_activated.connect(self.item_activated)
                 sec.prune_toggled.connect(self.prune_toggled)
+                sec.mark_toggled.connect(self.mark_toggled)
                 sec.selection_changed.connect(self._on_section_selection_changed)
                 sec.set_select_mode(self._select_mode)
                 self._vlay.insertWidget(insert_at, sec)

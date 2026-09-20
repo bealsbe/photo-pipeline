@@ -241,6 +241,8 @@ class PhotoTableModel(QAbstractTableModel):
         if role == Qt.ForegroundRole:
             if prow.primary.is_pruned:
                 return QColor(160, 50, 50)
+            if prow.primary.is_marked_for_export and col == COL_FILE:
+                return QColor(58, 201, 106)
             if col == COL_TYPE:
                 if prow.is_paired:
                     return _COL_PAIR
@@ -277,6 +279,7 @@ class FileListWidget(QTableView):
 
     item_activated: Signal = Signal(object)   # PhotoRecord
     prune_toggled:  Signal = Signal(object)   # List[PhotoRecord]
+    mark_toggled:   Signal = Signal(object)   # List[PhotoRecord]
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -377,6 +380,13 @@ class FileListWidget(QTableView):
                 for r in records:
                     r.is_pruned = not all_pruned
                 self.prune_toggled.emit(records)
+        elif event.key() == Qt.Key_M:
+            records = self.selected_records()
+            if records:
+                all_marked = all(r.is_marked_for_export for r in records)
+                for r in records:
+                    r.is_marked_for_export = not all_marked
+                self.mark_toggled.emit(records)
         else:
             super().keyPressEvent(event)
 

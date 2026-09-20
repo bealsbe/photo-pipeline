@@ -196,6 +196,27 @@ class ThumbnailDelegate(QStyledItemDelegate):
             painter.setFont(xf)
             painter.drawText(thumb_rect, Qt.AlignCenter, "\u2715")
 
+        # \u2500\u2500 marked-for-export badge (top-right) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 #
+        if record and record.is_marked_for_export:
+            badge = max(18, min(30, ts // 6))
+            bx = thumb_rect.right() - badge - 4
+            by = thumb_rect.top()    + 4
+            badge_rect = QRect(bx, by, badge, badge)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrush(QColor(0x3a, 0xc9, 0x6a))
+            painter.setPen(QPen(QColor(0, 0, 0, 90), 1))
+            painter.drawEllipse(badge_rect)
+            pen = QPen(Qt.white)
+            pen.setWidthF(max(1.6, badge / 11))
+            pen.setCapStyle(Qt.RoundCap)
+            pen.setJoinStyle(Qt.RoundJoin)
+            painter.setPen(pen)
+            u = badge / 24.0
+            painter.drawLine(int(bx + 6 * u), int(by + 13 * u),
+                             int(bx + 10 * u), int(by + 18 * u))
+            painter.drawLine(int(bx + 10 * u), int(by + 18 * u),
+                             int(bx + 19 * u), int(by + 7 * u))
+
         # ── checkbox overlay (select mode) ──────────────────────────────── #
         if self.select_mode:
             cb = max(16, min(24, ts // 7))   # scale with thumb size, 16–24 px
@@ -480,6 +501,7 @@ class ThumbnailGridView(QListView):
 
     item_activated: Signal = Signal(object)  # PhotoRecord
     prune_toggled:  Signal = Signal(object)  # List[PhotoRecord]
+    mark_toggled:   Signal = Signal(object)  # List[PhotoRecord]
 
     def __init__(self, generator: ThumbnailGenerator, thumb_size: int = 160, parent=None) -> None:
         super().__init__(parent)
@@ -608,6 +630,13 @@ class ThumbnailGridView(QListView):
                 for r in records:
                     r.is_pruned = not all_pruned
                 self.prune_toggled.emit(records)
+        elif event.key() == Qt.Key_M:
+            records = self.selected_records()
+            if records:
+                all_marked = all(r.is_marked_for_export for r in records)
+                for r in records:
+                    r.is_marked_for_export = not all_marked
+                self.mark_toggled.emit(records)
         else:
             super().keyPressEvent(event)
 

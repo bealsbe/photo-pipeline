@@ -1349,6 +1349,7 @@ class ImageViewer(QWidget):
     """
 
     prune_toggled: Signal = Signal(object)   # PhotoRecord
+    mark_toggled:  Signal = Signal(object)   # PhotoRecord
 
     def __init__(
         self,
@@ -1463,6 +1464,7 @@ class ImageViewer(QWidget):
         self._view.drag_nav_progress.connect(self._on_drag_progress)
         self._view.drag_nav_end.connect(self._on_drag_end)
         self._btn_prune.clicked.connect(self._toggle_prune)
+        self._btn_mark.clicked.connect(self._toggle_mark)
         self._btn_show_folder.clicked.connect(self._show_in_folder)
         self._btn_info.clicked.connect(self._toggle_exif_panel)
 
@@ -1513,13 +1515,22 @@ class ImageViewer(QWidget):
         self._lbl_pos    = QLabel()
         self._lbl_pos.setStyleSheet("color:#44445a;font-size:12px;")
 
-        self._btn_prune = QPushButton("Mark")
-        self._btn_prune.setFixedSize(62, 28)
+        self._btn_prune = QPushButton("Prune")
+        self._btn_prune.setFixedSize(64, 28)
         self._btn_prune.setCheckable(True)
         self._btn_prune.setStyleSheet(self._prune_style(False))
         ic_trash = _icon("trash-alt", size=12)
         if not ic_trash.isNull():
             self._btn_prune.setIcon(ic_trash)
+
+        self._btn_mark = QPushButton("Keep")
+        self._btn_mark.setFixedSize(64, 28)
+        self._btn_mark.setCheckable(True)
+        self._btn_mark.setStyleSheet(self._mark_style(False))
+        from app.ui.icons import check_icon as _check_icon
+        ic_chk = _check_icon("#3ac96a", size=12)
+        if not ic_chk.isNull():
+            self._btn_mark.setIcon(ic_chk)
 
         self._btn_pair = QPushButton("⇄ Pair")
         self._btn_pair.setFixedSize(66, 28)
@@ -1552,6 +1563,8 @@ class ImageViewer(QWidget):
         lay.addWidget(self._btn_pair)
         lay.addSpacing(4)
         lay.addWidget(self._btn_show_folder)
+        lay.addSpacing(4)
+        lay.addWidget(self._btn_mark)
         lay.addSpacing(4)
         lay.addWidget(self._btn_prune)
         return bar
@@ -2055,6 +2068,7 @@ class ImageViewer(QWidget):
         self._btn_pair.setStyleSheet(self._pair_btn_style(False, has_pair))
 
         self._sync_prune_btn(record)
+        self._sync_mark_btn(record)
         self._update_meta(record)
 
         cached = self._loader.get_cached(record.path)
@@ -2205,6 +2219,13 @@ class ImageViewer(QWidget):
         self._prune_banner.setVisible(record.is_pruned)
         self.prune_toggled.emit(record)
 
+    def _toggle_mark(self) -> None:
+        record = self._records[self._index]
+        record.is_marked_for_export = not record.is_marked_for_export
+        self._btn_mark.setChecked(record.is_marked_for_export)
+        self._apply_mark_style(record.is_marked_for_export)
+        self.mark_toggled.emit(record)
+
     def _show_in_folder(self) -> None:
         """Open the system file manager with the current file selected."""
         import subprocess, sys
@@ -2306,6 +2327,36 @@ class ImageViewer(QWidget):
         if not ic.isNull():
             self._btn_prune.setIcon(ic)
 
+    @staticmethod
+    def _mark_style(active: bool) -> str:
+        if active:
+            return (
+                "QPushButton{background:#1a4a2a;color:#a8e6c0;"
+                "border:1px solid #3ac96a;"
+                "border-radius:4px;font-size:12px;font-weight:bold;}"
+                "QPushButton:hover{background:#206036;color:#fff;}"
+            )
+        return (
+            "QPushButton{background:rgba(58,201,106,0.08);color:#8888a8;"
+            "border:1px solid rgba(58,201,106,0.20);"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:rgba(58,201,106,0.18);color:#f0f0f0;"
+            "border-color:rgba(58,201,106,0.55);}"
+        )
+
+    def _sync_mark_btn(self, record: PhotoRecord) -> None:
+        self._btn_mark.blockSignals(True)
+        self._btn_mark.setChecked(record.is_marked_for_export)
+        self._apply_mark_style(record.is_marked_for_export)
+        self._btn_mark.blockSignals(False)
+
+    def _apply_mark_style(self, active: bool) -> None:
+        self._btn_mark.setStyleSheet(self._mark_style(active))
+        from app.ui.icons import check_icon as _check_icon
+        ic = _check_icon("#3ac96a", size=12)
+        if not ic.isNull():
+            self._btn_mark.setIcon(ic)
+
     # ------------------------------------------------------------------ #
     # Metadata                                                             #
     # ------------------------------------------------------------------ #
@@ -2347,6 +2398,7 @@ class ImageViewer(QWidget):
         elif k in (Qt.Key_Plus, Qt.Key_Equal):        self._view.zoom_in()
         elif k == Qt.Key_Minus:                        self._view.zoom_out()
         elif k in (Qt.Key_Delete, Qt.Key_P):          self._toggle_prune()
+        elif k == Qt.Key_M:                            self._toggle_mark()
         elif k == Qt.Key_U:                            self._unmark()
         elif k == Qt.Key_Question:                     self._show_shortcuts()
         else:

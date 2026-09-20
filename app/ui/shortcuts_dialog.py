@@ -25,6 +25,7 @@ _SECTIONS = [
         ("Ctrl+1",          "Switch to List view"),
         ("Ctrl+2",          "Switch to Grid view"),
         ("P  /  Delete",    "Toggle prune mark on selected files"),
+        ("M",               "Toggle mark-for-export on selected files"),
         ("?",               "Show this shortcuts reference"),
     ]),
     ("Image Viewer", [
@@ -32,6 +33,7 @@ _SECTIONS = [
         ("Home",               "First image"),
         ("End",                "Last image"),
         ("P  /  Delete",       "Toggle prune mark"),
+        ("M",                  "Toggle mark-for-export"),
         ("U",                  "Unmark (clear prune)"),
         ("F  /  Space",        "Fit image to window"),
         ("1",                  "Actual size (100 %)"),

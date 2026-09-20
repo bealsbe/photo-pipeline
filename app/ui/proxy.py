@@ -22,6 +22,8 @@ class FilterState:
     show_unpaired: bool = True
     show_pruned:   bool = True
     show_unpruned: bool = True
+    show_marked:   bool = True
+    show_unmarked: bool = True
     # date range  (None = no bound)
     date_from: Optional[_pydate] = field(default=None)
     date_to:   Optional[_pydate] = field(default=None)
@@ -86,6 +88,10 @@ class PhotoFilterProxy(QSortFilterProxyModel):
         if record.is_pruned     and not s.show_pruned:
             return False
         if not record.is_pruned and not s.show_unpruned:
+            return False
+        if record.is_marked_for_export     and not s.show_marked:
+            return False
+        if not record.is_marked_for_export and not s.show_unmarked:
             return False
 
         rec_date = record.shot_time.date()

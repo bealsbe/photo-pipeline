@@ -230,6 +230,12 @@ class FilterBar(QWidget):
         self._show_pruned.toggled.connect(self._emit)
         lay.addWidget(self._show_pruned)
 
+        # ── marked-only toggle (filter to is_marked_for_export) ─────────── #
+        self._marked_only = _ToggleButton("Marked Only", "#3ac96a", checked=False)
+        self._marked_only.setToolTip("Show only files marked for export")
+        self._marked_only.toggled.connect(self._emit)
+        lay.addWidget(self._marked_only)
+
         lay.addStretch()
 
         # ── sort buttons ─────────────────────────────────────────────── #
@@ -339,6 +345,7 @@ class FilterBar(QWidget):
             date_to   = _qdate_to_py(self._date_to.date())
 
         showing_pruned = self._show_pruned.isChecked()
+        marked_only    = self._marked_only.isChecked()
         return FilterState(
             show_raw      = True,
             show_jpg      = True,
@@ -346,6 +353,8 @@ class FilterBar(QWidget):
             show_unpaired = True,
             show_pruned   = showing_pruned,
             show_unpruned = True,
+            show_marked   = True,
+            show_unmarked = not marked_only,
             date_from     = date_from,
             date_to       = date_to,
             sort_key      = sort_key,
@@ -355,6 +364,7 @@ class FilterBar(QWidget):
     def restore_state(
         self,
         show_pruned: bool = False,
+        marked_only: bool = False,
         sort_key:  str  = "date",
         sort_asc:  bool = True,
         date_from: Optional[_pydate] = None,
@@ -365,6 +375,10 @@ class FilterBar(QWidget):
         self._show_pruned.blockSignals(True)
         self._show_pruned.setChecked(show_pruned)
         self._show_pruned.blockSignals(False)
+
+        self._marked_only.blockSignals(True)
+        self._marked_only.setChecked(marked_only)
+        self._marked_only.blockSignals(False)
 
         # sort buttons
         for btn in self._sort_btns:
@@ -422,6 +436,9 @@ class FilterBar(QWidget):
         self._show_pruned.blockSignals(True)
         self._show_pruned.setChecked(False)
         self._show_pruned.blockSignals(False)
+        self._marked_only.blockSignals(True)
+        self._marked_only.setChecked(False)
+        self._marked_only.blockSignals(False)
         self._date_toggle.blockSignals(True)
         self._date_toggle.setChecked(False)
         self._date_toggle.blockSignals(False)
