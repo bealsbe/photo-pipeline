@@ -35,6 +35,9 @@ F  / Space          fit to window
 -                   zoom out
 Delete / P          toggle prune mark
 U                   unmark (clear prune)
+C                   toggle the crop tool
+Enter               apply the crop (crop mode)
+R                   reset the crop rect to the full frame (crop mode)
 """
 from __future__ import annotations
 
@@ -76,8 +79,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from app.models.crop import (
+    FREEFORM,
+    ORIGINAL,
+    AspectRatio,
+    Crop,
+    ratio_from_label,
+)
 from app.models.photo_record import FileType, PhotoRecord
 from app.thumbnails.image_loader import ImageLoader
+from app.ui.crop_bar import CropBar
+from app.ui.crop_overlay import CropOverlay
 from app.ui.icons import icon as _icon
 
 try:
@@ -792,6 +804,11 @@ class _ImageView(QGraphicsView):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
 
+        # Set by ImageViewer once the crop tool is built.  Every path that
+        # changes the view transform notifies it so the crop rect stays
+        # welded to the photo under pan, zoom and resize.
+        self.crop_overlay = None
+
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
 
@@ -903,6 +920,19 @@ class _ImageView(QGraphicsView):
         self._scene.setSceneRect(self._item.boundingRect())
         self._fit_mode = True
         self._fit_now()
+        self._notify_crop_overlay()
+
+    def image_size(self) -> QSize:
+        """Pixel dimensions of the image currently displayed (may be empty)."""
+        return self._item.pixmap().size()
+
+    def _notify_crop_overlay(self) -> None:
+        if self.crop_overlay is not None and self.crop_overlay.isVisible():
+            self.crop_overlay.refresh()
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        super().scrollContentsBy(dx, dy)
+        self._notify_crop_overlay()
 
     # ------------------------------------------------------------------ #
     # Transition API                                                       #
@@ -1234,6 +1264,7 @@ class _ImageView(QGraphicsView):
         self._status.setGeometry(self.rect())
         if self._fit_mode:
             self._fit_now()
+        self._notify_crop_overlay()
 
     # ------------------------------------------------------------------ #
     # Internal                                                             #
@@ -1350,6 +1381,7 @@ class ImageViewer(QWidget):
 
     prune_toggled: Signal = Signal(object)   # PhotoRecord
     mark_toggled:  Signal = Signal(object)   # PhotoRecord
+    crop_changed:  Signal = Signal(object)   # PhotoRecord — crop applied/cleared
 
     def __init__(
         self,
@@ -1402,6 +1434,12 @@ class ImageViewer(QWidget):
         self._drag_target_index: Optional[int] = None
         self._drag_committing:   bool           = False
 
+        # Crop tool state
+        self._crop_mode: bool = False
+        # Set when the crop tool is asked for before the image has decoded;
+        # _on_image_ready opens it as soon as there are pixels to crop.
+        self._crop_pending: bool = False
+
         self._build_ui()
         self._loader.image_ready.connect(self._on_image_ready)
         self._loader.load_failed.connect(self._on_load_failed)
@@ -1417,6 +1455,7 @@ class ImageViewer(QWidget):
     # ------------------------------------------------------------------ #
 
     def navigate_to(self, records: List[PhotoRecord], index: int) -> None:
+        self._exit_crop_mode(apply=False)
         self._records = list(records)
         self._index = max(0, min(index, len(records) - 1))
         self._pending_shot = None
@@ -1436,6 +1475,9 @@ class ImageViewer(QWidget):
         bottom_bar = self._build_bottom_bar()
 
         root.addWidget(self._build_controls())
+        self._crop_bar = CropBar()
+        self._crop_bar.hide()
+        root.addWidget(self._crop_bar)
         self._prune_banner = self._build_prune_banner()
         root.addWidget(self._prune_banner)
 
@@ -1467,6 +1509,18 @@ class ImageViewer(QWidget):
         self._btn_mark.clicked.connect(self._toggle_mark)
         self._btn_show_folder.clicked.connect(self._show_in_folder)
         self._btn_info.clicked.connect(self._toggle_exif_panel)
+
+        # Crop tool — overlay lives on the view's viewport so it shares the
+        # viewport coordinate system and is painted above the image.
+        self._crop_overlay = CropOverlay(self._view)
+        self._view.crop_overlay = self._crop_overlay
+        self._crop_overlay.crop_changed.connect(self._on_crop_rect_changed)
+        self._view.zoom_changed.connect(self._crop_overlay.refresh)
+        self._btn_crop.clicked.connect(self._toggle_crop_mode)
+        self._crop_bar.aspect_selected.connect(self._on_aspect_selected)
+        self._crop_bar.reset_requested.connect(self._crop_overlay.reset)
+        self._crop_bar.cancel_requested.connect(lambda: self._exit_crop_mode(False))
+        self._crop_bar.apply_requested.connect(lambda: self._exit_crop_mode(True))
 
     def _build_controls(self) -> QWidget:
         bar = QWidget()
@@ -1532,6 +1586,15 @@ class ImageViewer(QWidget):
         if not ic_chk.isNull():
             self._btn_mark.setIcon(ic_chk)
 
+        self._btn_crop = QPushButton("Crop")
+        self._btn_crop.setFixedSize(64, 28)
+        self._btn_crop.setCheckable(True)
+        self._btn_crop.setToolTip("Crop this photo  (C)")
+        self._btn_crop.setStyleSheet(self._crop_style(False))
+        ic_crop = _icon("crop", size=12)
+        if not ic_crop.isNull():
+            self._btn_crop.setIcon(ic_crop)
+
         self._btn_pair = QPushButton("⇄ Pair")
         self._btn_pair.setFixedSize(66, 28)
         self._btn_pair.setCheckable(True)
@@ -1561,6 +1624,8 @@ class ImageViewer(QWidget):
         lay.addWidget(self._lbl_pos)
         lay.addStretch()
         lay.addWidget(self._btn_pair)
+        lay.addSpacing(4)
+        lay.addWidget(self._btn_crop)
         lay.addSpacing(4)
         lay.addWidget(self._btn_show_folder)
         lay.addSpacing(4)
@@ -1691,7 +1756,12 @@ class ImageViewer(QWidget):
         self._lbl_pair_paths.setStyleSheet("color:#5a5a7a;font-size:10px;")
         self._lbl_pair_paths.hide()
 
+        self._lbl_crop = QLabel("")
+        self._lbl_crop.setStyleSheet("color:#ff6d00;font-size:11px;")
+        self._lbl_crop.hide()
+
         meta_lay.addWidget(self._lbl_meta)
+        meta_lay.addWidget(self._lbl_crop)
         meta_lay.addWidget(self._lbl_exif)
         meta_lay.addWidget(self._lbl_pair_paths)
         outer_lay.addWidget(meta)
@@ -2026,6 +2096,7 @@ class ImageViewer(QWidget):
         """Switch between the primary record and its pair."""
         if not self._pair_record:
             return
+        self._exit_crop_mode(apply=False)
         self._show_pair_mode = not self._show_pair_mode
         display = self._pair_record if self._show_pair_mode else self._records[self._index]
         self._btn_pair.setChecked(self._show_pair_mode)
@@ -2042,9 +2113,12 @@ class ImageViewer(QWidget):
         else:
             self._view.set_loading()
             self._loader.request(display)
+        self._sync_crop_btn(display)
 
     def _load_current(self, animate: bool = True) -> None:
         # Reset pair mode when navigating to a new image
+        self._exit_crop_mode(apply=False)
+        self._crop_pending = False
         self._show_pair_mode = False
         record = self._records[self._index]
         self._pair_record = self._pair_lookup(record)
@@ -2069,6 +2143,7 @@ class ImageViewer(QWidget):
 
         self._sync_prune_btn(record)
         self._sync_mark_btn(record)
+        self._sync_crop_btn(record)
         self._update_meta(record)
 
         cached = self._loader.get_cached(record.path)
@@ -2126,6 +2201,11 @@ class ImageViewer(QWidget):
             self._records[self._index],
             dims=(pixmap.width(), pixmap.height()),
         )
+        # The crop readout is in pixels, so it only becomes meaningful once
+        # the image size is known.
+        self._sync_crop_btn(expected)
+        if self._crop_pending:
+            self._enter_crop_mode()
 
     def _on_load_failed(self, path: Path, msg: str) -> None:
         self._pending_shot = None
@@ -2225,6 +2305,174 @@ class ImageViewer(QWidget):
         self._btn_mark.setChecked(record.is_marked_for_export)
         self._apply_mark_style(record.is_marked_for_export)
         self.mark_toggled.emit(record)
+
+    # ------------------------------------------------------------------ #
+    # Crop                                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _current_display_record(self) -> PhotoRecord:
+        """The record actually on screen — the pair file when in pair view."""
+        if self._show_pair_mode and self._pair_record is not None:
+            return self._pair_record
+        return self._records[self._index]
+
+    def _set_nav_enabled(self, on: bool) -> None:
+        """
+        Enable/disable navigation.  Re-enabling restores the correct state for
+        the current position rather than blindly enabling both arrows.
+        """
+        self._btn_prev.setEnabled(on and self._index > 0)
+        self._btn_next.setEnabled(on and self._index < len(self._records) - 1)
+        self._btn_pair.setEnabled(on and self._pair_record is not None)
+
+    def _toggle_crop_mode(self) -> None:
+        if self._crop_mode:
+            self._exit_crop_mode(apply=True)
+        else:
+            self._enter_crop_mode()
+
+    def _enter_crop_mode(self) -> None:
+        """Show the crop rect and ratio bar for the photo on screen."""
+        if self._crop_mode:
+            return
+        size = self._view.image_size()
+        if size.isEmpty():
+            # Still decoding.  Arm the tool rather than swallowing the
+            # keystroke — it opens the moment the pixels arrive.
+            self._crop_pending = True
+            return
+
+        self._crop_pending = False
+        record = self._current_display_record()
+        self._crop_mode = True
+
+        self._crop_overlay.set_image_size(size.width(), size.height())
+        existing = record.crop or Crop.full()
+        self._crop_overlay.set_crop(existing)
+
+        # Restore the ratio this crop was made with, but do not reshape the
+        # rect — the saved rect is already correct and nudging it on open
+        # would quietly alter a crop the user was happy with.
+        ratio = ratio_from_label(existing.aspect_label) or FREEFORM
+        self._crop_bar.select_aspect(ratio)
+        self._crop_overlay.set_aspect(self._resolve_ratio(ratio), reshape=False)
+
+        # Hand-drag panning would fight the rect for the same gesture.
+        self._view.setDragMode(QGraphicsView.NoDrag)
+        self._crop_overlay.refresh()
+        self._crop_overlay.show()
+        self._crop_overlay.raise_()
+        self._crop_bar.show()
+        self._btn_crop.setChecked(True)
+        self._apply_crop_style(True)
+        self._set_nav_enabled(False)
+        self._on_crop_rect_changed(self._crop_overlay.crop)
+
+    def _exit_crop_mode(self, apply: bool) -> None:
+        """
+        Leave crop mode.  With *apply* the rect becomes the record's crop
+        (a full-frame rect clears it); otherwise the edit is discarded.
+        """
+        self._crop_pending = False
+        if not self._crop_mode:
+            return
+        self._crop_mode = False
+        self._crop_overlay.hide()
+        self._crop_bar.hide()
+        self._view.setDragMode(QGraphicsView.ScrollHandDrag)
+        self._btn_crop.setChecked(False)
+        self._set_nav_enabled(True)
+
+        record = self._current_display_record()
+        if apply:
+            rect = self._crop_overlay.crop
+            record.crop = None if rect.is_full else rect
+            self.crop_changed.emit(record)
+
+        self._sync_crop_btn(record)
+
+    def _resolve_ratio(self, ratio: AspectRatio) -> Optional[AspectRatio]:
+        """
+        Turn a bar selection into a constraint the overlay can enforce.
+
+        "Original" has no fixed numbers — it means whatever this photo's own
+        aspect is, so it is resolved against the live image size.
+        """
+        if ratio is None:
+            return None
+        if ratio.label == ORIGINAL.label:
+            size = self._view.image_size()
+            if size.isEmpty():
+                return None
+            return AspectRatio(ORIGINAL.label, size.width(), size.height())
+        return None if ratio.is_free else ratio
+
+    def _on_aspect_selected(self, ratio: AspectRatio) -> None:
+        if not self._crop_mode:
+            return
+        # Stamp the chosen label onto the rect so it survives to the sidecar
+        # and comes back selected next time this photo is opened.
+        cur = self._crop_overlay.crop
+        label = None if ratio.label == FREEFORM.label else ratio.label
+        self._crop_overlay.set_crop(
+            Crop(cur.left, cur.top, cur.right, cur.bottom, label)
+        )
+        self._crop_overlay.set_aspect(self._resolve_ratio(ratio), reshape=True)
+        self._on_crop_rect_changed(self._crop_overlay.crop)
+
+    def _on_crop_rect_changed(self, crop: Crop) -> None:
+        """Live readout while the rect is being dragged."""
+        size = self._view.image_size()
+        if size.isEmpty():
+            return
+        w, h = crop.pixel_size(size.width(), size.height())
+        self._crop_bar.set_size_readout(w, h, size.width(), size.height())
+
+    @staticmethod
+    def _crop_style(active: bool) -> str:
+        if active:
+            return (
+                "QPushButton{background:rgba(255,109,0,0.24);color:#ff6d00;"
+                "border:1px solid rgba(255,109,0,0.70);"
+                "border-radius:4px;font-size:12px;font-weight:bold;}"
+                "QPushButton:hover{background:rgba(255,109,0,0.34);}"
+            )
+        return (
+            "QPushButton{background:rgba(255,109,0,0.08);color:#8888a8;"
+            "border:1px solid rgba(255,109,0,0.18);"
+            "border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:rgba(255,109,0,0.18);color:#f0f0f0;"
+            "border-color:rgba(255,109,0,0.45);}"
+        )
+
+    def _apply_crop_style(self, active: bool) -> None:
+        self._btn_crop.setStyleSheet(self._crop_style(active))
+        ic = _icon("crop", size=12)
+        if not ic.isNull():
+            self._btn_crop.setIcon(ic)
+
+    def _sync_crop_btn(self, record: PhotoRecord) -> None:
+        """Reflect *record*'s saved crop in the toolbar button and status line."""
+        cropped = record.is_cropped
+        self._btn_crop.blockSignals(True)
+        self._btn_crop.setChecked(self._crop_mode)
+        self._apply_crop_style(self._crop_mode or cropped)
+        self._btn_crop.setText("Crop" if not cropped else "Cropped")
+        self._btn_crop.blockSignals(False)
+
+        if not cropped:
+            self._lbl_crop.hide()
+            return
+
+        size = self._view.image_size()
+        crop = record.crop
+        if size.isEmpty():
+            self._lbl_crop.setText("\u2702  Cropped")
+        else:
+            w, h = crop.pixel_size(size.width(), size.height())
+            ratio = f"  \u2022  {crop.aspect_label}" if crop.aspect_label else ""
+            self._lbl_crop.setText(f"\u2702  Cropped to {w} \u00d7 {h} px{ratio}")
+        self._lbl_crop.show()
 
     def _show_in_folder(self) -> None:
         """Open the system file manager with the current file selected."""
@@ -2388,6 +2636,22 @@ class ImageViewer(QWidget):
 
     def keyPressEvent(self, event) -> None:
         k = event.key()
+
+        # Crop mode owns the keyboard: navigation would abandon the rect
+        # half-finished, so only the crop verbs are live.
+        if self._crop_mode:
+            if   k in (Qt.Key_Return, Qt.Key_Enter): self._exit_crop_mode(True)
+            elif k == Qt.Key_Escape:                 self._exit_crop_mode(False)
+            elif k == Qt.Key_C:                      self._exit_crop_mode(True)
+            elif k == Qt.Key_R:                      self._crop_overlay.reset()
+            elif k in (Qt.Key_F, Qt.Key_Space):      self._view.fit_view()
+            elif k == Qt.Key_1:                      self._view.zoom_actual()
+            elif k in (Qt.Key_Plus, Qt.Key_Equal):   self._view.zoom_in()
+            elif k == Qt.Key_Minus:                  self._view.zoom_out()
+            else:
+                super().keyPressEvent(event)
+            return
+
         if   k in (Qt.Key_Left,  Qt.Key_A):          self.go_prev()
         elif k in (Qt.Key_Right, Qt.Key_D):           self.go_next()
         elif k == Qt.Key_Home:                         self.go_first()
@@ -2399,6 +2663,7 @@ class ImageViewer(QWidget):
         elif k == Qt.Key_Minus:                        self._view.zoom_out()
         elif k in (Qt.Key_Delete, Qt.Key_P):          self._toggle_prune()
         elif k == Qt.Key_M:                            self._toggle_mark()
+        elif k == Qt.Key_C:                            self._enter_crop_mode()
         elif k == Qt.Key_U:                            self._unmark()
         elif k == Qt.Key_Question:                     self._show_shortcuts()
         else:
@@ -2412,5 +2677,11 @@ class ImageViewer(QWidget):
         self._shortcuts_dlg.raise_()
 
     def closeEvent(self, event) -> None:
+        # Closing with the crop tool open commits, matching the convention
+        # that switching away from a crop tool applies it.  Escape is the
+        # way to discard, and nothing is written to the original file either
+        # way — the crop is only metadata until export.
+        self._exit_crop_mode(apply=True)
+        self._view.crop_overlay = None
         self._loader.shutdown()
         super().closeEvent(event)

@@ -25,6 +25,11 @@ PlannedOp
 LibraryPlan
     Given a list of PhotoRecords + a library root, builds the full set of
     PlannedOps, detects conflicts, and exposes helpers for the UI.
+
+Cropping
+    A record carrying a Crop is exported cropped.  JPGs are re-encoded with
+    the crop baked into the pixels; RAWs are copied byte-for-byte and get an
+    XMP sidecar holding the same rect (see app/ops/crop_export.py for why).
 """
 from __future__ import annotations
 
@@ -38,6 +43,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 from app.models.photo_record import FileType, PhotoRecord
+from app.ops.crop_export import (
+    remove_xmp_crop,
+    render_cropped_jpeg,
+    write_xmp_crop,
+)
 
 # ── date validation ───────────────────────────────────────────────────────────
 
@@ -158,6 +168,40 @@ def _safe_copy(src: Path, dest: Path, stat: os.stat_result) -> None:
         raise
 
 
+def _clear_stale_crop(op: "PlannedOp", dest: Path) -> None:
+    """
+    Drop a crop left in the destination's XMP sidecar by an earlier export.
+
+    Only runs when the user deliberately overwrote an existing file: without
+    that guard, exporting an uncropped RAW would silently wipe a crop someone
+    had since made in Lightroom against the same sidecar.
+    """
+    if op.record.file_type != FileType.RAW:
+        return
+    if not (op.conflict and op.resolution == Resolution.OVERWRITE):
+        return
+    remove_xmp_crop(dest)
+
+
+def _write_with_crop(op: "PlannedOp", dest: Path, stat: os.stat_result) -> None:
+    """
+    Materialise *op* at *dest*, applying the record's crop.
+
+    JPG  — re-encoded with the crop applied to the pixels.
+    RAW  — copied untouched, then an XMP sidecar is written alongside it.
+    """
+    record = op.record
+    crop   = record.crop
+
+    if record.file_type == FileType.JPG:
+        render_cropped_jpeg(op.src, dest, crop)
+        return
+
+    # RAW: the bits are sacred.  Copy, then describe the crop next to them.
+    _safe_copy(op.src, dest, stat)
+    write_xmp_crop(dest, crop)
+
+
 # ── planned operation ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -208,6 +252,10 @@ class OpGroup:
     @property
     def pruned_count(self) -> int:
         return sum(1 for op in self.ops if op.record.is_pruned)
+
+    @property
+    def cropped_count(self) -> int:
+        return sum(1 for op in self.ops if op.record.is_cropped)
 
 
 # ── library plan ──────────────────────────────────────────────────────────────
@@ -285,6 +333,10 @@ class LibraryPlan:
     def conflict_count(self) -> int:
         return sum(1 for op in self.ops if op.conflict)
 
+    @property
+    def cropped_count(self) -> int:
+        return sum(1 for op in self.ops if op.record.is_cropped)
+
     # ── bulk resolution ───────────────────────────────────────────────────
 
     def apply_bulk_resolution(self, r: Resolution) -> None:
@@ -351,6 +403,10 @@ class LibraryPlan:
         - Skipped ops (Resolution.SKIP) are silently omitted from both lists.
         - Destination parent directories are created as needed.
         - File timestamps (atime + mtime) are preserved after copy.
+        - Records carrying a crop are written through _write_with_crop(): the
+          JPG is re-encoded cropped, the RAW is copied intact beside an XMP
+          sidecar.  A cropped move therefore re-encodes and then unlinks the
+          source rather than renaming it.
         """
         assert mode in ("copy", "move"), f"mode must be 'copy' or 'move', got {mode!r}"
 
@@ -381,8 +437,19 @@ class LibraryPlan:
                     continue
                 stat = src.stat()
 
-                if mode == "copy":
+                cropped = op.record.is_cropped
+
+                if cropped:
+                    # A cropped JPG is a different file from its source, so the
+                    # rename fast-path and the size-verified copy both go out
+                    # the window — write the new pixels, then drop the original
+                    # if this was a move.
+                    _write_with_crop(op, dest, stat)
+                    if mode == "move":
+                        src.unlink()
+                elif mode == "copy":
                     _safe_copy(src, dest, stat)
+                    _clear_stale_crop(op, dest)
                 else:
                     # Prefer os.rename (atomic, instant on same filesystem)
                     try:
@@ -391,6 +458,7 @@ class LibraryPlan:
                         # Cross-device move: safe copy then delete src
                         _safe_copy(src, dest, stat)
                         src.unlink()
+                    _clear_stale_crop(op, dest)
 
                 # Restore mtime so the file date is stable in the library
                 try:

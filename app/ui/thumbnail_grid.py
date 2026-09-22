@@ -139,6 +139,38 @@ class ThumbnailDelegate(QStyledItemDelegate):
         return QSize(self.thumb_size + self.PAD * 2 + 6,
                      self.thumb_size + self.LABEL_H + self.PAD * 2 + 6)
 
+    @staticmethod
+    def _draw_crop_frame(painter: QPainter, image_rect: QRect, crop) -> None:
+        """Outline *crop* over the thumbnail and dim what it discards."""
+        if image_rect.width() <= 0 or image_rect.height() <= 0:
+            return
+        w, h = image_rect.width(), image_rect.height()
+        cr = QRect(
+            image_rect.x() + int(crop.left * w),
+            image_rect.y() + int(crop.top  * h),
+            max(1, int(crop.width  * w)),
+            max(1, int(crop.height * h)),
+        )
+
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+
+        # Scrim the discarded margins so the kept area reads as the photo.
+        scrim = QColor(6, 6, 12, 150)
+        painter.fillRect(QRect(image_rect.x(), image_rect.y(),
+                               w, cr.top() - image_rect.y()), scrim)
+        painter.fillRect(QRect(image_rect.x(), cr.bottom() + 1,
+                               w, image_rect.bottom() - cr.bottom()), scrim)
+        painter.fillRect(QRect(image_rect.x(), cr.top(),
+                               cr.left() - image_rect.x(), cr.height()), scrim)
+        painter.fillRect(QRect(cr.right() + 1, cr.top(),
+                               image_rect.right() - cr.right(), cr.height()), scrim)
+
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor(0xff, 0x6d, 0x00, 210), 1))
+        painter.drawRect(cr.adjusted(0, 0, -1, -1))
+        painter.restore()
+
     def paint(
         self,
         painter: QPainter,
@@ -183,8 +215,17 @@ class ThumbnailDelegate(QStyledItemDelegate):
             x = thumb_rect.x() + (thumb_rect.width()  - scaled.width())  // 2
             y = thumb_rect.y() + (thumb_rect.height() - scaled.height()) // 2
             painter.drawPixmap(x, y, scaled)
+            image_rect = QRect(x, y, scaled.width(), scaled.height())
         else:
             self._draw_placeholder(painter, thumb_rect, record, alpha=1.0)
+            image_rect = thumb_rect
+
+        # ── crop framing ───────────────────────────────────────────────── #
+        # Drawn as the actual rect over the thumbnail rather than a generic
+        # badge: at grid sizes you can read the new framing at a glance,
+        # which is the thing you actually want to know.
+        if record and record.is_cropped and not record.is_pruned:
+            self._draw_crop_frame(painter, image_rect, record.crop)
 
         # ── pruned overlay ────────────────────────────────────────────── #
         if record and record.is_pruned:

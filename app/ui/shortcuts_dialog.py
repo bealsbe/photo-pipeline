@@ -34,6 +34,7 @@ _SECTIONS = [
         ("End",                "Last image"),
         ("P  /  Delete",       "Toggle prune mark"),
         ("M",                  "Toggle mark-for-export"),
+        ("C",                  "Open the crop tool"),
         ("U",                  "Unmark (clear prune)"),
         ("F  /  Space",        "Fit image to window"),
         ("1",                  "Actual size (100 %)"),
@@ -42,6 +43,15 @@ _SECTIONS = [
         ("Scroll wheel",       "Zoom in / out"),
         ("Double-click",       "Toggle fit ↔ 100 %"),
         ("Escape",             "Close viewer"),
+    ]),
+    ("Crop Tool", [
+        ("C  /  Enter",        "Apply the crop and leave crop mode"),
+        ("Escape",             "Cancel — discard this crop edit"),
+        ("R",                  "Reset the rect to the full frame"),
+        ("Drag inside",        "Move the crop rect"),
+        ("Drag a corner/edge", "Resize (constrained when a ratio is locked)"),
+        ("Double-click",       "Reset the rect to the full frame"),
+        ("⇅ button",           "Swap ratio between portrait and landscape"),
     ]),
 ]
 

@@ -711,14 +711,17 @@ class ExportDialog(QDialog):
         n_unp_jpg = sum(1 for r in records if r.file_type == FileType.JPG and not r.is_paired)
         n_pruned  = sum(1 for r in records if r.is_pruned) if self._chk_pruned.isChecked() else 0
 
-        self._refresh_stats(self._plan.total, self._plan.conflict_count, n_unp_raw, n_unp_jpg, n_pruned)
+        self._refresh_stats(
+            self._plan.total, self._plan.conflict_count,
+            n_unp_raw, n_unp_jpg, n_pruned, self._plan.cropped_count,
+        )
         self._refresh_preview(self._plan.grouped())
         self._refresh_conflict_section()
         self._update_export_button()
 
     def _refresh_stats(self, n_total: int, n_conflict: int,
                        n_unp_raw: int, n_unp_jpg: int,
-                       n_pruned: int = 0) -> None:
+                       n_pruned: int = 0, n_cropped: int = 0) -> None:
         while self._stats_lay.count():
             item = self._stats_lay.takeAt(0)
             if item.widget():
@@ -757,6 +760,14 @@ class ExportDialog(QDialog):
             self._stats_lay.addWidget(
                 chip(f"✕ {n_pruned} pruned", "#1a0a0a", "#c04040")
             )
+        if n_cropped:
+            c = chip(f"✂ {n_cropped} cropped", "#201304", "#ff8524")
+            c.setToolTip(
+                "Cropped JPGs are re-encoded with the crop applied.\n"
+                "Cropped RAWs are copied untouched and get an .xmp sidecar\n"
+                "carrying the same crop, which Lightroom / Camera Raw read."
+            )
+            self._stats_lay.addWidget(c)
         self._stats_lay.addStretch()
 
     def _refresh_preview(self, groups) -> None:
@@ -840,6 +851,20 @@ class ExportDialog(QDialog):
             else:
                 row_lay.addSpacing(44)
 
+            if g.cropped_count:
+                crop_lbl = QLabel(f"  ✂ {g.cropped_count}")
+                crop_lbl.setStyleSheet(
+                    f"font-size:11px; color:{_ORANGE}; font-weight:600;"
+                    " min-width:40px; background:transparent;"
+                )
+                crop_lbl.setToolTip(
+                    "JPGs in this group are re-encoded with the crop applied.\n"
+                    "RAWs are copied untouched with an .xmp sidecar alongside."
+                )
+                row_lay.addWidget(crop_lbl)
+            else:
+                row_lay.addSpacing(40)
+
             if has_pruned:
                 prune_lbl = QLabel(f"  ✕ {g.pruned_count}")
                 prune_lbl.setStyleSheet(
@@ -899,11 +924,16 @@ class ExportDialog(QDialog):
         if self._plan:
             records  = self._active_records()
             n_pruned = sum(1 for r in records if r.is_pruned) if self._chk_pruned.isChecked() else 0
+            # NB: this runs after _rebuild_plan's own _refresh_stats call and
+            # overwrites it, so every stat has to be passed here too — an
+            # omitted argument silently falls back to its default and the
+            # corresponding chip disappears.
             self._refresh_stats(
                 self._plan.total, self._plan.conflict_count,
                 sum(1 for r in records if r.file_type == FileType.RAW and not r.is_paired),
                 sum(1 for r in records if r.file_type == FileType.JPG and not r.is_paired),
                 n_pruned,
+                self._plan.cropped_count,
             )
 
     # ──────────────────────────────────────────────────────────────────────

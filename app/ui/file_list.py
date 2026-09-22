@@ -233,7 +233,12 @@ class PhotoTableModel(QAbstractTableModel):
         col  = index.column()
 
         if role == Qt.DisplayRole:
-            if col == COL_FILE:     return prow.display_name
+            if col == COL_FILE:
+                # Scissors prefix marks a cropped file — the list has no room
+                # for a preview, so the name column carries the signal.
+                if prow.primary.is_cropped:
+                    return f"\u2702 {prow.display_name}"
+                return prow.display_name
             if col == COL_TYPE:     return prow.type_label
             if col == COL_SIZE:     return _fmt_size(prow.file_size)
             if col == COL_MODIFIED: return prow.modified_time.strftime("%Y-%m-%d  %H:%M")

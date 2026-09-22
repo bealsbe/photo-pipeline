@@ -42,6 +42,7 @@ _SETTINGS_APP = "PhotoPipeline"
 _PRUNE_FILE   = ".photo_pipeline.json"       # sidecar: prune marks
 _PAIRS_FILE   = ".photo-pipeline-pairs.json" # sidecar: persistent pair marks
 _EXPORT_FILE  = ".photo-pipeline-export.json"  # sidecar: marked-for-export marks
+_CROPS_FILE   = ".photo-pipeline-crops.json"   # sidecar: per-file crop rects
 
 
 
@@ -489,6 +490,7 @@ class MainWindow(QMainWindow):
         self._grid_view.reset_records(all_records)
         self._load_prune_marks()
         self._load_export_marks()
+        self._load_crops()
 
         self._update_stats()
         pairs = self._collection.stats["paired"] // 2
@@ -549,6 +551,7 @@ class MainWindow(QMainWindow):
             )
             self._viewer.prune_toggled.connect(self._on_viewer_prune_toggled)
             self._viewer.mark_toggled.connect(self._on_viewer_mark_toggled)
+            self._viewer.crop_changed.connect(self._on_viewer_crop_changed)
             self._viewer.destroyed.connect(lambda: setattr(self, "_viewer", None))
             self._viewer.show()
         else:
@@ -693,6 +696,43 @@ class MainWindow(QMainWindow):
         self._update_status_count()
         self._save_export_marks()
 
+    # ------------------------------------------------------------------ #
+    # Crop                                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _on_viewer_crop_changed(self, record) -> None:
+        """A crop was applied or cleared in the viewer."""
+        self._refresh_crop([record])
+
+    def _refresh_crop(self, records) -> None:
+        """
+        Copy the crop onto each record's pair, repaint, and persist.
+
+        A RAW and its JPG are two renderings of one exposure, so a crop made
+        on either is a statement about the shot, not about the file — the same
+        reasoning that already propagates prune and keep marks across a pair.
+        """
+        all_affected = list(records)
+        i = 0
+        while i < len(all_affected):
+            r = all_affected[i]
+            pair = self._collection.find_pair(r)
+            if pair is not None and pair.crop != r.crop:
+                pair.crop = r.crop
+                all_affected.append(pair)
+            i += 1
+
+        self._file_list.source_model().notify_records_changed(all_affected)
+        self._grid_view.notify_records_changed(all_affected)
+        self._save_crops()
+
+        n = sum(1 for r in self._collection if r.is_cropped)
+        touched = all_affected[0] if all_affected else None
+        verb = "Crop cleared" if (touched and not touched.is_cropped) else "Crop saved"
+        self._statusbar.showMessage(
+            f"{verb} — {n} file{'s' if n != 1 else ''} cropped in this folder", 4000
+        )
+
     def _open_review(self) -> None:
         pruned = self._collection.pruned()
         if not pruned:
@@ -751,6 +791,17 @@ class MainWindow(QMainWindow):
         all_records = self._collection.all()
         self._file_list.source_model().reset_records(all_records)
         self._grid_view.reset_records(all_records)
+
+        # The prune / export / crop sidecars are keyed by file path, and the
+        # sort just moved every file into RAW/ or JPG/.  Without rewriting
+        # them here they still name the pre-sort paths, and every mark the
+        # user made is silently dropped the next time the folder is opened.
+        # (The pair sidecar is immune — its keys use the canonical parent,
+        # which deliberately strips the RAW/JPG level.)
+        self._save_prune_marks()
+        self._save_export_marks()
+        self._save_crops()
+
         self._update_stats()
         self._update_status_count()
 
@@ -958,6 +1009,38 @@ class MainWindow(QMainWindow):
             self._grid_view.notify_records_changed(affected)
             self._update_stats()
             self._update_status_count()
+
+    def _save_crops(self) -> None:
+        """Write current crop rects to .photo-pipeline-crops.json."""
+        if not self._current_folder:
+            return
+        from app.models.crop_sidecar import write_crops
+        crops = {r.path: r.crop for r in self._collection if r.is_cropped}
+        try:
+            write_crops(self._current_folder, crops)
+        except Exception as exc:
+            self._statusbar.showMessage(
+                f"\u26a0 Could not save crops: {exc}", 8000
+            )
+
+    def _load_crops(self) -> None:
+        """Apply saved crop rects from .photo-pipeline-crops.json after a scan."""
+        if not self._current_folder:
+            return
+        from app.models.crop_sidecar import read_crops
+        saved = read_crops(self._current_folder)
+        if not saved:
+            return
+
+        affected = []
+        for r in self._collection.all():
+            crop = saved.get(r.path)
+            if crop is not None:
+                r.crop = crop
+                affected.append(r)
+        if affected:
+            self._file_list.source_model().notify_records_changed(affected)
+            self._grid_view.notify_records_changed(affected)
 
     def _save_pair_marks(self, pair_keys=None) -> None:
         """Write pair keys to sidecar.  If pair_keys is None, use current collection."""

@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+from app.models.crop import Crop
+
 
 class FileType(Enum):
     JPG = "JPG"
@@ -57,6 +59,7 @@ class PhotoRecord:
     is_pruned: bool = False
     is_marked_for_export: bool = False
     pair_stem: Optional[str] = None  # lowercase stem shared with a paired file
+    crop: Optional[Crop] = None      # normalised crop rect; None = full frame
 
     # ------------------------------------------------------------------ #
     # Convenience properties                                               #
@@ -82,6 +85,10 @@ class PhotoRecord:
     @property
     def is_paired(self) -> bool:
         return self.pair_stem is not None
+
+    @property
+    def is_cropped(self) -> bool:
+        return self.crop is not None and not self.crop.is_full
 
     def __hash__(self) -> int:
         return hash(self.path)
