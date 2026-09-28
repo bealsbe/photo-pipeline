@@ -243,6 +243,14 @@ class PhotoCollection:
                 keys.add((str(canonical_parent), stem))
         return keys
 
+    def stem_siblings(self, record: PhotoRecord) -> List[PhotoRecord]:
+        """
+        Other records sharing *record*'s (canonical parent, stem), whether or
+        not they have been paired — the RAW that a JPG *would* pair with.
+        """
+        key = (self._canonical_parent(record.path), record.stem.lower())
+        return [r for r in self._pair_index.get(key, []) if r is not record]
+
     def find_pair(self, record: PhotoRecord) -> Optional[PhotoRecord]:
         """Return the RAW/JPG partner of *record*, or None if unpaired. O(1)."""
         if not record.is_paired:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from typing import List
 
-from PySide6.QtCore import QDir, QSettings, QSize, QTimer, Qt
+from PySide6.QtCore import QDir, QSettings, QTimer, Qt
 from PySide6.QtGui import QAction, QActionGroup
 from PySide6.QtWidgets import (
     QFileDialog,
@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QStackedWidget,
     QStatusBar,
-    QToolBar,
     QVBoxLayout,
     QWidget,
 )
@@ -26,14 +25,16 @@ from app.models.sidecar import atomic_write_text
 from app.models.photo_record import FileType
 from app.scanning.scanner import ScanWorker
 from app.thumbnails.generator import ThumbnailGenerator
+from app.ui.calendar_view import CalendarView
 from app.ui.file_list import FileListWidget
 from app.ui.filter_bar import FilterBar
 from app.ui.folder_bar import FolderBar
-from app.ui.icons import check_icon, icon
+from app.ui.icons import calendar_icon, check_icon, icon, tinted_icon
 from app.ui.prune_review import PruneReviewDialog
 from app.ui.pair_dialog import PairDialog
 from app.ui.separate_dialog import SeparateDialog
 from app.ui.shortcuts_dialog import KeyboardShortcutsDialog
+from app.ui.side_menu import SideMenu
 from app.ui.grouped_grid import GroupedGridView
 from app.ui.viewer import ImageViewer
 
@@ -51,15 +52,15 @@ _GENERATION_SIZE = 300   # fixed thumbnail generation + cache size
 _ZOOM_MIN        = 120
 _ZOOM_MAX        = 480
 _ZOOM_STEP       = 20
-_VIEW_LIST = 0
-_VIEW_GRID = 1
+_VIEW_LIST     = 0
+_VIEW_GRID     = 1
+_VIEW_CALENDAR = 2
 
 
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Photo Pipeline")
-        from app.ui.icons import tinted_icon
         self.setWindowIcon(tinted_icon("retro-camera", "#ff6d00", size=48))
         self.resize(1200, 780)
 
@@ -70,8 +71,8 @@ class MainWindow(QMainWindow):
         self._current_folder: Path | None = None
         self._library_folder: Path | None = None
 
-        # Scan buffer: accumulate file_found records and flush in batches
-        # to avoid thousands of individual model-insert signals per second.
+        # Scan buffer: accumulate scanned records and flush on a timer, so the
+        # models see one insert per frame rather than one per scanner batch.
         self._scan_buffer: List = []
         self._flush_timer = QTimer(self)
         self._flush_timer.setInterval(150)   # flush every 150 ms while scanning
@@ -79,9 +80,10 @@ class MainWindow(QMainWindow):
 
         self._shortcuts_dlg: KeyboardShortcutsDialog | None = None
 
-        self._build_menu()
-        self._build_toolbar()
+        self._build_actions()
         self._build_central()
+        self._build_side_menu()
+        self._build_menu()
         self._build_statusbar()
         # Keep filter-bar zoom slider in sync with Ctrl+scroll / pinch
         self._grid_view.thumb_size_changed.connect(self._filter_bar.set_zoom)
@@ -92,57 +94,98 @@ class MainWindow(QMainWindow):
     # Construction                                                         #
     # ------------------------------------------------------------------ #
 
+    def _build_actions(self) -> None:
+        """
+        One QAction per command, shared by the menu bar and the side menu.
+
+        Each shortcut must be bound exactly once: when a menu item and a
+        toolbar button each carried their own copy, Qt saw an ambiguous
+        shortcut and fired neither — Ctrl+1/2/3, Ctrl+O and friends were dead.
+        """
+        def act(icon_, text, slot=None, shortcut=None, tip=None, status=None,
+                checkable=False):
+            a = QAction(icon_, text, self)
+            if shortcut:
+                a.setShortcut(shortcut)
+            if tip:
+                a.setToolTip(tip)
+            if status:
+                a.setStatusTip(status)
+            a.setCheckable(checkable)
+            if slot is not None:
+                a.triggered.connect(slot)
+            return a
+
+        self._act_open = act(
+            icon("folder-open"), "&Open Working Folder…", self.open_folder, "Ctrl+O",
+            "Open working folder  (Ctrl+O)", "Open a folder to browse and cull")
+        self._act_export = act(
+            icon("file-import"), "&Export to Library…", self._open_export, "Ctrl+E",
+            "Export to library  (Ctrl+E)", "Export working folder to the library structure")
+        self._act_edit_copy = act(
+            tinted_icon("folder-open", "#5a8acc", size=24), "&Copy Marked RAWs to Folder…",
+            self._open_edit_copy, "Ctrl+Shift+E",
+            "Copy the RAW of every marked shot into a folder to edit from  (Ctrl+Shift+E)",
+            "Copy marked RAW files into one folder for editing")
+        self._act_review = act(
+            icon("trash"), "&Review Pruned…", self._open_review, "Ctrl+R",
+            "Review pruned files → Trash  (Ctrl+R)", "Review pruned files and commit to Trash")
+        self._act_sort = act(
+            icon("fork"), "&Sort into RAW / JPG…", self._open_sort, "Ctrl+Shift+S",
+            "Sort into RAW/ and JPG/ subfolders  (Ctrl+Shift+S)",
+            "Sort files into RAW/ and JPG/ subfolders")
+        self._act_pair = act(
+            icon("link"), "&Pair RAW + JPG…", self._open_pair, "Ctrl+Shift+P",
+            "Pair RAW+JPG by stem and save  (Ctrl+Shift+P)",
+            "Pair RAW and JPG files by stem and save to sidecar")
+
+        self._act_list = act(
+            icon("bullet-list"), "&List View", lambda: self._switch_view(_VIEW_LIST),
+            "Ctrl+1", "List view  (Ctrl+1)", checkable=True)
+        self._act_grid = act(
+            icon("grid"), "&Grid View", lambda: self._switch_view(_VIEW_GRID),
+            "Ctrl+2", "Grid view  (Ctrl+2)", checkable=True)
+        self._act_calendar = act(
+            calendar_icon("#c8c8d8", 24), "Library &Calendar",
+            lambda: self._switch_view(_VIEW_CALENDAR),
+            "Ctrl+3", "Library calendar  (Ctrl+3)", checkable=True)
+        self._act_list.setChecked(True)
+        grp = QActionGroup(self)
+        grp.setExclusive(True)
+        for a in (self._act_list, self._act_grid, self._act_calendar):
+            grp.addAction(a)
+
+        self._act_select = act(
+            icon("plus"), "&Select Mode", None, "S", "Multi-select mode  (S)",
+            checkable=True)
+        self._act_select.toggled.connect(self._on_select_mode_toggled)
+        # P and M are handled by the grid / list themselves; these buttons act
+        # on the current selection and carry no shortcut of their own.
+        self._act_cull = act(
+            icon("times-circle"), "&Prune Selected", self._toggle_prune_selected,
+            None, "Mark selected as pruned  (P)")
+        self._act_mark = act(
+            check_icon("#3ac96a", size=24), "&Mark Selected for Export",
+            self._toggle_mark_selected, None, "Mark selected for export  (M)")
+
     def _build_menu(self) -> None:
         mb = self.menuBar()
 
         file_menu = mb.addMenu("&File")
-
-        open_act = QAction("&Open Working Folder…", self)
-        open_act.setShortcut("Ctrl+O")
-        open_act.setStatusTip("Open a folder to browse and cull")
-        open_act.triggered.connect(self.open_folder)
-        file_menu.addAction(open_act)
-
+        file_menu.addAction(self._act_open)
         file_menu.addSeparator()
-
         quit_act = QAction("&Quit", self)
         quit_act.setShortcut("Ctrl+Q")
         quit_act.triggered.connect(self.close)
         file_menu.addAction(quit_act)
 
         prune_menu = mb.addMenu("&Prune")
-
-        review_act = QAction("&Review Pruned…", self)
-        review_act.setShortcut("Ctrl+R")
-        review_act.setStatusTip("Review pruned files and commit to Trash")
-        review_act.triggered.connect(self._open_review)
-        prune_menu.addAction(review_act)
-
-        separate_act = QAction("&Sort into RAW/JPG…", self)
-        separate_act.setShortcut("Ctrl+Shift+S")
-        separate_act.setStatusTip("Sort files into RAW/ and JPG/ subfolders")
-        separate_act.triggered.connect(self._open_sort)
-        prune_menu.addAction(separate_act)
-
-        pair_act = QAction("&Pair RAW + JPG…", self)
-        pair_act.setShortcut("Ctrl+Shift+P")
-        pair_act.setStatusTip("Pair RAW and JPG files by stem and save to sidecar")
-        pair_act.triggered.connect(self._open_pair)
-        prune_menu.addAction(pair_act)
-
+        prune_menu.addAction(self._act_review)
+        prune_menu.addAction(self._act_sort)
+        prune_menu.addAction(self._act_pair)
         prune_menu.addSeparator()
-
-        export_act = QAction("&Export to Library…", self)
-        export_act.setShortcut("Ctrl+E")
-        export_act.setStatusTip("Export working folder to the library structure")
-        export_act.triggered.connect(self._open_export)
-        prune_menu.addAction(export_act)
-
-        autosort_act = QAction("&Auto-sort Folder…", self)
-        autosort_act.setShortcut("Ctrl+Shift+A")
-        autosort_act.setStatusTip("Scan any folder and sort it into the library structure")
-        autosort_act.triggered.connect(self._open_autosort)
-        prune_menu.addAction(autosort_act)
+        prune_menu.addAction(self._act_export)
+        prune_menu.addAction(self._act_edit_copy)
 
         help_menu = mb.addMenu("&Help")
         shortcuts_act = QAction("&Keyboard Shortcuts…", self)
@@ -151,18 +194,16 @@ class MainWindow(QMainWindow):
         help_menu.addAction(shortcuts_act)
 
         view_menu = mb.addMenu("&View")
-
-        list_act = QAction("&List", self)
-        list_act.setShortcut("Ctrl+1")
-        list_act.triggered.connect(lambda: self._switch_view(_VIEW_LIST))
-        view_menu.addAction(list_act)
-
-        grid_act = QAction("&Grid", self)
-        grid_act.setShortcut("Ctrl+2")
-        grid_act.triggered.connect(lambda: self._switch_view(_VIEW_GRID))
-        view_menu.addAction(grid_act)
-
+        view_menu.addAction(self._act_list)
+        view_menu.addAction(self._act_grid)
+        view_menu.addAction(self._act_calendar)
         view_menu.addSeparator()
+
+        side_act = QAction("Side &Menu Labels", self)
+        side_act.setShortcut("Ctrl+\\")
+        side_act.setStatusTip("Expand the side menu to show command names")
+        side_act.triggered.connect(self._side_menu.toggle)
+        view_menu.addAction(side_act)
 
         self._act_folder_bar = QAction("&Folder Bar", self)
         self._act_folder_bar.setShortcut("Ctrl+B")
@@ -172,127 +213,39 @@ class MainWindow(QMainWindow):
         self._act_folder_bar.toggled.connect(self._on_folder_bar_toggled)
         view_menu.addAction(self._act_folder_bar)
 
-    def _build_toolbar(self) -> None:
-        tb = self._toolbar = QToolBar("Main")
-        tb.setObjectName("MainToolBar")
-        tb.setMovable(False)
-        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
-        tb.setIconSize(QSize(18, 18))
-        tb.setStyleSheet("""
-            QToolBar {
-                background: #14142a;
-                border-right: 1px solid rgba(255,109,0,0.15);
-                padding: 4px 3px;
-                spacing: 2px;
-            }
-            QToolButton {
-                background: transparent;
-                border: none;
-                border-radius: 5px;
-                padding: 7px 6px;
-                min-width: 32px;
-                min-height: 32px;
-                color: #c8c8d8;
-            }
-            QToolButton:hover   { background: rgba(255,109,0,0.10); }
-            QToolButton:pressed { background: rgba(255,109,0,0.18); }
-            QToolButton:checked {
-                background: rgba(255,109,0,0.15);
-                border: 1px solid rgba(255,109,0,0.45);
-            }
-            QToolBar::separator {
-                background: rgba(255,109,0,0.12);
-                height: 1px;
-                margin: 4px 6px;
-            }
-        """)
-        self.addToolBar(Qt.LeftToolBarArea, tb)
-        tb.toggleViewAction().setVisible(False)
-
-        open_act_tb = QAction(icon("folder-open"), "Open", self)
-        open_act_tb.setShortcut("Ctrl+O")
-        open_act_tb.setToolTip("Open working folder  (Ctrl+O)")
-        open_act_tb.triggered.connect(self.open_folder)
-        tb.addAction(open_act_tb)
-
-        export_act_tb = QAction(icon("file-import"), "Export", self)
-        export_act_tb.setShortcut("Ctrl+E")
-        export_act_tb.setToolTip("Export to library  (Ctrl+E)")
-        export_act_tb.triggered.connect(self._open_export)
-        tb.addAction(export_act_tb)
-
-        autosort_act_tb = QAction(icon("fork"), "Auto-sort", self)
-        autosort_act_tb.setShortcut("Ctrl+Shift+A")
-        autosort_act_tb.setToolTip("Auto-sort folder into library  (Ctrl+Shift+A)")
-        autosort_act_tb.triggered.connect(self._open_autosort)
-        tb.addAction(autosort_act_tb)
-
-        tb.addSeparator()
-
-        review_act_tb = QAction(icon("trash"), "Review Pruned", self)
-        review_act_tb.setShortcut("Ctrl+R")
-        review_act_tb.setToolTip("Review pruned files → Trash  (Ctrl+R)")
-        review_act_tb.triggered.connect(self._open_review)
-        tb.addAction(review_act_tb)
-
-        sort_act_tb = QAction(icon("fork"), "Sort", self)
-        sort_act_tb.setShortcut("Ctrl+Shift+S")
-        sort_act_tb.setToolTip("Sort into RAW/ and JPG/ subfolders  (Ctrl+Shift+S)")
-        sort_act_tb.triggered.connect(self._open_sort)
-        tb.addAction(sort_act_tb)
-
-        pair_act_tb = QAction(icon("link"), "Pair", self)
-        pair_act_tb.setShortcut("Ctrl+Shift+P")
-        pair_act_tb.setToolTip("Pair RAW+JPG by stem and save  (Ctrl+Shift+P)")
-        pair_act_tb.triggered.connect(self._open_pair)
-        tb.addAction(pair_act_tb)
-
-        tb.addSeparator()
-
-        self._act_list = QAction(icon("bullet-list"), "List", self)
-        self._act_list.setCheckable(True)
-        self._act_list.setChecked(True)
-        self._act_list.setShortcut("Ctrl+1")
-        self._act_list.setToolTip("List view  (Ctrl+1)")
-        self._act_list.triggered.connect(lambda: self._switch_view(_VIEW_LIST))
-        tb.addAction(self._act_list)
-
-        self._act_grid = QAction(icon("grid"), "Grid", self)
-        self._act_grid.setCheckable(True)
-        self._act_grid.setChecked(False)
-        self._act_grid.setShortcut("Ctrl+2")
-        self._act_grid.setToolTip("Grid view  (Ctrl+2)")
-        self._act_grid.triggered.connect(lambda: self._switch_view(_VIEW_GRID))
-        tb.addAction(self._act_grid)
-
-        grp = QActionGroup(self)
-        grp.setExclusive(True)
-        grp.addAction(self._act_list)
-        grp.addAction(self._act_grid)
-
-        tb.addSeparator()
-
-        self._act_select = QAction(icon("plus"), "Select", self)
-        self._act_select.setCheckable(True)
-        self._act_select.setShortcut("S")
-        self._act_select.setToolTip("Multi-select mode  (S)")
-        self._act_select.toggled.connect(self._on_select_mode_toggled)
-        tb.addAction(self._act_select)
-
-        self._act_cull = QAction(icon("times-circle"), "Prune", self)
-        self._act_cull.setToolTip("Mark selected as pruned  (P)")
-        self._act_cull.triggered.connect(self._toggle_prune_selected)
-        tb.addAction(self._act_cull)
-
-        self._act_mark = QAction(check_icon("#3ac96a", size=24), "Mark", self)
-        self._act_mark.setToolTip("Mark selected for export  (M)")
-        self._act_mark.triggered.connect(self._toggle_mark_selected)
-        tb.addAction(self._act_mark)
+    def _build_side_menu(self) -> None:
+        """Populate the collapsible rail on the left (built in _build_central)."""
+        m = self._side_menu
+        m.add_action(self._act_open)
+        m.add_action(self._act_export)
+        m.add_action(self._act_edit_copy)
+        m.add_separator()
+        m.add_action(self._act_review)
+        m.add_action(self._act_sort)
+        m.add_action(self._act_pair)
+        m.add_separator()
+        m.add_action(self._act_list)
+        m.add_action(self._act_grid)
+        m.add_action(self._act_calendar)
+        m.add_separator()
+        m.add_action(self._act_select)
+        m.add_action(self._act_cull, hint="P")
+        m.add_action(self._act_mark, hint="M")
 
     def _build_central(self) -> None:
         root = QWidget()
         self.setCentralWidget(root)
-        layout = QVBoxLayout(root)
+        root_lay = QHBoxLayout(root)
+        root_lay.setContentsMargins(0, 0, 0, 0)
+        root_lay.setSpacing(0)
+
+        # ── side menu: a fixed rail slot; the panel floats over `root` ── #
+        self._side_menu = SideMenu(root)
+        root_lay.addWidget(self._side_menu.placeholder())
+
+        column = QWidget()
+        root_lay.addWidget(column, 1)
+        layout = QVBoxLayout(column)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
@@ -322,8 +275,16 @@ class MainWindow(QMainWindow):
         self._file_list = FileListWidget()
         self._grid_view = GroupedGridView(self._generator, thumb_size=_THUMB_SIZE)
 
+        self._calendar  = CalendarView()
+
         self._stack.addWidget(self._file_list)   # index 0 → list
         self._stack.addWidget(self._grid_view)   # index 1 → grid
+        self._stack.addWidget(self._calendar)    # index 2 → library calendar
+
+        self._calendar.item_activated.connect(self._on_calendar_item_activated)
+        self._calendar.open_folder_requested.connect(self._on_calendar_open_folder)
+        self._calendar.library_folder_requested.connect(self._folder_bar.pick_library)
+        self._calendar.status_changed.connect(self._on_calendar_status)
 
         self._file_list.item_activated.connect(self._on_item_activated)
         self._grid_view.item_activated.connect(self._on_item_activated)
@@ -336,6 +297,10 @@ class MainWindow(QMainWindow):
 
         # Keep toolbar Select button in sync when mode exits via Done/Escape
         self._grid_view.selection_mode_changed.connect(self._on_grid_select_mode_changed)
+
+        # Siblings stack in creation order and the content column came after
+        # the side menu — lift the floating panel back above it.
+        self._side_menu.raise_()
 
     def _build_statusbar(self) -> None:
         self._statusbar = QStatusBar()
@@ -388,11 +353,28 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ #
 
     def _switch_view(self, idx: int) -> None:
+        if idx not in (_VIEW_LIST, _VIEW_GRID, _VIEW_CALENDAR):
+            idx = _VIEW_GRID
         self._stack.setCurrentIndex(idx)
         self._act_list.setChecked(idx == _VIEW_LIST)
         self._act_grid.setChecked(idx == _VIEW_GRID)
+        self._act_calendar.setChecked(idx == _VIEW_CALENDAR)
         self._filter_bar.set_zoom_enabled(idx == _VIEW_GRID)
-        self._update_status_count()
+
+        # The calendar browses the library, not the working folder: the filter
+        # bar and the culling actions don't apply to it.
+        on_calendar = idx == _VIEW_CALENDAR
+        self._filter_bar.setVisible(not on_calendar)
+        for act in (self._act_select, self._act_cull, self._act_mark):
+            act.setEnabled(not on_calendar)
+        if on_calendar:
+            self._calendar.activate()
+        else:
+            self._calendar.deactivate()
+            if len(self._collection) == 0:
+                # Don't leave the calendar's library summary behind
+                self._statusbar.showMessage("Ready — open a folder to begin")
+            self._update_status_count()
 
     def _on_thumb_size_changed(self, size: int) -> None:
         snapped = max(_ZOOM_MIN, min(_ZOOM_MAX, (size // _ZOOM_STEP) * _ZOOM_STEP))
@@ -451,7 +433,7 @@ class MainWindow(QMainWindow):
         self._update_stats()
 
         self._scanner = ScanWorker(path, recursive=True)
-        self._scanner.file_found.connect(self._on_file_found)
+        self._scanner.files_found.connect(self._on_files_found)
         self._scanner.progress.connect(self._on_scan_progress)
         self._scanner.scan_complete.connect(self._on_scan_complete)
         self._scanner.scan_error.connect(self._on_scan_error)
@@ -462,9 +444,10 @@ class MainWindow(QMainWindow):
     # Scanner signal handlers                                              #
     # ------------------------------------------------------------------ #
 
-    def _on_file_found(self, record) -> None:
-        self._collection.add(record)
-        self._scan_buffer.append(record)
+    def _on_files_found(self, records) -> None:
+        for record in records:
+            self._collection.add(record)
+        self._scan_buffer.extend(records)
 
     def _flush_scan_buffer(self) -> None:
         """Push buffered records to both models in one batch insert."""
@@ -518,6 +501,8 @@ class MainWindow(QMainWindow):
 
     def _update_status_count(self) -> None:
         """Update the status bar with 'Showing X of Y' for the active view."""
+        if self._stack.currentIndex() == _VIEW_CALENDAR:
+            return
         total = len(self._collection)
         if total == 0:
             return
@@ -539,26 +524,53 @@ class MainWindow(QMainWindow):
         """Open (or reuse) the image viewer for the activated record."""
         current_view = self._stack.currentWidget()
         records = current_view.all_visible_records()
+        self._open_viewer(record, records, self._collection.find_pair, read_only=False)
+
+    def _on_calendar_item_activated(self, record, records, pair_lookup) -> None:
+        """A library photo was opened from the calendar's day view."""
+        self._open_viewer(record, records, pair_lookup, read_only=True)
+
+    def _open_viewer(self, record, records, pair_lookup, read_only: bool) -> None:
         index = next(
             (i for i, r in enumerate(records) if r.path == record.path), 0
         )
 
-        if self._viewer is None or not self._viewer.isVisible():
+        viewer = self._viewer
+        if viewer is not None and viewer.isVisible() and viewer.is_read_only != read_only:
+            # A culling viewer and a library viewer differ in their controls;
+            # swap rather than repurpose.
+            viewer.close()
+            viewer = self._viewer = None
+
+        if viewer is None or not viewer.isVisible():
             self._viewer = ImageViewer(
                 records, index,
-                pair_lookup=self._collection.find_pair,
+                pair_lookup=pair_lookup,
                 parent=self,
+                read_only=read_only,
             )
             self._viewer.prune_toggled.connect(self._on_viewer_prune_toggled)
             self._viewer.mark_toggled.connect(self._on_viewer_mark_toggled)
             self._viewer.crop_changed.connect(self._on_viewer_crop_changed)
-            self._viewer.destroyed.connect(lambda: setattr(self, "_viewer", None))
+            v = self._viewer
+            v.destroyed.connect(
+                lambda: setattr(self, "_viewer", None) if self._viewer is v else None
+            )
             self._viewer.show()
         else:
-            self._viewer.navigate_to(records, index)
+            self._viewer.navigate_to(records, index, pair_lookup=pair_lookup)
 
         self._viewer.raise_()
         self._viewer.activateWindow()
+
+    def _on_calendar_open_folder(self, path: Path) -> None:
+        """'Open as working folder' on a library day."""
+        self._start_scan(path)
+        self._switch_view(_VIEW_GRID)
+
+    def _on_calendar_status(self, text: str) -> None:
+        if self._stack.currentIndex() == _VIEW_CALENDAR:
+            self._statusbar.showMessage(text)
 
     # ------------------------------------------------------------------ #
     # Prune                                                                #
@@ -573,6 +585,8 @@ class MainWindow(QMainWindow):
 
     def _on_library_folder_changed(self, path: Path) -> None:
         self._library_folder = path
+        self._folder_bar.set_library_folder(path)
+        self._calendar.set_library_root(path)
 
     def _on_select_mode_toggled(self, checked: bool) -> None:
         """Toolbar Select button toggled — enter or exit multi-select mode."""
@@ -843,26 +857,56 @@ class MainWindow(QMainWindow):
         dlg.marks_cleared.connect(self._on_export_marks_cleared)
         dlg.exec()
 
-    def _open_autosort(self) -> None:
-        from app.ui.autosort_dialog import AutoSortDialog
-        dlg = AutoSortDialog(
+    def _open_edit_copy(self) -> None:
+        """Copy the RAW of every marked shot into a folder to edit from."""
+        from PySide6.QtWidgets import QMessageBox
+        from app.ops.edit_copy import select_marked_raws
+        from app.ui.edit_copy_dialog import EditCopyDialog
+
+        if not len(self._collection):
+            QMessageBox.information(self, "No Files", "Open a folder first.")
+            return
+        selection = select_marked_raws(
+            self._collection.all(), self._collection.find_pair,
+            self._collection.stem_siblings,
+        )
+        if not selection.raws and not selection.jpg_only:
+            QMessageBox.information(
+                self, "Nothing Marked",
+                "No shots are marked.\n\nSelect photos and press M (or Keep in the "
+                "viewer) to mark the ones you want to edit.",
+            )
+            return
+
+        s = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        last = s.value("edit_copy/folder", "", type=str)
+        dest = Path(last) if last and Path(last).is_dir() else None
+        dlg = EditCopyDialog(
+            selection,
             working_folder = self._current_folder,
-            library_folder = self._library_folder,
+            dest_folder    = dest,
+            use_subfolder  = s.value("edit_copy/subfolder", True, type=bool),
             parent         = self,
         )
-        dlg.library_folder_changed.connect(self._on_library_folder_changed)
-        dlg.library_folder_changed.connect(self._folder_bar.set_library_folder)
-        dlg.sorted.connect(self._on_autosorted)
+        dlg.folder_changed.connect(self._on_edit_copy_folder_changed)
+        dlg.copied.connect(self._on_edit_copied)
         dlg.exec()
 
-    def _on_autosorted(self, succeeded: list, failed: list) -> None:
-        n = len(succeeded)
-        msg = f"{n} file{'s' if n != 1 else ''} sorted into library"
+    def _on_edit_copy_folder_changed(self, folder: Path, subfolder: bool) -> None:
+        s = QSettings(_SETTINGS_ORG, _SETTINGS_APP)
+        s.setValue("edit_copy/folder", str(folder))
+        s.setValue("edit_copy/subfolder", subfolder)
+
+    def _on_edit_copied(self, copied: list, failed: list) -> None:
+        n = len(copied)
+        msg = f"{n} RAW file{'s' if n != 1 else ''} copied for editing"
         if failed:
             msg += f"  ({len(failed)} failed)"
         self._statusbar.showMessage(msg)
 
     def _on_exported(self, succeeded: list, failed: list) -> None:
+        if succeeded:
+            self._calendar.mark_stale()
         n = len(succeeded)
         msg = f"{n} file{'s' if n != 1 else ''} exported to library"
         if failed:
@@ -1082,6 +1126,8 @@ class MainWindow(QMainWindow):
         s.setValue("library_folder",
                    str(self._library_folder) if self._library_folder else "")
         s.setValue("folder_bar_visible", self._act_folder_bar.isChecked())
+        for key, value in self._calendar.save_state().items():
+            s.setValue(f"calendar/{key}", value)
 
     def _restore_session(self) -> None:
         from datetime import date as _pydate
@@ -1090,11 +1136,12 @@ class MainWindow(QMainWindow):
             self.restoreGeometry(geom)
         if state := s.value("window_state"):
             self.restoreState(state)
-        # Always force the toolbar to the left regardless of saved state
-        self.addToolBar(Qt.LeftToolBarArea, self._toolbar)
-        self._toolbar.setVisible(True)   # never let saved state hide the toolbar
+        self._calendar.restore_state({
+            "mode":  s.value("calendar/mode", "", type=str),
+            "year":  s.value("calendar/year", 0, type=int),
+            "month": s.value("calendar/month", 0, type=int),
+        })
         view_idx = s.value("view_index", _VIEW_GRID, type=int)
-        self._switch_view(view_idx)
 
         def _parse_date(val: str):
             try:
@@ -1118,6 +1165,10 @@ class MainWindow(QMainWindow):
             if p.exists() and p.is_dir():
                 self._library_folder = p
                 self._folder_bar.set_library_folder(p)
+                self._calendar.set_library_root(p)
+
+        # Switch view only now, so the calendar knows its library when shown
+        self._switch_view(view_idx)
 
         # Restore folder bar visibility + collapsed state
         bar_visible = s.value("folder_bar_visible", True, type=bool)
@@ -1144,4 +1195,5 @@ class MainWindow(QMainWindow):
             # Don't block — scanner holds no resources that need ordered cleanup.
             # It will finish in the background after the process exits.
         self._generator.shutdown()
+        self._calendar.shutdown()
         super().closeEvent(event)

@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.photo_record import FileType, PhotoRecord
-from app.ui.proxy import FilterState, PhotoFilterProxy
+from app.ui.proxy import FilterState, PhotoFilterProxy, sort_key_func
 
 # ── Column definitions ────────────────────────────────────────────────────── #
 COL_FILE     = 0
@@ -108,6 +108,36 @@ class PhotoTableModel(QAbstractTableModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self._rows: List[_PairRow] = []
+        # None = preserve insertion order; set_sort() supplies the real key.
+        self._sort_key: Optional[str] = None
+        self._sort_asc: bool = True
+
+    # ------------------------------------------------------------------ #
+    # Ordering (see app/ui/proxy.py — the proxy does not sort)             #
+    # ------------------------------------------------------------------ #
+
+    def set_sort(self, sort_key: str, ascending: bool) -> None:
+        """Reorder rows in place.  Called by PhotoFilterProxy.apply_state()."""
+        self._sort_key, self._sort_asc = sort_key, ascending
+        if not self._rows:
+            return
+        self.beginResetModel()
+        self._apply_sort()
+        self.endResetModel()
+
+    def _apply_sort(self) -> None:
+        if self._sort_key is None:
+            return
+        # Sort on the primary record, matching what the proxy's old lessThan
+        # compared (it read Qt.UserRole, which is prow.primary).
+        key = sort_key_func(self._sort_key)
+        self._rows.sort(key=lambda prow: key(prow.primary), reverse=not self._sort_asc)
+
+    def record_for_row(self, row: int) -> Optional[PhotoRecord]:
+        return self._rows[row].primary if 0 <= row < len(self._rows) else None
+
+    def records_in_order(self) -> List[PhotoRecord]:
+        return [prow.primary for prow in self._rows]
 
     # ------------------------------------------------------------------ #
     # Mutation (main thread only)                                          #
@@ -135,6 +165,7 @@ class PhotoTableModel(QAbstractTableModel):
 
         self.beginResetModel()
         self._rows = rows
+        self._apply_sort()
         self.endResetModel()
 
     def append_batch(self, records: List[PhotoRecord]) -> None:
@@ -370,12 +401,7 @@ class FileListWidget(QTableView):
 
     def all_visible_records(self) -> List[PhotoRecord]:
         """Return the primary record per visible row (used by ImageViewer)."""
-        records: List[PhotoRecord] = []
-        for row in range(self._proxy.rowCount()):
-            src  = self._proxy.mapToSource(self._proxy.index(row, 0))
-            prow = self._source_model.row_at(src.row())
-            records.append(prow.primary)
-        return records
+        return self._proxy.visible_records()
 
     def keyPressEvent(self, event) -> None:
         if event.key() in (Qt.Key_P, Qt.Key_Delete):

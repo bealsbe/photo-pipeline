@@ -15,6 +15,16 @@ GroupedGridView (QScrollArea)
 One flat PhotoGridModel + PhotoFilterProxy sit behind the view so the
 rest of main_window.py can call the same API it used for ThumbnailGridView.
 Visual sections are rebuilt whenever records or filter state change.
+
+Thumbnail scheduling
+--------------------
+Each _SectionGrid asks for a thumbnail from data(Qt.DecorationRole), i.e. at
+paint time, which alone is enough to fill the screen but says nothing about
+what to decode *next*.  Scrolling fast that way fills the worker pool with
+cells that have already left the viewport while the cells now on screen queue
+behind them.  _prefetch_nearby() runs shortly after scrolling stops: it drops
+the stale backlog and re-queues the visible rows at PRIORITY_VISIBLE and a
+screen-height band on each side at PRIORITY_PREFETCH.
 """
 from __future__ import annotations
 
@@ -22,7 +32,7 @@ import math
 from collections import defaultdict
 from datetime import date as _pydate, timedelta
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (
     QEasingCurve,
@@ -52,9 +62,17 @@ from PySide6.QtWidgets import (
 )
 
 from app.models.photo_record import FileType, PhotoRecord
-from app.thumbnails.generator import ThumbnailGenerator
+from app.thumbnails.generator import (
+    PRIORITY_PREFETCH,
+    PRIORITY_VISIBLE,
+    ThumbnailGenerator,
+)
 from app.ui.proxy import FilterState, PhotoFilterProxy
 from app.ui.thumbnail_grid import PhotoGridModel, ThumbnailDelegate
+
+# How long after the last scroll event to re-prioritise the thumbnail queue.
+# Long enough not to fire mid-flick, short enough to feel immediate.
+_PREFETCH_SETTLE_MS = 80
 
 
 def _canonical_parent(path: Path) -> Path:
@@ -115,6 +133,7 @@ class _SectionGrid(QListView):
 
         self._model = PhotoGridModel(generator, self)
         self._model.reset_records(records)
+        self._record_paths: Tuple[Path, ...] = tuple(r.path for r in records)
 
         self.setModel(self._model)
         self.setItemDelegate(ThumbnailDelegate(thumb_size, self))
@@ -136,6 +155,7 @@ class _SectionGrid(QListView):
         self.viewport().setAttribute(Qt.WA_AcceptTouchEvents, False)
         self._update_grid_size()
         self._select_mode: bool = False
+        self._read_only: bool = False   # set by _DateSection; ignores P / M
 
         self.activated.connect(self._on_activated)
 
@@ -146,7 +166,49 @@ class _SectionGrid(QListView):
 
     def reset_records(self, records: List[PhotoRecord]) -> None:
         self._model.reset_records(records)
+        self._record_paths = tuple(r.path for r in records)
         self.updateGeometry()
+
+    def record_paths(self) -> Tuple[Path, ...]:
+        """
+        The paths currently in this section, in display order.
+
+        Cached rather than derived from the model on demand: _rebuild()
+        compares it against the incoming records for every section on every
+        call, and rebuilding it through index()/data() was costing as much as
+        the rebuild it exists to avoid.
+
+        Ordered, and compared as a sequence — a set comparison would call a
+        section unchanged whenever the sort key changed but the membership
+        did not, which is exactly what happens when the user switches between
+        Date, Name and Size.
+        """
+        return self._record_paths
+
+    def records_in_band(self, top: int, bottom: int) -> List[PhotoRecord]:
+        """
+        Records whose cells intersect the vertical band [*top*, *bottom*],
+        given in this grid's own coordinates.
+
+        Computed from the grid metrics rather than indexAt() so that it stays
+        O(1) in the number of rows and returns something sensible for points
+        that fall in the gaps between cells.
+        """
+        n = self._model.rowCount()
+        if n == 0 or bottom < 0:
+            return []
+
+        cell_h = self.gridSize().height()
+        cell_w = self.gridSize().width()
+        if cell_h <= 0 or cell_w <= 0:
+            return []
+        cols = max(1, max(cell_w, self.viewport().width()) // cell_w)
+
+        first = max(0, top // cell_h) * cols
+        last  = min(n - 1, (bottom // cell_h + 1) * cols - 1)
+        if first > last:
+            return []
+        return [self._model.record_at(row) for row in range(first, last + 1)]
 
     def update_thumb_size(self, size: int) -> None:
         """Update delegate + grid metrics without rebuilding the whole section."""
@@ -271,6 +333,9 @@ class _SectionGrid(QListView):
         event.ignore()
 
     def keyPressEvent(self, event) -> None:
+        if self._read_only and event.key() in (Qt.Key_P, Qt.Key_Delete, Qt.Key_M):
+            event.ignore()
+            return
         if event.key() in (Qt.Key_P, Qt.Key_Delete):
             records = [
                 idx.data(Qt.UserRole)
@@ -433,6 +498,7 @@ class _DateSection(QWidget):
         generator: ThumbnailGenerator,
         thumb_size: int,
         collapsed: bool = False,
+        read_only: bool = False,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -446,6 +512,7 @@ class _DateSection(QWidget):
 
         self._header = _DateHeader(_fmt_date(date_key), len(records), collapsed)
         self._grid   = _SectionGrid(records, generator, thumb_size, self)
+        self._grid._read_only = read_only
 
         # Clip container: only this widget's height is animated, so Qt does not
         # need to re-run the outer VBoxLayout geometry pass on every anim tick.
@@ -484,6 +551,22 @@ class _DateSection(QWidget):
 
     def section_model(self) -> PhotoGridModel:
         return self._grid.section_model()
+
+    def record_paths(self) -> Tuple[Path, ...]:
+        return self._grid.record_paths()
+
+    def set_records(self, records: List[PhotoRecord]) -> None:
+        """Replace this section's contents and refresh its header count."""
+        self._grid.reset_records(records)
+        self._header.update_count(len(records))
+
+    def records_in_band(self, top: int, bottom: int) -> List[PhotoRecord]:
+        """Records intersecting a vertical band, in the *grid's* coordinates."""
+        return self._grid.records_in_band(top, bottom)
+
+    def grid_offset_in(self, ancestor: QWidget) -> int:
+        """Y position of this section's grid within *ancestor*."""
+        return self._grid.mapTo(ancestor, self._grid.rect().topLeft()).y()
 
     def update_thumb_size(self, size: int) -> None:
         self._grid.update_thumb_size(size)
@@ -689,10 +772,14 @@ class GroupedGridView(QScrollArea):
         generator: ThumbnailGenerator,
         thumb_size: int = 160,
         parent=None,
+        read_only: bool = False,
     ) -> None:
         super().__init__(parent)
         self._generator  = generator
         self._thumb_size = thumb_size
+        # Read-only grids (the library calendar's day view) ignore the
+        # prune / mark keys, so browsing can never flip state on a record.
+        self._read_only  = read_only
 
         # Flat model + proxy — keeps main_window.py compatibility
         self._flat_model = PhotoGridModel(generator, self)
@@ -711,6 +798,12 @@ class GroupedGridView(QScrollArea):
         self._rebuild_timer.setSingleShot(True)
         self._rebuild_timer.setInterval(300)
         self._rebuild_timer.timeout.connect(self._rebuild)
+
+        # Debounce: re-prioritise the thumbnail queue once scrolling settles
+        self._prefetch_timer = QTimer(self)
+        self._prefetch_timer.setSingleShot(True)
+        self._prefetch_timer.setInterval(_PREFETCH_SETTLE_MS)
+        self._prefetch_timer.timeout.connect(self._prefetch_nearby)
 
         # Debounce for thumb-size slider: update delegates immediately,
         # defer full widget rebuild until the user stops dragging
@@ -738,6 +831,9 @@ class GroupedGridView(QScrollArea):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setStyleSheet(_QSS)
         self.verticalScrollBar().setSingleStep(40)
+        self.verticalScrollBar().valueChanged.connect(
+            lambda _v: self._prefetch_timer.start()
+        )
 
         self._container = QWidget()
         self._container.setStyleSheet("background: #0a0a12;")
@@ -1030,12 +1126,7 @@ class GroupedGridView(QScrollArea):
         return out
 
     def all_visible_records(self) -> List[PhotoRecord]:
-        raw = [
-            self._proxy.index(row, 0).data(Qt.UserRole)
-            for row in range(self._proxy.rowCount())
-            if self._proxy.index(row, 0).data(Qt.UserRole)
-        ]
-        return _dedup_pairs(raw)
+        return _dedup_pairs(self._proxy.visible_records())
 
     # ------------------------------------------------------------------ #
     # Internal rebuild                                                     #
@@ -1057,14 +1148,10 @@ class GroupedGridView(QScrollArea):
         for sec in self._sections:
             self._collapsed[sec.date_key] = sec.is_collapsed
 
-        # Collect visible+sorted records from proxy
-        all_visible: List[PhotoRecord] = []
-        for row in range(self._proxy.rowCount()):
-            r = self._proxy.index(row, 0).data(Qt.UserRole)
-            if r:
-                all_visible.append(r)
-
-        visible = _dedup_pairs(all_visible)
+        # Collect visible+sorted records from the proxy.  visible_records()
+        # reads the source list in Python; walking rowCount() and pulling
+        # Qt.UserRole per row cost ~100× more at a few thousand records.
+        visible = _dedup_pairs(self._proxy.visible_records())
 
         # Group by shot date
         groups: Dict[_pydate, List[PhotoRecord]] = {}
@@ -1097,7 +1184,7 @@ class GroupedGridView(QScrollArea):
 
         for insert_at, d in enumerate(ordered_dates):
             records = groups[d]
-            record_paths = {r.path for r in records}
+            record_paths = tuple(r.path for r in records)
 
             if d in existing:
                 sec = existing[d]
@@ -1106,23 +1193,18 @@ class GroupedGridView(QScrollArea):
                 if current_pos != insert_at:
                     self._vlay.removeWidget(sec)
                     self._vlay.insertWidget(insert_at, sec)
-                # Check if the record set changed
-                old_paths = {
-                    idx.data(Qt.UserRole).path
-                    for row in range(sec.section_model().rowCount())
-                    for idx in [sec.section_model().index(row)]
-                    if idx.data(Qt.UserRole)
-                }
-                if old_paths != record_paths:
-                    sec.section_model().reset_records(records)
-                    sec._header.update_count(len(records))
-                    # Rebuild path index for this section
+                # Check if the records or their order changed.  The path tuple
+                # is cached on the section, so an unchanged section really is
+                # a no-op here.
+                if sec.record_paths() != record_paths:
+                    sec.set_records(records)
                 sec.set_select_mode(self._select_mode)
             else:
                 collapsed = self._collapsed.get(d, False)
                 sec = _DateSection(
                     d, records, self._generator, self._thumb_size,
-                    collapsed=collapsed, parent=self._container,
+                    collapsed=collapsed, read_only=self._read_only,
+                    parent=self._container,
                 )
                 sec.item_activated.connect(self.item_activated)
                 sec.prune_toggled.connect(self.prune_toggled)
@@ -1145,3 +1227,55 @@ class GroupedGridView(QScrollArea):
         # sel_bar so freshly inserted section widgets don't cover it.
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_pos))
         QTimer.singleShot(0, self._reposition_sel_bar)
+        # Section geometry has just changed, so any earlier prioritisation is
+        # stale — schedule a fresh pass once the layout has settled.
+        self._prefetch_timer.start()
+
+    # ------------------------------------------------------------------ #
+    # Thumbnail scheduling                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _prefetch_nearby(self) -> None:
+        """
+        Re-prioritise the thumbnail queue for where the viewport is now.
+
+        Drops the queued-but-not-started backlog, then requests the rows on
+        screen at PRIORITY_VISIBLE and a screen-height band above and below at
+        PRIORITY_PREFETCH.  Workers already running are left alone; their
+        results still land in the cache.
+        """
+        if not self._sections:
+            return
+
+        view_top = self.verticalScrollBar().value()
+        view_h   = self.viewport().height()
+        if view_h <= 0:
+            return
+        view_bottom = view_top + view_h
+
+        self._generator.clear_queue()
+
+        visible: List[PhotoRecord] = []
+        nearby:  List[PhotoRecord] = []
+
+        for sec in self._sections:
+            if sec.is_collapsed:
+                continue
+            # Section grids are laid out in _container coordinates, which is
+            # also what the scrollbar value is measured in.
+            offset = sec.grid_offset_in(self._container)
+            for band, sink in (
+                ((view_top, view_bottom), visible),
+                ((view_top - view_h, view_bottom + view_h), nearby),
+            ):
+                top, bottom = band[0] - offset, band[1] - offset
+                if bottom < 0:
+                    continue
+                sink.extend(sec.records_in_band(max(0, top), bottom))
+
+        on_screen = {r.path for r in visible}
+        for record in visible:
+            self._generator.request(record, PRIORITY_VISIBLE)
+        for record in nearby:
+            if record.path not in on_screen:
+                self._generator.request(record, PRIORITY_PREFETCH)

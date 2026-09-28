@@ -12,8 +12,15 @@ best_date(record, pair=None) -> date
 month_folder(d) -> str
     "Jan-2025", "Feb-2025", …
 
-library_dest(root, record, d) -> Path
-    root / "2025" / "Jan-2025" / "RAW" / "IMG_001.cr3"
+day_folder(d) -> str
+    "01-Jan-2025", "02-Jan-2025", …
+
+library_dest(root, record, d, name=None) -> Path
+    root / "2025" / "Jan-2025" / "12-Jan-2025" / "RAW" / "IMG_001.cr3"
+
+library_name(dt, seq, suffix) -> str
+    "20250312_1430_0007.CR3" — the renamed filename used when a plan is
+    built with rename=True.
 
 Resolution
     Enum: SKIP | OVERWRITE | RENAME
@@ -30,11 +37,18 @@ Cropping
     A record carrying a Crop is exported cropped.  JPGs are re-encoded with
     the crop baked into the pixels; RAWs are copied byte-for-byte and get an
     XMP sidecar holding the same rect (see app/ops/crop_export.py for why).
+
+Renaming
+    With rename=True every file is named YYYYMMDD_HHMM_NNNN.ext from its
+    shot time.  The sequence counts per calendar day in capture order and
+    carries on from the highest number already in the library for that day.
+    Both halves of a RAW+JPG pair share one number so they stay paired.
 """
 from __future__ import annotations
 
 import calendar
 import os
+import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import date as _date, datetime
@@ -108,21 +122,93 @@ def month_folder(d: _date) -> str:
     return f"{calendar.month_abbr[d.month]}-{d.year}"
 
 
-def library_dest(root: Path, record: PhotoRecord, d: _date) -> Path:
+def day_folder(d: _date) -> str:
+    """Return the day-folder name for *d*: '01-Jan-2025', '12-Jan-2025', …
+
+    Zero-padded so the folders of a month list in date order.
+    """
+    return f"{d.day:02d}-{month_folder(d)}"
+
+
+def month_dir(root: Path, d: _date) -> Path:
+    """Return *d*'s month folder: root/2025/Jan-2025."""
+    return root / str(d.year) / month_folder(d)
+
+
+def day_dir(root: Path, d: _date) -> Path:
+    """Return the folder holding *d*'s type subfolders: root/2025/Jan-2025/12-Jan-2025."""
+    return month_dir(root, d) / day_folder(d)
+
+
+def library_dest(
+    root:   Path,
+    record: PhotoRecord,
+    d:      _date,
+    name:   Optional[str] = None,
+) -> Path:
     """
     Compute the destination path for *record* inside the library.
 
-        root / "2025" / "Jan-2025" / "RAW" / "IMG_001.cr3"
+        root / "2025" / "Jan-2025" / "12-Jan-2025" / "RAW" / "IMG_001.cr3"
 
-    The type subfolder is "RAW" or "JPG" from FileType.value.
+    The type subfolder is "RAW" or "JPG" from FileType.value.  *name*
+    replaces the original filename when given.
     """
     return (
-        root
-        / str(d.year)
-        / month_folder(d)
+        day_dir(root, d)
         / record.file_type.value   # "RAW" or "JPG"
-        / record.path.name
+        / (name or record.path.name)
     )
+
+
+# ── renaming ──────────────────────────────────────────────────────────────────
+
+# Stem of a renamed file: "20250312_1430_0007" → groups ("20250312", "0007").
+# Anchored, so a conflict-renamed "…_0007_1" is not mistaken for sequence 7.
+_SEQ_RE = re.compile(r"^(\d{8})_\d{4}_(\d+)$")
+
+
+def library_name(dt: datetime, seq: int, suffix: str) -> str:
+    """Return the renamed filename: ``20250312_1430_0007.CR3``."""
+    return f"{dt:%Y%m%d}_{dt:%H%M}_{seq:04d}{suffix}"
+
+
+def _existing_sequences(folder: Path) -> Dict[str, int]:
+    """
+    Return the highest sequence number already used per day in *folder*
+    (a month or day folder), keyed by "YYYYMMDD".  Both type subfolders are
+    read, since a pair shares one number and either half may be the only
+    one present.
+    """
+    highest: Dict[str, int] = {}
+    for ft in FileType:
+        try:
+            names = os.listdir(folder / ft.value)
+        except OSError:
+            continue
+        for n in names:
+            m = _SEQ_RE.match(Path(n).stem)
+            if m:
+                day, seq = m[1], int(m[2])
+                if seq > highest.get(day, 0):
+                    highest[day] = seq
+    return highest
+
+
+def _highest_sequence(root: Path, d: _date, cache: Dict[Path, Dict[str, int]]) -> int:
+    """
+    Highest sequence already in the library for day *d*.
+
+    Checks both the day folder and its month folder, so numbering carries on
+    across a library exported before day folders existed, whose files sit
+    directly in the month folder.
+    """
+    key, best = f"{d:%Y%m%d}", 0
+    for folder in (day_dir(root, d), month_dir(root, d)):
+        if folder not in cache:
+            cache[folder] = _existing_sequences(folder)
+        best = max(best, cache[folder].get(key, 0))
+    return best
 
 
 # ── conflict resolution ───────────────────────────────────────────────────────
@@ -231,13 +317,15 @@ class PlannedOp:
 @dataclass
 class OpGroup:
     """
-    A node in the preview tree: one year/month/type bucket.
+    A node in the preview tree: one year/month/day/type bucket.
 
-    Display: "2025 / Jan-2025 / RAW   24 files   ⚠ 2 conflicts"
+    Display: "2025 / Jan-2025 / 12-Jan-2025 / RAW   24 files   ⚠ 2 conflicts"
     """
     year:        int
     month:       int         # 1-12, used for chronological sorting
     month_key:   str         # "Jan-2025"
+    day:         int         # 1-31
+    day_key:     str         # "12-Jan-2025"
     type_label:  str         # "RAW" or "JPG"
     ops:         List[PlannedOp] = field(default_factory=list)
 
@@ -262,8 +350,8 @@ class OpGroup:
 
 class LibraryPlan:
     """
-    Compute and manage the full set of file operations for an export or
-    auto-sort into the standard library structure.
+    Compute and manage the full set of file operations for an export into
+    the standard library structure.
 
     Parameters
     ----------
@@ -276,6 +364,9 @@ class LibraryPlan:
         ``collection.find_pair`` or equivalent.  Used to cross-reference
         the partner file when choosing the best date.  Pass None to skip
         pair-aware date resolution.
+    rename
+        Name every file YYYYMMDD_HHMM_NNNN.ext instead of keeping its
+        original filename (see *Renaming* in the module docstring).
 
     Usage
     -----
@@ -297,27 +388,58 @@ class LibraryPlan:
         records:      List[PhotoRecord],
         library_root: Path,
         pair_lookup:  Optional[Callable[[PhotoRecord], Optional[PhotoRecord]]] = None,
+        rename:       bool = False,
     ) -> None:
         self._root = library_root
         self.ops: List[PlannedOp] = []
 
+        # Group records into shots: a file plus its pair partner, when the
+        # partner is part of this plan too.  Both halves take the shot's
+        # datetime so they always land in the same month folder and, when
+        # renaming, share one sequence number.
+        included = {id(r) for r in records}
+        seen:  set = set()
+        shots: List[Tuple[datetime, List[PhotoRecord]]] = []
         for record in records:
-            pair = pair_lookup(record) if pair_lookup else None
-            d    = best_date(record, pair)
-            dest = library_dest(library_root, record, d)
-            conflict = dest.exists()
-            op = PlannedOp(
-                record   = record,
-                src      = record.path,
-                dest     = dest,
-                date     = d,
-                conflict = conflict,
-            )
-            # Non-conflicting ops are ready to go immediately.
-            # Conflicting ops stay as SKIP until the user resolves them.
-            if not conflict:
-                op.set_resolution(Resolution.OVERWRITE)
-            self.ops.append(op)
+            if id(record) in seen:
+                continue
+            pair    = pair_lookup(record) if pair_lookup else None
+            members = [record]
+            if pair is not None and id(pair) in included and id(pair) not in seen:
+                members.append(pair)
+            seen.update(id(m) for m in members)
+            shots.append((best_datetime(record, pair), members))
+
+        names: Dict[int, str] = {}
+        if rename:
+            shots.sort(key=lambda s: (s[0], min(m.path.name.lower() for m in s[1])))
+            counters: Dict[str, int] = {}                  # "YYYYMMDD" → last seq
+            existing: Dict[Path, Dict[str, int]] = {}      # folder → per-day max
+            for dt, members in shots:
+                day = f"{dt:%Y%m%d}"
+                if day not in counters:
+                    counters[day] = _highest_sequence(library_root, dt.date(), existing)
+                counters[day] += 1
+                for m in members:
+                    names[id(m)] = library_name(dt, counters[day], m.path.suffix)
+
+        for dt, members in shots:
+            d = dt.date()
+            for record in members:
+                dest = library_dest(library_root, record, d, names.get(id(record)))
+                conflict = dest.exists()
+                op = PlannedOp(
+                    record   = record,
+                    src      = record.path,
+                    dest     = dest,
+                    date     = d,
+                    conflict = conflict,
+                )
+                # Non-conflicting ops are ready to go immediately.
+                # Conflicting ops stay as SKIP until the user resolves them.
+                if not conflict:
+                    op.set_resolution(Resolution.OVERWRITE)
+                self.ops.append(op)
 
     # ── summary properties ────────────────────────────────────────────────
 
@@ -350,21 +472,24 @@ class LibraryPlan:
         """
         Return ops collected into OpGroup buckets, sorted oldest-first.
 
-        Bucket key: (year, month, file_type)
+        Bucket key: (year, month, day, file_type)
         """
-        index: Dict[Tuple[int, int, str], OpGroup] = {}
+        index: Dict[Tuple[int, int, int, str], OpGroup] = {}
         for op in self.ops:
-            key = (op.date.year, op.date.month, op.record.file_type.value)
+            key = (op.date.year, op.date.month, op.date.day, op.record.file_type.value)
             if key not in index:
                 index[key] = OpGroup(
                     year       = op.date.year,
                     month      = op.date.month,
                     month_key  = month_folder(op.date),
+                    day        = op.date.day,
+                    day_key    = day_folder(op.date),
                     type_label = op.record.file_type.value,
                 )
             index[key].ops.append(op)
 
-        return sorted(index.values(), key=lambda g: (g.year, g.month, g.type_label))
+        return sorted(index.values(),
+                      key=lambda g: (g.year, g.month, g.day, g.type_label))
 
     # ── execution ─────────────────────────────────────────────────────────
 

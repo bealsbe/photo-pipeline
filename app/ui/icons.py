@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 # Icons are stored alongside this module: app/ui/icons/<size>px/<name>.png
@@ -73,6 +73,34 @@ def check_icon(color: str = "#3ac96a", size: int = 24) -> QIcon:
     u = size / 24.0
     p.drawLine(int(5 * u), int(13 * u), int(10 * u), int(18 * u))
     p.drawLine(int(10 * u), int(18 * u), int(19 * u), int(7 * u))
+    p.end()
+    return QIcon(pm)
+
+
+def calendar_icon(color: str = "#c8c8d8", size: int = 24) -> QIcon:
+    """Procedurally draw a calendar glyph (page, binder rings, day dots)."""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    u = size / 24.0
+    pen = QPen(QColor(color))
+    pen.setWidthF(max(1.4, size / 14))
+    pen.setCapStyle(Qt.RoundCap)
+    p.setPen(pen)
+    p.setBrush(Qt.NoBrush)
+    p.drawRoundedRect(QRectF(3.5 * u, 5 * u, 17 * u, 15.5 * u), 2.5 * u, 2.5 * u)
+    p.drawLine(QPointF(3.5 * u, 9.5 * u), QPointF(20.5 * u, 9.5 * u))
+    p.drawLine(QPointF(8 * u, 3 * u), QPointF(8 * u, 6.5 * u))
+    p.drawLine(QPointF(16 * u, 3 * u), QPointF(16 * u, 6.5 * u))
+    p.setPen(Qt.NoPen)
+    p.setBrush(QColor(color))
+    r = 1.2 * u
+    for row, y in enumerate((13 * u, 17 * u)):
+        for col, x in enumerate((8 * u, 12 * u, 16 * u)):
+            if row == 1 and col == 2:
+                p.setBrush(QColor("#ff6d00"))   # one highlighted day
+            p.drawEllipse(QPointF(x, y), r, r)
     p.end()
     return QIcon(pm)
 

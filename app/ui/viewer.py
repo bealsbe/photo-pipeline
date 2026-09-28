@@ -1389,9 +1389,13 @@ class ImageViewer(QWidget):
         start_index: int,
         pair_lookup=None,
         parent=None,
+        read_only: bool = False,
     ) -> None:
         super().__init__(parent, Qt.Window)
         self.setWindowTitle("Viewer")
+        # Read-only viewers browse files the user is not culling (the library
+        # calendar): prune / keep / crop are hidden and their keys ignored.
+        self._read_only = read_only
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setFocusPolicy(Qt.StrongFocus)
 
@@ -1441,6 +1445,9 @@ class ImageViewer(QWidget):
         self._crop_pending: bool = False
 
         self._build_ui()
+        if read_only:
+            for btn in (self._btn_prune, self._btn_mark, self._btn_crop):
+                btn.hide()
         self._loader.image_ready.connect(self._on_image_ready)
         self._loader.load_failed.connect(self._on_load_failed)
         self._load_current(animate=False)   # first open: no animation
@@ -1454,8 +1461,15 @@ class ImageViewer(QWidget):
     # Public                                                               #
     # ------------------------------------------------------------------ #
 
-    def navigate_to(self, records: List[PhotoRecord], index: int) -> None:
+    @property
+    def is_read_only(self) -> bool:
+        return self._read_only
+
+    def navigate_to(self, records: List[PhotoRecord], index: int,
+                    pair_lookup=None) -> None:
         self._exit_crop_mode(apply=False)
+        if pair_lookup is not None:
+            self._pair_lookup = pair_lookup
         self._records = list(records)
         self._index = max(0, min(index, len(records) - 1))
         self._pending_shot = None
@@ -2167,7 +2181,7 @@ class ImageViewer(QWidget):
 
     def _preload_adjacent(self) -> None:
         self._loader.clear_queue()
-        self._loader.preload_range(self._records, self._index, radius=2)
+        self._loader.preload_range(self._records, self._index)
 
     # ------------------------------------------------------------------ #
     # Slots                                                                #
@@ -2292,6 +2306,8 @@ class ImageViewer(QWidget):
     # ------------------------------------------------------------------ #
 
     def _toggle_prune(self) -> None:
+        if self._read_only:
+            return
         record = self._records[self._index]
         record.is_pruned = not record.is_pruned
         self._btn_prune.setChecked(record.is_pruned)
@@ -2300,6 +2316,8 @@ class ImageViewer(QWidget):
         self.prune_toggled.emit(record)
 
     def _toggle_mark(self) -> None:
+        if self._read_only:
+            return
         record = self._records[self._index]
         record.is_marked_for_export = not record.is_marked_for_export
         self._btn_mark.setChecked(record.is_marked_for_export)
@@ -2333,7 +2351,7 @@ class ImageViewer(QWidget):
 
     def _enter_crop_mode(self) -> None:
         """Show the crop rect and ratio bar for the photo on screen."""
-        if self._crop_mode:
+        if self._crop_mode or self._read_only:
             return
         size = self._view.image_size()
         if size.isEmpty():
@@ -2515,6 +2533,8 @@ class ImageViewer(QWidget):
         subprocess.Popen(["xdg-open", str(path.parent)])
 
     def _unmark(self) -> None:
+        if self._read_only:
+            return
         record = self._records[self._index]
         if record.is_pruned:
             record.is_pruned = False

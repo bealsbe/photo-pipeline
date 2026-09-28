@@ -5,7 +5,8 @@ Wizard layout
 -------------
   Card 1  — Source & destination paths
   Card 2  — Operation (Copy / Move toggle) + include-pruned checkbox
-  Section — Preview tree (year / month / type rows with file counts)
+            + rename-to-YYYYMMDD_HHMM_NNNN checkbox
+  Section — Preview tree (year / month / day / type rows with file counts)
   Footer  — Export button + Cancel
 
 Signals
@@ -280,6 +281,27 @@ class ExportDialog(QDialog):
         marked_row.addWidget(self._btn_clear_marks)
         op_lay.addLayout(marked_row)
 
+        # Rename to date/time/sequence
+        self._chk_rename = QCheckBox("Rename to date, time and sequence")
+        self._chk_rename.setChecked(True)
+        self._chk_rename.setStyleSheet(self._chk_pruned.styleSheet())
+        self._chk_rename.setToolTip(
+            "Files are named YYYYMMDD_HHMM_NNNN from the shot time.\n"
+            "The sequence counts per day in capture order, carrying on from\n"
+            "the highest number already in the library for that day.\n"
+            "A RAW and its paired JPG share one number."
+        )
+        self._rename_example = QLabel()
+        self._rename_example.setStyleSheet(f"font-size:11px; color:{_TEXT_DIM};")
+
+        rename_row = QHBoxLayout()
+        rename_row.setSpacing(8)
+        rename_row.setContentsMargins(0, 0, 0, 0)
+        rename_row.addWidget(self._chk_rename)
+        rename_row.addWidget(self._rename_example)
+        rename_row.addStretch()
+        op_lay.addLayout(rename_row)
+
         # Date range filter
         op_lay.addLayout(self._build_date_range_row())
 
@@ -422,6 +444,7 @@ class ExportDialog(QDialog):
         self._btn_change_lib.clicked.connect(self._pick_library)
         self._chk_pruned.toggled.connect(lambda _: self._rebuild_plan())
         self._chk_marked_only.toggled.connect(lambda _: self._rebuild_plan())
+        self._chk_rename.toggled.connect(lambda _: self._rebuild_plan())
 
     # ──────────────────────────────────────────────────────────────────────
     # Widget helpers
@@ -701,11 +724,15 @@ class ExportDialog(QDialog):
             self._refresh_stats(0, 0, 0, 0)
             self._refresh_preview([])
             self._refresh_conflict_section()
+            self._refresh_rename_example()
             self._update_export_button()
             return
 
         records = self._active_records()
-        self._plan = LibraryPlan(records, self._library_folder, self._pair_lookup)
+        self._plan = LibraryPlan(
+            records, self._library_folder, self._pair_lookup,
+            rename=self._chk_rename.isChecked(),
+        )
 
         n_unp_raw = sum(1 for r in records if r.file_type == FileType.RAW and not r.is_paired)
         n_unp_jpg = sum(1 for r in records if r.file_type == FileType.JPG and not r.is_paired)
@@ -717,7 +744,15 @@ class ExportDialog(QDialog):
         )
         self._refresh_preview(self._plan.grouped())
         self._refresh_conflict_section()
+        self._refresh_rename_example()
         self._update_export_button()
+
+    def _refresh_rename_example(self) -> None:
+        """Show the first planned filename, e.g. 'e.g. 20250312_1430_0001.CR3'."""
+        if self._plan and self._plan.ops and self._chk_rename.isChecked():
+            self._rename_example.setText(f"e.g. {self._plan.ops[0].dest.name}")
+        else:
+            self._rename_example.setText("")
 
     def _refresh_stats(self, n_total: int, n_conflict: int,
                        n_unp_raw: int, n_unp_jpg: int,
@@ -829,7 +864,8 @@ class ExportDialog(QDialog):
             path_lbl = QLabel(
                 f'<span style="color:{_TEXT_PRI}">{g.year}</span>{sep_html}'
                 f'<span style="color:{_TEXT_SEC}">{g.month_key}</span>{sep_html}'
-                f'<span style="color:{type_color}; font-weight:600">{g.type_label}</span>'
+                + f'<span style="color:{_TEXT_SEC}">{g.day_key}</span>{sep_html}'
+                + f'<span style="color:{type_color}; font-weight:600">{g.type_label}</span>'
             )
             path_lbl.setTextFormat(Qt.RichText)
             path_lbl.setStyleSheet("font-size:12px; background:transparent;")
@@ -964,7 +1000,7 @@ class ExportDialog(QDialog):
             return
 
         for w in (self._btn_export, self._btn_cancel, self._chk_pruned,
-                  self._btn_copy, self._btn_move,
+                  self._chk_rename, self._btn_copy, self._btn_move,
                   self._chk_date_range, self._date_from, self._date_to):
             w.setEnabled(False)
         self._conflict_section.hide()

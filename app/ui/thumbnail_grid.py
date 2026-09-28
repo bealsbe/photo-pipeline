@@ -51,7 +51,7 @@ from app.thumbnails.generator import (
     PRIORITY_VISIBLE,
     ThumbnailGenerator,
 )
-from app.ui.proxy import FilterState, PhotoFilterProxy
+from app.ui.proxy import FilterState, PhotoFilterProxy, sort_key_func
 
 _PREFETCH_LOOKAHEAD = 30   # rows to preload beyond the visible viewport edge
 
@@ -375,7 +375,40 @@ class PhotoGridModel(QAbstractListModel):
         self._records: List[PhotoRecord] = []
         self._path_row: Dict[Path, int]  = {}
         self._generator = generator
+        # None = preserve the order records are handed to us in.  The flat
+        # model behind the filter proxy gets a real key via set_sort(); the
+        # per-section models in GroupedGridView do not, because _rebuild()
+        # already hands them a correctly ordered slice and re-sorting it by a
+        # different key would scramble the section.
+        self._sort_key: Optional[str] = None
+        self._sort_asc: bool = True
         generator.thumbnail_ready.connect(self._on_thumbnail_ready)
+
+    # ------------------------------------------------------------------ #
+    # Ordering (see app/ui/proxy.py — the proxy does not sort)             #
+    # ------------------------------------------------------------------ #
+
+    def set_sort(self, sort_key: str, ascending: bool) -> None:
+        """Reorder rows in place.  Called by PhotoFilterProxy.apply_state()."""
+        self._sort_key, self._sort_asc = sort_key, ascending
+        if not self._records:
+            return
+        self.beginResetModel()
+        self._apply_sort()
+        self.endResetModel()
+
+    def _apply_sort(self) -> None:
+        if self._sort_key is not None:
+            self._records.sort(
+                key=sort_key_func(self._sort_key), reverse=not self._sort_asc
+            )
+        self._path_row = {r.path: i for i, r in enumerate(self._records)}
+
+    def record_for_row(self, row: int) -> Optional[PhotoRecord]:
+        return self._records[row] if 0 <= row < len(self._records) else None
+
+    def records_in_order(self) -> List[PhotoRecord]:
+        return self._records
 
     # ------------------------------------------------------------------ #
     # Mutation (main thread only)                                          #
@@ -384,7 +417,7 @@ class PhotoGridModel(QAbstractListModel):
     def reset_records(self, records: List[PhotoRecord]) -> None:
         self.beginResetModel()
         self._records = list(records)
-        self._path_row = {r.path: i for i, r in enumerate(self._records)}
+        self._apply_sort()
         self.endResetModel()
 
     def append(self, record: PhotoRecord) -> None:

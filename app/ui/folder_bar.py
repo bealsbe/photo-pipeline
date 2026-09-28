@@ -204,7 +204,7 @@ class FolderBar(QFrame):
         outer.addWidget(self._chevron, 0, Qt.AlignVCenter)
 
         self._working.clicked.connect(self.working_folder_requested)
-        self._library.clicked.connect(self._pick_library)
+        self._library.clicked.connect(self.pick_library)
         self._chevron.clicked.connect(self.toggle_collapsed)
 
     # ------------------------------------------------------------------ #
@@ -260,7 +260,8 @@ class FolderBar(QFrame):
             self.toggle_collapsed()
         super().mousePressEvent(event)
 
-    def _pick_library(self) -> None:
+    def pick_library(self) -> None:
+        """Open a folder picker for the library; emits library_folder_changed."""
         start = str(self._library.path() or QDir.homePath())
         folder = QFileDialog.getExistingDirectory(
             self,

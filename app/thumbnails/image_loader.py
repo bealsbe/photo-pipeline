@@ -8,11 +8,25 @@ FullImageWorker (QRunnable)
     Falls back to QImageReader if rawpy fails.
 
 ImageLoader (QObject, main thread)
-    Tiny (3-entry) LRU cache of QPixmaps — full-res images are large.
+    Byte-budgeted LRU cache of QPixmaps — full-res images are large.
     request(record)  — load now, emit image_ready when done.
     preload(record)  — low-priority background fetch.
     clear_queue()    — flush unstarted workers (call before navigating).
     get_cached(path) — synchronous cache hit.
+
+Cache sizing
+------------
+The budget is in bytes, not entries, because "an image" spans two orders of
+magnitude.  A 12 MP phone JPEG is 48 MB as a QPixmap; a 42 MP camera JPEG at
+7952×5304 is 169 MB.  A flat nine-entry cache therefore meant anything from
+430 MB to 1.52 GB, and on a modern body it was the latter — measured peak RSS
+of 2.0 GB just holding the viewer's LRU.
+
+The preload radius follows from the budget rather than being fixed, so the
+loader never decodes a neighbour it is about to evict: at 12 MP the budget
+holds sixteen frames and the full ±2 is preloaded, while at 42 MP it holds
+four and the radius drops to ±1.  _CACHE_FLOOR keeps the current image and its
+immediate neighbours resident no matter how large a single frame is.
 """
 from __future__ import annotations
 
@@ -40,9 +54,16 @@ try:
 except ImportError:
     _RAWPY_AVAILABLE = False
 
-_CACHE_LIMIT = 9     # ~100–300 MB at typical JPEG sizes; negligible on modern hardware
+_CACHE_BYTES = 768 * 1024 * 1024   # ~4 frames from a 42 MP body, ~16 from a phone
+_CACHE_FLOOR = 3                   # current image ± 1, resident at any frame size
+_PRELOAD_RADIUS = 2                # requested radius; trimmed to fit the budget
 _PRIO_NOW    = 10
 _PRIO_AHEAD  = 1
+
+
+def _pixmap_bytes(pixmap: QPixmap) -> int:
+    """Approximate resident size of *pixmap* in bytes."""
+    return max(1, pixmap.width() * pixmap.height() * max(1, pixmap.depth()) // 8)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -50,9 +71,14 @@ _PRIO_AHEAD  = 1
 # ──────────────────────────────────────────────────────────────────────────────
 
 class _LRU:
-    def __init__(self, maxsize: int) -> None:
+    """LRU bounded by total bytes, with a floor on the number of entries."""
+
+    def __init__(self, max_bytes: int, floor: int = 1) -> None:
         self._d: OrderedDict[Path, QPixmap] = OrderedDict()
-        self._max = maxsize
+        self._sizes: dict[Path, int] = {}
+        self._max_bytes = max_bytes
+        self._floor = max(1, floor)
+        self._bytes = 0
 
     def get(self, k: Path) -> Optional[QPixmap]:
         if k not in self._d:
@@ -62,16 +88,34 @@ class _LRU:
 
     def put(self, k: Path, v: QPixmap) -> None:
         if k in self._d:
+            self._bytes -= self._sizes.pop(k, 0)
             self._d.move_to_end(k)
+        size = _pixmap_bytes(v)
         self._d[k] = v
-        while len(self._d) > self._max:
-            self._d.popitem(last=False)
+        self._sizes[k] = size
+        self._bytes += size
+        # Never evict below the floor: dropping a neighbour the viewer is
+        # about to slide to would make navigation re-decode it.
+        while self._bytes > self._max_bytes and len(self._d) > self._floor:
+            old, _ = self._d.popitem(last=False)
+            self._bytes -= self._sizes.pop(old, 0)
 
     def __contains__(self, k: Path) -> bool:
         return k in self._d
 
     def clear(self) -> None:
         self._d.clear()
+        self._sizes.clear()
+        self._bytes = 0
+
+    @property
+    def nbytes(self) -> int:
+        return self._bytes
+
+    @property
+    def largest_entry(self) -> int:
+        """Bytes of the biggest pixmap currently held (0 when empty)."""
+        return max(self._sizes.values(), default=0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -175,7 +219,7 @@ class ImageLoader(QObject):
         super().__init__(parent)
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(3)   # 1 current + 2 preload
-        self._cache = _LRU(_CACHE_LIMIT)
+        self._cache = _LRU(_CACHE_BYTES, floor=_CACHE_FLOOR)
         self._loading: Set[Path] = set()
         self._signals = _Signals()
         self._signals.done.connect(self._on_done)
@@ -202,13 +246,34 @@ class ImageLoader(QObject):
         self._loading.add(record.path)
         self._pool.start(FullImageWorker(record, self._signals), _PRIO_AHEAD)
 
-    def preload_range(self, records: list, center: int, radius: int = 2) -> None:
-        """Preload *radius* images on each side of *center* index."""
+    def preload_range(self, records: list, center: int, radius: int = _PRELOAD_RADIUS) -> None:
+        """
+        Preload up to *radius* images on each side of *center* index.
+
+        The radius is trimmed to what the cache budget can actually hold, so a
+        42 MP shoot preloads ±1 rather than decoding a ±2 neighbour that the
+        next put() would immediately evict.
+        """
+        radius = min(radius, self._affordable_radius())
         lo = max(0, center - radius)
         hi = min(len(records) - 1, center + radius)
         for i in range(lo, hi + 1):
             if i != center:
                 self.preload(records[i])
+
+    def _affordable_radius(self) -> int:
+        """
+        How many neighbours fit in the budget alongside the current image.
+
+        Derived from the largest frame seen so far, which is what the next
+        decode is likely to cost.  Before anything has loaded there is nothing
+        to measure, so the caller's requested radius stands.
+        """
+        largest = self._cache.largest_entry
+        if largest <= 0:
+            return _PRELOAD_RADIUS
+        capacity = max(_CACHE_FLOOR, _CACHE_BYTES // largest)
+        return max(1, (capacity - 1) // 2)
 
     def get_cached(self, path: Path) -> Optional[QPixmap]:
         return self._cache.get(path)
