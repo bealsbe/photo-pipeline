@@ -334,6 +334,8 @@ pub struct Pane {
     /// The camera's AF point (fractions of the photo as shown), which the
     /// AF view centres each pane on.
     pub focus: Option<(f32, f32)>,
+    /// The analysis' hint, after the name ("Sharpest of 8").
+    pub hint: Option<(String, Option<crate::model::hints::Plate>)>,
 }
 
 impl Pane {
@@ -886,16 +888,34 @@ fn draw_marks(r: &mut Renderer, ir: Rectangle, marked: bool, pruned: bool) {
     }
 }
 
-/// File name left, file-type tag right, in the strip under the photo.
+/// File name left, the analysis' hint after it, file-type tag right, in
+/// the strip under the photo.
 fn draw_caption(r: &mut Renderer, visible: Rectangle, pane: &Pane, focused: bool) {
     let strip = rect(visible.x, visible.y + visible.height, visible.width, CAPTION_H);
     let x = strip.x + strip.width - super::tags::kind_width(pane.tag);
-    let name_w = (x - strip.x - 8.0).max(0.0);
     super::tags::draw_kind(r, x, strip.center_y(), pane.tag, 1.0, strip);
+    // The hint takes its room first, then the name has what is left.
+    let g = 12.0;
+    let hint_w = pane.hint.as_ref().map_or(0.0, |(w, _)| g + 5.0 + paint::text_width(w, t::T_SMALL, paint::REGULAR).ceil() + 12.0);
+    let name_room = (x - strip.x - 8.0).max(0.0);
+    let hint_w = if name_room - hint_w >= 60.0 { hint_w } else { 0.0 };
+    let name_w = name_room - hint_w;
     // As in the grid: shortened from the start, keeping the sequence number.
     let name = paint::elide_start(&pane.name, t::T_SMALL, paint::MEDIUM, name_w);
     let ink = if focused { t::PHOTO_INK } else { t::PHOTO_INK2 };
     paint::text(r, &name, strip, t::T_SMALL, paint::MEDIUM, ink, HAlign::Left, strip);
+    if let (Some((words, plate)), true) = (&pane.hint, hint_w > 0.0) {
+        let hx = strip.x + paint::text_width(&name, t::T_SMALL, paint::MEDIUM).ceil() + 12.0;
+        let mut tx = hx;
+        if let Some(plate) = plate {
+            let at = rect(hx.round(), (strip.center_y() - g / 2.0).round(), g, g);
+            let handle = super::icons::handle(super::hint_plate::glyph(*plate), g, super::hint_plate::tone(*plate));
+            r.draw_image(iced::advanced::image::Image::new(handle).filter_method(FilterMethod::Linear), at, strip);
+            tx += g + 5.0;
+        }
+        let tone = if *plate == Some(crate::model::hints::Plate::Accidental) { t::WARN } else { t::PHOTO_INK3 };
+        paint::text(r, words, rect(tx, strip.y, strip.width, strip.height), t::T_SMALL, paint::REGULAR, tone, HAlign::Left, strip);
+    }
 }
 
 impl<'a, Message: 'a> From<CompareStage<'a, Message>> for Element<'a, Message, iced::Theme, Renderer> {
@@ -1123,6 +1143,7 @@ mod tests {
             crop: None,
             status: None,
             focus,
+            hint: None,
         }
     }
 

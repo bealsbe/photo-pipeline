@@ -702,6 +702,11 @@ pub fn in_window<'a>(app: &'a App, content: Element<'a, Message>) -> Element<'a,
     }
 }
 
+/// The network share `path` is on, by name, once it has been probed.
+pub fn share_of(app: &App, path: &Path) -> Option<String> {
+    app.net.probe_of(path)?.share.as_ref().map(|s| s.name())
+}
+
 /// The folder bar's mark for `path`: an icon, its colour and a tooltip line.
 pub fn badge(app: &App, path: &Path, library: bool) -> Option<(Glyph, Color, String)> {
     let probe = app.net.probe_of(path);

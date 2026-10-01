@@ -73,6 +73,17 @@ pub enum Glyph {
     Network,
     /// Preferences: three sliders.
     Settings,
+    /// Analyse this folder: a camera's focus-area brackets round a point.
+    Analyse,
+    /// Hints (suggestions, hollow so they never read as decisions):
+    /// the sharpest frame of a burst, a crisp ring on its point …
+    HintSharp,
+    /// … looks out of focus, the same ring broken up …
+    HintSoft,
+    /// … an accidental frame, an empty frame …
+    HintAccident,
+    /// … a copy of another file, a frame on top of another.
+    HintCopy,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -483,6 +494,31 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
                 p.circle(x, y, 2.6);
             }
         }
+        Analyse => {
+            p.line(&[(3.5, 8.5), (3.5, 3.5), (8.5, 3.5)]);
+            p.line(&[(15.5, 3.5), (20.5, 3.5), (20.5, 8.5)]);
+            p.line(&[(20.5, 15.5), (20.5, 20.5), (15.5, 20.5)]);
+            p.line(&[(8.5, 20.5), (3.5, 20.5), (3.5, 15.5)]);
+            p.circle(12.0, 12.0, 3.6);
+        }
+        HintSharp => {
+            p.circle(12.0, 12.0, 7.5);
+            p.dot(12.0, 12.0, 2.4);
+        }
+        HintSoft => {
+            // The sharp ring broken into six dashes, with no point in it.
+            for k in 0..6 {
+                let a = k as f32 * 60.0 - 90.0;
+                p.arc(12.0, 12.0, 7.5, a + 12.0, a + 45.0);
+            }
+        }
+        HintAccident => {
+            p.rrect(3.5, 5.5, 17.0, 13.0, 2.0);
+        }
+        HintCopy => {
+            p.rounded(&[(4.0, 15.5), (4.0, 4.0), (15.5, 4.0)], 2.5);
+            p.rrect(8.5, 8.5, 11.5, 11.5, 2.0);
+        }
     }
 }
 
@@ -510,7 +546,7 @@ mod tests {
             Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, List, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
-            Settings,
+            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");

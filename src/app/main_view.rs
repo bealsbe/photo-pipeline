@@ -9,7 +9,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Point
 use super::commands::{Cmd, MENUS};
 use super::kit::{self, tip};
 use super::style::{self, Look};
-use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, network};
+use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, hints_ui, network};
 use crate::model::filter::SortKey;
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
 use crate::ui::grid::{Grid, GridData, Restack};
@@ -33,8 +33,8 @@ const STATUS_H: f32 = 28.0;
 
 // Fixed widths on the filter bar's right side, so the date popup can be
 // anchored under its field.
-const BAR_PAD: f32 = 12.0;
-const GAP: f32 = 8.0;
+pub(super) const BAR_PAD: f32 = 12.0;
+pub(super) const GAP: f32 = 8.0;
 const DATE_W: f32 = 108.0;
 const DASH_W: f32 = 10.0;
 const RESET_W: f32 = 60.0;
@@ -42,7 +42,7 @@ const SLIDER_W: f32 = 96.0;
 const ZOOM_W: f32 = 14.0 + 6.0 + SLIDER_W + 6.0 + 14.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let keyboard_ok = app.modal.is_none() && app.menu.is_none() && app.date_popup.is_none();
+    let keyboard_ok = app.modal.is_none() && app.menu.is_none() && app.date_popup.is_none() && app.bulk.is_none() && !app.quality.menu;
 
     // ── content column ──────────────────────────────────────────────────
     let mut col = column![].width(Length::Fill).height(Length::Fill);
@@ -52,10 +52,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(b) = network::banner(app) {
         col = col.push(b);
     }
+    if let Some(b) = hints_ui::banner(app) {
+        col = col.push(b);
+    }
     if app.view != View::Calendar {
         col = col.push(filter_bar(app));
     }
     let content: Element<'_, Message> = match app.view {
+        View::Grid | View::List if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
         View::Grid | View::List if pile_done(app) => pile_done_page(app),
         View::Grid => {
             let data = GridData {
@@ -68,6 +72,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 scale_factor: app.scale_factor,
                 show_names: app.show_names,
                 bursts: &app.derived.burst_runs,
+                moments: &app.derived.moment_links,
+                hints: (!app.quality.hints.is_empty()).then_some(&app.quality.hints),
                 restack: Some(Restack {
                     seq: app.grid.restack_seq,
                     sections: &app.derived.before,
@@ -97,11 +103,13 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let busy = app.scanning
         || match app.view {
             View::Calendar => app.calendar.is_indexing() || app.calendar.thumbs.pending() > 0,
-            _ => app.thumbs.pending() > 0,
+            _ => app.thumbs.pending() > 0 || app.quality.analysing(),
         };
     // Quick look covers the grid (an empty layer keeps the stack's shape).
     let quick_look = super::quicklook::view(app).filter(|_| app.view == View::Grid).unwrap_or_else(|| space().into());
-    col = col.push(stack![content, quick_look, ActivityBar::new(busy)].width(Length::Fill).height(Length::Fill));
+    // The Hints menu opens over the content, under its control.
+    let hints_menu = hints_ui::menu_layer(app).filter(|_| app.view != View::Calendar).unwrap_or_else(|| space().into());
+    col = col.push(stack![content, quick_look, ActivityBar::new(busy), hints_menu].width(Length::Fill).height(Length::Fill));
 
     let central = stack![
         row![Space::new().width(RAIL_W).height(Length::Fill), col],
@@ -132,6 +140,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     }
     if let Some(modal) = &app.modal {
         layers.push(dialogs::view(app, modal));
+    }
+    if let Some(dialog) = app.main_id.and_then(|id| super::bulk::overlay(app, id)) {
+        layers.push(dialog);
     }
     if let Some(prompt) = network::quit_overlay(app) {
         layers.push(prompt);
@@ -194,6 +205,7 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
         Cmd::QuickLook => Some(app.quicklook.is_some()),
         Cmd::AdvanceAfterMark => Some(app.settings.viewer_advance),
         Cmd::StackBursts => Some(app.stacking.all()),
+        Cmd::ProblemsOnly => Some(app.filter.hint == Some(crate::model::hints::HintFilter::Problems)),
         _ => None,
     }
 }
@@ -213,6 +225,16 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     }
     if cmd == Cmd::StackBurst {
         return app.view == View::Grid && app.focused_burst().is_some();
+    }
+    if cmd == Cmd::Analyse {
+        return !app.scanning && !app.coll.is_empty() && !app.quality.analysing();
+    }
+    let analysed = !app.quality.analysing() && app.quality.hints.coverage().0 > 0;
+    if matches!(cmd, Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly) {
+        return analysed && app.view != View::Calendar;
+    }
+    if cmd == Cmd::KeepThisPruneRest {
+        return analysed && super::viewer_burst::can_open(app);
     }
     !(app.view == View::Calendar && matches!(cmd, Cmd::SelectMode | Cmd::PruneSelected | Cmd::MarkSelected | Cmd::ToReview))
 }
@@ -547,6 +569,7 @@ fn filter_bar(app: &App) -> Element<'_, Message> {
     let mut r = row![
         show_choice(f.show()),
         pruned_chip,
+        hints_ui::chip(app),
         Space::new().width(Length::Fill),
     ]
     .spacing(GAP)
@@ -745,13 +768,11 @@ fn status_bar(app: &App) -> Element<'_, Message> {
                 .on_press(msg.clone()),
         );
     }
-    let mut r = row![
-        message,
-        Space::new().width(Length::Fill),
-        counts,
-    ]
-    .align_y(Alignment::Center)
-    .padding(Padding::from([0.0, BAR_PAD]));
+    let mut r = row![message, Space::new().width(Length::Fill)].align_y(Alignment::Center).padding(Padding::from([0.0, BAR_PAD]));
+    if let Some(slot) = hints_ui::status_slot(app) {
+        r = r.push(slot);
+    }
+    r = r.push(counts);
     if let Some(p) = review_progress(app) {
         r = r.push(Space::new().width(t::S3)).push(kit::vrule(12.0)).push(Space::new().width(t::S2)).push(p);
     }

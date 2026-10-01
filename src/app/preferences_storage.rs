@@ -1,5 +1,5 @@
 //! What the Preferences page's Storage section measures and clears: the
-//! three caches under `~/.cache/photo_pipeline`, and the folder of marks
+//! four caches under `~/.cache/photo_pipeline`, and the folder of marks
 //! waiting to be saved (`~/.local/share/photo-pipeline/unsaved`), which is
 //! only ever counted.  Everything here touches the disk, so the page runs
 //! it on a worker thread.
@@ -23,16 +23,20 @@ pub enum Cache {
     Library,
     /// `capture-times/`, per working folder (`model::capture_cache`).
     CaptureTimes,
+    /// `quality/`, what analysing measured, per folder
+    /// (`model::quality_cache`).
+    Quality,
 }
 
 impl Cache {
-    pub const ALL: [Cache; 3] = [Cache::Thumbs, Cache::Library, Cache::CaptureTimes];
+    pub const ALL: [Cache; 4] = [Cache::Thumbs, Cache::Library, Cache::CaptureTimes, Cache::Quality];
 
     fn folder_name(self) -> &'static str {
         match self {
             Cache::Thumbs => "thumbs",
             Cache::Library => "library",
             Cache::CaptureTimes => "capture-times",
+            Cache::Quality => "quality",
         }
     }
 
@@ -45,7 +49,7 @@ impl Cache {
     fn keep(self, dir: &Path) -> Vec<PathBuf> {
         match self {
             Cache::Thumbs => vec![dir.join(GENERATION_SIZE.to_string())],
-            Cache::Library | Cache::CaptureTimes => Vec::new(),
+            Cache::Library | Cache::CaptureTimes | Cache::Quality => Vec::new(),
         }
     }
 
@@ -221,6 +225,10 @@ mod tests {
         assert_eq!(Cache::Thumbs.dir(), Some(root.join("thumbs")));
         assert_eq!(Cache::Library.dir(), Some(root.join("library")));
         assert_eq!(Cache::CaptureTimes.dir(), Some(root.join("capture-times")));
+        assert_eq!(Cache::Quality.dir(), Some(root.join("quality")));
+        // The analysis writes where the Storage section looks.
+        let analysed = crate::model::quality_cache::file_for(std::path::Path::new("/photos/shoot")).expect("a cache file");
+        assert_eq!(analysed.parent(), Cache::Quality.dir().as_deref());
         let thumbs = Cache::Thumbs.dir().unwrap();
         assert_eq!(Cache::Thumbs.keep(&thumbs), vec![thumbs.join("300")]);
     }

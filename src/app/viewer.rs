@@ -93,6 +93,8 @@ pub enum Msg {
     ZoomOut,
     TogglePrune,
     ToggleMark,
+    /// Keep the outlined frame, prune the rest of its burst (asks first).
+    KeepThisPruneRest,
     ShowInFolder,
     ToggleInfo,
     ToggleCrop,
@@ -661,6 +663,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             return app.refresh_mark(&[id]);
         }
+        Msg::KeepThisPruneRest => return super::bulk::open_keep_viewer(app),
         Msg::ShowInFolder => {
             let path = app.viewer.as_ref().and_then(|v| v.record(app)).map(|r| r.path.clone());
             if let Some(p) = path {
@@ -911,6 +914,22 @@ fn vmsg(m: Msg) -> Option<Message> {
     Some(Message::Viewer(m))
 }
 
+/// The analysis' hint for the photo on screen, as a quiet glyph and a few
+/// words, with the reasons in its tooltip.
+fn hint_chip(app: &App, id: crate::model::collection::RecordId) -> Option<Element<'_, Message>> {
+    use crate::ui::hint_plate;
+    let h = &app.quality.hints;
+    let (words, plate) = hint_plate::phrase(h, id)?;
+    let tone = if plate == Some(crate::model::hints::Plate::Accidental) { t::WARN } else { t::INK2 };
+    let mut line = row![].spacing(6).align_y(Alignment::Center);
+    if let Some(p) = plate {
+        line = line.push(icons::view(hint_plate::glyph(p), 14.0, tone));
+    }
+    let chip = container(line.push(text(words).size(t::T_SMALL).font(paint::MEDIUM).color(tone))).padding(Padding::from([3.0, 8.0])).style(style::chip(t::INK3));
+    let why = hint_plate::explain(h, &app.coll, id);
+    Some(if why.is_empty() { chip.into() } else { kit::tip(chip, why.join("\n"), true) })
+}
+
 pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     let c = coll(app, v);
     let record = v.record(app);
@@ -942,12 +961,17 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     };
     let name = display.map(|r| r.filename()).unwrap_or_default();
     let mut top = row![prev, next, Space::new().width(t::S2)].spacing(t::S2).align_y(Alignment::Center);
+    // What the analysis says about the photo on screen (working folder).
+    let hint = if v.read_only { None } else { v.record_id().and_then(|id| hint_chip(app, id)) };
     if on_sheet {
         // The burst, and the frame the outline is on.
         let title = viewer_burst::title(app, v).unwrap_or_default();
         let frame = record.and_then(|r| viewer_burst::frame_caption(app, v).map(|f| format!("{f}, {}", r.filename())));
         top = top.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
         top = top.push(kit::caption(v.sheet.note.clone().or(frame).unwrap_or_default()));
+        if let Some(h) = hint {
+            top = top.push(h);
+        }
     } else {
         top = top.push(text(name).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
         match viewer_burst::frame_caption(app, v) {
@@ -961,6 +985,9 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
                 ));
             }
             None => top = top.push(kit::caption(format!("{} of {}", util::thousands(v.index as u64 + 1), util::thousands(n as u64)))),
+        }
+        if let Some(h) = hint {
+            top = top.push(h);
         }
     }
     top = top.push(Space::new().width(Length::Fill));
@@ -989,7 +1016,21 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         } else {
             "Compare this frame with its neighbours, or with frames you pick: Ctrl+click or Space  (C)"
         };
+        let tip = if picked < 2 && app.quality.hints.coverage().0 > 0 {
+            "Compare this frame with the burst's sharpest frames, or with frames you pick: Ctrl+click or Space  (C)"
+        } else {
+            tip
+        };
         top = top.push(kit::tip(kit::icon_text_btn(Glyph::Compare, label, t::INK2, style::ghost(), vmsg(Msg::CompareFrames)), tip, true));
+        if !v.read_only && app.quality.hints.coverage().0 > 0 {
+            // Narrow, the label goes (as Auto-advance's does).
+            let b = if v.win.width >= 1250.0 {
+                kit::icon_text_btn(Glyph::Keep, "Keep this, prune the rest", t::INK2, style::ghost(), vmsg(Msg::KeepThisPruneRest))
+            } else {
+                kit::icon_btn(Glyph::Keep, t::INK2, style::ghost(), vmsg(Msg::KeepThisPruneRest))
+            };
+            top = top.push(kit::tip(b, "Keep this, prune the rest: keep the outlined frame and prune this burst's other frames you haven't decided on. Asks first.", true));
+        }
     } else if !v.read_only {
         let cropped = display.is_some_and(|r| r.is_cropped());
         let active = v.crop_mode || cropped;

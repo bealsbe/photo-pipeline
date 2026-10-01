@@ -1,8 +1,10 @@
 //! The analysis as the app holds it: starting a pass (only when asked,
 //! decision 2), taking its results in, and the suggestions worked out from
-//! them (`model::hints::Hints`) for the views to show.  There is no
-//! command, menu or drawing here yet; the UI calls [`start`] and reads
-//! [`Quality::hints`].
+//! them (`model::hints::Hints`) for the views to show.  The views are in
+//! `hints_ui` (the main window's Hints control, progress and banner),
+//! `ui::hint_plate` (plates and words on photos) and `bulk` (the bulk
+//! actions).  Opening a folder shows what an earlier pass cached
+//! ([`start_cached`]), reading no photo.
 //!
 //! Measurements are kept by *canonical key* (the file's folder without a
 //! `RAW`/`JPG` level, plus its name), so a Sort, which moves files into
@@ -47,6 +49,12 @@ pub struct Quality {
     derived_at: Option<Instant>,
     /// How the last pass ended.
     pub last: Option<Finished>,
+    /// The running (or last) pass: a full one, or the cache only.
+    mode: Option<Mode>,
+    /// The Hints menu is open (the filter bar's Hints control).
+    pub menu: bool,
+    /// The "analysing stopped" banner was closed.
+    pub banner_hidden: bool,
 }
 
 /// A path's canonical key: its folder without a `RAW`/`JPG` level, and its
@@ -58,6 +66,12 @@ pub fn canonical_key(path: &Path) -> PathBuf {
 impl Quality {
     pub fn running(&self) -> bool {
         self.handle.is_some()
+    }
+
+    /// A pass the user asked for is running (not just the cache being
+    /// read on opening a folder).
+    pub fn analysing(&self) -> bool {
+        self.running() && self.mode == Some(Mode::Full)
     }
 
     /// Whether any results are held (from a pass, or the cache).
@@ -87,27 +101,21 @@ impl Quality {
         self.hints.summary()
     }
 
-    /// A line for the status bar: progress while a pass runs, the counts
-    /// after.
+    /// A line about the analysis: progress while a pass runs, what it
+    /// found after (the status bar says this when a pass ends).
     pub fn status_text(&self) -> Option<String> {
-        if let Some((done, total)) = self.progress {
-            return Some(format!("Checking focus · {} of {} shots", crate::util::thousands(done as u64), crate::util::thousands(total as u64)));
+        if let (Some((done, total)), true) = (self.progress, self.analysing()) {
+            return Some(format!("Analysing: {} of {} shots", crate::util::thousands(done as u64), crate::util::thousands(total as u64)));
         }
         let fin = self.last.as_ref()?;
         if let Some(e) = &fin.error {
-            return Some(format!("Checking focus stopped: {e}"));
+            return Some(format!("Analysing stopped: {e}"));
         }
         let s = self.summary();
-        let mut parts = vec![format!("{} moment{}", s.moments, crate::util::s(s.moments))];
-        parts.push(format!("{} look{} out of focus", s.soft, if s.soft == 1 { "s" } else { "" }));
-        if s.accidental > 0 {
-            parts.push(format!("{} accidental", s.accidental));
-        }
-        if s.duplicate_copies > 0 {
-            parts.push(format!("{} duplicate{}", s.duplicate_copies, crate::util::s(s.duplicate_copies)));
-        }
-        Some(parts.join(" · "))
+        let found = super::hints_ui::findings(s.soft_only, s.accidental, self.hints.copies()).unwrap_or_else(|| "none look out of focus or accidental".into());
+        Some(format!("{} of {} shots analysed: {found}; {} moments", s.measured, s.shots, s.moments))
     }
+
 
     fn clear(&mut self) {
         if let Some(h) = self.handle.take() {
@@ -140,6 +148,9 @@ fn start_with(app: &mut App, mode: Mode) -> Task<Message> {
     q.run += 1;
     q.last = None;
     q.failed.clear();
+    q.mode = Some(mode);
+    q.banner_hidden = false;
+    q.menu = false;
     let files = jobs(app);
     let total = files.iter().filter(|f| f.measure).count();
     let req = analysis::Request {
@@ -198,41 +209,49 @@ pub fn on_batch(app: &mut App, run: u64, batch: Arc<Batch>) -> Task<Message> {
         q.progress = None;
         q.last = Some(fin.clone());
         q.derived_at = None;
-    } else {
+    } else if let Some(h) = &q.handle {
+        // (Batches still on their way after a stop don't bring the
+        // progress back.)
         q.progress = Some((batch.done, batch.total));
         // Thumbnails the grid waits for come first.
-        if let Some(h) = &q.handle {
-            h.set_busy(app.thumbs.pending());
-        }
+        h.set_busy(app.thumbs.pending());
     }
     if batch.finished.is_some() {
-        // Final hints: stacks take their sharpest frame on top.
+        // Final hints: stacks take their sharpest frame on top, and the
+        // hints filter and its counts follow.
         app.refresh_views();
-    } else {
-        refresh(app);
+        let mode = app.quality.mode.unwrap_or(Mode::CachedOnly);
+        return super::hints_ui::on_ended(app, mode);
+    }
+    // The grid's plates follow as results stream in; what the hints
+    // filter shows (and the Hints menu's counts) too, when they're on
+    // screen.
+    if refresh(app) && (app.filter.hint.is_some() || app.quality.menu) {
+        app.refresh_views();
     }
     Task::none()
 }
 
 /// Work the suggestions out again if the collection or the results have
 /// changed (debounced while a pass streams in).  Called from
-/// `App::refresh_views`.
-pub fn refresh(app: &mut App) {
+/// `App::refresh_views`.  Returns whether they changed.
+pub fn refresh(app: &mut App) -> bool {
     let q = &app.quality;
     if app.scanning || !q.has_results() {
         if !q.hints.is_empty() {
             app.quality.hints = Hints::default();
+            return true;
         }
-        return;
+        return false;
     }
     if q.hints.is_current(&app.coll, q.revision) {
-        return;
+        return false;
     }
     // While results stream in, and the files are as they were, at most
     // every DERIVE_EVERY.
     let files_same = q.hints.generation() == Some(app.coll.generation());
     if q.running() && files_same && q.derived_at.is_some_and(|t| t.elapsed() < DERIVE_EVERY) {
-        return;
+        return false;
     }
     let by_key: HashMap<PathBuf, &Path> = app.coll.iter().map(|r| (canonical_key(&r.path), r.path.as_path())).collect();
     let exact: Vec<Vec<PathBuf>> =
@@ -242,4 +261,5 @@ pub fn refresh(app: &mut App) {
     app.quality.derived_at = Some(Instant::now());
     // The grid repaints its hint plates.
     app.derived.key = app.derived.key.wrapping_add(1);
+    true
 }

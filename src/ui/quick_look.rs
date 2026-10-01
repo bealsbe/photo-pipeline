@@ -60,6 +60,9 @@ pub struct Shown {
     pub when: String,
     /// (1-based frame, frames) when the photo is in a burst (B shows them all).
     pub burst: Option<(usize, usize)>,
+    /// What the analysis says, in a few words ("Looks out of focus",
+    /// "Sharpest of 8"), and its plate.
+    pub hint: Option<(String, Option<crate::model::hints::Plate>)>,
     pub pruned: bool,
     pub marked: bool,
     pub crop: Option<Crop>,
@@ -423,6 +426,18 @@ fn draw_caption(r: &mut Renderer, s: &Shown, b: Rectangle, k: f32) {
     put(r, &mut x, &s.when, t::T_SMALL, paint::REGULAR, t::PHOTO_INK3, t::S4);
     if let Some((i, n)) = s.burst {
         put(r, &mut x, &format!("Burst frame {i} of {n}"), t::T_SMALL, paint::REGULAR, t::PHOTO_INK2, t::S4);
+    }
+    if let Some((words, plate)) = &s.hint {
+        // The plate's glyph, then the words, as the grid's plate says it.
+        let g = 13.0;
+        if let Some(plate) = plate.filter(|_| x + g < right) {
+            let at = rect(x.round(), (strip.center_y() - g / 2.0).round(), g, g);
+            let handle = super::icons::handle(super::hint_plate::glyph(plate), g, super::hint_plate::tone(plate));
+            r.draw_image(iced::advanced::image::Image::new(handle).filter_method(FilterMethod::Linear).opacity(k), at, b);
+            x += g + 5.0;
+        }
+        let tone = if *plate == Some(crate::model::hints::Plate::Accidental) { t::WARN } else { t::PHOTO_INK2 };
+        put(r, &mut x, words, t::T_SMALL, paint::MEDIUM, tone, t::S4);
     }
     if s.marked {
         put(r, &mut x, "Kept", t::T_SMALL, paint::SEMIBOLD, t::KEEP, t::S3);

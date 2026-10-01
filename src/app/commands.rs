@@ -35,6 +35,20 @@ pub enum Cmd {
     StackBursts,
     AdvanceAfterMark,
     Preferences,
+    /// Analyse the working folder (only ever when asked: decision 2).
+    Analyse,
+    /// Keep the selected frame, prune the rest of its burst still to
+    /// review (asks first).
+    KeepThisPruneRest,
+    /// Prune every photo shown that looks out of focus or accidental
+    /// (asks first).
+    PruneSoft,
+    /// Prune every photo shown that looks accidental (asks first).
+    PruneAccidental,
+    /// Prune every copy the duplicate rule suggests (asks first).
+    PruneCopies,
+    /// The hints filter on "Possible problems", or off.
+    ProblemsOnly,
 }
 
 impl Cmd {
@@ -67,6 +81,12 @@ impl Cmd {
             Cmd::StackBursts => "Stack all bursts",
             Cmd::AdvanceAfterMark => "Advance after marking",
             Cmd::Preferences => "Preferences…",
+            Cmd::Analyse => "Analyse this folder",
+            Cmd::KeepThisPruneRest => "Keep this, prune the rest…",
+            Cmd::PruneSoft => "Prune all soft frames…",
+            Cmd::PruneAccidental => "Prune accidental frames…",
+            Cmd::PruneCopies => "Prune duplicate copies…",
+            Cmd::ProblemsOnly => "Show only possible problems",
         }
     }
 
@@ -103,6 +123,7 @@ impl Cmd {
             Cmd::StackBursts => "Shift+G",
             Cmd::AdvanceAfterMark => "Ctrl+Shift+A",
             Cmd::Preferences => "Ctrl+,",
+            Cmd::Analyse | Cmd::KeepThisPruneRest | Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly => "",
         }
     }
 
@@ -130,6 +151,12 @@ impl Cmd {
             Cmd::StackBursts => "Show every burst in the grid as one stack; off, every frame shows",
             Cmd::AdvanceAfterMark => "In the viewer, move on to the next photo when P or M marks one",
             Cmd::Preferences => "Settings for culling, the grid, the viewer, folders and storage",
+            Cmd::Analyse => "Look for photos that are out of focus or accidental, for copies, and for the sharpest frame of each burst. Nothing is marked",
+            Cmd::KeepThisPruneRest => "Keep the selected frame and prune the other frames of its burst you haven't decided on (asks first)",
+            Cmd::PruneSoft => "Prune every photo shown that looks out of focus or accidental (asks first)",
+            Cmd::PruneAccidental => "Prune every photo shown that looks accidental (asks first)",
+            Cmd::PruneCopies => "Prune the copies of files that are in the folder twice (asks first)",
+            Cmd::ProblemsOnly => "Show only photos that look out of focus or accidental, and copies",
             _ => "",
         }
     }
@@ -154,6 +181,7 @@ impl Cmd {
             Cmd::Compare => Glyph::Compare,
             Cmd::AdvanceAfterMark => Glyph::Skip,
             Cmd::Preferences => Glyph::Settings,
+            Cmd::Analyse => Glyph::Analyse,
             _ => return None,
         })
     }
@@ -207,7 +235,26 @@ impl Cmd {
 pub const MENUS: &[(&str, char, &[Option<Cmd>])] = &[
     ("File", 'f', &[Some(Cmd::Open), None, Some(Cmd::Quit)]),
     ("Edit", 'e', &[Some(Cmd::Undo), Some(Cmd::Redo), None, Some(Cmd::Preferences)]),
-    ("Prune", 'p', &[Some(Cmd::Review), Some(Cmd::Sort), None, Some(Cmd::Export), Some(Cmd::EditCopy), None, Some(Cmd::AdvanceAfterMark)]),
+    (
+        "Prune",
+        'p',
+        &[
+            Some(Cmd::Analyse),
+            None,
+            Some(Cmd::KeepThisPruneRest),
+            Some(Cmd::PruneSoft),
+            Some(Cmd::PruneAccidental),
+            Some(Cmd::PruneCopies),
+            None,
+            Some(Cmd::Review),
+            Some(Cmd::Sort),
+            None,
+            Some(Cmd::Export),
+            Some(Cmd::EditCopy),
+            None,
+            Some(Cmd::AdvanceAfterMark),
+        ],
+    ),
     ("Help", 'h', &[Some(Cmd::Shortcuts)]),
     (
         "View",
@@ -218,6 +265,7 @@ pub const MENUS: &[(&str, char, &[Option<Cmd>])] = &[
             Some(Cmd::CalendarView),
             None,
             Some(Cmd::ToReview),
+            Some(Cmd::ProblemsOnly),
             Some(Cmd::QuickLook),
             Some(Cmd::Compare),
             Some(Cmd::ReviewBurst),
@@ -238,6 +286,7 @@ pub const SIDE: &[Option<Cmd>] = &[
     Some(Cmd::EditCopy),
     None,
     Some(Cmd::Review),
+    Some(Cmd::Analyse),
     None,
     Some(Cmd::ListView),
     Some(Cmd::GridView),

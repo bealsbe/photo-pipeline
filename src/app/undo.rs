@@ -115,6 +115,9 @@ pub struct Trashed {
 #[derive(Debug, Clone)]
 pub enum Kind {
     Marks { field: Field, changes: Vec<Change> },
+    /// Mark changes made by one action (a confirmed bulk action that
+    /// prunes some frames and keeps one): undone and redone together.
+    Batch { parts: Vec<(Field, Vec<Change>)> },
     Sort { moves: Vec<Moved> },
     /// `window`: when the trash operation ran (unix seconds).
     Trash { files: Vec<Trashed>, window: (i64, i64) },
@@ -129,6 +132,7 @@ impl Kind {
         };
         match self {
             Kind::Marks { changes, .. } => changes.iter_mut().for_each(|c| fix(&mut c.id)),
+            Kind::Batch { parts } => parts.iter_mut().flat_map(|(_, c)| c.iter_mut()).for_each(|c| fix(&mut c.id)),
             Kind::Sort { moves } => moves.iter_mut().for_each(|m| fix(&mut m.id)),
             Kind::Trash { files, .. } => files.iter_mut().for_each(|f| fix(&mut f.id)),
         }
@@ -199,6 +203,9 @@ pub struct History {
     /// Bumped by every new step.
     epoch: u64,
     pending: Option<Pending>,
+    /// While one action's changes are gathered into a single step (see
+    /// [`batch`]).
+    gathering: Option<Vec<(Field, Vec<Change>)>>,
 }
 
 fn trim(v: &mut Vec<Step>) {
@@ -252,6 +259,51 @@ impl History {
             self.set_baseline(id, after);
         }
         out
+    }
+
+    /// Start gathering mark changes into one step.
+    fn gather(&mut self) {
+        self.gathering = Some(Vec::new());
+    }
+
+    /// Stop gathering: the changes gathered become one step named `label`
+    /// (none if nothing changed).  Returns its serial.
+    fn gathered(&mut self, label: String) -> Option<u64> {
+        let parts = self.gathering.take()?;
+        if parts.is_empty() {
+            return None;
+        }
+        Some(self.push(label, Kind::Batch { parts }))
+    }
+
+    /// Put the marks of a marks step back (`Undo`: as they were before
+    /// it) or on again (`Redo`), moving the baseline with them.  Returns
+    /// how many records it reached and the fields whose sidecars change.
+    fn restore(&mut self, coll: &mut Collection, kind: &Kind, dir: Dir) -> (usize, Vec<Field>) {
+        let parts: Vec<(Field, &[Change])> = match kind {
+            Kind::Marks { field, changes } => vec![(*field, changes.as_slice())],
+            Kind::Batch { parts } => parts.iter().map(|(f, c)| (*f, c.as_slice())).collect(),
+            _ => return (0, Vec::new()),
+        };
+        // Undo takes the parts back in reverse, redo replays them in order.
+        let order: Vec<usize> = if dir == Dir::Undo { (0..parts.len()).rev().collect() } else { (0..parts.len()).collect() };
+        let mut applied = 0;
+        let mut fields: Vec<Field> = Vec::new();
+        for i in order {
+            let (field, changes) = parts[i];
+            if !fields.contains(&field) {
+                fields.push(field);
+            }
+            for c in changes {
+                let target = if dir == Dir::Undo { &c.before } else { &c.after };
+                if let Some(r) = coll.get_mut(c.id) {
+                    field.copy(target, r);
+                    self.set_baseline(c.id, Marks::of(r));
+                    applied += 1;
+                }
+            }
+        }
+        (applied, fields)
     }
 
     /// Record a new step; the redo stack goes.  Returns its serial.
@@ -402,8 +454,21 @@ pub fn note(app: &mut App, field: Field, ids: &[RecordId]) {
     if changes.is_empty() {
         return;
     }
+    if let Some(parts) = &mut app.history.gathering {
+        parts.push((field, changes));
+        return;
+    }
     let label = marks_label(&app.coll, field, &changes);
     app.history.push(label, Kind::Marks { field, changes });
+}
+
+/// Run `f` (which ends in `refresh_prune` / `refresh_mark`, once or more)
+/// as one step named `label`: one Ctrl+Z undoes all of it.
+pub fn batch(app: &mut App, label: String, f: impl FnOnce(&mut App) -> Task<Message>) -> (Task<Message>, Option<u64>) {
+    app.history.gather();
+    let t = f(app);
+    let serial = app.history.gathered(label);
+    (t, serial)
 }
 
 /// The moves in a Sort's result, read before the records are updated.
@@ -505,7 +570,7 @@ fn run(app: &mut App, dir: Dir) -> Task<Message> {
         return app.show_status(if dir == Dir::Undo { "Nothing to undo" } else { "Nothing to redo" }, 3000);
     };
     match (&step.kind, dir) {
-        (Kind::Marks { .. }, _) => apply_marks(app, dir, step),
+        (Kind::Marks { .. } | Kind::Batch { .. }, _) => apply_marks(app, dir, step),
         (Kind::Sort { .. }, _) => start_moves(app, dir, step),
         (Kind::Trash { .. }, Dir::Undo) => start_restore(app, step),
         (Kind::Trash { .. }, Dir::Redo) => start_retrash(app, step),
@@ -513,33 +578,25 @@ fn run(app: &mut App, dir: Dir) -> Task<Message> {
 }
 
 fn apply_marks(app: &mut App, dir: Dir, step: Step) -> Task<Message> {
-    let Kind::Marks { field, changes } = &step.kind else { return Task::none() };
-    let field = *field;
-    let mut applied = 0;
-    for c in changes {
-        let target = if dir == Dir::Undo { &c.before } else { &c.after };
-        if let Some(r) = app.coll.get_mut(c.id) {
-            field.copy(target, r);
-            let now = Marks::of(r);
-            app.history.set_baseline(c.id, now);
-            applied += 1;
-        }
-    }
+    let (applied, fields) = app.history.restore(&mut app.coll, &step.kind, dir);
     if applied == 0 {
         let text = format!("Couldn't {} “{}”: those files are no longer in the working folder.", dir.verb(), step.label);
         return app.show_status(text, 0);
     }
     app.coll.recount_flags();
     app.refresh_views();
-    let save = match field {
-        Field::Prune => app.save_prune_marks(),
-        Field::Mark => app.save_export_marks(),
-        Field::Crop => app.save_crops(),
-    };
+    let saves: Vec<Task<Message>> = fields
+        .iter()
+        .map(|f| match f {
+            Field::Prune => app.save_prune_marks(),
+            Field::Mark => app.save_export_marks(),
+            Field::Crop => app.save_crops(),
+        })
+        .collect();
     let text = format!("{}: {}", dir.past(), step.label);
     let epoch = app.history.epoch;
     app.history.finish(dir, step, epoch);
-    Task::batch([save, app.show_status(text, 0)])
+    Task::batch(saves.into_iter().chain([app.show_status(text, 0)]))
 }
 
 /// Spawn `work` for step `step` running in direction `dir`.
@@ -804,6 +861,39 @@ mod tests {
         // A prune diff ignores marks made outside it.
         c.get_mut(lone).unwrap().is_marked = true;
         assert!(h.diff(&c, Field::Prune, &[lone]).is_empty());
+    }
+
+    #[test]
+    fn a_bulk_action_is_one_step_and_undoes_whole() {
+        // Keep IMG_1 (both halves), prune IMG_2: two fields, one step.
+        let (mut c, raw, jpg, lone) = shoot();
+        let mut h = History::new();
+        h.reset_baseline(&c);
+        h.gather();
+        c.get_mut(lone).unwrap().is_pruned = true;
+        let pruned = h.diff(&c, Field::Prune, &[lone]);
+        h.gathering.as_mut().unwrap().push((Field::Prune, pruned));
+        c.get_mut(jpg).unwrap().is_marked = true;
+        c.get_mut(raw).unwrap().is_marked = true;
+        let kept = h.diff(&c, Field::Mark, &[jpg, raw]);
+        h.gathering.as_mut().unwrap().push((Field::Mark, kept));
+        assert!(h.gathered("keep IMG_1 and prune the rest of its burst".into()).is_some());
+        assert_eq!(h.labels(Dir::Undo), vec!["keep IMG_1 and prune the rest of its burst"]);
+        // One undo takes both back.
+        let step = h.take(Dir::Undo).unwrap();
+        let (n, fields) = h.restore(&mut c, &step.kind, Dir::Undo);
+        assert_eq!((n, fields), (3, vec![Field::Mark, Field::Prune]));
+        assert!(c.iter().all(|r| !r.is_pruned && !r.is_marked));
+        // Redo puts both on again.
+        let (n, _) = h.restore(&mut c, &step.kind, Dir::Redo);
+        assert_eq!(n, 3);
+        assert!(c.get(lone).unwrap().is_pruned && c.get(jpg).unwrap().is_marked && c.get(raw).unwrap().is_marked);
+        // The baseline followed: nothing new to record.
+        assert!(h.diff(&c, Field::Mark, &[jpg, raw]).is_empty());
+        // Gathering nothing records nothing.
+        h.gather();
+        assert_eq!(h.gathered("nothing".into()), None);
+        assert!(h.gathering.is_none());
     }
 
     #[test]

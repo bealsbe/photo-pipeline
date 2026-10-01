@@ -122,6 +122,58 @@ impl ShotHint {
     pub fn problem(&self) -> bool {
         self.soft.is_some() || self.accidental.is_some()
     }
+
+    /// Looks out of focus and isn't an accident (an accidental frame is
+    /// soft too, but is shown and counted as accidental).
+    pub fn soft_only(&self) -> bool {
+        self.soft.is_some() && self.accidental.is_none()
+    }
+}
+
+/// The one hint a photo's plate shows in the grid (the most pressing, when
+/// several apply).  Suggestions only: the plate goes once the photo is
+/// pruned or marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Plate {
+    Accidental,
+    Soft,
+    /// A copy the duplicate rule suggests pruning.
+    Copy,
+    /// The sharpest frame of its burst.
+    Sharpest,
+}
+
+/// The filter bar's hints choice: only photos with this hint.  A RAW+JPG
+/// pair passes when either half does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HintFilter {
+    /// Looks out of focus, accidental, or a copy suggested for pruning.
+    Problems,
+    Soft,
+    Accidental,
+    /// Every file with a copy: the one to keep and the copies.
+    Duplicates,
+    Sharpest,
+}
+
+impl HintFilter {
+    pub const ALL: [HintFilter; 5] = [HintFilter::Problems, HintFilter::Soft, HintFilter::Accidental, HintFilter::Duplicates, HintFilter::Sharpest];
+
+    pub fn index(self) -> usize {
+        HintFilter::ALL.iter().position(|&f| f == self).unwrap_or(0)
+    }
+
+    /// Does `id` (either half of a pair) have this hint?
+    pub fn accepts(self, h: &Hints, id: RecordId) -> bool {
+        let hint = h.get(id);
+        match self {
+            HintFilter::Problems => hint.is_some_and(ShotHint::problem) || h.suggested_copy(id),
+            HintFilter::Soft => hint.is_some_and(ShotHint::soft_only),
+            HintFilter::Accidental => hint.is_some_and(|x| x.accidental.is_some()),
+            HintFilter::Duplicates => h.duplicate_of(id).is_some(),
+            HintFilter::Sharpest => hint.is_some_and(|x| x.sharpest),
+        }
+    }
 }
 
 pub type MomentId = u32;
@@ -146,7 +198,11 @@ pub struct Summary {
     pub shots: usize,
     pub measured: usize,
     pub soft: usize,
+    /// Soft and not accidental (what the hints count as out of focus).
+    pub soft_only: usize,
     pub accidental: usize,
+    /// Bursts whose sharpest frame is known.
+    pub sharpest: usize,
     pub moments: usize,
     /// Moments of more than one press.
     pub merged: usize,
@@ -381,13 +437,52 @@ impl Hints {
         (g != NONE).then(|| (&self.duplicates[g as usize], prune))
     }
 
+    /// `id` is a copy the duplicate rule suggests pruning.
+    pub fn suggested_copy(&self, id: RecordId) -> bool {
+        self.duplicate_of(id).is_some_and(|(_, prune)| prune)
+    }
+
+    /// What `id`'s plate shows: accidental first, then soft, a copy, the
+    /// sharpest of its burst.  The caller hides it on decided photos.
+    pub fn plate(&self, id: RecordId) -> Option<Plate> {
+        let h = self.get(id);
+        if h.is_some_and(|h| h.accidental.is_some()) {
+            Some(Plate::Accidental)
+        } else if h.is_some_and(|h| h.soft.is_some()) {
+            Some(Plate::Soft)
+        } else if self.suggested_copy(id) {
+            Some(Plate::Copy)
+        } else if h.is_some_and(|h| h.sharpest) {
+            Some(Plate::Sharpest)
+        } else {
+            None
+        }
+    }
+
+    /// `id`'s moment, when it joins presses of one scene (two or more).
+    pub fn joined_moment(&self, id: RecordId) -> Option<MomentId> {
+        self.moment_of(id).filter(|&m| self.moments.get(m as usize).is_some_and(|m| m.presses.len() > 1))
+    }
+
+    /// Shots whose own file is a copy suggested for pruning.
+    pub fn copies(&self) -> usize {
+        self.reps.iter().filter(|&&r| self.suggested_copy(r)).count()
+    }
+
+    /// Shots measured and shots in all (how far an analysis got).
+    pub fn coverage(&self) -> (usize, usize) {
+        (self.hints.iter().flatten().count(), self.reps.len())
+    }
+
     pub fn summary(&self) -> Summary {
         let measured: Vec<&ShotHint> = self.hints.iter().flatten().collect();
         Summary {
             shots: self.reps.len(),
             measured: measured.len(),
             soft: measured.iter().filter(|h| h.soft.is_some()).count(),
+            soft_only: measured.iter().filter(|h| h.soft_only()).count(),
             accidental: measured.iter().filter(|h| h.accidental.is_some()).count(),
+            sharpest: measured.iter().filter(|h| h.sharpest).count(),
             moments: self.moments.len(),
             merged: self.moments.iter().filter(|m| m.presses.len() > 1).count(),
             duplicate_groups: self.duplicates.len(),
@@ -461,6 +556,24 @@ impl Hints {
         }
         Plan { mark: Vec::new(), prune }
     }
+}
+
+/// Where the grid splices one press to the next of the same moment: for
+/// each tile, whether it joins the tile after it.  `moment` gives a tile's
+/// moment when that joins several presses ([`Hints::joined_moment`]);
+/// frames of one strip are joined already and aren't spliced.
+pub fn moment_links(tiles: &[RecordId], runs: &[Option<super::bursts::RunMark>], moment: impl Fn(RecordId) -> Option<MomentId>) -> Vec<bool> {
+    let ms: Vec<Option<MomentId>> = tiles.iter().map(|&id| moment(id)).collect();
+    (0..tiles.len())
+        .map(|i| {
+            let Some(next) = ms.get(i + 1) else { return false };
+            let same_strip = match (runs.get(i).copied().flatten(), runs.get(i + 1).copied().flatten()) {
+                (Some(a), Some(b)) => a.burst == b.burst && !a.last,
+                _ => false,
+            };
+            ms[i].is_some() && ms[i] == *next && !same_strip
+        })
+        .collect()
 }
 
 /// Rank one press's frames, mark its sharpest, and flag frames far softer
@@ -1021,5 +1134,87 @@ mod tests {
         assert_eq!(h.moments().len(), 0);
         assert_eq!(h.get(a2), None);
         assert!(!h.get(s.id("/s/JPG/a1.JPG")).unwrap().sharpest);
+    }
+
+    #[test]
+    fn one_plate_per_photo_the_most_pressing_first() {
+        // A press with a sharp frame, a soft one and a black one; a single
+        // shot with an identical copy.
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 6))),
+            (rec("/s/a3.JPG", 200, Some(3)), Some(feats(&Img::from_fn(192, 128, |_, _| 3.0)))),
+            (rec("/s/a4.JPG", 300, Some(4)), Some(scene(1, 1))),
+            (rec("/s/b.JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/b copy.JPG", 9000, Some(0)), Some(scene(2, 0))),
+        ]);
+        let h = s.hints(&[vec![PathBuf::from("/s/b.JPG"), PathBuf::from("/s/b copy.JPG")]]);
+        let plate = |n: &str| h.plate(s.id(&format!("/s/{n}.JPG")));
+        assert_eq!(plate("a1"), Some(Plate::Sharpest));
+        assert_eq!(plate("a2"), Some(Plate::Soft));
+        // Black is soft too, but shows (and counts) as accidental.
+        assert_eq!(plate("a3"), Some(Plate::Accidental));
+        assert!(h.get(s.id("/s/a3.JPG")).unwrap().soft.is_some() && !h.get(s.id("/s/a3.JPG")).unwrap().soft_only());
+        assert_eq!(plate("a4"), None);
+        assert_eq!(plate("b copy"), Some(Plate::Copy));
+        assert_eq!(plate("b"), None, "the copy to keep has no plate");
+        let sum = h.summary();
+        assert_eq!((sum.soft, sum.soft_only, sum.accidental), (2, 1, 1));
+        assert_eq!(h.coverage(), (6, 6));
+    }
+
+    #[test]
+    fn the_hints_filter_takes_a_pair_by_either_half() {
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a1.ARW", 0, Some(1)), None),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 6))),
+            (rec("/s/a2.ARW", 100, Some(2)), None),
+            (rec("/s/black.JPG", 5000, Some(0)), Some(feats(&Img::from_fn(192, 128, |_, _| 3.0)))),
+            (rec("/s/c.JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/c (1).JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/new.JPG", 20_000, Some(0)), None),
+        ]);
+        let h = s.hints(&[vec![PathBuf::from("/s/c.JPG"), PathBuf::from("/s/c (1).JPG")]]);
+        let pass = |f: HintFilter| -> Vec<String> {
+            let mut v: Vec<String> = s.coll.iter_ids().filter(|&(id, _)| f.accepts(&h, id)).map(|(_, r)| r.filename()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(pass(HintFilter::Soft), vec!["a2.ARW", "a2.JPG"]);
+        assert_eq!(pass(HintFilter::Accidental), vec!["black.JPG"]);
+        assert_eq!(pass(HintFilter::Problems), vec!["a2.ARW", "a2.JPG", "black.JPG", "c (1).JPG"]);
+        assert_eq!(pass(HintFilter::Duplicates), vec!["c (1).JPG", "c.JPG"]);
+        assert_eq!(pass(HintFilter::Sharpest), vec!["a1.ARW", "a1.JPG"]);
+        // Not measured yet: no hint at all.
+        assert!(HintFilter::ALL.iter().all(|f| !f.accepts(&h, s.id("/s/new.JPG"))));
+        assert_eq!(HintFilter::ALL.iter().map(|f| f.index()).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn presses_of_one_moment_are_spliced_in_the_grid() {
+        use super::super::bursts::RunMark;
+        // Press a (2 frames) and single s make a moment; press c (2 frames)
+        // is a moment of its own; d is a single in none.
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 1))),
+            (rec("/s/s.JPG", 900, Some(0)), Some(scene(1, 0))),
+            (rec("/s/c1.JPG", 9000, Some(1)), Some(scene(3, 0))),
+            (rec("/s/c2.JPG", 9100, Some(2)), Some(scene(3, 0))),
+            (rec("/s/d.JPG", 20_000, Some(0)), Some(scene(4, 0))),
+        ]);
+        let h = s.hints(&[]);
+        let ids: Vec<RecordId> = ["a1", "a2", "s", "c1", "c2", "d"].iter().map(|n| s.id(&format!("/s/{n}.JPG"))).collect();
+        assert!(h.joined_moment(ids[0]).is_some() && h.joined_moment(ids[0]) == h.joined_moment(ids[2]));
+        assert_eq!(h.joined_moment(ids[3]), None, "one press is a burst, not a joined moment");
+        let (tiles, runs) = s.bursts.tiles(&ids, |_| false, |r| r[0], &s.coll);
+        // a1–a2 are one strip; a2 splices to s; nothing else.
+        assert_eq!(moment_links(&tiles, &runs, |id| h.joined_moment(id)), vec![false, true, false, false, false, false]);
+        // Stacked, press a is one tile, spliced to s.
+        let (tiles, runs) = s.bursts.tiles(&ids, |_| true, |r| r[0], &s.coll);
+        assert_eq!(tiles.len(), 4);
+        assert_eq!(moment_links(&tiles, &runs, |id| h.joined_moment(id)), vec![true, false, false, false]);
+        let _: Option<RunMark> = runs[0];
     }
 }

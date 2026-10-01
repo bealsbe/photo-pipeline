@@ -79,9 +79,11 @@ impl Control {
             Control::Open(Cache::Thumbs) => "pref-open-thumbs",
             Control::Open(Cache::Library) => "pref-open-library",
             Control::Open(Cache::CaptureTimes) => "pref-open-capture",
+            Control::Open(Cache::Quality) => "pref-open-quality",
             Control::Clear(Cache::Thumbs) => "pref-clear-thumbs",
             Control::Clear(Cache::Library) => "pref-clear-library",
             Control::Clear(Cache::CaptureTimes) => "pref-clear-capture",
+            Control::Clear(Cache::Quality) => "pref-clear-quality",
             Control::OpenUnsaved => "pref-open-unsaved",
             Control::Close => "pref-close",
         }
@@ -722,6 +724,12 @@ fn storage_section(app: &App) -> Element<'_, Message> {
             cache_row(p, Cache::Thumbs, "Thumbnails", "Small copies of your photos for the grid and the filmstrip. Shared with the Python app."),
             cache_row(p, Cache::Library, "Library index", "The library's folders and capture times, so the calendar opens at once."),
             cache_row(p, Cache::CaptureTimes, "Capture times", "When each photo in a working folder was taken, so folders open faster."),
+            cache_row(
+                p,
+                Cache::Quality,
+                "Photo analysis",
+                "What analysing found in each folder (sharpness, exposure, fingerprints), so its hints show at once and analysing again reads only new photos.",
+            ),
             unsaved_row(app),
         ],
     )
@@ -731,7 +739,7 @@ fn count_word(c: Cache, n: u64) -> String {
     match c {
         Cache::Thumbs => util::plural(n, "thumbnail"),
         Cache::Library => format!("{} {}", util::thousands(n), if n == 1 { "library" } else { "libraries" }),
-        Cache::CaptureTimes => util::plural(n, "folder"),
+        Cache::CaptureTimes | Cache::Quality => util::plural(n, "folder"),
     }
 }
 
@@ -841,6 +849,14 @@ fn confirm_view(p: &Prefs, cache: Cache) -> Element<'_, Message> {
                 "This deletes the saved index of your library ({size}). The next time you start Photo Pipeline, the calendar reads the whole library folder again (a few seconds, longer on a network share) and reads capture times again as you open days."
             ),
             "Clear the index",
+        ),
+        Cache::Quality => (
+            "Clear the photo analysis?",
+            format!(
+                "This deletes what analysing found in {} ({size}). Hints on screen now stay until a folder is opened again. To see them after that, analyse the folder again: it reads each photo's preview once more, about 0.4 MB a photo, which takes longer on a network share.",
+                util::plural(u.files, "folder")
+            ),
+            "Clear the analysis",
         ),
         Cache::CaptureTimes => (
             "Clear the capture times?",

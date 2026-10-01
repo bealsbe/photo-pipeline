@@ -250,6 +250,10 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::StackBursts => "view-group",
         Cmd::AdvanceAfterMark => "media-skip-forward",
         Cmd::Preferences => "configure",
+        Cmd::Analyse => "edit-find",
+        Cmd::ProblemsOnly => "view-filter",
+        Cmd::KeepThisPruneRest => "dialog-ok-apply",
+        Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies => "dialog-cancel",
     }
 }
 

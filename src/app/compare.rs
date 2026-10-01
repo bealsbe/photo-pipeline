@@ -730,6 +730,7 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
                 crop: r.and_then(|r| r.crop.as_ref()).filter(|c| !c.is_full()).map(|c| [c.left as f32, c.top as f32, c.right as f32, c.bottom as f32]),
                 status,
                 focus: r.and_then(|r| r.shot.focus_point()),
+                hint: crate::ui::hint_plate::phrase(&app.quality.hints, id),
             }
         })
         .collect();
