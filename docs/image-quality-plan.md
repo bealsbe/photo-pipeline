@@ -1,10 +1,34 @@
 # Image-quality checks for Photo Pipeline (Rust) — feasibility and plan
 
 *Investigation only: nothing in the app was changed. Written 2026-09-30.
-Experiments ran in `/tmp/scratch/agents/cleanvision/` and only read from
-`/mnt/nas`.*
+Experiments ran in a scratch folder (since deleted; see the appendix) and only
+read from `/mnt/nas`.*
 
 ---
+
+## Decisions (2026-09-30)
+
+The user answered the open questions in §10.  Where an answer changes the
+plan, the change is noted here; the sections below are otherwise unchanged.
+
+| # | Question | Decision | What it changes |
+|---|---|---|---|
+| 1 | Licence | **Write our own.**  Re-implement the published techniques in Rust; credit cleanvision as inspiration. | Route (c). No code ported. |
+| 2 | When to run | **Only when asked.**  An "Analyse this folder" command starts the pass. | The background pass in phase 2 becomes on demand. Bursts from capture times and sequence numbers still show as soon as a folder opens, because they cost nothing. |
+| 3 | What is a burst | **Presses, then moments.**  Presses show at once; after an analysis, presses of the same scene merge into a moment with the presses marked inside. | As proposed. Moments exist only after an analysis. |
+| 4 | Focus hints | **Both:** a "looks out of focus" mark below a strict cut-off, and a "sharpest" marker per burst. | As proposed. Keep the cut-off conservative, and watch low-light frames. |
+| 5 | Bulk actions | **All three:** *Keep this, prune the rest*; *Prune accidental frames…*; *Prune all soft frames…*. | Each asks first, lists what it will mark, and is one undo step. Nothing goes to the Trash before Prune Review. |
+| 6 | Stacking | **Bracket, stack on demand.**  Every frame is visible with a bracket and count; a View toggle and a key collapse bursts into stacks. | Stacking moves from a later phase into scope, as a toggle and not the default. |
+| 7a | Duplicates: where | **Both:** working folders and the library. | Exact duplicates stay in phase 2. The library side is reached by opening a day as a working folder (see 8). |
+| 7b | Which copy to suggest | **Rule of thumb:** a copy-like name first ("copy", "(1)", a "_1" suffix); in the library, the later export (higher sequence number); otherwise the newer file. | The suggestion is shown, never applied without confirmation. |
+| 8 | Library calendar | **Neither:** no calendar hints, and no "already in library" warning in Export for now. | Drop the library-calendar phase and the Export check. |
+| 9 | Older bodies | **Best effort.**  Use the fallbacks (whole-second times plus file order, sharpest area instead of the focus point). | No dedicated tuning for the A7R II or the Canon T6. |
+
+**Labelling (phase 0) is optional.**  None of the checks learn from data;
+labels only measure them and set cut-offs.  Lighter options than labelling
+800 frames: use past prune and keep decisions from culled folders' sidecars as
+a read-only test set, or start from the cut-offs that worked in the
+experiment and adjust them in use.
 
 ## 1. Summary and recommendation
 
@@ -669,10 +693,12 @@ Ask the user whether they've actually hit duplicates (§10).
 
 ---
 
-## Appendix — scratch artefacts (for reproduction)
+## Appendix — scratch artefacts (no longer available)
 
-Everything is under `/tmp/scratch/agents/cleanvision/`; nothing is in the
-app tree.
+These lived under `/tmp/scratch/agents/cleanvision/` and were deleted in a
+cleanup on 2026-09-30, so the numbers above can't be re-run from them.  The
+list records what was used.  Rebuilding them means re-extracting previews
+read-only from the 19-Sep-2026 day and re-running the steps described in §4.
 
 | Path | What it is |
 |---|---|
