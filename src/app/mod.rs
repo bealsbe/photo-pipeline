@@ -695,6 +695,7 @@ impl App {
     // ── derived views ───────────────────────────────────────────────────
 
     pub fn refresh_views(&mut self) {
+        let _t = crate::profile::span("refresh", "views");
         let state = self.filter.state();
         // Bursts change only when files come, go or pair up (not on marks);
         // they are found once the scan has paired the folder.
@@ -1875,6 +1876,8 @@ impl App {
     }
 
     fn on_filter(&mut self, m: FilterMsg) -> Task<Message> {
+        // A filter changed: the Hints menu has done its job.
+        self.quality.menu = false;
         match m {
             FilterMsg::TogglePruned => self.filter.show_pruned = !self.filter.show_pruned,
             FilterMsg::ToggleMarkedOnly => {
@@ -1888,7 +1891,6 @@ impl App {
                 self.filter.set_show(show);
             }
             FilterMsg::Hint(f) => {
-                self.quality.menu = false;
                 if self.filter.hint == f {
                     return Task::none();
                 }
@@ -2196,13 +2198,18 @@ fn shot_has(h: &Hints, coll: &Collection, f: HintFilter, id: RecordId) -> bool {
 
 /// How many of `shots` have each hint (by `HintFilter::index`).
 fn hint_counts(h: &Hints, coll: &Collection, shots: &[RecordId]) -> [usize; 5] {
+    let _t = crate::profile::span("refresh", "hint counts");
     let mut n = [0; 5];
     if h.is_empty() {
         return n;
     }
     for &id in shots {
+        // The other half is looked up once, and only if needed (it costs
+        // a key built from the path).
+        let mut pair: Option<Option<RecordId>> = None;
         for f in HintFilter::ALL {
-            n[f.index()] += shot_has(h, coll, f, id) as usize;
+            let has = f.accepts(h, id) || pair.get_or_insert_with(|| coll.find_pair(id)).is_some_and(|p| f.accepts(h, p));
+            n[f.index()] += has as usize;
         }
     }
     n
