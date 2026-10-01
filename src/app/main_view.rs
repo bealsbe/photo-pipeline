@@ -12,7 +12,7 @@ use super::style::{self, Look};
 use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, network};
 use crate::model::filter::SortKey;
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
-use crate::ui::grid::{Grid, GridData};
+use crate::ui::grid::{Grid, GridData, Restack};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::list::{List, ListData};
 use crate::ui::motion::{ActivityBar, Appear};
@@ -68,6 +68,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 scale_factor: app.scale_factor,
                 show_names: app.show_names,
                 bursts: &app.derived.burst_runs,
+                restack: Some(Restack {
+                    seq: app.grid.restack_seq,
+                    sections: &app.derived.before,
+                    bursts: &app.derived.before_runs,
+                    focus: app.derived.restack_focus,
+                }),
             };
             Grid::new(data, app.thumb_size, Message::Grid)
                 .keyboard(keyboard_ok && !app.side_expanded && app.quicklook.is_none())
@@ -187,6 +193,7 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
         Cmd::ToReview => Some(app.filter.to_review),
         Cmd::QuickLook => Some(app.quicklook.is_some()),
         Cmd::AdvanceAfterMark => Some(app.settings.viewer_advance),
+        Cmd::StackBursts => Some(app.stacking.all()),
         _ => None,
     }
 }
@@ -203,6 +210,9 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     }
     if cmd == Cmd::QuickLook {
         return app.view == View::Grid && !app.derived.visible.is_empty();
+    }
+    if cmd == Cmd::StackBurst {
+        return app.view == View::Grid && app.focused_burst().is_some();
     }
     !(app.view == View::Calendar && matches!(cmd, Cmd::SelectMode | Cmd::PruneSelected | Cmd::MarkSelected | Cmd::ToReview))
 }

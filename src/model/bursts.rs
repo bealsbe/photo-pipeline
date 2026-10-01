@@ -19,10 +19,13 @@
 //!
 //! Shots with no EXIF capture time are never in a burst.  Merging presses
 //! of the same scene into "moments" needs the pixels and comes later; the
-//! data here is per press, so stacking a burst into one tile can be built
-//! on [`Bursts::frames`] and [`Bursts::runs`].
+//! data here is per press.
+//!
+//! The grid shows each burst as a strip of its frames, or folded into one
+//! stack ([`Bursts::tiles`], [`Stacking`]).  Folding never finds bursts
+//! again: they are recomputed only when files come, go or pair up.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use chrono::NaiveDateTime;
@@ -44,17 +47,80 @@ const NONE: u32 = u32::MAX;
 
 pub type BurstId = u32;
 
-/// Where a grid tile sits in a run of tiles from one burst (consecutive in
-/// display order).  Only runs of two or more tiles are marked.
+/// Where a grid tile sits in a run of frames from one burst (consecutive in
+/// display order).  Only runs of two or more frames are marked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RunMark {
-    /// The run's first and last tile.
+    pub burst: BurstId,
+    /// The run's first and last tile (both, for a stack).
     pub first: bool,
     pub last: bool,
-    /// Tiles in this run, and frames in the whole burst (more when a
-    /// filter hides some).
+    /// Frames in this run (as tiles, or inside the stack), and frames in
+    /// the whole burst (more when a filter hides some).
     pub shown: u16,
     pub total: u16,
+    /// The run folded into this one tile, its cover: the first frame shown.
+    pub stacked: bool,
+    /// For a stack: how many of the burst's frames (all of them, whatever
+    /// the filter shows) are marked to keep and to prune.
+    pub kept: u16,
+    pub pruned: u16,
+}
+
+/// Which bursts the grid shows stacked: all or none (View ▸ Stack all
+/// bursts, saved in the settings), with single bursts opened or folded
+/// against that for the session (G, or the burst's tab).
+#[derive(Debug, Clone, Default)]
+pub struct Stacking {
+    all: bool,
+    /// Every frame of each burst toggled against `all`.  Kept by frame
+    /// rather than by burst number, so the choice survives the bursts being
+    /// found again (a trash, a Sort) and any one frame going.
+    flipped: HashSet<RecordId>,
+}
+
+impl Stacking {
+    pub fn new(all: bool) -> Stacking {
+        Stacking { all, flipped: HashSet::new() }
+    }
+
+    /// Bursts are stacked unless opened one by one.
+    pub fn all(&self) -> bool {
+        self.all
+    }
+
+    /// Stack every burst, or open every one; single choices are dropped.
+    pub fn set_all(&mut self, all: bool) {
+        self.all = all;
+        self.flipped.clear();
+    }
+
+    /// A new folder: the single choices were for the old one.
+    pub fn forget(&mut self) {
+        self.flipped.clear();
+    }
+
+    /// The bursts toggled against `all`, resolved once for a refresh.
+    pub fn flipped(&self, bursts: &Bursts) -> HashSet<BurstId> {
+        self.flipped.iter().filter_map(|&id| bursts.of(id)).collect()
+    }
+
+    #[cfg(test)]
+    pub fn is_stacked(&self, bursts: &Bursts, b: BurstId) -> bool {
+        self.all != bursts.frames(b).iter().any(|f| self.flipped.contains(f))
+    }
+
+    /// Fold burst `b` into a stack, or open it.
+    pub fn toggle(&mut self, bursts: &Bursts, b: BurstId) {
+        let frames = bursts.frames(b);
+        if frames.iter().any(|f| self.flipped.contains(f)) {
+            for f in frames {
+                self.flipped.remove(f);
+            }
+        } else {
+            self.flipped.extend(frames.iter().copied());
+        }
+    }
 }
 
 /// The folder's bursts: each a press of two or more shots.
@@ -181,31 +247,72 @@ impl Bursts {
         self.frames.iter().map(Vec::len).sum()
     }
 
-    /// Marks for tiles shown in this order: each run of two or more
-    /// consecutive tiles from one burst.
-    pub fn runs(&self, ids: &[RecordId]) -> Vec<Option<RunMark>> {
-        let of: Vec<Option<BurstId>> = ids.iter().map(|&id| self.of(id)).collect();
-        let mut out = vec![None; ids.len()];
+    /// The grid's tiles for one day's photos in display order, and their
+    /// marks: each run of two or more frames from one burst stays a strip
+    /// of tiles, or folds into one tile when `stacked(burst)`.  The stack's
+    /// cover is the run's first frame shown — with To review on, the first
+    /// still to review.  (The sharpest frame, once the analysis knows it.)
+    pub fn tiles(&self, ids: &[RecordId], stacked: impl Fn(BurstId) -> bool, coll: &Collection) -> (Vec<RecordId>, Vec<Option<RunMark>>) {
+        let mut runs: Vec<(usize, usize, BurstId)> = Vec::new();
+        self.each_run(ids, |b, i, j| runs.push((i, j, b)));
+        if runs.is_empty() {
+            return (ids.to_vec(), vec![None; ids.len()]);
+        }
+        let mut tiles = Vec::with_capacity(ids.len());
+        let mut marks = Vec::with_capacity(ids.len());
+        let mut at = 0;
+        for (i, j, b) in runs {
+            tiles.extend_from_slice(&ids[at..i]);
+            marks.resize(tiles.len(), None);
+            let (shown, total) = self.counts(b, j - i);
+            if stacked(b) {
+                let (mut kept, mut pruned) = (0u16, 0u16);
+                for r in self.frames(b).iter().filter_map(|&f| coll.get(f)) {
+                    kept = kept.saturating_add(r.is_marked as u16);
+                    pruned = pruned.saturating_add(r.is_pruned as u16);
+                }
+                tiles.push(ids[i]);
+                marks.push(Some(RunMark { burst: b, first: true, last: true, shown, total, stacked: true, kept, pruned }));
+            } else {
+                for (k, &id) in ids.iter().enumerate().take(j).skip(i) {
+                    tiles.push(id);
+                    marks.push(Some(RunMark { burst: b, first: k == i, last: k == j - 1, shown, total, stacked: false, kept: 0, pruned: 0 }));
+                }
+            }
+            at = j;
+        }
+        tiles.extend_from_slice(&ids[at..]);
+        marks.resize(tiles.len(), None);
+        (tiles, marks)
+    }
+
+    /// Calls `f(burst, start, end)` for each run of two or more consecutive
+    /// ids from one burst.
+    fn each_run(&self, ids: &[RecordId], mut f: impl FnMut(BurstId, usize, usize)) {
+        if self.frames.is_empty() {
+            return;
+        }
         let mut i = 0;
         while i < ids.len() {
-            let Some(b) = of[i] else {
+            let Some(b) = self.of(ids[i]) else {
                 i += 1;
                 continue;
             };
             let mut j = i + 1;
-            while j < ids.len() && of[j] == Some(b) {
+            while j < ids.len() && self.of(ids[j]) == Some(b) {
                 j += 1;
             }
             if j - i >= 2 {
-                let total = self.frames(b).len().min(u16::MAX as usize) as u16;
-                let shown = (j - i).min(u16::MAX as usize) as u16;
-                for (k, slot) in out.iter_mut().enumerate().take(j).skip(i) {
-                    *slot = Some(RunMark { first: k == i, last: k == j - 1, shown, total });
-                }
+                f(b, i, j);
             }
             i = j;
         }
-        out
+    }
+
+    /// (frames in a run of `len`, frames in burst `b`), for a [`RunMark`].
+    fn counts(&self, b: BurstId, len: usize) -> (u16, u16) {
+        let clamp = |n: usize| n.min(u16::MAX as usize) as u16;
+        (clamp(len), clamp(self.frames(b).len()))
     }
 }
 
@@ -537,6 +644,13 @@ mod tests {
         assert_eq!(Bursts::find(&c).len(), 0);
     }
 
+    /// Marks for tiles shown in this order, every burst open.
+    fn open_runs(b: &Bursts, c: &Collection, ids: &[RecordId]) -> Vec<Option<RunMark>> {
+        let (tiles, marks) = b.tiles(ids, |_| false, c);
+        assert_eq!(tiles, ids, "nothing folds when nothing is stacked");
+        marks
+    }
+
     #[test]
     fn runs_mark_consecutive_tiles_of_one_burst() {
         let (c, b) = find(vec![
@@ -550,19 +664,99 @@ mod tests {
         let id = |n: &str| c.id_of(Path::new(&format!("/s/{n}.JPG"))).unwrap();
         // All shown, in order.
         let order = [id("a1"), id("a2"), id("a3"), id("x"), id("b1"), id("b2")];
-        let runs = b.runs(&order);
-        assert_eq!(runs[0], Some(RunMark { first: true, last: false, shown: 3, total: 3 }));
+        let runs = open_runs(&b, &c, &order);
+        let a = b.of(id("a1")).unwrap();
+        let open = |first, last, shown, total| Some(RunMark { burst: a, first, last, shown, total, stacked: false, kept: 0, pruned: 0 });
+        assert_eq!(runs[0], open(true, false, 3, 3));
         assert_eq!(runs[1].map(|r| (r.first, r.last)), Some((false, false)));
         assert_eq!(runs[2].map(|r| (r.first, r.last)), Some((false, true)));
         assert_eq!(runs[3], None);
         assert_eq!(runs[4].map(|r| (r.first, r.shown)), Some((true, 2)));
+        assert_ne!(runs[4].map(|r| r.burst), Some(a));
         // A filter hid a2: the run shows two of three.
-        let runs = b.runs(&[id("a1"), id("a3"), id("x")]);
-        assert_eq!(runs[0], Some(RunMark { first: true, last: false, shown: 2, total: 3 }));
+        let runs = open_runs(&b, &c, &[id("a1"), id("a3"), id("x")]);
+        assert_eq!(runs[0], open(true, false, 2, 3));
         // Split by another photo (a name sort): lone tiles get no mark.
-        let runs = b.runs(&[id("a1"), id("x"), id("a2"), id("a3")]);
+        let runs = open_runs(&b, &c, &[id("a1"), id("x"), id("a2"), id("a3")]);
         assert_eq!(runs[0], None);
         assert_eq!(runs[2].map(|r| r.shown), Some(2));
+    }
+
+    #[test]
+    fn tiles_fold_stacked_runs_into_their_first_frame() {
+        let (mut c, b) = find(vec![
+            rec("/s/a1.JPG", 0, Some(0), Some(1)),
+            rec("/s/a2.JPG", 0, Some(100), Some(2)),
+            rec("/s/a3.JPG", 0, Some(200), Some(3)),
+            rec("/s/x.JPG", 3, Some(0), Some(1)),
+            rec("/s/b1.JPG", 6, Some(0), Some(1)),
+            rec("/s/b2.JPG", 6, Some(100), Some(2)),
+        ]);
+        let id = |c: &Collection, n: &str| c.id_of(Path::new(&format!("/s/{n}.JPG"))).unwrap();
+        let order: Vec<RecordId> = ["a1", "a2", "a3", "x", "b1", "b2"].iter().map(|n| id(&c, n)).collect();
+        let (ba, bb) = (b.of(order[0]).unwrap(), b.of(order[4]).unwrap());
+        // Nothing stacked: the tiles are the photos, each run a strip.
+        let (tiles, marks) = b.tiles(&order, |_| false, &c);
+        assert_eq!(tiles, order);
+        assert_eq!(marks.iter().filter(|m| m.is_some_and(|m| !m.stacked)).count(), 5);
+        // Burst a stacked: one tile, a1, standing for three frames.
+        c.get_mut(order[1]).unwrap().is_pruned = true;
+        c.get_mut(order[2]).unwrap().is_marked = true;
+        let (tiles, marks) = b.tiles(&order, |x| x == ba, &c);
+        assert_eq!(tiles, [order[0], order[3], order[4], order[5]]);
+        assert_eq!(marks[0], Some(RunMark { burst: ba, first: true, last: true, shown: 3, total: 3, stacked: true, kept: 1, pruned: 1 }));
+        assert_eq!(marks[1], None);
+        assert_eq!(marks[2].map(|m| (m.burst, m.first, m.stacked)), Some((bb, true, false)));
+        // Both stacked; a filter hid a1, so a2 is the cover of "2 of 3", and
+        // the marks still count the whole burst.
+        let shown = [order[1], order[2], order[3], order[4], order[5]];
+        let (tiles, marks) = b.tiles(&shown, |_| true, &c);
+        assert_eq!(tiles, [order[1], order[3], order[4]]);
+        assert_eq!(marks[0].map(|m| (m.shown, m.total, m.kept, m.pruned)), Some((2, 3, 1, 1)));
+        assert_eq!(marks[2].map(|m| (m.shown, m.stacked)), Some((2, true)));
+        // One frame left of a burst isn't a run, stacked or not.
+        let (tiles, marks) = b.tiles(&[order[0], order[3]], |_| true, &c);
+        assert_eq!(tiles, [order[0], order[3]]);
+        assert_eq!(marks, [None, None]);
+    }
+
+    #[test]
+    fn stacking_follows_the_default_and_single_choices() {
+        let (mut c, b) = find(vec![
+            rec("/s/a1.JPG", 0, Some(0), Some(1)),
+            rec("/s/a2.JPG", 0, Some(100), Some(2)),
+            rec("/s/b1.JPG", 6, Some(0), Some(1)),
+            rec("/s/b2.JPG", 6, Some(100), Some(2)),
+            rec("/s/b3.JPG", 6, Some(200), Some(3)),
+        ]);
+        let burst = |c: &Collection, b: &Bursts, n: &str| b.of(c.id_of(Path::new(&format!("/s/{n}.JPG"))).unwrap()).unwrap();
+        let (ba, bb) = (burst(&c, &b, "a1"), burst(&c, &b, "b1"));
+        // Open by default; one burst folded, then opened again.
+        let mut s = Stacking::new(false);
+        assert!(!s.is_stacked(&b, ba) && !s.is_stacked(&b, bb));
+        s.toggle(&b, bb);
+        assert!(!s.is_stacked(&b, ba) && s.is_stacked(&b, bb));
+        assert_eq!(s.flipped(&b), [bb].into());
+        s.toggle(&b, bb);
+        assert!(!s.is_stacked(&b, bb));
+        // Stack all: every burst folds and single choices are dropped; one
+        // opened against it stays open while the rest stay stacked.
+        s.toggle(&b, ba);
+        s.set_all(true);
+        assert!(s.is_stacked(&b, ba) && s.is_stacked(&b, bb));
+        s.toggle(&b, ba);
+        assert!(!s.is_stacked(&b, ba) && s.is_stacked(&b, bb));
+        // The bursts found again after a frame is trashed (new numbers):
+        // the choice carries over, by frame.
+        let b1 = c.id_of(Path::new("/s/b1.JPG")).unwrap();
+        c.remove(b1);
+        c.build_pairs();
+        let again = Bursts::find(&c);
+        let (ba2, bb2) = (burst(&c, &again, "a1"), burst(&c, &again, "b2"));
+        assert!(!s.is_stacked(&again, ba2) && s.is_stacked(&again, bb2));
+        // A new folder forgets the single choices, not the default.
+        s.forget();
+        assert!(s.all() && s.is_stacked(&again, ba2));
     }
 
     #[test]

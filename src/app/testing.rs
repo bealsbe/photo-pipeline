@@ -14,15 +14,18 @@
 //! cfocus 2                    # click the 3rd pane of the compare view
 //! cfilm 5                     # click the 6th frame in Review burst's strip
 //! bursts                      # print the working folder's bursts
+//! tiles                       # print the grid's tiles, stacks and selection
+//! tab 3                       # click the burst tab on the 4th grid tile
+//! day 0                       # click the grid's 1st day header (collapse it)
 //! film 5                      # click the 6th photo in the viewer's filmstrip
 //! vresize 1300 800            # resize the viewer window
 //! vmax on|off                 # maximise the viewer window, or restore it
 //! vmove 200 120               # move the viewer window (not on Wayland)
 //! vpos                        # print where the viewer window is (X11)
 //! vdump                       # print the viewer's state and its settings
-//! click 3 [ctrl|shift]        # grid click on the 4th visible tile
+//! click 3 [ctrl|shift]        # grid click on the 4th tile (a stack is one)
 //! lclick 3                    # list click on the 4th row
-//! activate 0                  # open the viewer on a visible tile
+//! activate 0                  # open the viewer on a grid tile
 //! aspect 1:1                  # pick a crop ratio in the viewer
 //! filter pruned|marked|all|date|date-from|date-close
 //! filter show-all|to-review|show-marked   # the All · To review · Marked choice
@@ -165,6 +168,8 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "ToReview" => Some(Cmd::ToReview),
                 "Compare" => Some(Cmd::Compare),
                 "ReviewBurst" => Some(Cmd::ReviewBurst),
+                "StackBurst" => Some(Cmd::StackBurst),
+                "StackBursts" => Some(Cmd::StackBursts),
                 "AdvanceAfterMark" => Some(Cmd::AdvanceAfterMark),
                 _ => None,
             };
@@ -208,6 +213,38 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let ev = crate::ui::filmstrip::FilmEvent::Jump(arg.parse().unwrap_or(0));
             app.update(Message::Compare(super::compare::Msg::Film(ev)))
         }
+        "tab" => match app.derived.tiles.get(arg.parse().unwrap_or(0)).copied() {
+            Some(id) => app.update(Message::Grid(crate::ui::grid::GridEvent::ToggleBurst(id))),
+            None => Task::none(),
+        },
+        "day" => match app.derived.sections.get(arg.parse().unwrap_or(0)).map(|s| s.date) {
+            Some(d) => app.update(Message::Grid(crate::ui::grid::GridEvent::ToggleCollapse(d))),
+            None => Task::none(),
+        },
+        "tiles" => {
+            let name = |id: crate::model::collection::RecordId| app.coll.get(id).map(|r| r.stem()).unwrap_or_default();
+            let mut stacks = Vec::new();
+            for (sec, marks) in app.derived.sections.iter().zip(&app.derived.burst_runs) {
+                for (k, (&id, m)) in sec.ids.iter().zip(marks).enumerate() {
+                    if let Some(m) = m.filter(|m| m.stacked) {
+                        stacks.push(format!("{k}:{} {}/{} kept {} pruned {}", name(id), m.shown, m.total, m.kept, m.pruned));
+                    }
+                }
+            }
+            let sel: Vec<String> = app.derived.tiles.iter().filter(|id| app.grid.selection.contains(id)).map(|&id| name(id)).collect();
+            eprintln!(
+                "[tiles] tiles={} visible={} days={} stacked_all={} stacks={} {:?} selection={sel:?} anchor={:?} scroll={}",
+                app.derived.tiles.len(),
+                app.derived.visible.len(),
+                app.derived.days.iter().map(|d| d.photos).sum::<usize>(),
+                app.stacking.all(),
+                stacks.len(),
+                stacks.iter().take(8).collect::<Vec<_>>(),
+                app.grid.anchor.map(name),
+                app.grid.scroll,
+            );
+            Task::none()
+        }
         "bursts" => {
             let b = &app.bursts;
             let lens: Vec<usize> = (0..b.len() as u32).map(|i| b.frames(i).len()).collect();
@@ -237,7 +274,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 Some("shift") => Modifiers::SHIFT,
                 _ => Modifiers::empty(),
             };
-            match app.derived.visible.get(idx).copied() {
+            match app.derived.tiles.get(idx).copied() {
                 Some(id) if cmd == "click" => app.update(Message::Grid(crate::ui::grid::GridEvent::Click { id, modifiers: mods })),
                 Some(id) => app.update(Message::Grid(crate::ui::grid::GridEvent::Activate(id))),
                 None => Task::none(),
@@ -488,6 +525,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
     let control = match what {
         "advance" => Some(Control::Advance),
         "names" => Some(Control::FileNames),
+        "stack" => Some(Control::StackBursts),
         "filmstrip" => Some(Control::Filmstrip),
         "viewersize" => Some(Control::ViewerSize),
         "librarybutton" => Some(Control::Library),

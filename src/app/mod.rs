@@ -21,7 +21,7 @@ pub mod viewer_advance;
 pub mod viewer_filmstrip;
 pub mod viewer_window;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use iced::{Event, Point, Size, Subscription, Task, event, window};
 use crate::bus::{self, BgEvent, Bus};
 use crate::imaging::loader::Loader;
 use crate::imaging::thumbs::{self, OWNER_CALENDAR, OWNER_MAIN, ThumbCache, ThumbWorkers};
-use crate::model::bursts::{Bursts, RunMark};
+use crate::model::bursts::{Bursts, RunMark, Stacking};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::filter::{self, FilterState, ListRow, SortKey};
 use crate::model::sidecar;
@@ -275,11 +275,26 @@ pub struct Status {
 }
 
 pub struct Derived {
+    /// Every photo shown, by day (a RAW+JPG pair once).
+    pub days: Vec<Section>,
+    /// What the grid shows, by day: `days` with each stacked burst folded
+    /// into one tile, its cover.  Selection, arrow keys and quick look go
+    /// by these tiles.
     pub sections: Vec<Section>,
-    /// Burst brackets for each section's tiles (parallel to `sections`).
+    /// Burst strips and stacks for each section's tiles (parallel to
+    /// `sections`).
     pub burst_runs: Vec<Vec<Option<RunMark>>>,
-    /// Deduped visible records in display order (what the viewer steps through).
+    /// The grid's tiles in order (`sections`, flattened).
+    pub tiles: Vec<RecordId>,
+    /// Deduped visible records in display order, frames inside stacks
+    /// included (what the viewer steps through).
     pub visible: Vec<RecordId>,
+    /// The grid as it was before the last burst was stacked or opened, and
+    /// the focused tile before and after, so the grid can animate the
+    /// change (see `GridUi::restack_seq`).
+    pub before: Vec<Section>,
+    pub before_runs: Vec<Vec<Option<RunMark>>>,
+    pub restack_focus: Option<(RecordId, RecordId)>,
     pub accepted: usize,
     pub list_rows: Vec<ListRow>,
     pub list_accepted: usize,
@@ -295,6 +310,8 @@ pub struct GridUi {
     pub collapsed: HashSet<NaiveDate>,
     pub scroll: f32,
     pub scroll_seq: u64,
+    /// Bumped when bursts are stacked or opened (the grid animates it).
+    pub restack_seq: u64,
 }
 
 pub struct ListUi {
@@ -324,6 +341,8 @@ pub struct App {
     pub coll: Collection,
     /// The working folder's bursts (shutter presses), from shot metadata.
     pub bursts: Bursts,
+    /// Which bursts the grid shows folded into stacks.
+    pub stacking: Stacking,
     pub folder: Option<PathBuf>,
     pub library: Option<PathBuf>,
     scan: Option<ScanHandle>,
@@ -435,6 +454,7 @@ impl App {
             folder_bar_visible: settings.folder_bar_visible,
             folder_bar_collapsed: settings.folder_bar_collapsed,
             show_names: settings.show_file_names,
+            stacking: Stacking::new(settings.stack_bursts),
             prefs: preferences::Prefs::new(&settings),
             settings,
             bus,
@@ -460,9 +480,14 @@ impl App {
             scan_started: Instant::now(),
             filter,
             derived: Derived {
+                days: Vec::new(),
                 sections: Vec::new(),
                 burst_runs: Vec::new(),
+                tiles: Vec::new(),
                 visible: Vec::new(),
+                before: Vec::new(),
+                before_runs: Vec::new(),
+                restack_focus: None,
                 accepted: 0,
                 list_rows: Vec::new(),
                 list_accepted: 0,
@@ -476,6 +501,7 @@ impl App {
                 collapsed: HashSet::new(),
                 scroll: 0.0,
                 scroll_seq: 0,
+                restack_seq: 0,
             },
             list: ListUi { selection: HashSet::new(), anchor: None, current: None, scroll: 0.0 },
             side_expanded: false,
@@ -638,8 +664,10 @@ impl App {
         let sorted = filter::visible_sorted(&self.coll, &state);
         let visible = filter::dedup_pairs(&sorted, &self.coll);
         let groups = filter::group_by_date(&visible, &self.coll, &state);
-        self.derived.sections =
-            groups.into_iter().map(|g| Section { label: fmt_section_date(g.date), date: g.date, ids: g.ids }).collect();
+        self.derived.days = groups
+            .into_iter()
+            .map(|g| Section { label: fmt_section_date(g.date), date: g.date, photos: g.ids.len(), ids: g.ids })
+            .collect();
         // Bursts change only when files come, go or pair up (not on marks);
         // they are found once the scan has paired the folder.
         if self.scanning {
@@ -649,21 +677,134 @@ impl App {
         } else if !self.bursts.is_current(&self.coll) {
             self.bursts = Bursts::find(&self.coll);
         }
-        self.derived.burst_runs = self.derived.sections.iter().map(|s| self.bursts.runs(&s.ids)).collect();
+        self.build_tiles();
         self.derived.accepted = sorted.len();
-        self.derived.visible = self.derived.sections.iter().flat_map(|s| s.ids.iter().copied()).collect();
+        self.derived.visible = self.derived.days.iter().flat_map(|s| s.ids.iter().copied()).collect();
         self.derived.list_rows = filter::list_rows(&self.coll, &state);
         self.derived.list_accepted = self.derived.list_rows.iter().map(|r| r.members().count()).sum();
         // Pairs form when the scan completes; counting shots before then
         // would count every file.
         self.derived.progress = if self.scanning { filter::Progress::default() } else { filter::progress(&self.coll) };
         self.derived.key = self.derived.key.wrapping_add(1);
-        // Drop selections that are no longer on screen.
-        let on_grid: HashSet<RecordId> = self.derived.visible.iter().copied().collect();
-        self.grid.selection.retain(|id| on_grid.contains(id));
+        self.keep_grid_selection();
         let on_list: HashSet<RecordId> = self.derived.list_rows.iter().map(|r| r.primary()).collect();
         self.list.selection.retain(|id| on_list.contains(id));
         self.last_refresh = Instant::now();
+    }
+
+    /// The grid's tiles from `derived.days`, each stacked burst folded into
+    /// its cover.  Cheap (no sorting, no burst finding), so stacking and
+    /// opening bursts runs only this.
+    fn build_tiles(&mut self) {
+        let _t = crate::profile::span("refresh", "grid tiles");
+        let flipped = self.stacking.flipped(&self.bursts);
+        let all = self.stacking.all();
+        let stacked = |b| all != flipped.contains(&b);
+        let mut sections = Vec::with_capacity(self.derived.days.len());
+        let mut runs = Vec::with_capacity(self.derived.days.len());
+        for day in &self.derived.days {
+            let (ids, marks) = self.bursts.tiles(&day.ids, stacked, &self.coll);
+            sections.push(Section { date: day.date, label: day.label.clone(), photos: day.photos, ids });
+            runs.push(marks);
+        }
+        self.derived.tiles = sections.iter().flat_map(|s| s.ids.iter().copied()).collect();
+        self.derived.sections = sections;
+        self.derived.burst_runs = runs;
+    }
+
+    /// The grid's selection once its tiles have changed: a photo folded
+    /// into a stack hands its selection (and focus) to the stack; anything
+    /// else no longer on screen is dropped.
+    fn keep_grid_selection(&mut self) {
+        let on_grid: HashSet<RecordId> = self.derived.tiles.iter().copied().collect();
+        let all_there = self.grid.selection.iter().all(|id| on_grid.contains(id)) && self.grid.anchor.is_none_or(|a| on_grid.contains(&a));
+        if all_there {
+            return;
+        }
+        let covers = self.stack_covers();
+        let home = |id: RecordId| self.bursts.of(id).and_then(|b| covers.get(&b).copied());
+        let (selection, anchor) = regather(&self.grid.selection, self.grid.anchor, &on_grid, home);
+        self.grid.selection = selection;
+        self.grid.anchor = anchor;
+    }
+
+    /// Each stacked burst's tile (its first, should a sort split it).
+    fn stack_covers(&self) -> HashMap<crate::model::bursts::BurstId, RecordId> {
+        let mut covers = HashMap::new();
+        for (sec, marks) in self.derived.sections.iter().zip(&self.derived.burst_runs) {
+            for (&id, m) in sec.ids.iter().zip(marks) {
+                if let Some(m) = m.filter(|m| m.stacked) {
+                    covers.entry(m.burst).or_insert(id);
+                }
+            }
+        }
+        covers
+    }
+
+    /// The tile that shows `id` in the grid: itself, or the stack it is
+    /// folded into.
+    pub fn tile_of(&self, id: RecordId) -> Option<RecordId> {
+        if self.derived.tiles.contains(&id) {
+            return Some(id);
+        }
+        let b = self.bursts.of(id)?;
+        self.stack_covers().get(&b).copied()
+    }
+
+    /// Fold bursts or open them again after `stacking` changed: only the
+    /// grid's tiles are rebuilt (bursts aren't found again), and the grid
+    /// animates the change, holding `anchor` (the tile acted on, or the
+    /// focused one) where it was on screen.
+    pub fn restack(&mut self, anchor: Option<RecordId>) {
+        let _t = crate::profile::span("refresh", "restack");
+        self.derived.before = std::mem::take(&mut self.derived.sections);
+        self.derived.before_runs = std::mem::take(&mut self.derived.burst_runs);
+        self.build_tiles();
+        self.keep_grid_selection();
+        self.derived.restack_focus = anchor.and_then(|a| Some((a, self.tile_of(a)?)));
+        self.derived.key = self.derived.key.wrapping_add(1);
+        self.grid.restack_seq += 1;
+    }
+
+    /// The grid's focused photo: the one last clicked or stepped to, while
+    /// selected, else a lone selected photo.
+    pub fn grid_focus(&self) -> Option<RecordId> {
+        let sel = &self.grid.selection;
+        self.grid.anchor.filter(|a| sel.contains(a)).or_else(|| if sel.len() == 1 { sel.iter().next().copied() } else { None })
+    }
+
+    /// The burst of the grid's focused photo (what G stacks or opens).
+    pub fn focused_burst(&self) -> Option<crate::model::bursts::BurstId> {
+        self.bursts.of(self.grid_focus()?)
+    }
+
+    /// Stack `id`'s burst in the grid, or open it (G, or its tab).
+    pub fn toggle_burst(&mut self, id: RecordId) -> Task<Message> {
+        let Some(b) = self.bursts.of(id) else {
+            let name = self.coll.get(id).map(|r| r.stem()).unwrap_or_default();
+            return self.show_status(format!("{name} isn't part of a burst."), 4000);
+        };
+        self.stacking.toggle(&self.bursts, b);
+        self.restack(Some(id));
+        quicklook::follow(self)
+    }
+
+    /// Shift+G: every burst stacked, or every frame shown (saved).
+    fn toggle_all_bursts(&mut self) -> Task<Message> {
+        let all = !self.stacking.all();
+        self.stacking.set_all(all);
+        self.settings.stack_bursts = all;
+        self.settings.save_in_background();
+        let anchor = self.grid_focus();
+        self.restack(anchor);
+        let n = self.bursts.len();
+        let text = match (all, n) {
+            (_, 0) => "No bursts in this folder.".to_string(),
+            (true, n) => format!("{} burst{} stacked. G opens the selected one.", util::thousands(n as u64), util::s(n)),
+            (false, _) => "Every frame of every burst shows.".to_string(),
+        };
+        let status = self.show_status(text, 4000);
+        Task::batch([status, quicklook::follow(self)])
     }
 
     // ── scanning ────────────────────────────────────────────────────────
@@ -684,6 +825,7 @@ impl App {
         }
         self.folder = Some(path.clone());
         self.quicklook = None;
+        self.stacking.forget();
         self.coll.clear();
         self.history.clear();
         self.thumbs.clear(&self.workers);
@@ -917,7 +1059,7 @@ impl App {
         match self.view {
             View::Grid if !self.grid.select_mode && self.grid.selection.len() == 1 => {
                 let id = self.grid.selection.iter().next()?;
-                self.derived.visible.iter().position(|x| x == id)
+                self.derived.tiles.iter().position(|x| x == id)
             }
             View::List if self.list.selection.len() == 1 => {
                 let id = self.list.selection.iter().next()?;
@@ -931,7 +1073,7 @@ impl App {
         let Some(i) = place else { return };
         match self.view {
             View::Grid if self.grid.selection.is_empty() => {
-                if let Some(&id) = self.derived.visible.get(i).or(self.derived.visible.last()) {
+                if let Some(&id) = self.derived.tiles.get(i).or(self.derived.tiles.last()) {
                     self.grid.selection.insert(id);
                     self.grid.anchor = Some(id);
                 }
@@ -981,7 +1123,9 @@ impl App {
                 .filter(|r| self.list.selection.contains(&r.primary()))
                 .flat_map(|r| r.members())
                 .collect(),
-            View::Grid => self.derived.visible.iter().copied().filter(|id| self.grid.selection.contains(id)).collect(),
+            // A stack is its cover: marks go to the photo shown, never to
+            // the frames folded under it.
+            View::Grid => self.derived.tiles.iter().copied().filter(|id| self.grid.selection.contains(id)).collect(),
             View::Calendar => return Task::none(),
         };
         if ids.is_empty() {
@@ -1216,13 +1360,7 @@ impl App {
                 _ => Task::none(),
             },
             Key::Named(Named::ArrowLeft) | Key::Named(Named::ArrowRight) if !self.grid.select_mode => {
-                let vis = &self.derived.visible;
-                let cur = self.grid.anchor.and_then(|a| vis.iter().position(|&x| x == a));
-                let next = match (key, cur) {
-                    (_, None) => vis.first().copied(),
-                    (Key::Named(Named::ArrowLeft), Some(i)) => vis.get(i.saturating_sub(1)).copied(),
-                    (_, Some(i)) => vis.get((i + 1).min(vis.len().saturating_sub(1))).copied(),
-                };
+                let next = arrow_step(&self.derived.tiles, self.grid.anchor, *key == Key::Named(Named::ArrowRight));
                 if let Some(n) = next {
                     self.grid_click(n, if mods.shift() { keyboard::Modifiers::SHIFT } else { keyboard::Modifiers::empty() });
                     if mods.shift() {
@@ -1551,6 +1689,14 @@ impl App {
             }
             Cmd::Compare => compare::open_selected(self),
             Cmd::ReviewBurst => compare::review_burst(self),
+            Cmd::StackBurst if self.view != View::Grid => Task::none(),
+            Cmd::StackBurst => match self.grid_focus() {
+                Some(id) => self.toggle_burst(id),
+                None => self.show_status("Select a photo to stack its burst.", 4000),
+            },
+            // A saved preference: from the menu, the keys or Preferences,
+            // whichever view is showing.
+            Cmd::StackBursts => self.toggle_all_bursts(),
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
             Cmd::Preferences => preferences::open(self),
         }
@@ -1701,6 +1847,7 @@ impl App {
                 self.grid.selection.clear();
                 Task::none()
             }
+            GridEvent::ToggleBurst(id) => self.toggle_burst(id),
             GridEvent::ToggleCollapse(d) => {
                 if !self.grid.collapsed.remove(&d) {
                     self.grid.collapsed.insert(d);
@@ -1914,6 +2061,64 @@ impl App {
         self.bus.clone()
     }
 
+}
+
+/// The tile an arrow key moves to in the grid's `tiles` from `anchor`: the
+/// next or previous one (a stack is one step), or the first when nothing
+/// is focused.  Stays at either end.
+fn arrow_step(tiles: &[RecordId], anchor: Option<RecordId>, forward: bool) -> Option<RecordId> {
+    let at = anchor.and_then(|a| tiles.iter().position(|&x| x == a));
+    match at {
+        None => tiles.first().copied(),
+        Some(i) if forward => tiles.get((i + 1).min(tiles.len() - 1)).copied(),
+        Some(i) => tiles.get(i.saturating_sub(1)).copied(),
+    }
+}
+
+/// The selection and focus once the grid's tiles changed: each photo no
+/// longer `on_grid` goes to its `home` (the stack it was folded into), or
+/// is dropped.  A focus with no home stays (it only orders arrow keys).
+fn regather(
+    selection: &HashSet<RecordId>,
+    anchor: Option<RecordId>,
+    on_grid: &HashSet<RecordId>,
+    home: impl Fn(RecordId) -> Option<RecordId>,
+) -> (HashSet<RecordId>, Option<RecordId>) {
+    let kept = selection.iter().filter_map(|&id| if on_grid.contains(&id) { Some(id) } else { home(id) }).collect();
+    let anchor = anchor.map(|a| if on_grid.contains(&a) { a } else { home(a).unwrap_or(a) });
+    (kept, anchor)
+}
+
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+
+    #[test]
+    fn arrows_step_by_tile_so_a_stack_is_one_step() {
+        // Tiles 10, 20 (a stack folding 21 and 22), 30.
+        let tiles = [10, 20, 30];
+        assert_eq!(arrow_step(&tiles, None, true), Some(10));
+        assert_eq!(arrow_step(&tiles, Some(10), true), Some(20));
+        assert_eq!(arrow_step(&tiles, Some(20), true), Some(30), "past the folded frames in one step");
+        assert_eq!(arrow_step(&tiles, Some(30), true), Some(30));
+        assert_eq!(arrow_step(&tiles, Some(30), false), Some(20));
+        assert_eq!(arrow_step(&tiles, Some(10), false), Some(10));
+        assert_eq!(arrow_step(&[], None, true), None);
+    }
+
+    #[test]
+    fn a_frame_folded_into_a_stack_hands_its_selection_to_the_stack() {
+        // 21 and 22 were folded into the stack 20; 40 left the grid (a filter).
+        let on_grid: HashSet<RecordId> = [10, 20, 30].into();
+        let home = |id: RecordId| (21..=22).contains(&id).then_some(20);
+        let (sel, anchor) = regather(&[10, 22, 40].into(), Some(22), &on_grid, home);
+        assert_eq!(sel, [10, 20].into());
+        assert_eq!(anchor, Some(20));
+        // Two frames of one stack select it once; a gone focus with no home stays.
+        let (sel, anchor) = regather(&[21, 22].into(), Some(40), &on_grid, home);
+        assert_eq!(sel, [20].into());
+        assert_eq!(anchor, Some(40));
+    }
 }
 
 #[cfg(test)]

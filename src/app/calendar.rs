@@ -806,7 +806,7 @@ fn day_data(date: NaiveDate, records: Vec<PhotoRecord>) -> DayData {
     let ids = filter::dedup_pairs(&sorted, &coll);
     let sections = filter::group_by_date(&ids, &coll, &state)
         .into_iter()
-        .map(|g| Section { label: super::fmt_section_date(g.date), date: g.date, ids: g.ids })
+        .map(|g| Section { label: super::fmt_section_date(g.date), date: g.date, photos: g.ids.len(), ids: g.ids })
         .collect();
     DayData { coll: Arc::new(coll), sections, ids }
 }
@@ -981,7 +981,8 @@ fn on_day_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
                 cal.day_collapsed.insert(date);
             }
         }
-        GridEvent::Chip(_) | GridEvent::SelectDone | GridEvent::Scrolled(_) => {}
+        // The library's day grid shows no bursts.
+        GridEvent::Chip(_) | GridEvent::SelectDone | GridEvent::Scrolled(_) | GridEvent::ToggleBurst(_) => {}
         GridEvent::ZoomStep(step) => {
             cal.day_thumb = ((cal.day_thumb + step as f32 * 20.0) / 20.0).floor() * 20.0;
             cal.day_thumb = cal.day_thumb.clamp(grid::MIN_SIZE, grid::MAX_SIZE);
@@ -1098,6 +1099,7 @@ fn paint_day(cal: &Calendar, r: &mut paint::Renderer, bounds: Rectangle, date: N
         scale_factor: sf,
         show_names: names,
         bursts: &[],
+        restack: None,
     };
     let open = |d: NaiveDate| if cal.day_collapsed.contains(&d) { 0.0 } else { 1.0 };
     let ps = grid::PaintState::snapshot(0.0, cal.day_thumb, alpha, &open);
@@ -1120,6 +1122,7 @@ fn day_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         scale_factor: app.scale_factor,
         show_names: app.show_names,
         bursts: &[],
+        restack: None,
     };
     Grid::new(gd, cal.day_thumb, |e| Message::Calendar(Msg::Grid(e)))
         .keyboard(keyboard_ok)

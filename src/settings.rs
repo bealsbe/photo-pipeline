@@ -44,6 +44,9 @@ pub struct Settings {
     pub thumb_size: u32,
     /// File names under the grid's photos.
     pub show_file_names: bool,
+    /// The grid shows each burst folded into one stack (View ▸ Stack all
+    /// bursts); off, every frame shows.
+    pub stack_bursts: bool,
     /// Viewer: a P / M key press that sets a mark moves on to the next photo.
     pub viewer_advance: bool,
     /// Viewer: the filmstrip along the bottom of the photo.
@@ -88,6 +91,7 @@ impl Default for Settings {
             window_maximized: false,
             thumb_size: 180,
             show_file_names: true,
+            stack_bursts: false,
             viewer_advance: false,
             viewer_filmstrip: true,
             viewer_width: 0.0,
@@ -238,6 +242,7 @@ mod tests {
     fn defaults_cover_every_preference() {
         let s = Settings::default();
         assert!(!s.viewer_advance);
+        assert!(!s.stack_bursts, "bursts open by default");
         assert!(s.show_file_names && s.viewer_filmstrip && s.edit_copy_subfolder && s.global_menu);
         assert_eq!(s.thumb_size, 180);
         assert!(s.library_folder.is_empty() && s.edit_copy_folder.is_empty());
@@ -260,6 +265,7 @@ mod tests {
             edit_copy_folder: "/home/me/RAW edits".into(),
             edit_copy_subfolder: false,
             global_menu: false,
+            stack_bursts: true,
             ..Settings::default()
         };
         let text = serde_json::to_string_pretty(&s).expect("serialises");

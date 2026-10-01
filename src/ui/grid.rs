@@ -13,6 +13,15 @@
 //! pruned frame is dimmed and crossed out corner to corner, as a grease
 //! pencil marks a contact sheet; a kept frame wears a green check on its
 //! corner; crops scrim the margins they discard.
+//!
+//! The frames of a burst share one strip, a lighter mount joined across
+//! the gutters, with a tab on its first frame giving the count.  A strip
+//! never leaves the columns: where it wraps it ends square at the last
+//! column and carries on square from the first, so every row starts at the
+//! same edge.  A stacked burst is one tile, its cover, with the edges of
+//! the frames under it showing below; its tab adds how many of them are
+//! kept and pruned.  Clicking a tab stacks or opens the burst, and the
+//! tiles slide to their new places.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -33,7 +42,7 @@ use super::icons::{self, Glyph};
 use super::paint::{self, HAlign, Renderer, rect};
 use super::theme as t;
 use crate::imaging::thumbs::ThumbCache;
-use crate::model::bursts::RunMark;
+use crate::model::bursts::{BurstId, RunMark};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::record::{FileType, PhotoRecord};
 use crate::util;
@@ -46,8 +55,25 @@ pub const LABEL_H: f32 = 24.0;
 const NAME_GAP: f32 = 4.0;
 /// The tag's inset from the photo's corner when names are hidden.
 const CORNER_INSET: f32 = 4.0;
-/// Gutter between mounts.
+/// Gutter between mounts in a row.
 const GAP: f32 = 8.0;
+/// Gutter between rows: wider than [`GAP`], so a row reads as a strip and
+/// a burst's tab and a stack's edges have room above and below a mount.
+const ROW_GAP: f32 = 14.0;
+/// A burst's tab: how far it rises above the strip, its height (down to
+/// the photo's top edge, never over it), and its inner padding.
+const TAB_RISE: f32 = 7.0;
+const TAB_H: f32 = TAB_RISE + PAD;
+const TAB_PAD: f32 = 5.0;
+/// The tab's chevron and mark glyphs.
+const TAB_GLYPH: f32 = 9.0;
+/// The edges of the frames under a stack, showing below its mount: each
+/// edge's inset from the mount's sides and its height.
+const STACK_EDGES: [(f32, f32); 2] = [(5.0, 3.0), (10.0, 3.0)];
+/// Mid-slide, how far (in cells) a tile changing rows drifts as it fades
+/// out of one row and into the next: enough to show which way the row
+/// moved, too little to cross other tiles.
+const DRIFT: f32 = 0.3;
 pub const HEADER_H: f32 = 48.0;
 const TOP_MARGIN: f32 = 4.0;
 const BOTTOM_MARGIN: f32 = 16.0;
@@ -64,7 +90,11 @@ pub const MAX_SIZE: f32 = 480.0;
 pub struct Section {
     pub date: NaiveDate,
     pub label: String,
+    /// The tiles: each photo, or a stacked burst's cover.
     pub ids: Vec<RecordId>,
+    /// Photos in the day, frames inside stacks included (the header's
+    /// count).
+    pub photos: usize,
 }
 
 /// What the grid reports to the app.
@@ -74,6 +104,8 @@ pub enum GridEvent {
     Activate(RecordId),
     ClearSelection,
     ToggleCollapse(NaiveDate),
+    /// A burst's tab was clicked (on this tile): stack it, or open it.
+    ToggleBurst(RecordId),
     Chip(NaiveDate),
     ZoomStep(i32),
     PinchTo(f32),
@@ -96,15 +128,32 @@ pub struct GridData<'a> {
     pub scale_factor: f32,
     /// File names under the photos (View ▸ Show file names).
     pub show_names: bool,
-    /// Burst brackets, per section and tile (empty: none).
+    /// Burst strips and stacks, per section and tile (empty: none).
     pub bursts: &'a [Vec<Option<RunMark>>],
+    /// The grid before bursts were last stacked or opened, to animate from.
+    pub restack: Option<Restack<'a>>,
 }
 
-/// The stride of one cell: its mount plus the gutter.  `label_h` is the
+/// What the grid looked like before bursts were stacked or opened.  A new
+/// `seq` starts the animation: tiles slide from their old places to their
+/// new ones, folded frames slide into their stack and fade, opened ones
+/// slide out of it.
+#[derive(Clone, Copy)]
+pub struct Restack<'a> {
+    pub seq: u64,
+    pub sections: &'a [Section],
+    pub bursts: &'a [Vec<Option<RunMark>>],
+    /// The tile to hold still on screen, before and after (a frame folded
+    /// into a stack is the stack).  Without it, the tile in the middle of
+    /// the view holds still.
+    pub focus: Option<(RecordId, RecordId)>,
+}
+
+/// The stride of one cell: its mount plus the gutters.  `label_h` is the
 /// name strip's height: [`LABEL_H`], 0 with names hidden, or in between
 /// while that animates.
 pub fn cell_size(ts: f32, label_h: f32) -> Size {
-    Size::new(ts + PAD * 2.0 + GAP, ts + PAD * 2.0 + label_h + GAP)
+    Size::new(ts + PAD * 2.0 + GAP, ts + PAD * 2.0 + label_h + ROW_GAP)
 }
 
 /// The label strip under a photo `ts` wide: (name width, tag x), from the
@@ -128,7 +177,70 @@ fn corner_tag(thumb: Rectangle, tag_w: f32) -> (Rectangle, Rectangle) {
 
 /// The mount inside a cell's stride.
 fn mount_rect(cell: Rectangle) -> Rectangle {
-    rect(cell.x, cell.y, cell.width - GAP, cell.height - GAP)
+    rect(cell.x, cell.y, cell.width - GAP, cell.height - ROW_GAP)
+}
+
+/// A burst frame's piece of its strip: its mount, joined across the gutter
+/// to the next frame in the same row, and the corner radius on each side
+/// (left, right).  Only the burst's real ends are rounded; where it wraps,
+/// the piece stops square at the column edge, so a strip never reaches
+/// into the margins and rows stay aligned.  `col`: the cell's column of
+/// `cols`.
+fn strip_piece(cell: Rectangle, run: RunMark, col: usize, cols: usize) -> (Rectangle, f32, f32) {
+    let mount = mount_rect(cell);
+    let joins_next = !run.last && col + 1 < cols;
+    let width = if joins_next { cell.width } else { mount.width };
+    let left = if run.first { t::R_CELL } else { 0.0 };
+    let right = if run.last { t::R_CELL } else { 0.0 };
+    (rect(mount.x, mount.y, width, mount.height), left, right)
+}
+
+/// The count on a burst's tab: "11", or "5 of 11" when a filter hides
+/// some of its frames.
+fn tab_count(run: RunMark) -> String {
+    if run.shown < run.total { format!("{} of {}", run.shown, run.total) } else { run.total.to_string() }
+}
+
+/// Width of a short label in the tab's type, cached: tabs repeat a handful
+/// of counts, and measuring text shapes it.
+fn badge_width(label: &str) -> f32 {
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, f32>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|c| {
+        if let Some(&w) = c.borrow().get(label) {
+            return w;
+        }
+        let w = paint::text_width(label, t::T_SMALL, paint::MEDIUM).ceil();
+        let mut c = c.borrow_mut();
+        if c.len() > 4096 {
+            c.clear();
+        }
+        c.insert(label.to_string(), w);
+        w
+    })
+}
+
+/// A count after a glyph in a stack's tab (kept, pruned).
+fn tally(n: u16) -> Option<String> {
+    (n > 0).then(|| n.to_string())
+}
+
+/// The tab on a burst's first tile: on the strip's top edge, above the
+/// photo's left edge, rising into the gutter above.  Its pieces from the
+/// left: a chevron (open or stacked), the count, then for a stack the
+/// kept and pruned tallies.
+fn tab_rect(mount: Rectangle, run: RunMark) -> Rectangle {
+    let mut w = TAB_PAD + TAB_GLYPH + 3.0 + badge_width(&tab_count(run)) + TAB_PAD;
+    if run.stacked {
+        for n in [run.kept, run.pruned] {
+            if let Some(s) = tally(n) {
+                w += 7.0 + TAB_GLYPH + 2.0 + badge_width(&s);
+            }
+        }
+    }
+    // Never wider than the mount.
+    rect(mount.x + PAD, mount.y - TAB_RISE, w.min(mount.width - PAD), TAB_H)
 }
 
 fn cols_for(width: f32, ts: f32) -> usize {
@@ -215,6 +327,8 @@ enum Hover {
     Cell(RecordId),
     Header(usize),
     Chip(usize),
+    /// The tab of the burst whose first tile this is.
+    Tab(RecordId),
     BarDone,
     Scrollbar,
 }
@@ -283,6 +397,31 @@ pub struct State {
     initialised: bool,
     scroll_seq: u64,
     reported_scroll: f32,
+    /// The last [`Restack::seq`] seen, and the slide it started.
+    restack_seq: u64,
+    restack: Option<Slide>,
+}
+
+/// Tiles sliding to new places after bursts were stacked or opened.  All
+/// rects are in the new layout's content coordinates (the old ones moved by
+/// the scroll change that holds the focused tile still).
+struct Slide {
+    anim: Anim,
+    /// Where each tile near the view was.
+    from: HashMap<RecordId, Rectangle>,
+    /// Where each stack was: frames opening out of it start there.
+    stack_from: HashMap<BurstId, Rectangle>,
+    /// Frames folded away: where they were, and their stack's new place.
+    gone: Vec<(RecordId, Rectangle, Rectangle)>,
+    /// Each day's old (top, grid height), so headers slide with their rows.
+    days: HashMap<NaiveDate, (f32, f32)>,
+}
+
+impl Slide {
+    /// Progress, eased (0 → 1).
+    fn t(&self, now: Instant) -> f32 {
+        self.anim.value(now, paint::out_cubic)
+    }
 }
 
 impl State {
@@ -319,6 +458,8 @@ impl State {
             initialised: false,
             scroll_seq: 0,
             reported_scroll: 0.0,
+            restack_seq: 0,
+            restack: None,
         }
     }
 
@@ -431,6 +572,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         s.scroll_seq = self.scroll_seq;
         s.last_collapsed = self.data.collapsed.clone();
         s.last_select_mode = self.data.select_mode;
+        s.restack_seq = self.data.restack.map_or(0, |r| r.seq);
         s.bar = Anim {
             from: if self.data.select_mode { 1.0 } else { 0.0 },
             to: if self.data.select_mode { 1.0 } else { 0.0 },
@@ -486,6 +628,10 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             if st.elide.borrow().len() > 20_000 {
                 st.elide.borrow_mut().clear();
             }
+        }
+        if let Some(r) = self.data.restack.filter(|r| r.seq != st.restack_seq) {
+            st.restack_seq = r.seq;
+            start_slide(st, &self.data, r, now);
         }
     }
 
@@ -549,6 +695,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     || st.label_anim.is_some()
                     || st.kinetic.is_some()
                     || st.collapse.values().any(|a| !a.done(now))
+                    || st.restack.is_some()
                     || !st.bar.done(now);
                 // Thumbnails fading in, placeholders shimmering, a hover fade.
                 let (on_screen, _) = collect(&metrics, data, st.scroll, bounds.height, false);
@@ -590,7 +737,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     }
                 }
                 // Tooltip timer.
-                if let Hover::Cell(_) = st.hover {
+                if let Hover::Cell(_) | Hover::Tab(_) = st.hover {
                     let at = st.hover_since + TOOLTIP_DELAY;
                     if now < at {
                         shell.request_redraw_at(window::RedrawRequest::At(at));
@@ -643,7 +790,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     if p != st.cursor {
                         st.cursor = p;
                         st.hover_since = now;
-                        if matches!(st.hover, Hover::Cell(_)) {
+                        if matches!(st.hover, Hover::Cell(_) | Hover::Tab(_)) {
                             shell.request_redraw();
                         }
                     }
@@ -683,6 +830,10 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     Hover::BarDone => shell.publish((self.on)(GridEvent::SelectDone)),
                     Hover::Chip(s) => shell.publish((self.on)(GridEvent::Chip(data.sections[s].date))),
                     Hover::Header(s) => shell.publish((self.on)(GridEvent::ToggleCollapse(data.sections[s].date))),
+                    Hover::Tab(id) => {
+                        st.last_click = None;
+                        shell.publish((self.on)(GridEvent::ToggleBurst(id)));
+                    }
                     Hover::Cell(id) => {
                         let click = amouse::Click::new(abs, mouse::Button::Left, st.last_click);
                         st.last_click = Some(click);
@@ -745,7 +896,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             return mouse::Interaction::None;
         }
         match st.hover {
-            Hover::Header(_) | Hover::Chip(_) | Hover::BarDone => mouse::Interaction::Pointer,
+            Hover::Header(_) | Hover::Chip(_) | Hover::Tab(_) | Hover::BarDone => mouse::Interaction::Pointer,
             _ => mouse::Interaction::Idle,
         }
     }
@@ -778,15 +929,24 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             openness: &|d| st.openness(d, self.data.collapsed, now),
             elide: Some(&st.elide),
             label_h: Some(st.label_h),
+            slide: st.restack.as_ref(),
         };
         paint(renderer, bounds, &self.data, &view);
         // Tooltip
-        if let Hover::Cell(id) = st.hover {
-            if now >= st.hover_since + TOOLTIP_DELAY && st.drag_bar.is_none() {
-                if let Some(r) = self.data.coll.get(id) {
-                    let pair = self.data.coll.find_pair(id).and_then(|p| self.data.coll.get(p));
-                    draw_tooltip(renderer, bounds, st.cursor, &tooltip_text(r, pair));
+        if now >= st.hover_since + TOOLTIP_DELAY && st.drag_bar.is_none() {
+            match st.hover {
+                Hover::Cell(id) => {
+                    if let Some(r) = self.data.coll.get(id) {
+                        let pair = self.data.coll.find_pair(id).and_then(|p| self.data.coll.get(p));
+                        draw_tooltip(renderer, bounds, st.cursor, &tooltip_text(r, pair));
+                    }
                 }
+                Hover::Tab(id) => {
+                    if let Some(run) = run_of(&self.data, id) {
+                        draw_tooltip(renderer, bounds, st.cursor, &tab_tooltip(run));
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -834,7 +994,114 @@ fn advance(st: &mut State, now: Instant) {
         }
     }
     st.collapse.retain(|_, a| !a.done(now));
+    if st.restack.as_ref().is_some_and(|sl| sl.anim.done(now)) {
+        st.restack = None;
+    }
     st.last_frame = now;
+}
+
+/// Begin the slide after bursts were stacked or opened (`r` is the grid
+/// before), moving the scroll so the focused tile — else the one in the
+/// middle of the view — stays where it was on screen.  Costs one pass over
+/// the tiles, once; each frame of the slide then looks tiles up by id.
+fn start_slide(st: &mut State, data: &GridData<'_>, r: Restack<'_>, now: Instant) {
+    st.restack = None;
+    let vp = st.viewport;
+    if vp.width <= 0.0 || vp.height <= 0.0 {
+        return;
+    }
+    let (old, new) = {
+        let st_ref: &State = st;
+        let open = |d: NaiveDate| st_ref.openness(d, data.collapsed, now);
+        (
+            Metrics::new(r.sections, vp.width, st_ref.size, st_ref.label_h, &open),
+            Metrics::new(data.sections, vp.width, st_ref.size, st_ref.label_h, &open),
+        )
+    };
+    // Where every tile is now, and each stack by its burst.
+    let mut home: HashMap<RecordId, (usize, usize)> = HashMap::with_capacity(data.sections.iter().map(|s| s.ids.len()).sum());
+    let mut stack_home: HashMap<BurstId, (usize, usize)> = HashMap::new();
+    for (s, sec) in data.sections.iter().enumerate() {
+        let marks = data.bursts.get(s);
+        for (i, &id) in sec.ids.iter().enumerate() {
+            home.insert(id, (s, i));
+            if let Some(m) = marks.and_then(|m| m.get(i).copied().flatten()).filter(|m| m.stacked) {
+                stack_home.entry(m.burst).or_insert((s, i));
+            }
+        }
+    }
+    let old_mark = |s: usize, i: usize| r.bursts.get(s).and_then(|m| m.get(i).copied().flatten());
+    // A tile's new place: itself, or the stack it was folded into.
+    let new_home = |id: RecordId, mark: Option<RunMark>| home.get(&id).or_else(|| mark.and_then(|m| stack_home.get(&m.burst))).copied();
+
+    // Hold the focused tile still if it was on screen, else the middle row.
+    let (h, old_scroll) = (vp.height, st.scroll);
+    let mut hold: Option<(f32, f32)> = None;
+    if let Some((before, after)) = r.focus {
+        let at = r.sections.iter().enumerate().find_map(|(s, sec)| sec.ids.iter().position(|&x| x == before).map(|i| (s, i)));
+        if let (Some((s0, i0)), Some(&(s1, i1))) = (at, home.get(&after)) {
+            let y0 = old.cell_rect(s0, i0).y;
+            if old.tops[s0].1 > 0.999 && y0 + old.cell.height > old_scroll && y0 < old_scroll + h {
+                hold = Some((y0, new.cell_rect(s1, i1).y));
+            }
+        }
+    }
+    if hold.is_none() {
+        if let Some((s, idx, _)) = locate(&old, r.sections, old_scroll + h / 2.0) {
+            hold = if idx == usize::MAX {
+                let date = r.sections[s].date;
+                data.sections.iter().position(|x| x.date == date).map(|s1| (old.tops[s].0, new.tops[s1].0))
+            } else {
+                new_home(r.sections[s].ids[idx], old_mark(s, idx)).map(|(s1, i1)| (old.cell_rect(s, idx).y, new.cell_rect(s1, i1).y))
+            };
+        }
+    }
+    let max_scroll = (new.total - h).max(0.0);
+    let new_scroll = hold.map_or(old_scroll, |(y0, y1)| old_scroll + y1 - y0).clamp(0.0, max_scroll);
+    let delta = new_scroll - old_scroll;
+
+    // Where the tiles around the view were (a screen either side: tiles
+    // slide in from off screen), moved by the scroll change.
+    let mut slide = Slide {
+        anim: Anim { from: 0.0, to: 1.0, start: now, ms: t::MOTION_MS },
+        from: HashMap::new(),
+        stack_from: HashMap::new(),
+        gone: Vec::new(),
+        days: HashMap::with_capacity(r.sections.len()),
+    };
+    let (lo, hi) = (old_scroll - h, old_scroll + 2.0 * h);
+    for (s, sec) in r.sections.iter().enumerate() {
+        let (top, o) = old.tops[s];
+        let gh = grid_height(sec.ids.len(), old.cols, old.cell.height) * o;
+        slide.days.insert(sec.date, (top + delta, gh));
+        let gtop = top + HEADER_H;
+        if o < 0.01 || gtop + gh < lo || gtop > hi {
+            continue;
+        }
+        let first_row = ((lo - gtop) / old.cell.height).floor().max(0.0) as usize;
+        let last_row = ((hi - gtop) / old.cell.height).floor().max(0.0) as usize;
+        let first = (first_row * old.cols).min(sec.ids.len());
+        let last = ((last_row + 1) * old.cols).min(sec.ids.len());
+        for i in first..last {
+            let id = sec.ids[i];
+            let mut was = old.cell_rect(s, i);
+            was.y += delta;
+            let mark = old_mark(s, i);
+            if let Some(m) = mark.filter(|m| m.stacked) {
+                slide.stack_from.entry(m.burst).or_insert(was);
+            }
+            if home.contains_key(&id) {
+                slide.from.insert(id, was);
+            } else if let Some((s1, i1)) = new_home(id, mark) {
+                slide.gone.push((id, was, new.cell_rect(s1, i1)));
+            }
+        }
+    }
+    st.scroll = new_scroll;
+    st.scroll_anim = None;
+    st.kinetic = None;
+    st.sent_range = None;
+    st.restack = Some(slide);
 }
 
 fn clamp_scroll(st: &mut State, max_scroll: f32) {
@@ -963,11 +1230,13 @@ fn header_label_x(header: Rectangle) -> f32 {
     header.x + LEFT + HEADER_CHEVRON + 6.0
 }
 
+/// The header's chip: the day's photos (frames inside stacks too), or how
+/// many of its tiles are selected (a stack is one).
 fn chip_label(sec: &Section, sel: &HashSet<RecordId>) -> (String, usize) {
     let n_total = sec.ids.len();
-    let n_sel = sec.ids.iter().filter(|id| sel.contains(id)).count();
+    let n_sel = if sel.is_empty() { 0 } else { sec.ids.iter().filter(|id| sel.contains(id)).count() };
     let label = if n_sel == 0 {
-        format!("{} {}", util::thousands(n_total as u64), if n_total == 1 { "photo" } else { "photos" })
+        format!("{} {}", util::thousands(sec.photos as u64), if sec.photos == 1 { "photo" } else { "photos" })
     } else if n_sel < n_total {
         format!("{n_sel} of {n_total} selected")
     } else if n_total == 1 {
@@ -997,6 +1266,10 @@ fn hit(st: &State, m: &Metrics, data: GridData<'_>, bounds: Rectangle, local: Po
         return Hover::Scrollbar;
     }
     let p = Point::new(local.x, local.y + st.scroll);
+    // Before the header: a first row's tabs rise into it.
+    if let Some(id) = hit_tab(m, data, p) {
+        return Hover::Tab(id);
+    }
     if let Some(s) = m.section_at(p.y) {
         let hr = m.header_rect(s);
         if hr.contains(p) {
@@ -1007,6 +1280,47 @@ fn hit(st: &State, m: &Metrics, data: GridData<'_>, bounds: Rectangle, local: Po
     match m.hit_cell(data.sections, p) {
         Some((s, i)) => Hover::Cell(data.sections[s].ids[i]),
         None => Hover::None,
+    }
+}
+
+/// The burst tab at content-space point `p`, by the tile it sits on.  A tab
+/// rises into the gutter above its tile, which belongs to the row above, so
+/// the tile below the point is tried too.
+fn hit_tab(m: &Metrics, data: GridData<'_>, p: Point) -> Option<RecordId> {
+    for probe in [p, Point::new(p.x, p.y + TAB_RISE)] {
+        let Some((s, i)) = m.hit_cell(data.sections, probe) else { continue };
+        let run = data.bursts.get(s).and_then(|r| r.get(i).copied().flatten()).filter(|r| r.first);
+        if let Some(run) = run {
+            if tab_rect(mount_rect(m.cell_rect(s, i)), run).contains(p) {
+                return Some(data.sections[s].ids[i]);
+            }
+        }
+    }
+    None
+}
+
+/// The burst mark of the tile showing `id`.
+fn run_of(data: &GridData<'_>, id: RecordId) -> Option<RunMark> {
+    data.sections.iter().zip(data.bursts).find_map(|(sec, runs)| sec.ids.iter().position(|&x| x == id).and_then(|i| runs.get(i).copied().flatten()))
+}
+
+/// The tab's hover text.
+fn tab_tooltip(run: RunMark) -> String {
+    let frames = if run.shown < run.total {
+        format!("Showing {} of this burst's {} frames", run.shown, run.total)
+    } else {
+        format!("A burst of {} frames", run.total)
+    };
+    if run.stacked {
+        let marks = match (run.kept, run.pruned) {
+            (0, 0) => "none marked yet".to_string(),
+            (k, 0) => format!("{k} kept"),
+            (0, p) => format!("{p} pruned"),
+            (k, p) => format!("{k} kept, {p} pruned"),
+        };
+        format!("{frames}, stacked: {marks}.\nMarks go to the photo on top.\nClick or press G to show every frame.")
+    } else {
+        format!("{frames}.\nClick or press G to stack it.")
     }
 }
 
@@ -1116,6 +1430,8 @@ pub struct PaintState<'s> {
     /// The name strip's height mid-animation; `None` follows
     /// `GridData::show_names`.
     label_h: Option<f32>,
+    /// Tiles sliding after bursts were stacked or opened.
+    slide: Option<&'s Slide>,
 }
 
 impl<'s> PaintState<'s> {
@@ -1133,6 +1449,7 @@ impl<'s> PaintState<'s> {
             openness,
             elide: None,
             label_h: None,
+            slide: None,
         }
     }
 }
@@ -1148,88 +1465,219 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
     let label_h = ps.label_h.unwrap_or(if data.show_names { LABEL_H } else { 0.0 });
     let m = Metrics::new(data.sections, bounds.width, ps.size, label_h, ps.openness);
     let scroll = ps.scroll.clamp(0.0, (m.total - bounds.height).max(0.0));
-    let top = scroll;
-    let bottom = scroll + bounds.height;
+    let origin_y = bounds.y - scroll;
+    // Mid-slide, tiles come in from off screen: a screen either side of the
+    // view is drawn.
+    let slide = ps.slide.map(|sl| (sl.t(ps.now), sl));
+    let reach = if slide.is_some() { bounds.height } else { 0.0 };
+    let (top, bottom) = (scroll - reach, scroll + bounds.height + reach);
 
     r.with_layer(bounds, |r| {
+        // Frames folding into a stack, fading out under everything: those on
+        // the stack's row slide into it, the rest drift back where they are.
+        if let Some((k, sl)) = slide {
+            for &(id, from, to) in &sl.gone {
+                let Some(rec) = data.coll.get(id) else { continue };
+                let mut cell = if (from.y - to.y).abs() < 0.5 {
+                    paint::lerp_rect(from, to, k)
+                } else {
+                    rect(from.x - m.cell.width * DRIFT * k, from.y, from.width, from.height)
+                };
+                cell.x += bounds.x;
+                cell.y += origin_y;
+                if cell.intersects(&bounds) {
+                    paint_cell(r, cell, id, rec, data, m.ts, m.label_h, 0.0, true, false, ps.now, op * (1.0 - k), ps.elide, bounds);
+                }
+            }
+        }
         for (s, sec) in data.sections.iter().enumerate() {
-            let (stop, o) = m.tops[s];
-            let gh = grid_height(sec.ids.len(), m.cols, m.cell.height) * o;
+            let (new_top, o) = m.tops[s];
+            let new_gh = grid_height(sec.ids.len(), m.cols, m.cell.height) * o;
+            // Mid-slide, a day's header and rows move together.
+            let (stop, gh) = match slide.and_then(|(k, sl)| sl.days.get(&sec.date).map(|&(t0, h0)| (k, t0, h0))) {
+                Some((k, t0, h0)) => (paint::lerp(t0, new_top, k), paint::lerp(h0, new_gh, k)),
+                None => (new_top, new_gh),
+            };
             if stop + HEADER_H + gh < top || stop > bottom {
                 continue;
             }
-            let origin_y = bounds.y - scroll;
             // Grid rows (clipped to the animated height).
             if o > 0.001 && !sec.ids.is_empty() {
-                let clip_y = (bounds.y + stop + HEADER_H - scroll).max(bounds.y);
-                let clip_bottom = (bounds.y + stop + HEADER_H + gh - scroll).min(bounds.y + bounds.height);
+                let clip_y = (origin_y + stop + HEADER_H).max(bounds.y);
+                let clip_bottom = (origin_y + stop + HEADER_H + gh).min(bounds.y + bounds.height);
                 let clip = rect(bounds.x, clip_y, bounds.width, clip_bottom - clip_y);
                 if clip.height > 0.0 {
-                    let first_row = ((top - stop - HEADER_H) / m.cell.height).floor().max(0.0) as usize;
-                    let last_row = ((bottom - stop - HEADER_H) / m.cell.height).floor().max(0.0) as usize;
-                    let first = first_row * m.cols;
-                    let last = ((last_row + 1) * m.cols).min(sec.ids.len());
-                    // Images draw above every quad in their layer, so the
-                    // marks that sit on top of a thumbnail get a layer of
-                    // their own.
-                    let mut drawn = Vec::with_capacity(last.saturating_sub(first));
-                    let runs = data.bursts.get(s).map(Vec::as_slice).unwrap_or(&[]);
-                    r.with_layer(clip, |r| {
-                        // Burst trays first: the mounts sit on them.
-                        for i in first..last {
-                            if let Some(run) = runs.get(i).copied().flatten() {
-                                let mut cell = m.cell_rect(s, i);
-                                cell.x += bounds.x;
-                                cell.y += origin_y;
-                                let row_end = i % m.cols == m.cols - 1;
-                                let edges = (bounds.x, bounds.x + bounds.width - SCROLLBAR_W);
-                                paint_tray(r, cell, run, i % m.cols == 0, row_end, edges, op);
-                            }
-                        }
-                        for i in first..last {
-                            let id = sec.ids[i];
-                            let Some(rec) = data.coll.get(id) else { continue };
-                            let mut cell = m.cell_rect(s, i);
-                            cell.x += bounds.x;
-                            cell.y += origin_y;
-                            let hover = (ps.hover_amt)(id);
-                            let run = runs.get(i).copied().flatten();
-                            let (thumb_rect, image_rect) =
-                                paint_cell(r, cell, id, rec, data, m.ts, m.label_h, hover, run.is_some(), ps.now, op, ps.elide, clip);
-                            drawn.push((id, rec, thumb_rect, image_rect, run));
-                        }
-                    });
-                    r.with_layer(clip, |r| {
-                        for &(id, rec, thumb_rect, image_rect, run) in &drawn {
-                            paint_cell_marks(r, id, rec, data, m.ts, m.label_h, thumb_rect, image_rect, op, clip);
-                            if let Some(run) = run.filter(|run| run.first) {
-                                paint_burst_chip(r, run, image_rect, m.ts, data.select_mode, op, clip);
-                            }
-                        }
-                    });
-                    // Names hidden: each tag on its photo's corner, above
-                    // the marks.
-                    let corner = 1.0 - m.label_h / LABEL_H;
-                    if corner > 0.01 {
-                        r.with_layer(clip, |r| {
-                            for &(id, rec, thumb_rect, image_rect, run) in &drawn {
-                                let base = if run.is_some() { t::PHOTO_TRAY } else { t::PHOTO_MOUNT };
-                                let mount = paint::lerp_color(base, t::PHOTO_RAISED, (ps.hover_amt)(id));
-                                paint_corner_tag(r, rec, thumb_rect, image_rect, mount, op * corner, clip);
-                            }
-                        });
-                    }
+                    // Mid-slide the rows sit on the day's sliding top.
+                    let was = slide.and_then(|(_, sl)| sl.days.get(&sec.date)).map_or(new_top, |d| d.0);
+                    let gtops = (stop + HEADER_H, was + HEADER_H);
+                    let rows = Rows { bounds, origin_y, top, bottom, gtops, clip, slide };
+                    paint_rows(r, data, ps, &m, s, &rows);
                 }
             }
             // Header
             let mut hr = m.header_rect(s);
             hr.x += bounds.x;
-            hr.y += origin_y;
+            hr.y = origin_y + stop;
             paint_header(r, hr, sec, data, ps.hover, s, o < 0.5, op, bounds);
         }
     });
 
     r.with_layer(bounds, |r| paint_chrome(r, bounds, data, ps, &m, scroll));
+}
+
+/// Where one day's rows are painted: the widget's bounds, the content's
+/// screen offset, the content-space band to draw, the rows' clip, and the
+/// slide in progress (with its eased progress).
+struct Rows<'s> {
+    bounds: Rectangle,
+    origin_y: f32,
+    top: f32,
+    bottom: f32,
+    /// The top of the day's rows (content space): now, mid-slide, and
+    /// where it was before the slide.
+    gtops: (f32, f32),
+    clip: Rectangle,
+    slide: Option<(f32, &'s Slide)>,
+}
+
+/// Where a tile is drawn this frame, and how present it is: once, or twice
+/// for a tile changing rows mid-slide.
+type Places = ([(Rectangle, f32); 2], usize);
+
+/// A tile painted this frame, for the layers drawn over it.
+struct Drawn<'a> {
+    id: RecordId,
+    rec: &'a PhotoRecord,
+    mount: Rectangle,
+    thumb: Rectangle,
+    image: Rectangle,
+    run: Option<RunMark>,
+    alpha: f32,
+}
+
+/// Day `s`'s tiles within the band: burst strips and stack edges, then the
+/// mounts and photos, then (each a layer above the images) the marks, the
+/// burst tabs and, with names hidden, the corner tags.
+fn paint_rows(r: &mut Renderer, data: &GridData<'_>, ps: &PaintState<'_>, m: &Metrics, s: usize, rows: &Rows<'_>) {
+    let sec = &data.sections[s];
+    let op = ps.opacity;
+    let clip = rows.clip;
+    let gtop = m.tops[s].0 + HEADER_H;
+    let first_row = ((rows.top - gtop) / m.cell.height).floor().max(0.0) as usize;
+    let last_row = ((rows.bottom - gtop) / m.cell.height).floor().max(0.0) as usize;
+    let first = (first_row * m.cols).min(sec.ids.len());
+    let last = ((last_row + 1) * m.cols).min(sec.ids.len());
+    if first >= last {
+        return;
+    }
+    let runs = data.bursts.get(s).map(Vec::as_slice).unwrap_or(&[]);
+    // A tile's place on screen and how present it is: its cell, or mid-slide
+    // on its way there from where it was.  Only moves along a row slide;
+    // a tile changing rows fades out of the old one and into the new one,
+    // drifting the way the rows moved, rather than flying across the grid.
+    // Frames opening out of a stack slide out of it along its row, and fade
+    // in on the rows after, as does a tile from too far away.
+    let (gtop, old_gtop) = rows.gtops;
+    let (cw, ch) = (m.cell.width, m.cell.height);
+    let place = |i: usize, id: RecordId, run: Option<RunMark>| -> Places {
+        let at = |mut cr: Rectangle| {
+            cr.x += rows.bounds.x;
+            cr.y += rows.origin_y;
+            cr
+        };
+        let (row, col) = (i / m.cols, i % m.cols);
+        let cell = rect(LEFT + col as f32 * cw, gtop + row as f32 * ch, cw, ch);
+        let none = (Rectangle::default(), 0.0);
+        let Some((k, sl)) = rows.slide else { return ([(at(cell), 1.0), none], 1) };
+        match sl.from.get(&id) {
+            Some(&from) => {
+                let old_row = ((from.y - old_gtop) / ch).round();
+                if old_row == row as f32 {
+                    ([(at(rect(paint::lerp(from.x, cell.x, k), cell.y, cw, ch)), 1.0), none], 1)
+                } else {
+                    let shift = if row as f32 > old_row { cw * DRIFT } else { -cw * DRIFT };
+                    let leaving = rect(from.x + shift * k, gtop + old_row * ch, cw, ch);
+                    let arriving = rect(cell.x - shift * (1.0 - k), cell.y, cw, ch);
+                    ([(at(leaving), 1.0 - k), (at(arriving), k)], 2)
+                }
+            }
+            None => {
+                let stack = run.and_then(|m| sl.stack_from.get(&m.burst)).copied();
+                match stack {
+                    Some(f) if ((f.y - old_gtop) / ch).round() == row as f32 => ([(at(paint::lerp_rect(f, cell, k)), k), none], 1),
+                    _ => ([(at(rect(cell.x + cw * DRIFT * (1.0 - k), cell.y, cw, ch)), k), none], 1),
+                }
+            }
+        }
+    };
+    // Mid-slide each frame carries its own mount; the strips join up again
+    // once the tiles have landed.
+    let joined = rows.slide.is_none();
+    let mut drawn: Vec<Drawn<'_>> = Vec::with_capacity(last - first);
+    r.with_layer(clip, |r| {
+        // Strips and stack edges first: the mounts sit on them.
+        for i in first..last {
+            let Some(run) = runs.get(i).copied().flatten() else { continue };
+            let (places, n) = place(i, sec.ids[i], Some(run));
+            for &(cell, alpha) in &places[..n] {
+                if run.stacked {
+                    // A new stack's edges grow in as its frames fold away.
+                    let grow = match rows.slide {
+                        Some((k, sl)) if !sl.stack_from.contains_key(&run.burst) => k,
+                        _ => 1.0,
+                    };
+                    paint_stack_edges(r, mount_rect(cell), op * alpha * grow);
+                }
+                if joined {
+                    let (band, left, right) = strip_piece(cell, run, i % m.cols, m.cols);
+                    paint_corners(r, band, (left, right, right, left), paint::with_alpha(t::PHOTO_TRAY, op));
+                }
+            }
+        }
+        for i in first..last {
+            let id = sec.ids[i];
+            let Some(rec) = data.coll.get(id) else { continue };
+            let run = runs.get(i).copied().flatten();
+            let (places, n) = place(i, id, run);
+            for &(cell, alpha) in &places[..n] {
+                if !cell.intersects(&clip) || alpha <= 0.0 {
+                    continue;
+                }
+                let hover = (ps.hover_amt)(id);
+                let (thumb, image) =
+                    paint_cell(r, cell, id, rec, data, m.ts, m.label_h, hover, run.is_some(), joined, ps.now, op * alpha, ps.elide, clip);
+                drawn.push(Drawn { id, rec, mount: mount_rect(cell), thumb, image, run, alpha });
+            }
+        }
+    });
+    // Images draw above every quad in their layer, so the marks that sit
+    // on top of a thumbnail get a layer of their own.
+    r.with_layer(clip, |r| {
+        for d in &drawn {
+            paint_cell_marks(r, d.id, d.rec, data, m.ts, m.label_h, d.thumb, d.image, op * d.alpha, clip);
+        }
+    });
+    // Burst tabs, over the selection outline.  They rise into the gutter
+    // above their row, so past the top of the day's first row too.
+    let tab_top = (clip.y - TAB_RISE).max(rows.bounds.y);
+    let tab_clip = rect(clip.x, tab_top, clip.width, clip.y + clip.height - tab_top);
+    r.with_layer(tab_clip, |r| {
+        for d in &drawn {
+            if let Some(run) = d.run.filter(|r| r.first) {
+                paint_tab(r, d.mount, run, ps.hover == Hover::Tab(d.id), op * d.alpha, tab_clip);
+            }
+        }
+    });
+    // Names hidden: each tag on its photo's corner, above the marks.
+    let corner = 1.0 - m.label_h / LABEL_H;
+    if corner > 0.01 {
+        r.with_layer(clip, |r| {
+            for d in &drawn {
+                let mount = mount_color(d.run.is_some(), (ps.hover_amt)(d.id));
+                paint_corner_tag(r, d.rec, d.thumb, d.image, mount, op * corner * d.alpha, clip);
+            }
+        });
+    }
 }
 
 /// Scrollbar and select-mode pill, above the cells.
@@ -1316,6 +1764,7 @@ fn paint_cell(
     label_h: f32,
     hover: f32,
     in_burst: bool,
+    on_strip: bool,
     now: Instant,
     op: f32,
     elide: Option<&RefCell<HashMap<(RecordId, u32), String>>>,
@@ -1324,10 +1773,11 @@ fn paint_cell(
     let c = |col: Color| paint::with_alpha(col, op);
     let selected = data.selection.contains(&id);
     let mount = mount_rect(cell);
-    // A burst's frames share one card (see `paint_tray`); a frame's own
-    // mount only shows when hovered.
-    let base = if in_burst { t::PHOTO_TRAY } else { t::PHOTO_MOUNT };
-    paint::rounded(r, mount, t::R_CELL, c(paint::lerp_color(base, t::PHOTO_RAISED, hover)));
+    // A burst frame `on_strip` sits on its strip (see `strip_piece`): its
+    // own mount only shows when hovered.
+    if !(in_burst && on_strip && hover <= 0.0) {
+        paint::rounded(r, mount, t::R_CELL, c(mount_color(in_burst, hover)));
+    }
 
     let thumb_rect = rect(mount.x + PAD, mount.y + PAD, ts, ts);
     let thumb = data.thumbs.get(&rec.path);
@@ -1460,58 +1910,79 @@ fn paint_cell_marks(
     }
 }
 
-/// A burst's card: the mounts of a run joined into one, across the gutters
-/// between them, so the frames read as one group and neighbouring bursts
-/// stay apart.  Its ends are rounded; where the run wraps to the next row
-/// the card runs off the grid's right edge and comes back in from the left
-/// one, so it plainly carries on.  `edges`: the grid area's left and right.
-fn paint_tray(r: &mut Renderer, cell: Rectangle, run: RunMark, row_start: bool, row_end: bool, edges: (f32, f32), op: f32) {
-    let mount = mount_rect(cell);
-    let color = paint::with_alpha(t::PHOTO_TRAY, op);
-    let x0 = if run.first || !row_start { mount.x } else { edges.0 };
-    let x1 = if run.last {
-        mount.x + mount.width
-    } else if row_end {
-        edges.1.max(mount.x + mount.width)
+/// A mount's colour: a single photo's, or a burst frame's (its strip's),
+/// lit by `hover` (0–1).
+fn mount_color(in_burst: bool, hover: f32) -> Color {
+    if in_burst {
+        paint::lerp_color(t::PHOTO_TRAY, t::PHOTO_TRAY_HI, hover)
     } else {
-        // Across the gutter to the next mount.
-        cell.x + cell.width
-    };
-    let band = rect(x0, mount.y, x1 - x0, mount.height);
-    paint::rounded(r, band, t::R_CELL, color);
-    // Square off the sides that join on to the rest of the burst.
-    let side = t::R_CELL + 1.0;
-    if !run.first {
-        paint::fill(r, rect(band.x, band.y, side, band.height), color);
-    }
-    if !run.last {
-        paint::fill(r, rect(band.x + band.width - side, band.y, side, band.height), color);
+        paint::lerp_color(t::PHOTO_MOUNT, t::PHOTO_RAISED, hover)
     }
 }
 
-/// The count on a burst's first tile, top left on the photo (beside the
-/// select-mode checkbox): two stacked frames and the number of frames, or
-/// "5 of 13" when a filter hides some.
-fn paint_burst_chip(r: &mut Renderer, run: RunMark, ir: Rectangle, ts: f32, select_mode: bool, op: f32, clip: Rectangle) {
-    if ir.width < 40.0 || ir.height < 30.0 {
+/// A filled rect with its own radius at each corner: (top left, top right,
+/// bottom right, bottom left).
+fn paint_corners(r: &mut Renderer, bounds: Rectangle, (tl, tr, br, bl): (f32, f32, f32, f32), color: Color) {
+    if color.a <= 0.0 || bounds.width <= 0.0 || bounds.height <= 0.0 {
         return;
     }
-    let c = |col: Color| paint::with_alpha(col, op);
-    let label = if run.shown < run.total { format!("{} of {}", run.shown, run.total) } else { run.total.to_string() };
-    let tw = paint::text_width(&label, t::T_SMALL, paint::MEDIUM).ceil();
-    let (h, glyph_w) = (18.0, 11.0);
-    let mut x = ir.x + 6.0;
-    if select_mode {
-        x += (ts / 8.0).floor().clamp(18.0, 26.0) + 4.0;
+    let radius = iced::border::Radius::default().top_left(tl).top_right(tr).bottom_right(br).bottom_left(bl);
+    r.fill_quad(
+        iced::advanced::renderer::Quad { bounds, border: iced::Border { radius, ..iced::Border::default() }, ..Default::default() },
+        color,
+    );
+}
+
+/// The edges of the frames folded under a stack, showing below its mount
+/// like the cards of a squared-up deck: each narrower and darker than the
+/// one above.  They sit in the row gutter, inside the columns.
+fn paint_stack_edges(r: &mut Renderer, mount: Rectangle, op: f32) {
+    let mut y = mount.y + mount.height;
+    for (k, &(inset, h)) in STACK_EDGES.iter().enumerate() {
+        let shade = paint::lerp_color(t::PHOTO_TRAY, t::PHOTO_GROUND, 0.12 + 0.3 * k as f32);
+        paint_corners(r, rect(mount.x + inset, y, mount.width - 2.0 * inset, h), (0.0, 0.0, 1.5, 1.5), paint::with_alpha(shade, op));
+        y += h;
     }
-    let chip = rect(x, ir.y + 6.0, 6.0 + glyph_w + 4.0 + tw + 7.0, h);
-    paint::rounded(r, chip, h / 2.0, c(t::alpha(Color::BLACK, 0.6)));
-    // Two frames, one behind the other.
-    let (gx, gy) = (chip.x + 6.0, chip.y + 4.0);
-    paint::framed(r, rect(gx + 3.0, gy, 8.0, 7.0), 1.0, Color::TRANSPARENT, c(t::PHOTO_INK2), 1.0);
-    paint::framed(r, rect(gx, gy + 3.0, 8.0, 7.0), 1.0, c(t::alpha(Color::BLACK, 0.9)), c(t::PHOTO_INK), 1.0);
-    let text_clip = chip.intersection(&clip).unwrap_or_default();
-    paint::text(r, &label, rect(gx + glyph_w + 4.0, chip.y, tw + 2.0, h), t::T_SMALL, paint::MEDIUM, c(t::PHOTO_INK), HAlign::Left, text_clip);
+}
+
+/// A burst's tab on its first tile (see [`tab_rect`]): part of the strip,
+/// rounded on top like a folder's tab.  An open burst's chevron points
+/// down, a stack's to the side, as the day headers' do.
+fn paint_tab(r: &mut Renderer, mount: Rectangle, run: RunMark, hot: bool, op: f32, clip: Rectangle) {
+    let c = |col: Color| paint::with_alpha(col, op);
+    let tab = tab_rect(mount, run);
+    let fill = if hot { t::PHOTO_TRAY_HI } else { t::PHOTO_TRAY };
+    paint_corners(r, tab, (4.0, 4.0, 0.0, 0.0), c(fill));
+    let inside = tab.intersection(&clip).unwrap_or_default();
+    // The count is brighter than the file names, so where each burst
+    // starts stands out in a grid full of them.
+    let ink = t::PHOTO_INK;
+    let cy = tab.center_y();
+    let glyph = |r: &mut Renderer, g: Glyph, x: f32, color: Color| {
+        r.draw_image(
+            iced::advanced::image::Image::new(icons::handle(g, TAB_GLYPH, color)).filter_method(FilterMethod::Linear).opacity(op),
+            rect(x, (cy - TAB_GLYPH / 2.0).round(), TAB_GLYPH, TAB_GLYPH),
+            inside,
+        );
+    };
+    let mut x = tab.x + TAB_PAD;
+    glyph(r, if run.stacked { Glyph::ChevronRight } else { Glyph::ChevronDown }, x, if hot { t::PHOTO_INK } else { t::PHOTO_INK2 });
+    x += TAB_GLYPH + 3.0;
+    let count = tab_count(run);
+    let w = badge_width(&count);
+    paint::text(r, &count, rect(x, tab.y, w + 2.0, tab.height), t::T_SMALL, paint::MEDIUM, c(ink), HAlign::Left, inside);
+    x += w;
+    if run.stacked {
+        for (n, g, color) in [(run.kept, Glyph::Check, t::KEEP), (run.pruned, Glyph::Close, t::REJECT)] {
+            let Some(label) = tally(n) else { continue };
+            x += 7.0;
+            glyph(r, g, x, color);
+            x += TAB_GLYPH + 2.0;
+            let w = badge_width(&label);
+            paint::text(r, &label, rect(x, tab.y, w + 2.0, tab.height), t::T_SMALL, paint::MEDIUM, c(ink), HAlign::Left, inside);
+            x += w;
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1665,9 +2136,9 @@ pub fn reveal_scroll(
     let max_scroll = (m.total - size.height).max(0.0);
     let target = if mount.y < scroll {
         // Up: at the top, with its day's header when it is in the first row.
-        if i < m.cols { m.tops[s].0 } else { mount.y - GAP }
+        if i < m.cols { m.tops[s].0 } else { mount.y - ROW_GAP }
     } else if mount.y + mount.height > scroll + size.height {
-        mount.y + mount.height + GAP - size.height
+        mount.y + mount.height + ROW_GAP - size.height
     } else {
         return None;
     };
@@ -1684,6 +2155,214 @@ mod tests {
         let p = PathBuf::from(path);
         let ft = FileType::from_path(&p).unwrap();
         PhotoRecord::new(p, ft, size, MTime::from_unix(secs, 0), None)
+    }
+
+    /// Tiles and burst marks for runs of these lengths in a row of the grid
+    /// (1: a single photo; `true`: that run stacked into one tile).  Ids
+    /// count every photo, so a stack skips the ids folded into it.
+    fn layout(runs: &[(usize, bool)]) -> (Vec<RecordId>, Vec<Option<RunMark>>) {
+        let (mut ids, mut marks, mut next) = (Vec::new(), Vec::new(), 0 as RecordId);
+        for (b, &(len, stacked)) in runs.iter().enumerate() {
+            let mark = |first, last| RunMark {
+                burst: b as BurstId,
+                first,
+                last,
+                shown: len as u16,
+                total: len as u16,
+                stacked,
+                kept: 0,
+                pruned: 0,
+            };
+            if len < 2 {
+                ids.push(next);
+                marks.push(None);
+            } else if stacked {
+                ids.push(next);
+                marks.push(Some(mark(true, true)));
+            } else {
+                for k in 0..len {
+                    ids.push(next + k as RecordId);
+                    marks.push(Some(mark(k == 0, k == len - 1)));
+                }
+            }
+            next += len as RecordId;
+        }
+        (ids, marks)
+    }
+
+    fn day(ids: &[RecordId], photos: usize) -> Vec<Section> {
+        vec![Section { date: NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(), label: String::new(), ids: ids.to_vec(), photos }]
+    }
+
+    #[test]
+    fn strips_never_leave_the_columns() {
+        // Singles, a burst wrapping rows, 2-frame bursts side by side, a
+        // very long burst, a stack: at many widths, sizes, names on and off.
+        let (ids, marks) = layout(&[(1, false), (11, false), (2, false), (2, false), (1, false), (30, false), (3, true), (2, false), (1, false)]);
+        let sections = day(&ids, ids.len());
+        let open = |_: NaiveDate| 1.0;
+        for ts in [MIN_SIZE, 180.0, 300.0, MAX_SIZE] {
+            for label_h in [LABEL_H, 0.0] {
+                for width in [700.0, 1000.0, 1452.0, 2500.0] {
+                    let m = Metrics::new(&sections, width, ts, label_h, &open);
+                    let right_edge = LEFT + m.cols as f32 * m.cell.width - GAP;
+                    for i in 0..ids.len() {
+                        let (cell, col) = (m.cell_rect(0, i), i % m.cols);
+                        let mount = mount_rect(cell);
+                        if col == 0 {
+                            assert_eq!(mount.x, LEFT, "every row's first mount starts at the same x");
+                        }
+                        let Some(run) = marks[i] else { continue };
+                        let (band, left, right) = strip_piece(cell, run, col, m.cols);
+                        let ctx = format!("tile {i} col {col}/{} ts {ts} width {width}", m.cols);
+                        assert!(band.x >= LEFT && band.x + band.width <= right_edge + 0.01, "{ctx}: {band:?}");
+                        assert_eq!((band.x, band.y, band.height), (mount.x, mount.y, mount.height), "{ctx}");
+                        if !run.last && col + 1 < m.cols {
+                            let next = mount_rect(m.cell_rect(0, i + 1));
+                            assert_eq!(band.x + band.width, next.x, "{ctx}: joined across the gutter");
+                        } else {
+                            assert_eq!(band.width, mount.width, "{ctx}: stops at its own mount");
+                        }
+                        // Rounded only where the burst really starts and ends.
+                        assert_eq!((left > 0.0, right > 0.0), (run.first, run.last), "{ctx}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stacks_are_one_tile_and_their_tabs_are_hit() {
+        // A single, a 5-frame stack, an open 3-frame burst, a single.
+        let (ids, marks) = layout(&[(1, false), (5, true), (3, false), (1, false), (4, true), (2, false)]);
+        assert_eq!(ids, [0, 1, 6, 7, 8, 9, 10, 14, 15]);
+        let sections = day(&ids, 16);
+        let bursts = vec![marks.clone()];
+        let (coll, thumbs, none) = (Collection::new(), ThumbCache::new(crate::imaging::thumbs::OWNER_MAIN, 1 << 20), HashSet::new());
+        let collapsed = HashSet::new();
+        let data = GridData {
+            sections: &sections,
+            coll: &coll,
+            thumbs: &thumbs,
+            selection: &none,
+            collapsed: &collapsed,
+            select_mode: false,
+            scale_factor: 1.0,
+            show_names: true,
+            bursts: &bursts,
+            restack: None,
+        };
+        // The header counts photos, frames in stacks too.
+        assert_eq!(chip_label(&sections[0], &none).0, "16 photos");
+        // Three columns, so tabs sit on the first, second and third rows.
+        let m = Metrics::new(&sections, LEFT + 3.0 * cell_size(180.0, LABEL_H).width + SCROLLBAR_W + 1.0, 180.0, LABEL_H, &|_| 1.0);
+        assert_eq!(m.cols, 3);
+        for (i, mark) in marks.iter().enumerate() {
+            let mount = mount_rect(m.cell_rect(0, i));
+            assert_eq!(m.hit_cell(&sections, m.cell_rect(0, i).center()), Some((0, i)));
+            match mark.filter(|r| r.first) {
+                Some(run) => {
+                    let tab = tab_rect(mount, run);
+                    assert_eq!(hit_tab(&m, data, tab.center()), Some(ids[i]), "tile {i}");
+                    // Its top is in the gutter above (the row above's cell).
+                    assert_eq!(hit_tab(&m, data, Point::new(tab.x + 2.0, tab.y + 1.0)), Some(ids[i]), "tile {i}");
+                    // The photo under it is not the tab.
+                    assert_eq!(hit_tab(&m, data, Point::new(tab.center_x(), mount.y + PAD + 1.0)), None);
+                }
+                None => assert_eq!(hit_tab(&m, data, Point::new(mount.x + PAD + 4.0, mount.y + 2.0)), None, "tile {i}"),
+            }
+        }
+        // A first-row tab rises into the day's header, and is still the tab.
+        let first = tab_rect(mount_rect(m.cell_rect(0, 1)), marks[1].unwrap());
+        assert!(m.header_rect(0).contains(Point::new(first.x + 2.0, first.y + 1.0)));
+        assert_eq!(hit_tab(&m, data, Point::new(first.x + 2.0, first.y + 1.0)), Some(ids[1]));
+        let st = State::new(180.0, true);
+        let bounds = rect(0.0, 0.0, m.content_w + SCROLLBAR_W, 2000.0);
+        assert_eq!(hit(&st, &m, data, bounds, Point::new(first.x + 2.0, first.y + 1.0)), Hover::Tab(ids[1]), "not the header");
+        assert_eq!(hit(&st, &m, data, bounds, Point::new(first.x + 2.0, m.tops[0].0 + 4.0)), Hover::Header(0));
+        // A stack's tab names the burst's frames and what's marked.
+        let stack = marks[1].unwrap();
+        assert!(tab_rect(mount_rect(m.cell_rect(0, 1)), RunMark { kept: 3, pruned: 1, ..stack }).width > tab_rect(mount_rect(m.cell_rect(0, 1)), stack).width);
+        assert!(tab_tooltip(RunMark { kept: 3, pruned: 1, ..stack }).starts_with("A burst of 5 frames, stacked: 3 kept, 1 pruned."));
+        assert!(tab_tooltip(RunMark { shown: 2, ..marks[2].unwrap() }).starts_with("Showing 2 of this burst's 3 frames."));
+        assert_eq!(run_of(&data, 10), marks[6]);
+    }
+
+    #[test]
+    fn the_tab_stays_off_the_photo_and_clear_of_a_stack_above() {
+        let mount = rect(LEFT, 100.0, 192.0, 216.0);
+        let (_, marks) = layout(&[(4, false)]);
+        let tab = tab_rect(mount, marks[0].unwrap());
+        assert_eq!(tab.y + tab.height, mount.y + PAD, "down to the photo's top edge, not over it");
+        assert_eq!(tab.x, mount.x + PAD, "over the photo's left edge");
+        assert!(tab.y < mount.y, "rising into the gutter");
+        // The frames' edges under a stack in the row above, and this tab,
+        // share the gutter without touching.
+        let edges: f32 = STACK_EDGES.iter().map(|e| e.1).sum();
+        assert!(TAB_RISE + edges < ROW_GAP);
+        // Never wider than its mount, however small the photo.
+        let tiny = rect(LEFT, 100.0, MIN_SIZE + 2.0 * PAD, MIN_SIZE + 2.0 * PAD);
+        let busy = RunMark { shown: 999, total: 1000, stacked: true, kept: 999, pruned: 999, ..marks[0].unwrap() };
+        assert!(tab_rect(tiny, busy).x + tab_rect(tiny, busy).width <= tiny.x + tiny.width);
+    }
+
+    #[test]
+    fn stacking_slides_and_holds_the_focused_tile_still() {
+        // Before: everything open.  After: the 11-frame burst stacked.  (Room
+        // to scroll either way: singles after.)
+        let runs = |stacked| [[(1, false), (11, stacked), (3, false), (1, false), (6, false), (2, false), (9, false)].as_slice(), &[(1, false); 20]].concat();
+        let (open_ids, open_marks) = layout(&runs(false));
+        let (ids, marks) = layout(&runs(true));
+        let (before, after) = (day(&open_ids, open_ids.len()), day(&ids, open_ids.len()));
+        let (before_runs, after_runs) = (vec![open_marks], vec![marks]);
+        let (coll, thumbs, none, collapsed) = (Collection::new(), ThumbCache::new(crate::imaging::thumbs::OWNER_MAIN, 1 << 20), HashSet::new(), HashSet::new());
+        let data = GridData {
+            sections: &after,
+            coll: &coll,
+            thumbs: &thumbs,
+            selection: &none,
+            collapsed: &collapsed,
+            select_mode: false,
+            scale_factor: 1.0,
+            show_names: true,
+            bursts: &after_runs,
+            restack: None,
+        };
+        let open = |_: NaiveDate| 1.0;
+        let width = 1000.0;
+        let m0 = Metrics::new(&before, width, 180.0, LABEL_H, &open);
+        let m1 = Metrics::new(&after, width, 180.0, LABEL_H, &open);
+        let y = |m: &Metrics, secs: &[Section], id: RecordId| m.cell_rect(0, secs[0].ids.iter().position(|&x| x == id).unwrap()).y;
+        let now = Instant::now();
+        // The focus, a photo after the burst (id 30, on screen): it moves up
+        // in the grid but stays put on screen.
+        let mut st = State::new(180.0, true);
+        st.viewport = rect(0.0, 0.0, width, 700.0);
+        st.scroll = y(&m0, &before, 30) - 300.0;
+        let screen = y(&m0, &before, 30) - st.scroll;
+        let restack = Restack { seq: 1, sections: &before, bursts: &before_runs, focus: Some((30, 30)) };
+        start_slide(&mut st, &data, restack, now);
+        assert!((y(&m1, &after, 30) - st.scroll - screen).abs() < 0.01, "held still");
+        let slide = st.restack.as_ref().expect("sliding");
+        // The folded frames within a screen of the view slide into the
+        // stack (or fade where they are); those further away just go.
+        let stack = m1.cell_rect(0, 1);
+        let gone: Vec<RecordId> = slide.gone.iter().map(|g| g.0).collect();
+        assert_eq!(gone, (8..=11).collect::<Vec<_>>(), "rows 2 and up of the old layout");
+        assert!(slide.gone.iter().all(|g| g.2 == stack));
+        // Tiles that stay are known by where they were, moved by the scroll.
+        let delta = st.scroll - (y(&m0, &before, 30) - 300.0);
+        assert_eq!(slide.from.get(&30).map(|r| r.y), Some(y(&m0, &before, 30) + delta));
+        // A frame folded away while focused: the stack holds its place.
+        let mut st = State::new(180.0, true);
+        st.viewport = rect(0.0, 0.0, width, 700.0);
+        st.scroll = y(&m0, &before, 9) - 200.0;
+        let screen = y(&m0, &before, 9) - st.scroll;
+        start_slide(&mut st, &data, Restack { focus: Some((9, 1)), ..restack }, now);
+        assert!((y(&m1, &after, 1) - st.scroll - screen).abs() < 0.01 || st.scroll == 0.0);
+        // The slide ends by itself.
+        advance(&mut st, now + Duration::from_millis(t::MOTION_MS as u64 + 1));
+        assert!(st.restack.is_none());
     }
 
     #[test]
@@ -1715,14 +2394,16 @@ mod tests {
     fn hiding_names_packs_rows_and_hit_testing_follows() {
         let mut c = Collection::new();
         let ids: Vec<RecordId> = (0..20).map(|i| c.add(rec(&format!("/s/IMG_{i}.JPG"), 1, 0))).collect();
-        let sections = vec![Section { date: NaiveDate::from_ymd_opt(2026, 7, 24).unwrap(), label: String::new(), ids: ids.clone() }];
+        let sections = day(&ids, ids.len());
         let open = |_: NaiveDate| 1.0;
         let width = 1000.0;
         let on = Metrics::new(&sections, width, 180.0, LABEL_H, &open);
         let off = Metrics::new(&sections, width, 180.0, 0.0, &open);
         assert_eq!(on.cols, off.cols);
         assert_eq!(on.cell.height - off.cell.height, LABEL_H);
-        assert_eq!(off.cell.width, off.cell.height, "with names hidden a cell is square");
+        let mount = mount_rect(off.cell_rect(0, 0));
+        assert_eq!(mount.width, mount.height, "with names hidden a mount is square");
+        assert_eq!(off.cell.height - off.cell.width, ROW_GAP - GAP, "rows sit further apart than columns");
         assert!(off.total < on.total);
         // The centre of every cell hits that cell, in both layouts.
         for m in [&on, &off] {
