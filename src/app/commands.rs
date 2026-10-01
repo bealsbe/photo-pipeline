@@ -28,6 +28,7 @@ pub enum Cmd {
     ToReview,
     FileNames,
     Compare,
+    ReviewBurst,
     AdvanceAfterMark,
     Preferences,
 }
@@ -57,6 +58,7 @@ impl Cmd {
             Cmd::ToReview => "Show only photos to review",
             Cmd::FileNames => "Show file names",
             Cmd::Compare => "Compare selected",
+            Cmd::ReviewBurst => "Review burst",
             Cmd::AdvanceAfterMark => "Advance after marking",
             Cmd::Preferences => "Preferences…",
         }
@@ -90,6 +92,7 @@ impl Cmd {
             Cmd::ToReview => "Ctrl+U",
             Cmd::FileNames => "",
             Cmd::Compare => "C",
+            Cmd::ReviewBurst => "B",
             Cmd::AdvanceAfterMark => "Ctrl+Shift+A",
             Cmd::Preferences => "Ctrl+,",
         }
@@ -114,6 +117,7 @@ impl Cmd {
             Cmd::ToReview => "Show only photos not yet pruned or marked",
             Cmd::FileNames => "Show each photo's file name under it",
             Cmd::Compare => "Compare 2 to 4 selected photos side by side",
+            Cmd::ReviewBurst => "Compare the frames of the selected photo's burst, at 100 % on each one's focus point",
             Cmd::AdvanceAfterMark => "In the viewer, move on to the next photo when P or M marks one",
             Cmd::Preferences => "Settings for culling, the grid, the viewer, folders and storage",
             _ => "",
@@ -175,6 +179,7 @@ impl Cmd {
                     (true, false, ",") => Some(Cmd::Preferences),
                     (false, false, "s") => Some(Cmd::SelectMode),
                     (false, false, "c") => Some(Cmd::Compare),
+                    (false, false, "b") => Some(Cmd::ReviewBurst),
                     (false, _, "?") => Some(Cmd::Shortcuts),
                     _ => None,
                 }
@@ -203,6 +208,7 @@ pub const MENUS: &[(&str, char, &[Option<Cmd>])] = &[
             Some(Cmd::ToReview),
             Some(Cmd::QuickLook),
             Some(Cmd::Compare),
+            Some(Cmd::ReviewBurst),
             None,
             Some(Cmd::SideMenu),
             Some(Cmd::FolderBar),

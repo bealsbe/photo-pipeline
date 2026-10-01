@@ -37,6 +37,9 @@ pub struct Collection {
     by_path: HashMap<PathBuf, RecordId>,
     pair_index: HashMap<PairKey, Vec<RecordId>>,
     stats: Stats,
+    /// Bumped whenever records come, go, move or pair up (not for marks),
+    /// so what is derived from those (bursts) knows when to look again.
+    generation: u64,
 }
 
 pub fn pair_key(path: &Path) -> PairKey {
@@ -77,15 +80,24 @@ impl Collection {
         self.by_path.insert(record.path.clone(), id);
         self.slots.push(Some(record));
         self.order.push(id);
+        self.generation += 1;
         id
     }
 
     pub fn clear(&mut self) {
+        let generation = self.generation + 1;
         *self = Self::default();
+        self.generation = generation;
+    }
+
+    /// Changes whenever records are added, removed, moved or paired.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn remove(&mut self, id: RecordId) -> Option<PhotoRecord> {
         let record = self.slots.get_mut(id as usize)?.take()?;
+        self.generation += 1;
         let s = &mut self.stats;
         s.total -= 1;
         match record.file_type {
@@ -122,6 +134,7 @@ impl Collection {
         };
         let old_path = record.path.clone();
         let old_key = pair_key(&old_path);
+        self.generation += 1;
         if let Some(bucket) = self.pair_index.get_mut(&old_key) {
             bucket.retain(|&r| r != id);
             if bucket.is_empty() {
@@ -217,6 +230,7 @@ impl Collection {
                 r.pair_stem = v;
             }
         }
+        self.generation += 1;
         self.stats.paired = paired_count;
         self.stats.unpaired = self.stats.total - paired_count;
     }

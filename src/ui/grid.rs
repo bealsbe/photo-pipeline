@@ -33,6 +33,7 @@ use super::icons::{self, Glyph};
 use super::paint::{self, HAlign, Renderer, rect};
 use super::theme as t;
 use crate::imaging::thumbs::ThumbCache;
+use crate::model::bursts::RunMark;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::record::{FileType, PhotoRecord};
 use crate::util;
@@ -56,6 +57,12 @@ const PREFETCH_SETTLE: Duration = Duration::from_millis(80);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(700);
 pub const MIN_SIZE: f32 = 120.0;
 pub const MAX_SIZE: f32 = 480.0;
+/// A burst's bracket under its mounts: colour, weight, how far it sits
+/// outside them and how high its ends rise.
+const BRACKET: Color = t::PHOTO_INK3;
+const BRACKET_W: f32 = 1.0;
+const BRACKET_DROP: f32 = 3.0;
+const BRACKET_RISE: f32 = 14.0;
 
 
 /// One date group.
@@ -95,6 +102,8 @@ pub struct GridData<'a> {
     pub scale_factor: f32,
     /// File names under the photos (View ▸ Show file names).
     pub show_names: bool,
+    /// Burst brackets, per section and tile (empty: none).
+    pub bursts: &'a [Vec<Option<RunMark>>],
 }
 
 /// The stride of one cell: its mount plus the gutter.  `label_h` is the
@@ -1170,6 +1179,7 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                     // marks that sit on top of a thumbnail get a layer of
                     // their own.
                     let mut drawn = Vec::with_capacity(last.saturating_sub(first));
+                    let runs = data.bursts.get(s).map(Vec::as_slice).unwrap_or(&[]);
                     r.with_layer(clip, |r| {
                         for i in first..last {
                             let id = sec.ids[i];
@@ -1179,12 +1189,19 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                             cell.y += origin_y;
                             let hover = (ps.hover_amt)(id);
                             let (thumb_rect, image_rect) = paint_cell(r, cell, id, rec, data, m.ts, m.label_h, hover, ps.now, op, ps.elide, clip);
-                            drawn.push((id, rec, thumb_rect, image_rect));
+                            let run = runs.get(i).copied().flatten();
+                            if let Some(run) = run {
+                                paint_bracket(r, cell, run, i % m.cols == 0, op);
+                            }
+                            drawn.push((id, rec, thumb_rect, image_rect, run));
                         }
                     });
                     r.with_layer(clip, |r| {
-                        for &(id, rec, thumb_rect, image_rect) in &drawn {
+                        for &(id, rec, thumb_rect, image_rect, run) in &drawn {
                             paint_cell_marks(r, id, rec, data, m.ts, m.label_h, thumb_rect, image_rect, op, clip);
+                            if let Some(run) = run.filter(|run| run.first) {
+                                paint_burst_chip(r, run, image_rect, m.ts, data.select_mode, op, clip);
+                            }
                         }
                     });
                     // Names hidden: each tag on its photo's corner, above
@@ -1192,7 +1209,7 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                     let corner = 1.0 - m.label_h / LABEL_H;
                     if corner > 0.01 {
                         r.with_layer(clip, |r| {
-                            for &(id, rec, thumb_rect, image_rect) in &drawn {
+                            for &(id, rec, thumb_rect, image_rect, _) in &drawn {
                                 let mount = paint::lerp_color(t::PHOTO_MOUNT, t::PHOTO_RAISED, (ps.hover_amt)(id));
                                 paint_corner_tag(r, rec, thumb_rect, image_rect, mount, op * corner, clip);
                             }
@@ -1433,6 +1450,58 @@ fn paint_cell_marks(
         let mount = rect(thumb_rect.x - PAD, thumb_rect.y - PAD, ts + 2.0 * PAD, ts + 2.0 * PAD + label_h);
         paint::framed(r, mount, t::R_CELL, Color::TRANSPARENT, c(t::SIGNAL), 2.0);
     }
+}
+
+/// A burst's bracket: a rule through the gutter just under its run of
+/// mounts, rising a little beside the first and the last.  Between tiles
+/// it runs on across the gap; where the run wraps to the next row it runs
+/// out into the gap, open, and picks up again under the next row.
+fn paint_bracket(r: &mut Renderer, cell: Rectangle, run: RunMark, row_start: bool, op: f32) {
+    let mount = mount_rect(cell);
+    let color = paint::with_alpha(BRACKET, op);
+    let bottom = mount.y + mount.height;
+    let y = (bottom + BRACKET_DROP).round();
+    let (left, right) = (mount.x - BRACKET_DROP, mount.x + mount.width + BRACKET_DROP - BRACKET_W);
+    let x0 = if run.first {
+        left
+    } else if row_start {
+        mount.x - GAP / 2.0
+    } else {
+        mount.x
+    };
+    let x1 = if run.last { right + BRACKET_W } else { cell.x + cell.width };
+    paint::hline(r, x0, x1, y, BRACKET_W, color);
+    if run.first {
+        paint::vline(r, left, y - BRACKET_RISE, y + BRACKET_W, BRACKET_W, color);
+    }
+    if run.last {
+        paint::vline(r, right, y - BRACKET_RISE, y + BRACKET_W, BRACKET_W, color);
+    }
+}
+
+/// The count on a burst's first tile, top left on the photo (beside the
+/// select-mode checkbox): two stacked frames and the number of frames, or
+/// "5 of 13" when a filter hides some.
+fn paint_burst_chip(r: &mut Renderer, run: RunMark, ir: Rectangle, ts: f32, select_mode: bool, op: f32, clip: Rectangle) {
+    if ir.width < 40.0 || ir.height < 30.0 {
+        return;
+    }
+    let c = |col: Color| paint::with_alpha(col, op);
+    let label = if run.shown < run.total { format!("{} of {}", run.shown, run.total) } else { run.total.to_string() };
+    let tw = paint::text_width(&label, t::T_SMALL, paint::MEDIUM).ceil();
+    let (h, glyph_w) = (18.0, 11.0);
+    let mut x = ir.x + 6.0;
+    if select_mode {
+        x += (ts / 8.0).floor().clamp(18.0, 26.0) + 4.0;
+    }
+    let chip = rect(x, ir.y + 6.0, 6.0 + glyph_w + 4.0 + tw + 7.0, h);
+    paint::rounded(r, chip, h / 2.0, c(t::alpha(Color::BLACK, 0.6)));
+    // Two frames, one behind the other.
+    let (gx, gy) = (chip.x + 6.0, chip.y + 4.0);
+    paint::framed(r, rect(gx + 3.0, gy, 8.0, 7.0), 1.0, Color::TRANSPARENT, c(t::PHOTO_INK2), 1.0);
+    paint::framed(r, rect(gx, gy + 3.0, 8.0, 7.0), 1.0, c(t::alpha(Color::BLACK, 0.9)), c(t::PHOTO_INK), 1.0);
+    let text_clip = chip.intersection(&clip).unwrap_or_default();
+    paint::text(r, &label, rect(gx + glyph_w + 4.0, chip.y, tw + 2.0, h), t::T_SMALL, paint::MEDIUM, c(t::PHOTO_INK), HAlign::Left, text_clip);
 }
 
 #[allow(clippy::too_many_arguments)]

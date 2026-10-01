@@ -1,4 +1,5 @@
 pub mod binfile;
+pub mod bursts;
 pub mod capture_cache;
 pub mod collection;
 pub mod crop;

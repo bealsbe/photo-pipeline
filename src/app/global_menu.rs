@@ -245,6 +245,7 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::ToReview => "view-filter",
         Cmd::FileNames => "insert-text",
         Cmd::Compare => "view-split-left-right",
+        Cmd::ReviewBurst => "object-group",
         Cmd::AdvanceAfterMark => "media-skip-forward",
         Cmd::Preferences => "configure",
     }

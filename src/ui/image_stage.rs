@@ -55,6 +55,9 @@ pub enum ViewCmd {
     None,
     Fit,
     Actual,
+    /// 100 % centred on the camera's AF point, where the stage knows it
+    /// (the compare view's burst review); elsewhere the same as `Actual`.
+    Focus,
     ZoomIn,
     ZoomOut,
 }
@@ -452,7 +455,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                         st.start_zoom(f, None, true, now);
                     }
                 }
-                ViewCmd::Actual => st.start_zoom(1.0, None, false, now),
+                ViewCmd::Actual | ViewCmd::Focus => st.start_zoom(1.0, None, false, now),
                 ViewCmd::ZoomIn => st.scale_about(STEP, center, now),
                 ViewCmd::ZoomOut => st.scale_about(1.0 / STEP, center, now),
                 ViewCmd::None => {}

@@ -32,6 +32,7 @@ use iced::{Event, Point, Size, Subscription, Task, event, window};
 use crate::bus::{self, BgEvent, Bus};
 use crate::imaging::loader::Loader;
 use crate::imaging::thumbs::{self, OWNER_CALENDAR, OWNER_MAIN, ThumbCache, ThumbWorkers};
+use crate::model::bursts::{Bursts, RunMark};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::filter::{self, FilterState, ListRow, SortKey};
 use crate::model::sidecar;
@@ -257,6 +258,8 @@ pub struct Status {
 
 pub struct Derived {
     pub sections: Vec<Section>,
+    /// Burst brackets for each section's tiles (parallel to `sections`).
+    pub burst_runs: Vec<Vec<Option<RunMark>>>,
     /// Deduped visible records in display order (what the viewer steps through).
     pub visible: Vec<RecordId>,
     pub accepted: usize,
@@ -301,6 +304,8 @@ pub struct App {
     window_pos: Option<Point>,
 
     pub coll: Collection,
+    /// The working folder's bursts (shutter presses), from shot metadata.
+    pub bursts: Bursts,
     pub folder: Option<PathBuf>,
     pub library: Option<PathBuf>,
     scan: Option<ScanHandle>,
@@ -428,6 +433,7 @@ impl App {
             window_size: size,
             window_pos: None,
             coll: Collection::new(),
+            bursts: Bursts::default(),
             folder: None,
             library: None,
             scan: None,
@@ -439,6 +445,7 @@ impl App {
             filter,
             derived: Derived {
                 sections: Vec::new(),
+                burst_runs: Vec::new(),
                 visible: Vec::new(),
                 accepted: 0,
                 list_rows: Vec::new(),
@@ -617,6 +624,16 @@ impl App {
         let groups = filter::group_by_date(&visible, &self.coll, &state);
         self.derived.sections =
             groups.into_iter().map(|g| Section { label: fmt_section_date(g.date), date: g.date, ids: g.ids }).collect();
+        // Bursts change only when files come, go or pair up (not on marks);
+        // they are found once the scan has paired the folder.
+        if self.scanning {
+            if !self.bursts.is_empty() {
+                self.bursts = Bursts::default();
+            }
+        } else if !self.bursts.is_current(&self.coll) {
+            self.bursts = Bursts::find(&self.coll);
+        }
+        self.derived.burst_runs = self.derived.sections.iter().map(|s| self.bursts.runs(&s.ids)).collect();
         self.derived.accepted = sorted.len();
         self.derived.visible = self.derived.sections.iter().flat_map(|s| s.ids.iter().copied()).collect();
         self.derived.list_rows = filter::list_rows(&self.coll, &state);
@@ -1517,6 +1534,7 @@ impl App {
                 Task::none()
             }
             Cmd::Compare => compare::open_selected(self),
+            Cmd::ReviewBurst => compare::review_burst(self),
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
             Cmd::Preferences => preferences::open(self),
         }

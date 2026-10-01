@@ -482,6 +482,7 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
         types,
         position: position(app, q.id),
         when: r.shot_time().format("%Y-%m-%d  %H:%M:%S").to_string(),
+        burst: app.bursts.of(q.id).zip(app.bursts.frame_index(q.id)).map(|(b, i)| (i + 1, app.bursts.frames(b).len())),
         pruned: r.is_pruned,
         marked: r.is_marked,
         crop: r.crop.clone(),

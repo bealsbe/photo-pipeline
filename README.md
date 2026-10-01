@@ -130,6 +130,13 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   outline; P, M and U mark the outlined photo.  Enter opens it on its own in
   the viewer, and Esc goes back.  (Like a Ctrl-click selection, picking photos
   from different days needs select mode, S.)
+- **Bursts.** The frames of each shutter press are found from the headers
+  the scan reads anyway (sub-second times; on Sony bodies, each frame's
+  number in its press), and a thin bracket with a frame count runs under
+  them in the grid.  **B** opens **Review burst**: compare on that burst,
+  every frame in a strip below.  Shift+← → change the outlined photo's
+  frame, PgUp/PgDn page, and **1** shows every pane at 100 % on its own AF
+  point, still linked.
 - **Viewer.** A filmstrip under the photo shows its neighbours with their
   marks and crops; click to jump, T to hide it.  With *Advance after marking*
   on (Ctrl+Shift+A, or the Auto-advance toggle), P or M marks the photo and

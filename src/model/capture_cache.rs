@@ -5,8 +5,14 @@
 //! folder.  An entry is used only while the file's size and mtime are what
 //! they were when it was read; any other file is read as before.
 //!
+//! Each entry also keeps the shot metadata read from the same header (the
+//! sub-second time, the press sequence number and the AF point), which is
+//! what finds bursts.
+//!
 //! Saved to `~/.cache/photo_pipeline/capture-times/<md5 of the folder>.bin`
 //! after each complete scan, holding exactly the files that scan found.
+//! A file written by an older version is not read (its entries lack the
+//! shot metadata), so the next scan reads every header once and rewrites it.
 
 use std::collections::HashMap;
 use std::fs;
@@ -16,10 +22,11 @@ use chrono::NaiveDateTime;
 use md5::{Digest, Md5};
 
 use super::binfile::{Reader, Writer};
-use super::record::MTime;
+use super::record::{MTime, ShotMeta};
 
 const MAGIC: &[u8; 8] = b"PPCAPTM\0";
-const VERSION: u32 = 1;
+/// 2: entries carry [`ShotMeta`].
+const VERSION: u32 = 2;
 
 /// A capture time as read, with the size and mtime the file had then.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -62,11 +69,79 @@ pub fn read_times(r: &mut Reader<'_>) -> Option<HashMap<PathBuf, TimeEntry>> {
     Some(times)
 }
 
+/// A capture time and the shot metadata read with it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShotEntry {
+    pub time: TimeEntry,
+    pub meta: ShotMeta,
+}
+
+impl ShotEntry {
+    /// What was read, if the file is still as it was when read.
+    pub fn valid_for(&self, size: u64, mtime: &MTime) -> Option<(Option<NaiveDateTime>, ShotMeta)> {
+        Some((self.time.valid_for(size, mtime)?, self.meta))
+    }
+}
+
+/// Bit flags for the optional [`ShotMeta`] fields.
+const HAS_SUBSEC: u8 = 1;
+const HAS_SEQUENCE: u8 = 2;
+const HAS_FOCUS: u8 = 4;
+
+fn write_meta(w: &mut Writer, m: &ShotMeta) {
+    let flags = m.subsec_ms.map_or(0, |_| HAS_SUBSEC) | m.sequence.map_or(0, |_| HAS_SEQUENCE) | m.focus.map_or(0, |_| HAS_FOCUS);
+    w.u8(flags);
+    w.u16(m.subsec_ms.unwrap_or(0));
+    w.u16(m.sequence.unwrap_or(0));
+    let [fx, fy] = m.focus.unwrap_or([0, 0]);
+    w.u16(fx);
+    w.u16(fy);
+    w.u32(m.camera);
+}
+
+fn read_meta(r: &mut Reader<'_>) -> Option<ShotMeta> {
+    let flags = r.u8()?;
+    let (subsec, sequence, fx, fy, camera) = (r.u16()?, r.u16()?, r.u16()?, r.u16()?, r.u32()?);
+    Some(ShotMeta {
+        subsec_ms: (flags & HAS_SUBSEC != 0).then_some(subsec),
+        sequence: (flags & HAS_SEQUENCE != 0).then_some(sequence),
+        focus: (flags & HAS_FOCUS != 0).then_some([fx, fy]),
+        camera,
+    })
+}
+
+/// The fewest bytes one entry takes: path length, size, mtime, time flag,
+/// metadata.
+const ENTRY_MIN: usize = 4 + 8 + 8 + 1 + 13;
+
+fn write_shots(w: &mut Writer, shots: &HashMap<PathBuf, ShotEntry>) {
+    w.u32(shots.len() as u32);
+    for (path, e) in shots {
+        w.path(path);
+        w.u64(e.time.size);
+        w.u64(e.time.mtime);
+        w.time(e.time.time);
+        write_meta(w, &e.meta);
+    }
+}
+
+fn read_shots(r: &mut Reader<'_>) -> Option<HashMap<PathBuf, ShotEntry>> {
+    let n = r.count(ENTRY_MIN)?;
+    let mut shots = HashMap::with_capacity(n);
+    for _ in 0..n {
+        let path = r.path()?;
+        let (size, mtime, time) = (r.u64()?, r.u64()?, r.time()?);
+        let meta = read_meta(r)?;
+        shots.insert(path, ShotEntry { time: TimeEntry { size, mtime, time }, meta });
+    }
+    Some(shots)
+}
+
 /// One folder's remembered capture times, and what this scan saw.
 pub struct CaptureCache {
     root: PathBuf,
-    known: HashMap<PathBuf, TimeEntry>,
-    seen: HashMap<PathBuf, TimeEntry>,
+    known: HashMap<PathBuf, ShotEntry>,
+    seen: HashMap<PathBuf, ShotEntry>,
 }
 
 impl CaptureCache {
@@ -76,13 +151,14 @@ impl CaptureCache {
         Self { root: root.to_path_buf(), known, seen: HashMap::new() }
     }
 
-    /// A remembered capture time for this file as it is now.
-    pub fn get(&self, path: &Path, size: u64, mtime: &MTime) -> Option<Option<NaiveDateTime>> {
+    /// A remembered capture time and shot metadata for this file as it is
+    /// now.
+    pub fn get(&self, path: &Path, size: u64, mtime: &MTime) -> Option<(Option<NaiveDateTime>, ShotMeta)> {
         self.known.get(path)?.valid_for(size, mtime)
     }
 
     /// What the scan found for one file (remembered or freshly read).
-    pub fn note(&mut self, path: PathBuf, entry: TimeEntry) {
+    pub fn note(&mut self, path: PathBuf, entry: ShotEntry) {
         self.seen.insert(path, entry);
     }
 
@@ -106,22 +182,22 @@ fn file_for(root: &Path) -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".cache").join("photo_pipeline").join("capture-times").join(format!("{digest}.bin")))
 }
 
-fn encode(root: &Path, times: &HashMap<PathBuf, TimeEntry>) -> Vec<u8> {
-    let mut w = Writer(Vec::with_capacity(64 + times.len() * 120));
+fn encode(root: &Path, shots: &HashMap<PathBuf, ShotEntry>) -> Vec<u8> {
+    let mut w = Writer(Vec::with_capacity(64 + shots.len() * 134));
     w.0.extend_from_slice(MAGIC);
     w.u32(VERSION);
     w.path(root);
-    write_times(&mut w, times);
+    write_shots(&mut w, shots);
     w.seal()
 }
 
-fn decode(data: &[u8], root: &Path) -> Option<HashMap<PathBuf, TimeEntry>> {
+fn decode(data: &[u8], root: &Path) -> Option<HashMap<PathBuf, ShotEntry>> {
     let mut r = Reader::open(data)?;
     if r.take(8)? != MAGIC || r.u32()? != VERSION || r.path()? != root {
         return None;
     }
-    let times = read_times(&mut r)?;
-    r.done().then_some(times)
+    let shots = read_shots(&mut r)?;
+    r.done().then_some(shots)
 }
 
 #[cfg(test)]
@@ -138,19 +214,66 @@ mod tests {
         assert_eq!(e.valid_for(1000, &MTime::from_unix(1_741_789_801, 0)), None);
     }
 
+    fn sample() -> HashMap<PathBuf, ShotEntry> {
+        let mut shots = HashMap::new();
+        let m = MTime::from_unix(1_741_789_800, 0);
+        let t = NaiveDateTime::parse_from_str("2025-03-12 14:30:05", "%Y-%m-%d %H:%M:%S").ok();
+        let sony = ShotMeta { subsec_ms: Some(24), sequence: Some(3), focus: Some([38_293, 21_700]), camera: 0xdead_beef };
+        shots.insert(PathBuf::from("/shoot/a.JPG"), ShotEntry { time: TimeEntry::new(5, &m, t), meta: sony });
+        // An older body: whole seconds, no maker note.
+        let plain = ShotMeta { camera: 7, ..ShotMeta::default() };
+        shots.insert(PathBuf::from("/shoot/b.ARW"), ShotEntry { time: TimeEntry::new(7, &m, t), meta: plain });
+        // Sequence 0 (a single shot) is kept apart from no sequence.
+        let single = ShotMeta { subsec_ms: Some(0), sequence: Some(0), ..ShotMeta::default() };
+        shots.insert(PathBuf::from("/shoot/c.JPG"), ShotEntry { time: TimeEntry::new(9, &m, None), meta: single });
+        shots
+    }
+
     #[test]
     fn round_trips_and_rejects_damage() {
         let root = Path::new("/shoot");
-        let mut times = HashMap::new();
-        let m = MTime::from_unix(1_741_789_800, 0);
-        times.insert(PathBuf::from("/shoot/a.JPG"), TimeEntry::new(5, &m, NaiveDateTime::parse_from_str("2025-03-12 14:30:05", "%Y-%m-%d %H:%M:%S").ok()));
-        times.insert(PathBuf::from("/shoot/b.ARW"), TimeEntry::new(7, &m, None));
-        let data = encode(root, &times);
-        assert_eq!(decode(&data, root), Some(times));
+        let shots = sample();
+        let data = encode(root, &shots);
+        assert_eq!(decode(&data, root), Some(shots));
         assert_eq!(decode(&data, Path::new("/other")), None);
         let mut bad = data.clone();
         bad[12] ^= 1;
         assert_eq!(decode(&bad, root), None);
         assert_eq!(decode(&data[..data.len() - 1], root), None);
+    }
+
+    #[test]
+    fn shot_metadata_holds_only_while_the_file_is_unchanged() {
+        let m = MTime::from_unix(1_741_789_800, 0);
+        let e = sample()[Path::new("/shoot/a.JPG")];
+        assert_eq!(e.valid_for(5, &m), Some((e.time.time, e.meta)));
+        assert_eq!(e.valid_for(6, &m), None);
+    }
+
+    /// A cache from before shot metadata was kept (version 1: size, mtime
+    /// and time per entry) is refused rather than misread, so the scan
+    /// reads those headers again.
+    #[test]
+    fn an_older_cache_is_read_again_not_misparsed() {
+        let root = Path::new("/shoot");
+        let m = MTime::from_unix(1_741_789_800, 0);
+        let mut times = HashMap::new();
+        for i in 0..3 {
+            times.insert(PathBuf::from(format!("/shoot/{i}.JPG")), TimeEntry::new(i, &m, None));
+        }
+        let mut w = Writer(Vec::new());
+        w.0.extend_from_slice(MAGIC);
+        w.u32(1);
+        w.path(root);
+        write_times(&mut w, &times);
+        let v1 = w.seal();
+        assert!(Reader::open(&v1).is_some(), "a sound file");
+        assert_eq!(decode(&v1, root), None);
+        // Even with the version patched, its entries don't parse as v2 ones.
+        let mut patched = v1[..v1.len() - 8].to_vec();
+        patched[8..12].copy_from_slice(&VERSION.to_le_bytes());
+        let sum = crate::model::binfile::fnv1a(&patched);
+        patched.extend_from_slice(&sum.to_le_bytes());
+        assert_eq!(decode(&patched, root), None);
     }
 }
