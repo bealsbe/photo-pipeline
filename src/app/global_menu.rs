@@ -246,6 +246,8 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::FileNames => "insert-text",
         Cmd::Compare => "view-split-left-right",
         Cmd::ReviewBurst => "object-group",
+        Cmd::StackBurst => "object-group",
+        Cmd::StackBursts => "view-group",
         Cmd::AdvanceAfterMark => "media-skip-forward",
         Cmd::Preferences => "configure",
     }

@@ -47,6 +47,7 @@ const PAGE_W: f32 = 640.0;
 pub enum Control {
     Advance,
     FileNames,
+    StackBursts,
     ThumbSize,
     Filmstrip,
     BurstSheet,
@@ -66,6 +67,7 @@ impl Control {
         match self {
             Control::Advance => "pref-advance",
             Control::FileNames => "pref-names",
+            Control::StackBursts => "pref-stack-bursts",
             Control::ThumbSize => "pref-thumb-size",
             Control::Filmstrip => "pref-filmstrip",
             Control::BurstSheet => "pref-burst-sheet",
@@ -313,6 +315,7 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
     match c {
         Control::Advance => viewer_advance::toggle(app),
         Control::FileNames => app.run_cmd(Cmd::FileNames),
+        Control::StackBursts => app.run_cmd(Cmd::StackBursts),
         Control::ThumbSize => Task::none(),
         Control::Filmstrip => {
             viewer_filmstrip::toggle(app);
@@ -378,7 +381,7 @@ fn remembered_viewer_size(s: &Settings) -> bool {
 /// right now are skipped).
 fn controls(app: &App) -> Vec<Control> {
     let p = &app.prefs;
-    let mut v = vec![Control::Advance, Control::FileNames, Control::ThumbSize, Control::Filmstrip, Control::BurstSheet];
+    let mut v = vec![Control::Advance, Control::FileNames, Control::StackBursts, Control::ThumbSize, Control::Filmstrip, Control::BurstSheet];
     if remembered_viewer_size(&app.settings) {
         v.push(Control::ViewerSize);
     }
@@ -602,6 +605,11 @@ fn grid(app: &App) -> Element<'_, Message> {
         None,
         vec![
             setting("Show file names", about("Each photo's name under its thumbnail, as in View ▸ Show file names."), switch(p, Control::FileNames, app.show_names, true)),
+            setting(
+                "Stack bursts",
+                about("Each burst as one photo with its count, as in View ▸ Stack all bursts. G opens or stacks the selected one."),
+                row![keycap("Shift+G"), switch(p, Control::StackBursts, app.stacking.all(), true)].spacing(t::S3).align_y(Alignment::Center).into(),
+            ),
             setting("Thumbnail size", about("Also on the filter bar, or Ctrl+scroll over the grid."), size.into()),
         ],
     )

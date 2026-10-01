@@ -1648,6 +1648,8 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("M", "Mark the selection for export"),
             ("C", "Compare the 2 to 4 selected photos"),
             ("B", "Every frame of the selected photo's burst, in the viewer"),
+            ("G  or  click its tab", "Stack the selected photo's burst, or show all its frames"),
+            ("Shift+G", "Stack all bursts, or show every frame"),
             ("?", "This list"),
         ],
     ),

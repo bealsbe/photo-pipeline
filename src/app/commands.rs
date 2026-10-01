@@ -29,6 +29,10 @@ pub enum Cmd {
     FileNames,
     Compare,
     ReviewBurst,
+    /// G: fold the focused photo's burst into a stack, or open it.
+    StackBurst,
+    /// Shift+G: every burst stacked, or every one open (saved).
+    StackBursts,
     AdvanceAfterMark,
     Preferences,
 }
@@ -59,6 +63,8 @@ impl Cmd {
             Cmd::FileNames => "Show file names",
             Cmd::Compare => "Compare selected",
             Cmd::ReviewBurst => "Review burst",
+            Cmd::StackBurst => "Stack or expand burst",
+            Cmd::StackBursts => "Stack all bursts",
             Cmd::AdvanceAfterMark => "Advance after marking",
             Cmd::Preferences => "Preferences…",
         }
@@ -93,6 +99,8 @@ impl Cmd {
             Cmd::FileNames => "",
             Cmd::Compare => "C",
             Cmd::ReviewBurst => "B",
+            Cmd::StackBurst => "G",
+            Cmd::StackBursts => "Shift+G",
             Cmd::AdvanceAfterMark => "Ctrl+Shift+A",
             Cmd::Preferences => "Ctrl+,",
         }
@@ -118,6 +126,8 @@ impl Cmd {
             Cmd::FileNames => "Show each photo's file name under it",
             Cmd::Compare => "Compare 2 to 4 selected photos side by side",
             Cmd::ReviewBurst => "See every frame of the selected photo's burst in the viewer, to look closer at or compare",
+            Cmd::StackBurst => "Fold the selected photo's burst into one stack in the grid, or show all its frames",
+            Cmd::StackBursts => "Show every burst in the grid as one stack; off, every frame shows",
             Cmd::AdvanceAfterMark => "In the viewer, move on to the next photo when P or M marks one",
             Cmd::Preferences => "Settings for culling, the grid, the viewer, folders and storage",
             _ => "",
@@ -180,6 +190,8 @@ impl Cmd {
                     (false, false, "s") => Some(Cmd::SelectMode),
                     (false, false, "c") => Some(Cmd::Compare),
                     (false, false, "b") => Some(Cmd::ReviewBurst),
+                    (false, false, "g") => Some(Cmd::StackBurst),
+                    (false, true, "g") => Some(Cmd::StackBursts),
                     (false, _, "?") => Some(Cmd::Shortcuts),
                     _ => None,
                 }
@@ -209,6 +221,8 @@ pub const MENUS: &[(&str, char, &[Option<Cmd>])] = &[
             Some(Cmd::QuickLook),
             Some(Cmd::Compare),
             Some(Cmd::ReviewBurst),
+            Some(Cmd::StackBurst),
+            Some(Cmd::StackBursts),
             None,
             Some(Cmd::SideMenu),
             Some(Cmd::FolderBar),

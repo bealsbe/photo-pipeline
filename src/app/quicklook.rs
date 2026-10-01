@@ -193,6 +193,21 @@ pub fn close(app: &mut App) -> Task<Message> {
     Task::none()
 }
 
+/// After bursts were stacked or opened (G): stay on the photo shown, or
+/// move to the stack it was folded into, so quick look keeps showing a
+/// tile of the grid.
+pub fn follow(app: &mut App) -> Task<Message> {
+    let Some(id) = app.quicklook.as_ref().map(|q| q.id) else { return Task::none() };
+    let nav = Nav::of(app);
+    if nav.ids.contains(&id) {
+        return Task::none();
+    }
+    match app.tile_of(id).and_then(|t| nav.ids.iter().position(|&x| x == t)) {
+        Some(i) => show(app, &nav, i, false),
+        None => Task::none(),
+    }
+}
+
 fn step(app: &mut App, mv: Move) -> Task<Message> {
     let Some(q) = &app.quicklook else { return Task::none() };
     let nav = Nav::of(app);
@@ -577,6 +592,7 @@ mod tests {
         let day = |d: u32, ids: std::ops::Range<RecordId>| Section {
             date: chrono::NaiveDate::from_ymd_opt(2026, 7, d).unwrap(),
             label: String::new(),
+            photos: ids.len(),
             ids: ids.collect(),
         };
         let sections = vec![day(1, 0..40), day(2, 40..80)];

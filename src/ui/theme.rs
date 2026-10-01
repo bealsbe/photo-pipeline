@@ -64,9 +64,11 @@ pub const PHOTO_MOUNT: Color = hex(0x232323);
 pub const PHOTO_RAISED: Color = hex(0x2d2d2d);
 /// Rules on the photo ground.
 pub const PHOTO_LINE: Color = hex(0x333333);
-/// A burst's mount: one card under all its frames, a step lighter than a
-/// single photo's.
-pub const PHOTO_TRAY: Color = hex(0x292929);
+/// A burst's strip: one mount under all its frames, joined across the
+/// gutters, a clear step lighter than a single photo's mount.
+pub const PHOTO_TRAY: Color = hex(0x2c2c2c);
+/// A hovered frame in a strip, and a hovered burst tab.
+pub const PHOTO_TRAY_HI: Color = hex(0x363636);
 pub const PHOTO_INK: Color = hex(0xe6e6e6);
 pub const PHOTO_INK2: Color = hex(0xa6a6a6);
 pub const PHOTO_INK3: Color = hex(0x747474);

@@ -151,8 +151,18 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   from different days needs select mode, S.)
 - **Bursts.** The frames of each shutter press are found from the headers
   the scan reads anyway (sub-second times; on Sony bodies, each frame's
-  number in its press), and a thin bracket with a frame count runs under
-  them in the grid (the viewer's filmstrip brackets them too).  Arriving at
+  number in its press).  In the grid they share one strip, a lighter mount
+  joined across the gutters, with a tab on the first frame giving the count.
+  A strip that wraps stops square at the last column and carries on from
+  the first, so every row starts at the same edge.  **G** (or a click on the
+  tab) stacks the selected photo's burst into one photo, the edges of the
+  frames under it showing below and its tab adding how many are kept and
+  pruned; **Shift+G** (View ▸ Stack all bursts, or Preferences) stacks
+  every burst and is remembered.  A stack is one photo to the arrow keys,
+  quick look and selection, and P and M mark only the photo on top, never
+  the frames under it; the viewer still steps through every frame.  With
+  To review on, a stack shows its first frame still to review.  The
+  viewer's filmstrip brackets bursts too.  Arriving at
   a burst in the viewer — stepping to it from the photo before or after,
   or opening the viewer on one of its frames — shows **all its frames**
   first, laid out over the photo area with the one you came to outlined.
