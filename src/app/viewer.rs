@@ -722,6 +722,10 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
             viewer_filmstrip::toggle(app);
             Task::none()
         }
+        (_, Some("b")) if !v.read_only => match v.items.get(v.index).copied() {
+            Some(id) => super::compare::review_burst_of(app, id),
+            None => Task::none(),
+        },
         (_, Some("c")) => {
             enter_crop(app);
             Task::none()

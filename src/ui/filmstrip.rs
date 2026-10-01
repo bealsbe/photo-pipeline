@@ -1,7 +1,8 @@
 //! The viewer's filmstrip: a row of thumbnails under the photo, in the
 //! viewer's order, with their prune / keep marks and crops.  The photo on
 //! screen is framed in the accent; click another to jump to it.  The strip
-//! glides to keep the current photo centred.
+//! glides to keep the current photo centred.  Review burst uses it too, for
+//! every frame of the burst, with the other panes' frames framed in grey.
 //!
 //! One custom widget draws only the cells in view, from the same thumbnail
 //! caches as the grids (the working folder's, or the calendar's for library
@@ -189,6 +190,9 @@ pub struct Filmstrip<'a, Message> {
     coll: &'a Collection,
     thumbs: &'a ThumbCache,
     current: usize,
+    /// Other cells on show elsewhere (the compare view's other panes),
+    /// framed quietly.
+    also: Vec<usize>,
     interactive: bool,
     scale_factor: f32,
     on: Box<dyn Fn(FilmEvent) -> Message + 'a>,
@@ -203,12 +207,18 @@ impl<'a, Message> Filmstrip<'a, Message> {
         scale_factor: f32,
         on: impl Fn(FilmEvent) -> Message + 'a,
     ) -> Self {
-        Self { items, coll, thumbs, current, interactive: true, scale_factor, on: Box::new(on) }
+        Self { items, coll, thumbs, current, also: Vec::new(), interactive: true, scale_factor, on: Box::new(on) }
     }
 
     /// Whether clicks jump (off while the crop tool holds the photo).
     pub fn interactive(mut self, on: bool) -> Self {
         self.interactive = on;
+        self
+    }
+
+    /// Cells also on show, besides the current one: framed in grey.
+    pub fn also(mut self, cells: Vec<usize>) -> Self {
+        self.also = cells;
         self
     }
 
@@ -486,9 +496,11 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Filmstrip<'a, Messa
         r.with_layer(b, |r| {
             for (i, rec, ir) in placed {
                 paint_marks(r, rec, ir);
+                let m = mount_at(i);
                 if i == self.current {
-                    let m = mount_at(i);
                     paint::framed(r, rect(m.x - 3.0, m.y - 3.0, m.width + 6.0, m.height + 6.0), t::R_CELL + 3.0, Color::TRANSPARENT, t::SIGNAL, 2.0);
+                } else if self.also.contains(&i) {
+                    paint::framed(r, rect(m.x - 3.0, m.y - 3.0, m.width + 6.0, m.height + 6.0), t::R_CELL + 3.0, Color::TRANSPARENT, t::PHOTO_INK3, 1.5);
                 }
             }
         });

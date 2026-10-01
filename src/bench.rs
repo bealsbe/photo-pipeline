@@ -255,3 +255,102 @@ fn bench_thumbs_list() {
     };
     println!("thumbs          {:>6} files  {:>8.1} ms each ({ok} ok)  {wire}", paths.len(), ms(t) / paths.len() as f64);
 }
+
+/// Shot metadata as the scan reads it, for every photo directly in
+/// `PP_SHOT_DIR`, one tab-separated line each (name, capture time,
+/// sub-second ms, sequence, AF point as fractions of the photo as shown),
+/// to check against `exiftool`.
+#[test]
+#[ignore]
+fn dump_shot_meta() {
+    let Ok(dir) = std::env::var("PP_SHOT_DIR") else { return };
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+    paths.sort();
+    let t = Instant::now();
+    let mut n = 0;
+    for p in &paths {
+        let Some(ft) = crate::model::record::FileType::from_path(p) else { continue };
+        let (time, m) = crate::exif::read_shot(p, ft == crate::model::record::FileType::Raw);
+        let opt = |v: Option<u16>| v.map(|x| x.to_string()).unwrap_or_default();
+        let focus = m.focus_point().map(|(x, y)| format!("{x:.4}\t{y:.4}")).unwrap_or("\t".into());
+        let time = time.map(|t| t.format("%Y:%m:%d %H:%M:%S").to_string()).unwrap_or_default();
+        println!("{}\t{time}\t{}\t{}\t{focus}\t{:08x}", crate::util::file_name(p), opt(m.subsec_ms), opt(m.sequence), m.camera);
+        n += 1;
+    }
+    eprintln!("read {n} headers in {:.0} ms", ms(t));
+}
+
+/// Burst grouping over a whole shoot's metadata, from an `exiftool -n -csv`
+/// export at `PP_BURST_CSV` (columns SourceFile, SubSecTimeOriginal,
+/// DateTimeOriginal, SequenceNumber): presses found with all the metadata,
+/// then as an older body would see them (no sequence numbers; then whole
+/// seconds only), each scored against the presses the sequence numbers
+/// mark.  Reads only the CSV.
+#[test]
+#[ignore]
+fn bench_bursts() {
+    use crate::model::bursts::Bursts;
+    use crate::model::collection::Collection;
+    use crate::model::record::{FileType, MTime, ShotMeta};
+    use chrono::NaiveDateTime;
+    let Ok(csv) = std::env::var("PP_BURST_CSV") else { return };
+    let text = std::fs::read_to_string(csv).unwrap();
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap().split(',').collect();
+    let col = |name: &str| header.iter().position(|h| *h == name).unwrap();
+    let (c_file, c_sub, c_dto, c_seq) = (col("SourceFile"), col("SubSecTimeOriginal"), col("DateTimeOriginal"), col("SequenceNumber"));
+    let rows: Vec<Vec<String>> = lines.map(|l| l.split(',').map(str::to_string).collect()).collect();
+    let build = |keep_seq: bool, keep_subsec: bool| -> (Collection, f64) {
+        let mut c = Collection::new();
+        for r in &rows {
+            let path = PathBuf::from("/day").join(r[c_file].trim_start_matches("./"));
+            let time = NaiveDateTime::parse_from_str(&r[c_dto], "%Y:%m:%d %H:%M:%S").ok();
+            let mut rec = PhotoRecord::new(path, FileType::Jpg, 1, crate::model::record::MTime::from_unix(0, 0), time);
+            rec.shot = ShotMeta {
+                subsec_ms: crate::exif::parse_subsec(r[c_sub].as_bytes()).filter(|_| keep_subsec),
+                sequence: r[c_seq].parse().ok().filter(|_| keep_seq),
+                focus: None,
+                camera: 1,
+            };
+            c.add(rec);
+        }
+        c.build_pairs();
+        let t = Instant::now();
+        let _ = Bursts::find(&c);
+        (c, ms(t))
+    };
+    let _ = MTime::from_unix(0, 0);
+    // Every shot's press, as the names in it (singles included).
+    let presses = |c: &Collection, b: &Bursts| -> HashSet<Vec<String>> {
+        let mut out: HashSet<Vec<String>> =
+            (0..b.len() as u32).map(|i| b.frames(i).iter().map(|&id| c.get(id).unwrap().filename()).collect()).collect();
+        for (id, r) in c.iter_ids() {
+            if b.of(id).is_none() {
+                out.insert(vec![r.filename()]);
+            }
+        }
+        out
+    };
+    let (c, t_full) = build(true, true);
+    let truth = presses(&c, &Bursts::find(&c));
+    let multi: Vec<&Vec<String>> = truth.iter().filter(|p| p.len() > 1).collect();
+    println!(
+        "{} frames: {} presses, {} of them bursts holding {} frames; grouping took {t_full:.1} ms",
+        c.len(),
+        truth.len(),
+        multi.len(),
+        multi.iter().map(|p| p.len()).sum::<usize>()
+    );
+    for (label, seq, sub) in [("sub-second times only", false, true), ("whole seconds + file numbers", false, false)] {
+        let (c, _) = build(seq, sub);
+        let got = presses(&c, &Bursts::find(&c));
+        let exact = got.intersection(&truth).count();
+        let spanning = got.iter().filter(|p| truth.iter().filter(|t| t.iter().any(|f| p.contains(f))).count() > 1).count();
+        println!(
+            "{label:>30}: {} presses, {exact} of {} exactly right ({:.1} %), {spanning} spanning two or more presses",
+            got.len(),
+            truth.len(),
+            100.0 * exact as f64 / truth.len() as f64
+        );
+    }
+}

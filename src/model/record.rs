@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use chrono::{Local, NaiveDateTime, TimeZone};
 
 use super::crop::Crop;
+pub use crate::exif::ShotMeta;
 use crate::util;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -129,6 +130,9 @@ pub struct PhotoRecord {
     pub is_marked: bool,
     pub pair_stem: Option<String>,
     pub crop: Option<Crop>,
+    /// Sub-second time, press sequence number and AF point, from the same
+    /// header read as the capture time (not part of the Python app's data).
+    pub shot: ShotMeta,
 
     /// Cached `filename.lower()` — the Name sort key.
     pub name_lower: String,
@@ -153,6 +157,7 @@ impl PhotoRecord {
             is_marked: false,
             pair_stem: None,
             crop: None,
+            shot: ShotMeta::default(),
             name_lower,
         }
     }

@@ -12,6 +12,8 @@
 //! vkey right                  # a key press in the viewer window
 //! ckey tab                    # a key press in the compare window
 //! cfocus 2                    # click the 3rd pane of the compare view
+//! cfilm 5                     # click the 6th frame in Review burst's strip
+//! bursts                      # print the working folder's bursts
 //! film 5                      # click the 6th photo in the viewer's filmstrip
 //! vresize 1300 800            # resize the viewer window
 //! vmax on|off                 # maximise the viewer window, or restore it
@@ -19,6 +21,7 @@
 //! vpos                        # print where the viewer window is (X11)
 //! vdump                       # print the viewer's state and its settings
 //! click 3 [ctrl|shift]        # grid click on the 4th visible tile
+//! lclick 3                    # list click on the 4th row
 //! activate 0                  # open the viewer on a visible tile
 //! aspect 1:1                  # pick a crop ratio in the viewer
 //! filter pruned|marked|all|date|date-from|date-close
@@ -161,6 +164,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "Redo" => Some(Cmd::Redo),
                 "ToReview" => Some(Cmd::ToReview),
                 "Compare" => Some(Cmd::Compare),
+                "ReviewBurst" => Some(Cmd::ReviewBurst),
                 "AdvanceAfterMark" => Some(Cmd::AdvanceAfterMark),
                 _ => None,
             };
@@ -196,6 +200,20 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let ev = crate::ui::compare_stage::CompareEvent::Focus(arg.parse().unwrap_or(0));
             app.update(Message::Compare(super::compare::Msg::Stage(ev)))
         }
+        "lclick" => match app.derived.list_rows.get(arg.parse().unwrap_or(0)).map(|r| r.primary()) {
+            Some(id) => app.update(Message::List(crate::ui::list::ListEvent::Click { id, modifiers: Modifiers::empty() })),
+            None => Task::none(),
+        },
+        "cfilm" => {
+            let ev = crate::ui::filmstrip::FilmEvent::Jump(arg.parse().unwrap_or(0));
+            app.update(Message::Compare(super::compare::Msg::Film(ev)))
+        }
+        "bursts" => {
+            let b = &app.bursts;
+            let lens: Vec<usize> = (0..b.len() as u32).map(|i| b.frames(i).len()).collect();
+            eprintln!("[bursts] {} bursts holding {} frames: {lens:?}", b.len(), b.frame_count());
+            Task::none()
+        }
         "cdump" => {
             match app.compare.as_ref() {
                 Some(c) => {
@@ -205,7 +223,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                         .filter_map(|&id| app.coll.get(id))
                         .map(|r| format!("{}{}{}", r.filename(), if r.is_marked { " kept" } else { "" }, if r.is_pruned { " pruned" } else { "" }))
                         .collect();
-                    eprintln!("[cdump] focus={} items={marks:?} viewer_open={}", c.focus, app.viewer.is_some());
+                    eprintln!("[cdump] focus={} items={marks:?} viewer_open={} {}", c.focus, app.viewer.is_some(), c.debug_state());
                 }
                 None => eprintln!("[cdump] no compare; viewer_open={}", app.viewer.is_some()),
             }

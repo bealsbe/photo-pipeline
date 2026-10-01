@@ -1,7 +1,8 @@
 //! Background folder scan.
 //!
 //! The walk itself is cheap; the cost is reading a capture time out of every
-//! file, which is pure I/O latency.  Those reads run across a pool of eight
+//! file, which is pure I/O latency.  The same header read gives the shot
+//! metadata bursts are found from (`exif::ShotMeta`), at no extra I/O.  Those reads run across a pool of eight
 //! threads, and records are emitted in batches of 250 so a 10 000-file shoot
 //! costs forty UI updates rather than ten thousand.  The app's scans also
 //! remember capture times per folder (`model::capture_cache`), so a rescan
@@ -19,8 +20,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use rayon::prelude::*;
 
 use crate::bus::{Bus, BgEvent};
-use crate::exif::read_capture_time;
-use crate::model::capture_cache::{CaptureCache, TimeEntry};
+use crate::exif::read_shot;
+use crate::model::capture_cache::{CaptureCache, ShotEntry, TimeEntry};
 use crate::model::record::{FileType, MTime, PhotoRecord};
 
 const READ_WORKERS: usize = 8;
@@ -74,7 +75,7 @@ fn run(id: u64, root: &Path, cancel: &AtomicBool, bus: &Bus, remember: bool) {
         let records = build_records(std::mem::take(batch), &pool, cache.as_ref());
         if let Some(c) = cache {
             for r in &records {
-                c.note(r.path.clone(), TimeEntry::new(r.file_size, &r.modified, r.capture_time));
+                c.note(r.path.clone(), ShotEntry { time: TimeEntry::new(r.file_size, &r.modified, r.capture_time), meta: r.shot });
             }
         }
         *count += records.len();
@@ -130,19 +131,21 @@ fn walk(dir: &Path, cancel: &AtomicBool, emit: &mut dyn FnMut(Entry)) {
     }
 }
 
-/// Build records, reading capture times in parallel where `cache` doesn't
-/// already have them, keeping walk order.
+/// Build records, reading capture times and shot metadata in parallel where
+/// `cache` doesn't already have them, keeping walk order.
 fn build_records(batch: Vec<Entry>, pool: &rayon::ThreadPool, cache: Option<&CaptureCache>) -> Vec<PhotoRecord> {
     pool.install(|| {
         batch
             .into_par_iter()
             .map(|(path, file_type, meta)| {
                 let mtime = MTime::from_metadata(&meta);
-                let ct = match cache.and_then(|c| c.get(&path, meta.len(), &mtime)) {
-                    Some(t) => t,
-                    None => read_capture_time(&path, file_type == FileType::Raw),
+                let (ct, shot) = match cache.and_then(|c| c.get(&path, meta.len(), &mtime)) {
+                    Some(known) => known,
+                    None => read_shot(&path, file_type == FileType::Raw),
                 };
-                PhotoRecord::new(path, file_type, meta.len(), mtime, ct)
+                let mut r = PhotoRecord::new(path, file_type, meta.len(), mtime, ct);
+                r.shot = shot;
+                r
             })
             .collect()
     })

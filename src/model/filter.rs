@@ -183,10 +183,16 @@ fn shot_parent(path: &std::path::Path) -> &std::path::Path {
     }
 }
 
-/// Compare two records by the sort key (ascending).
+/// Compare two records by the sort key (ascending).  Within one second,
+/// dates fall back on the sub-second time and then the file name, so the
+/// frames of a burst (eight or more a second) stay in shooting order.
 pub fn compare(key: SortKey, a: &PhotoRecord, b: &PhotoRecord) -> Ordering {
     match key {
-        SortKey::Date => a.shot_time().cmp(&b.shot_time()),
+        SortKey::Date => a
+            .shot_time()
+            .cmp(&b.shot_time())
+            .then_with(|| a.shot.subsec_ms.unwrap_or(0).cmp(&b.shot.subsec_ms.unwrap_or(0)))
+            .then_with(|| a.name_lower.cmp(&b.name_lower)),
         SortKey::Name => a.name_lower.cmp(&b.name_lower),
         SortKey::Size => a.file_size.cmp(&b.file_size),
     }
@@ -403,6 +409,27 @@ mod tests {
         let raw = c.find_pair(jpg).unwrap();
         set(&mut c, &[raw], |r| r.is_marked = true);
         assert_eq!(progress(&c), Progress { shots: 2, reviewed: 1 });
+    }
+
+    #[test]
+    fn frames_in_one_second_sort_in_shooting_order() {
+        // Scanned in directory order, which isn't shooting order.
+        let mut c = Collection::new();
+        let mut add = |name: &str, ms: Option<u16>| {
+            let mut r = rec(&format!("/s/{name}"), 1);
+            r.shot.subsec_ms = ms;
+            c.add(r)
+        };
+        let late = add("DSC0003.JPG", Some(900));
+        let early = add("DSC0001.JPG", Some(100));
+        let mid = add("DSC0002.JPG", Some(500));
+        // An older body: whole seconds, so the file name decides.
+        let b = add("B0002.JPG", None);
+        let a = add("B0001.JPG", None);
+        let up = visible_sorted(&c, &FilterState::default());
+        assert_eq!(up, [a, b, early, mid, late]);
+        let down = visible_sorted(&c, &FilterState { sort_asc: false, ..FilterState::default() });
+        assert_eq!(down, [late, mid, early, b, a]);
     }
 
     #[test]

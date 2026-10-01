@@ -24,6 +24,28 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 | 8 | Library calendar | **Neither:** no calendar hints, and no "already in library" warning in Export for now. | Drop the library-calendar phase and the Export check. |
 | 9 | Older bodies | **Best effort.**  Use the fallbacks (whole-second times plus file order, sharpest area instead of the focus point). | No dedicated tuning for the A7R II or the Canon T6. |
 
+### Phase 1 as built (2026-09-30)
+
+- **Metadata** (`exif::read_shot`, cached in capture cache v2): SubSec,
+  Sony `SequenceNumber` and `FocusLocation`, and a make+model hash.  Checked
+  against `exiftool` on 596 headers from the 19-Sep day (0 differences, 15
+  portrait frames among them).  `FocusLocation` is in **sensor**
+  orientation (portrait frames still say `7008 4672 x y`), so it is rotated
+  by IFD0 Orientation; 11 frames that day had `0 0 0 2566` (no AF point).
+  The A7R II *does* write `SequenceNumber` (the §4.2 note only covered
+  SubSec), so its presses are exact too.
+- **Presses** (`model/bursts.rs`): sequence numbers first, tolerating a
+  missing (trashed) frame.  On the whole day (9 536 frames): 1 731 presses,
+  1 505 of them bursts holding 9 310 frames, found in 1.6 ms.  Without
+  sequence numbers, a fixed 0.5 s gap rebuilt only 65 % of presses exactly
+  (in-press gaps reach 0.9 s, presses start 0.235 s apart), so the
+  sub-second fallback uses twice the folder's median close gap: 96.5 %.
+  Whole seconds + file numbers, the last resort, manage 20 % at 10 fps.
+- **Review burst** opens from the selected frame (not always the first
+  four), keeps the zoom while frames change, and adds PgUp/PgDn paging to
+  `,` / `.`.  `1` there means 100 % on each pane's AF point; plain compare
+  keeps 1 = the same spot on every photo.
+
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling
 800 frames: use past prune and keep decisions from culled folders' sidecars as

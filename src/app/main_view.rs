@@ -67,6 +67,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 select_mode: app.grid.select_mode,
                 scale_factor: app.scale_factor,
                 show_names: app.show_names,
+                bursts: &app.derived.burst_runs,
             };
             Grid::new(data, app.thumb_size, Message::Grid)
                 .keyboard(keyboard_ok && !app.side_expanded && app.quicklook.is_none())
@@ -196,6 +197,9 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     }
     if cmd == Cmd::Compare {
         return super::compare::can_open(app);
+    }
+    if cmd == Cmd::ReviewBurst {
+        return super::compare::can_review_burst(app);
     }
     if cmd == Cmd::QuickLook {
         return app.view == View::Grid && !app.derived.visible.is_empty();

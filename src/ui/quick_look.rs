@@ -58,6 +58,8 @@ pub struct Shown {
     /// (1-based position, count) in the grid; `None` while it is hidden.
     pub position: Option<(usize, usize)>,
     pub when: String,
+    /// (1-based frame, frames) when the photo is in a burst (B reviews it).
+    pub burst: Option<(usize, usize)>,
     pub pruned: bool,
     pub marked: bool,
     pub crop: Option<Crop>,
@@ -419,6 +421,9 @@ fn draw_caption(r: &mut Renderer, s: &Shown, b: Rectangle, k: f32) {
         put(r, &mut x, &format!("{} of {}", crate::util::thousands(i as u64), crate::util::thousands(n as u64)), t::T_SMALL, paint::REGULAR, t::PHOTO_INK3, t::S3);
     }
     put(r, &mut x, &s.when, t::T_SMALL, paint::REGULAR, t::PHOTO_INK3, t::S4);
+    if let Some((i, n)) = s.burst {
+        put(r, &mut x, &format!("Burst frame {i} of {n}"), t::T_SMALL, paint::REGULAR, t::PHOTO_INK2, t::S4);
+    }
     if s.marked {
         put(r, &mut x, "Kept", t::T_SMALL, paint::SEMIBOLD, t::KEEP, t::S3);
     }

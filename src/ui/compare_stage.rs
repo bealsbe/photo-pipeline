@@ -8,6 +8,10 @@
 //! animation; the app sends commands (fit, 100 %, zoom) and the focus, and
 //! hears back which pane was clicked.
 //!
+//! In the AF view (Review burst's `1`) each pane's view is the shared one
+//! moved by its own AF point's offset from the middle, so every pane shows
+//! its camera's focus point at 100 % and zoom and pan still move them all.
+//!
 //! The layout picks the grid (a row, a column or 2 × 2) that shows the most
 //! photo for the window and the photos' shapes.  Each photo sits in a mount
 //! with its name underneath, as in the grid; the focused one wears the
@@ -275,6 +279,20 @@ pub fn pan(v: Linked, img: Size, port: Port, delta: Vector) -> Linked {
     clamp(Linked { center: c, ..v }, img, port)
 }
 
+/// A pane's own view: the shared one with its centre moved by `shift`
+/// (fractions of the pane's photo).  Fit has no centre to move.
+pub fn shifted(v: Linked, shift: (f32, f32)) -> Linked {
+    if v.fit || shift == (0.0, 0.0) {
+        return v;
+    }
+    Linked { center: (v.center.0 + shift.0, v.center.1 + shift.1), ..v }
+}
+
+/// The shared view behind a pane's own view.
+pub fn unshifted(v: Linked, shift: (f32, f32)) -> Linked {
+    shifted(v, (-shift.0, -shift.1))
+}
+
 /// A photo's placement `e` (eased, 0–1) of the way from view `a` to `b`:
 /// scale and centre move together, so the zoom heads straight for its
 /// target.
@@ -312,6 +330,9 @@ pub struct Pane {
     pub crop: Option<[f32; 4]>,
     /// Shown in place of the photo ("Loading…", an error).
     pub status: Option<String>,
+    /// The camera's AF point (fractions of the photo as shown), which the
+    /// AF view centres each pane on.
+    pub focus: Option<(f32, f32)>,
 }
 
 impl Pane {
@@ -319,6 +340,17 @@ impl Pane {
         match &self.image {
             Some(img) => img.width.max(1) as f32 / img.height.max(1) as f32,
             None => self.aspect,
+        }
+    }
+
+    /// How far this pane's view sits from the shared centre: in the AF view
+    /// (`af`), its AF point's distance from the middle of the photo, so each
+    /// pane shows its own AF point while zoom and pan stay linked.  A pane
+    /// with no AF point shows the shared centre.
+    fn shift(&self, af: bool) -> (f32, f32) {
+        match (af, self.focus) {
+            (true, Some((x, y))) => (x - 0.5, y - 0.5),
+            _ => (0.0, 0.0),
         }
     }
 }
@@ -365,6 +397,8 @@ struct Anim {
     from: Linked,
     to: Linked,
     start: Instant,
+    /// Whether `from` was an AF view (`to` is one if `State::af`).
+    from_af: bool,
 }
 
 struct Pan {
@@ -375,7 +409,10 @@ struct Pan {
 
 struct State {
     key: u64,
+    /// The shared view; each pane shows it moved by its shift.
     view: Linked,
+    /// The AF view: each pane centred on its own AF point (`Pane::shift`).
+    af: bool,
     anim: Option<Anim>,
     cmd_seq: u64,
     focus: usize,
@@ -396,25 +433,26 @@ fn ease(start: Instant, ms: f32, now: Instant) -> (f32, bool) {
 }
 
 impl State {
-    /// A photo's placement now, following any zoom animation.
-    fn placement(&self, img: Size, vp: Port, now: Instant) -> (f32, Vector) {
+    /// `pane`'s photo placement now, following any zoom animation.
+    fn placement(&self, img: Size, vp: Port, pane: &Pane, now: Instant) -> (f32, Vector) {
         match self.anim {
-            Some(a) => between(a.from, a.to, ease(a.start, ZOOM_MS, now).0, img, vp),
-            None => place(self.view, img, vp),
+            Some(a) => between(shifted(a.from, pane.shift(a.from_af)), shifted(a.to, pane.shift(self.af)), ease(a.start, ZOOM_MS, now).0, img, vp),
+            None => place(shifted(self.view, pane.shift(self.af)), img, vp),
         }
     }
 
-    /// The view as it stands now, as seen from a pane showing `img` (an
-    /// animation is frozen where it is).
-    fn current(&self, img: Size, vp: Port, now: Instant) -> Linked {
+    /// The shared view as it stands now, as seen from `pane` showing `img`
+    /// (an animation is frozen where it is).
+    fn current(&self, img: Size, vp: Port, pane: &Pane, now: Instant) -> Linked {
         match self.anim {
             Some(a) => {
                 let (e, done) = ease(a.start, ZOOM_MS, now);
                 if done {
                     return a.to;
                 }
-                let (s, off) = between(a.from, a.to, e, img, vp);
-                clamp(Linked { fit: false, scale: s, center: center_of(img, s, off, vp.size) }, img, vp)
+                let (s, off) = between(shifted(a.from, pane.shift(a.from_af)), shifted(a.to, pane.shift(self.af)), e, img, vp);
+                let own = clamp(Linked { fit: false, scale: s, center: center_of(img, s, off, vp.size) }, img, vp);
+                unshifted(own, pane.shift(self.af))
             }
             None => self.view,
         }
@@ -429,18 +467,32 @@ impl State {
         }
     }
 
-    fn animate_to(&mut self, to: Linked, img: Size, vp: Port, now: Instant) {
-        let from = self.current(img, vp, now);
-        if from == to {
+    /// Animate to the shared view `to`, in the AF view or not (fit never
+    /// is one).
+    fn animate_to(&mut self, to: Linked, af: bool, img: Size, vp: Port, pane: &Pane, now: Instant) {
+        let af = af && !to.fit;
+        let from = self.current(img, vp, pane, now);
+        if from == to && af == self.af {
             return;
         }
+        let from_af = self.af;
         self.view = to;
-        self.anim = Some(Anim { from, to, start: now });
+        self.af = af;
+        self.anim = Some(Anim { from, to, start: now, from_af });
     }
 
     fn set(&mut self, v: Linked) {
         self.anim = None;
         self.view = v;
+        if v.fit {
+            self.af = false;
+        }
+    }
+
+    /// Set the view from one pane's own view of it.
+    fn set_from(&mut self, own: Linked, pane: &Pane) {
+        let v = unshifted(own, pane.shift(self.af));
+        self.set(v);
     }
 
     fn fit_mode(&self) -> bool {
@@ -457,6 +509,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
         tree::State::new(State {
             key: self.key,
             view: FIT,
+            af: false,
             anim: None,
             cmd_seq: self.cmd.0,
             focus: self.focus,
@@ -476,6 +529,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
         if self.key != st.key {
             st.key = self.key;
             st.set(FIT);
+            st.af = false;
             st.pan = None;
             st.ring_from = None;
             st.focus = self.focus;
@@ -492,18 +546,25 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
         let cells = self.cells(Rectangle::with_size(st.size));
         let Some((i, img)) = self.reference() else { return };
         let Some(cell) = cells.get(i) else { return };
+        let pane = &self.panes[i];
         let (img, vp) = (img_size(img), cell.port());
         let centre = Point::new(vp.size.width / 2.0, vp.size.height / 2.0);
         match self.cmd.1 {
-            ViewCmd::Fit => st.animate_to(FIT, img, vp, now),
+            ViewCmd::Fit => st.animate_to(FIT, false, img, vp, pane, now),
             ViewCmd::Actual => {
-                let (s, off) = st.placement(img, vp, now);
-                st.animate_to(zoom_to(s, off, img, vp, 1.0, centre), img, vp, now);
+                let (s, off) = st.placement(img, vp, pane, now);
+                let to = unshifted(zoom_to(s, off, img, vp, 1.0, centre), pane.shift(st.af));
+                st.animate_to(to, st.af, img, vp, pane, now);
+            }
+            ViewCmd::Focus => {
+                // Every pane at 100 %, each on its own AF point.
+                let to = if fit_scale(img, vp.size) >= 0.9999 { FIT } else { Linked { fit: false, scale: 1.0, center: (0.5, 0.5) } };
+                st.animate_to(to, true, img, vp, pane, now);
             }
             ViewCmd::ZoomIn | ViewCmd::ZoomOut => {
-                let (s, off) = st.placement(img, vp, now);
+                let (s, off) = st.placement(img, vp, pane, now);
                 let factor = if self.cmd.1 == ViewCmd::ZoomIn { STEP } else { 1.0 / STEP };
-                st.set(zoom_to(s, off, img, vp, s * factor, centre));
+                st.set_from(zoom_to(s, off, img, vp, s * factor, centre), pane);
             }
             ViewCmd::None => {}
         }
@@ -550,9 +611,9 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
                         shell.request_redraw();
                     }
                 }
-                let focused = self.panes.get(self.focus).and_then(|p| p.image.as_ref()).zip(cells.get(self.focus));
-                if let Some((img, cell)) = focused {
-                    let s = st.placement(img_size(img), cell.port(), now).0;
+                let focused = self.panes.get(self.focus).and_then(|p| p.image.as_ref().map(|img| (p, img))).zip(cells.get(self.focus));
+                if let Some(((pane, img), cell)) = focused {
+                    let s = st.placement(img_size(img), cell.port(), pane, now).0;
                     let pub_key = (s * 1000.0).round() as i32;
                     if pub_key != st.last_zoom_pub {
                         st.last_zoom_pub = pub_key;
@@ -568,7 +629,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
             Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
                 let Some(p) = cursor.position_in(b).and(cursor.position()) else { return };
                 let Some(i) = pane_at(p) else { return };
-                let Some(img) = self.panes[i].image.as_ref() else { return };
+                let pane = &self.panes[i];
+                let Some(img) = pane.image.as_ref() else { return };
                 let (img, vp) = (img_size(img), cells[i].port());
                 let local = Point::new(p.x - cells[i].photo.x, p.y - cells[i].photo.y);
                 let ctrl = crate::ui::modifiers::get().control();
@@ -580,8 +642,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
                         }
                         _ => return,
                     };
-                    let (s, off) = st.placement(img, vp, now);
-                    st.set(zoom_to(s, off, img, vp, s * factor, local));
+                    let (s, off) = st.placement(img, vp, pane, now);
+                    st.set_from(zoom_to(s, off, img, vp, s * factor, local), pane);
                 } else {
                     let shift = crate::ui::modifiers::get().shift();
                     let (dx, dy) = match delta {
@@ -589,8 +651,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
                         ScrollDelta::Pixels { x, y } => (*x, *y),
                     };
                     let (dx, dy) = if shift { (dy, dx) } else { (dx, dy) };
-                    let v = st.view;
-                    st.set(pan(v, img, vp, Vector::new(dx, dy)));
+                    let own = shifted(st.view, pane.shift(st.af));
+                    st.set_from(pan(own, img, vp, Vector::new(dx, dy)), pane);
                 }
                 shell.capture_event();
                 shell.request_redraw();
@@ -605,34 +667,37 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
                 }
                 let click = amouse::Click::new(p, mouse::Button::Left, st.last_click);
                 st.last_click = Some(click);
-                let Some(img) = self.panes[i].image.as_ref() else { return };
+                let pane = &self.panes[i];
+                let Some(img) = pane.image.as_ref() else { return };
                 let photo = cells[i].photo;
                 if !photo.contains(p) {
                     return;
                 }
                 let (img, vp) = (img_size(img), cells[i].port());
                 let local = Point::new(p.x - photo.x, p.y - photo.y);
-                let (s, off) = st.placement(img, vp, now);
+                let (s, off) = st.placement(img, vp, pane, now);
                 if click.kind() == amouse::click::Kind::Double {
-                    // Fit ↔ 100 % about the point clicked, on every photo.
+                    // Fit ↔ 100 % about the point clicked, the same spot on
+                    // every photo.
                     let to = if st.fit_mode() { zoom_to(s, off, img, vp, 1.0, local) } else { FIT };
-                    st.animate_to(to, img, vp, now);
+                    st.animate_to(to, false, img, vp, pane, now);
                     shell.request_redraw();
                     return;
                 }
                 if img.width * s > vp.size.width + 0.5 || img.height * s > vp.size.height + 0.5 {
-                    let v = st.current(img, vp, now);
+                    let v = st.current(img, vp, pane, now);
                     st.set(v);
-                    st.pan = Some(Pan { pane: i, origin: p, start: v });
+                    st.pan = Some(Pan { pane: i, origin: p, start: shifted(v, pane.shift(st.af)) });
                 }
             }
 
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 let Some(p) = cursor.position() else { return };
                 if let Some(pn) = &st.pan {
-                    if let (Some(img), Some(cell)) = (self.panes.get(pn.pane).and_then(|x| x.image.as_ref()), cells.get(pn.pane)) {
-                        let v = pan(pn.start, img_size(img), cell.port(), p - pn.origin);
-                        st.view = v;
+                    let pane = self.panes.get(pn.pane);
+                    if let (Some(pane), Some(img), Some(cell)) = (pane, pane.and_then(|x| x.image.as_ref()), cells.get(pn.pane)) {
+                        let own = pan(pn.start, img_size(img), cell.port(), p - pn.origin);
+                        st.view = unshifted(own, pane.shift(st.af));
                     }
                     shell.request_redraw();
                     return;
@@ -675,7 +740,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
         let Some(i) = cells.iter().position(|c| c.photo.contains(p)) else { return mouse::Interaction::Idle };
         if let Some(img) = self.panes[i].image.as_ref() {
             let (img, vp) = (img_size(img), cells[i].port());
-            let (s, _) = st.placement(img, vp, Instant::now());
+            let (s, _) = st.placement(img, vp, &self.panes[i], Instant::now());
             if img.width * s > vp.size.width + 0.5 || img.height * s > vp.size.height + 0.5 {
                 return mouse::Interaction::Grab;
             }
@@ -708,7 +773,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CompareStage<'a, Me
             .zip(&cells)
             .map(|(pane, cell)| match pane.image.as_ref() {
                 Some(img) => {
-                    let (s, off) = st.placement(img_size(img), cell.port(), now);
+                    let (s, off) = st.placement(img_size(img), cell.port(), pane, now);
                     let dst = rect(cell.photo.x + off.x, cell.photo.y + off.y, img.width as f32 * s, img.height as f32 * s);
                     (Some((s, dst)), dst.intersection(&cell.photo).unwrap_or(fitted(pane.aspect(), cell)))
                 }
@@ -1044,6 +1109,50 @@ mod tests {
         // Zooming in from an aligned fit starts where the photo is.
         let to = zoom_to(s, off, IMG, port, 1.0, Point::new(100.0, 100.0));
         assert_eq!(between(FIT, to, 0.0, IMG, port), (s, off));
+    }
+
+    fn pane(focus: Option<(f32, f32)>) -> Pane {
+        Pane {
+            image: None,
+            aspect: LAND,
+            name: String::new(),
+            tag: crate::ui::tags::Kind::Jpg,
+            marked: false,
+            pruned: false,
+            crop: None,
+            status: None,
+            focus,
+        }
+    }
+
+    #[test]
+    fn the_af_view_centres_each_pane_on_its_own_focus_point() {
+        let (a, b, none) = (pane(Some((0.3, 0.4))), pane(Some((0.7, 0.2))), pane(None));
+        let v = Linked { fit: false, scale: 1.0, center: (0.5, 0.5) };
+        let centre = |p: &Pane| shifted(v, p.shift(true)).center;
+        assert!(close(centre(&a).0, 0.3) && close(centre(&a).1, 0.4));
+        assert!(close(centre(&b).0, 0.7) && close(centre(&b).1, 0.2));
+        assert_eq!(centre(&none), (0.5, 0.5), "no AF point: the middle");
+        // Placed, pane a shows its AF point in the middle of the pane.
+        let (s, off) = place(shifted(v, a.shift(true)), IMG, VP);
+        let c = center_of(IMG, s, off, VP.size);
+        assert!(close(c.0, 0.3) && close(c.1, 0.4), "{c:?}");
+        // Out of the AF view, or at fit, nothing moves.
+        assert_eq!(a.shift(false), (0.0, 0.0));
+        assert_eq!(shifted(FIT, a.shift(true)), FIT);
+    }
+
+    #[test]
+    fn panning_one_pane_in_the_af_view_moves_them_all_alike() {
+        let (a, b) = (pane(Some((0.3, 0.4))), pane(Some((0.7, 0.2))));
+        let v = Linked { fit: false, scale: 1.0, center: (0.5, 0.5) };
+        // Drag pane a 60 px left: its view moves 60 photo pixels right.
+        let own = pan(shifted(v, a.shift(true)), IMG, VP, Vector::new(-60.0, 0.0));
+        let shared = unshifted(own, a.shift(true));
+        let b_after = shifted(shared, b.shift(true)).center;
+        assert!(close(b_after.0, 0.7 + 60.0 / IMG.width) && close(b_after.1, 0.2), "{b_after:?}");
+        // And back to the shared view it came from.
+        assert_eq!(unshifted(shifted(v, b.shift(true)), b.shift(true)), v);
     }
 
     #[test]
