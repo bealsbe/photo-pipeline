@@ -1,8 +1,11 @@
 //! Photo Pipeline — keyboard-driven RAW+JPG culling and library organisation.
 
+mod analysis;
 mod app;
 #[cfg(test)]
 mod bench;
+#[cfg(test)]
+mod quality_eval;
 mod bus;
 mod exif;
 mod exif_panel;

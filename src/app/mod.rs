@@ -10,6 +10,7 @@ pub mod global_menu;
 pub mod kit;
 pub mod main_view;
 pub mod quicklook;
+pub mod quality;
 pub mod network;
 pub mod preferences;
 pub mod preferences_storage;
@@ -325,6 +326,8 @@ pub struct App {
     pub coll: Collection,
     /// The working folder's bursts (shutter presses), from shot metadata.
     pub bursts: Bursts,
+    /// The analysis (run on demand) and what it suggests.
+    pub quality: quality::Quality,
     pub folder: Option<PathBuf>,
     pub library: Option<PathBuf>,
     scan: Option<ScanHandle>,
@@ -451,6 +454,7 @@ impl App {
             window_pos: None,
             coll: Collection::new(),
             bursts: Bursts::default(),
+            quality: quality::Quality::default(),
             folder: None,
             library: None,
             scan: None,
@@ -651,6 +655,7 @@ impl App {
             self.bursts = Bursts::find(&self.coll);
         }
         self.derived.burst_runs = self.derived.sections.iter().map(|s| self.bursts.runs(&s.ids)).collect();
+        quality::refresh(self);
         self.derived.accepted = sorted.len();
         self.derived.visible = self.derived.sections.iter().flat_map(|s| s.ids.iter().copied()).collect();
         self.derived.list_rows = filter::list_rows(&self.coll, &state);
@@ -685,6 +690,7 @@ impl App {
         }
         self.folder = Some(path.clone());
         self.quicklook = None;
+        quality::on_folder_changed(self);
         self.coll.clear();
         self.history.clear();
         self.thumbs.clear(&self.workers);
@@ -1462,6 +1468,7 @@ impl App {
         if let Some(s) = self.scan.take() {
             s.cancel();
         }
+        quality::cancel(self);
         self.calendar.shutdown();
         self.loader.shutdown();
         let mut tasks = Vec::new();
@@ -1884,6 +1891,7 @@ impl App {
                 BgEvent::Undo(done) => tasks.push(undo::on_done(self, done)),
                 BgEvent::GlobalMenu(present) => self.global_menu_present = present,
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
+                BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
             }
         }
         if self.scan_dirty && self.last_refresh.elapsed() >= Duration::from_millis(200) {

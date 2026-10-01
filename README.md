@@ -49,6 +49,10 @@ window rules that matched the app before need the new id.)
   unchanged.  Safe to delete.
 - **Library index (Rust only):** `~/.cache/photo_pipeline/library/`, one
   file per library (see "Library calendar" below).  Safe to delete.
+- **Quality analysis (Rust only):** `~/.cache/photo_pipeline/quality/`, one
+  file per analysed folder: sharpness, exposure and hashes per shot, and the
+  duplicate check's digests, so analysing again reads only changed files.
+  Safe to delete.
 - **Settings:** on first run, the Python app's QSettings
   (`~/.config/PhotoPipeline/PhotoPipeline.conf`) are imported.  After that,
   settings live in `~/.config/photo-pipeline/settings.json`.

@@ -31,7 +31,7 @@ unsafe extern "C" {
         data: *const c_uchar,
         len: c_ulong,
         scale_denom: c_int,
-        rgba: c_int,
+        mode: c_int,
         buf: *mut c_uchar,
         buf_len: usize,
         out_w: *mut c_int,
@@ -40,23 +40,32 @@ unsafe extern "C" {
     ) -> c_int;
 }
 
+/// What `pp_jpeg_decode` writes: RGB (grayscale JPEGs stay one channel),
+/// RGBA, or luma alone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Out {
+    Native = 0,
+    Rgba = 1,
+    Luma = 2,
+}
+
 /// Output (width, height, channels) of a decode at 1/`denom` scale.
-fn turbo_probe(data: &[u8], denom: u32, rgba: bool) -> Option<(u32, u32, u8)> {
+fn turbo_probe(data: &[u8], denom: u32, out: Out) -> Option<(u32, u32, u8)> {
     let (mut w, mut h, mut c) = (0, 0, 0);
     // SAFETY: data is valid for len bytes; a null buffer only reads headers.
     let e = unsafe {
-        pp_jpeg_decode(data.as_ptr(), data.len() as c_ulong, denom as c_int, rgba as c_int, std::ptr::null_mut(), 0, &mut w, &mut h, &mut c)
+        pp_jpeg_decode(data.as_ptr(), data.len() as c_ulong, denom as c_int, out as c_int, std::ptr::null_mut(), 0, &mut w, &mut h, &mut c)
     };
     (e == 0 && w > 0 && h > 0).then_some((w as u32, h as u32, c as u8))
 }
 
-fn turbo_decode(data: &[u8], denom: u32, rgba: bool) -> Result<Pixels, String> {
-    let (w, h, c) = turbo_probe(data, denom, rgba).ok_or("not a readable JPEG")?;
+fn turbo_decode(data: &[u8], denom: u32, out: Out) -> Result<Pixels, String> {
+    let (w, h, c) = turbo_probe(data, denom, out).ok_or("not a readable JPEG")?;
     let mut buf = vec![0u8; w as usize * h as usize * c as usize];
     let (mut ow, mut oh, mut oc) = (0, 0, 0);
     // SAFETY: buf holds exactly the probed output size; data is valid.
     let e = unsafe {
-        pp_jpeg_decode(data.as_ptr(), data.len() as c_ulong, denom as c_int, rgba as c_int, buf.as_mut_ptr(), buf.len(), &mut ow, &mut oh, &mut oc)
+        pp_jpeg_decode(data.as_ptr(), data.len() as c_ulong, denom as c_int, out as c_int, buf.as_mut_ptr(), buf.len(), &mut ow, &mut oh, &mut oc)
     };
     if e != 0 || (ow as u32, oh as u32, oc as u8) != (w, h, c) {
         return Err("JPEG decode failed".into());
@@ -66,18 +75,41 @@ fn turbo_decode(data: &[u8], denom: u32, rgba: bool) -> Result<Pixels, String> {
 
 /// (width, height) from a JPEG's headers, without decoding pixels.
 pub fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    turbo_probe(data, 1, false).map(|(w, h, _)| (w, h))
+    turbo_probe(data, 1, Out::Native).map(|(w, h, _)| (w, h))
 }
 
 /// Full-resolution decode.  Grayscale stays single-channel; everything else
 /// (YCbCr, CMYK, YCCK) comes out as RGB.
 pub fn decode_jpeg_full(data: &[u8]) -> Result<Pixels, String> {
-    turbo_decode(data, 1, false)
+    turbo_decode(data, 1, Out::Native)
 }
 
 /// Full-resolution decode straight to RGBA, ready for the GPU.
 pub fn decode_jpeg_rgba(data: &[u8]) -> Result<Pixels, String> {
-    turbo_decode(data, 1, true)
+    turbo_decode(data, 1, Out::Rgba)
+}
+
+/// Luma (one channel) at 1/`denom` scale (1, 2, 4 or 8).  A YCbCr JPEG
+/// gives its Y plane without touching the colour planes (about two thirds
+/// of an RGB decode's time on a camera preview); CMYK is decoded to RGB and
+/// converted.
+pub fn decode_jpeg_luma(data: &[u8], denom: u32) -> Result<Pixels, String> {
+    let px = turbo_decode(data, denom, Out::Luma)?;
+    Ok(if px.channels == 1 { px } else { to_luma(&px) })
+}
+
+/// Rec. 601 luma (what a JPEG's Y plane holds) of 8-bit pixels.
+pub fn to_luma(px: &Pixels) -> Pixels {
+    let c = px.channels as usize;
+    if c == 1 {
+        return px.clone();
+    }
+    let data = px
+        .data
+        .chunks_exact(c)
+        .map(|p| ((p[0] as u32 * 19_595 + p[1] as u32 * 38_470 + p[2] as u32 * 7_471 + 32_768) >> 16) as u8)
+        .collect();
+    Pixels::new(px.width, px.height, 1, data)
 }
 
 /// Decode at reduced size and resize smoothly to fit `box_w`×`box_h` — what
@@ -94,7 +126,7 @@ pub fn decode_jpeg_scaled(data: &[u8], box_w: u32, box_h: u32) -> Result<Pixels,
         r if r >= 2 => 2,
         _ => 1,
     };
-    let px = turbo_decode(data, denom, false)?;
+    let px = turbo_decode(data, denom, Out::Native)?;
     Ok(resize_to(&px, tw, th))
 }
 
@@ -295,6 +327,28 @@ mod tests {
         assert_eq!(qt_scaled_keep(1616, 1080, 300, 300), (300, 200));
         assert_eq!(qt_scaled_keep(1080, 1616, 300, 300), (200, 300));
         assert_eq!(qt_scaled_keep(7008, 4672, 300, 300), (300, 200));
+    }
+
+    #[test]
+    fn luma_decode_is_the_y_plane() {
+        // A colourful RGB JPEG: its luma decode matches the RGB decode's
+        // luma to within rounding, at full and at reduced size.
+        let (w, h) = (64u16, 48u16);
+        let rgb: Vec<u8> = (0..w as usize * h as usize).flat_map(|i| [(i * 7 % 256) as u8, (i * 3 % 256) as u8, (255 - i % 256) as u8]).collect();
+        let mut jpg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpg, 95).encode(&rgb, w, h, jpeg_encoder::ColorType::Rgb).unwrap();
+        let y = decode_jpeg_luma(&jpg, 1).unwrap();
+        assert_eq!((y.width, y.height, y.channels), (64, 48, 1));
+        let from_rgb = to_luma(&decode_jpeg_full(&jpg).unwrap());
+        let worst = y.data.iter().zip(&from_rgb.data).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(worst <= 3, "{worst}");
+        let half = decode_jpeg_luma(&jpg, 2).unwrap();
+        assert_eq!((half.width, half.height, half.channels), (32, 24, 1));
+        // A grayscale JPEG stays one channel.
+        let mut g = Vec::new();
+        jpeg_encoder::Encoder::new(&mut g, 90).encode(&y.data, w, h, jpeg_encoder::ColorType::Luma).unwrap();
+        assert_eq!(decode_jpeg_luma(&g, 1).unwrap().channels, 1);
+        assert!(decode_jpeg_luma(b"not a jpeg", 1).is_err());
     }
 
     #[test]

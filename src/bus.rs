@@ -70,6 +70,8 @@ pub enum BgEvent {
     Saver(Arc<crate::model::saver::Report>),
     /// Where a folder lives and whether it answered (`ops::netfs::probe`).
     NetProbe { path: PathBuf, seq: u64, probe: Arc<crate::ops::netfs::Probe> },
+    /// Results of an analysis pass (`crate::analysis`), with its progress.
+    Analysis { run: u64, batch: Arc<crate::analysis::Batch> },
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
@@ -106,6 +108,7 @@ impl BgEvent {
             BgEvent::MenuCommand(_) => "MenuCommand",
             BgEvent::Saver(_) => "Saver",
             BgEvent::NetProbe { .. } => "NetProbe",
+            BgEvent::Analysis { .. } => "Analysis",
         }
     }
 }
