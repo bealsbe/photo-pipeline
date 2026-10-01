@@ -28,11 +28,16 @@ static void pp_output_message(j_common_ptr cinfo) {
     (void)cinfo;
 }
 
-/* scale_denom: 1, 2, 4 or 8.  rgba: nonzero for 4-channel RGBA output,
- * otherwise grayscale stays 1 channel and everything else is RGB.
+/* scale_denom: 1, 2, 4 or 8.  mode: 1 for 4-channel RGBA output; 2 for
+ * luma only (1 channel: the Y plane of a YCbCr JPEG, so the colour planes
+ * are neither transformed nor upsampled); otherwise grayscale stays 1
+ * channel and everything else is RGB.  CMYK is never luma-decoded (mode 2
+ * gives RGB for it, which the caller converts).
  * Returns 0 on success, 1 on a decode error, 2 if buf is too small. */
-int pp_jpeg_decode(const unsigned char *data, unsigned long len, int scale_denom, int rgba,
+int pp_jpeg_decode(const unsigned char *data, unsigned long len, int scale_denom, int mode,
                    unsigned char *buf, size_t buf_len, int *out_w, int *out_h, int *out_c) {
+    int rgba = mode == 1;
+    int luma = mode == 2;
     struct jpeg_decompress_struct cinfo;
     struct pp_jpeg_error jerr;
     unsigned char *volatile cmyk_row = NULL;
@@ -60,7 +65,7 @@ int pp_jpeg_decode(const unsigned char *data, unsigned long len, int scale_denom
     } else if (rgba) {
         cinfo.out_color_space = JCS_EXT_RGBA;
         channels = 4;
-    } else if (cinfo.jpeg_color_space == JCS_GRAYSCALE) {
+    } else if (cinfo.jpeg_color_space == JCS_GRAYSCALE || (luma && (cinfo.jpeg_color_space == JCS_YCbCr || cinfo.jpeg_color_space == JCS_RGB))) {
         cinfo.out_color_space = JCS_GRAYSCALE;
         channels = 1;
     } else {

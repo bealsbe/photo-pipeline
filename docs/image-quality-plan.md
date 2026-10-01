@@ -46,6 +46,132 @@ plan, the change is noted here; the sections below are otherwise unchanged.
   `,` / `.`.  `1` there means 100 % on each pane's AF point; plain compare
   keeps 1 = the same spot on every photo.
 
+### Phase 2 engine as built (2026-09-30)
+
+The non-UI half of phase 2: measurements, decisions, cache and the pass.
+Nothing is drawn and no command exists yet (see "What the UI pass needs").
+
+**Modules.**
+
+| File | What it holds |
+|---|---|
+| `imaging/quality.rs` | `Features` and `measure()` on a luma plane; `load()` reads the plane (JPG: MPF preview, else the image at ≥ 1200 px by DCT scaling; RAW: LibRaw's smallest embedded JPEG ≥ 1000 px; never a full decode or demosaic). |
+| `imaging/decode.rs`, `native/jpeg_shim.c` | `decode_jpeg_luma`: libjpeg-turbo's Y plane only (1.9 ms per 1616-px preview, against 2.8 ms RGB). |
+| `model/hints.rs` | `Hints::derive(coll, bursts, features, identical, revision)`: per shot `ShotHint` (score, local, relative, soft, accidental, sharpest, rank), `Moment`s, duplicate groups, `summary()`, and the bulk-action lists. |
+| `model/duplicates.rs` | Identical-file grouping, same-capture copies, the which-copy rule (`keeper`). |
+| `model/quality_cache.rs` | `~/.cache/photo_pipeline/quality/<md5>.bin`. |
+| `analysis.rs` | The pass: `jobs()`, `start()` → `Handle` (cancel, `set_busy`), `execute()` (also used by the harness), `BgEvent::Analysis` batches. |
+| `app/quality.rs` | `App.quality`: `start` / `start_cached` / `cancel`, results by canonical key, `hints`, `status_text()`.  Hooks in `app/mod.rs`: the field, `refresh_views` → `quality::refresh`, `start_scan` → `on_folder_changed`, quit → `cancel`, the `BgEvent` arm. |
+| `quality_eval.rs` | `quality_eval::eval` (counts, costs, agreement with sidecar marks, CSV), `costs`, `derive_cost`. |
+| `app/testing.rs` | Script commands `analyse [cached\|cancel]` and `quality [all\|plans]`. |
+
+**Measurements** (on the ~1616-px preview luma, as stored).  Mean squared
+4-neighbour Laplacian per tile of a 12×8 grid; pixels touching a blown
+highlight (≥ 250) count for nothing, and tiles with more than 0.8 % of
+them are left out of the *local* sharpness (`Features::local`: mean of the
+three sharpest remaining tiles).  Without that, bokeh discs and lights made
+frames shot inside the minimum focus distance look as sharp as good night
+shots (19-Sep 13:50).  Also: the whole-frame value, the AF-point window
+(sharpest quarter of a window ⅛ of the long edge, kept for display, not
+used in decisions: it ranked kept frames no better), luma percentiles,
+entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
+
+**Decisions and thresholds** (all in `model/hints.rs`):
+
+- *Score* = √(whole frame × local).  Within a press it put a frame the user
+  kept first in 59 % of 93 presses with kept and unkept frames (chance
+  31 %), and in the top two in 82 % (AnthroSocal 101/102MSDCF samples,
+  20-Sep).  While tuning on the 74 AnthroSocal bursts: this 62 %, the
+  whole frame alone 58 %, local alone 55 %, the AF window 50 %.
+- *Sharpest* and *relative softness* are judged **per press**, not per
+  moment: across presses the subject moves or fills the frame and the score
+  moves as much as focus does (19:42 frames 8368/8370 came out at 0.2 of
+  8388, whose rim-lit fur against a blue light was the sharpest area; their
+  faces were no softer).  Per moment, the sharpest was kept in 54 %.
+- *Looks out of focus*: `local` < 15 (nothing sharp), **or** score ≤ 0.35
+  of the best frame of its press that looks like it (pHash ≤ 16) while
+  `local` < 60.  Good night shots start at local 21; the 13:50
+  minimum-focus-distance frames are 5–10.
+- *Accidental*: p99 ≤ 24 (black); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
+  local < 15 (one tone: wall, sleeve); median ≤ 12 with local < 12 (dark,
+  nothing sharp; good night shots keep 60+ at a median of 4); local < 5.
+- *Moments*: consecutive presses (singles included) of one folder and
+  camera merge when the next starts ≤ 2 s after the last ends and any of the
+  last three / first three frames are ≤ 16 pHash bits apart.  On the
+  19-Sep sample 131 presses (73 bursts) became 56 moments of 2+ frames, 8 of
+  them merged from several presses.  Checked by eye, 19 of the 20 joins
+  were the same scene (one joined two subjects walking through the same
+  hall); the 13 near misses at 17–22 bits were 6 same scene, 7 not, so 16
+  stays.  A moment needs two different captures (copies of one frame don't
+  make one).
+- *Identical files*: same type, size and header capture (ms, sequence,
+  camera), then the same first 64 KB, then the same 64 KB at the middle and
+  end.  Whole files are never compared (a day exported twice would read
+  340 GB).  *Same capture*: same camera, ms and sequence, one type, pHash
+  ≤ 6.  *Which copy*: copy-like name ("copy", "(n)", another name + "_n"),
+  then the later export (higher `NNNN`), then the newer file, then name.
+- *Bulk lists*: `keep_this_prune_rest(frames, chosen)`,
+  `prune_accidental(scope)`, `prune_soft(scope)` (soft or accidental),
+  `prune_duplicates(scope)` (only shots whose every file is a copy: a prune
+  reaches the pair).  Only frames neither pruned nor marked.  They return
+  ids; nothing is marked.
+
+**On real data** (1 888 frames: three samples copied read-only from the NAS,
+1 087, and the culled 20-Sep and 26-Sep days read in place, 801): 23
+frames flagged, 14 of them in folders with marks.  By eye all
+are motion-blurred, missed focus, someone walking in front of the lens, or
+lens-cap / blank frames; the borderline one is 2037_9384 (0.35, a little
+soft).  Against the user's marks: of the 14, 2 were kept (26-Sep 0073 and 0183, both visibly motion-blurred, kept
+anyway); none of the 3 shots pruned on 20-Sep is flagged (they are sharp
+group shots, pruned for other reasons).  Recall is deliberately modest:
+whole presses that are soft together (13:50 7745/7746/7751) are not flagged
+beyond their absolute values.  Contact sheets:
+`/tmp/scratch/agents/quality/flagged_*.jpg` (scratch).
+
+**Duplicates found.**  20-Jun-2026 and 22-Feb-2026 were exported twice like
+23-May (every file has an identical copy: 396 and 156 groups); a stat-only
+look at 2026 suggests 19 more days are (every JPG shares its size with
+another: 20/21/24/27-Feb, 01/08/14-Mar, 11/18-Apr, 14/21/22/24/25/31-May,
+01/26/27-Jun, 04-Jul).  On days shot without copies, many RAWs share a
+size (9 224 of 9 547 on 19-Sep) but never a capture, so nothing is read.
+
+**Costs.**  Per shot: ~0.33–0.45 MB read (the preview's first read is now
+128 KB, not 256 KB: `exif::jpeg_preview_bytes`, which the thumbnails and the
+viewer use too), 1.9 ms luma decode + 1.35 ms measuring.  Local (4
+threads): 1.1 ms/shot wall → 5 000 shots ≈ 5.5 s.  NAS: 5.7–6.4 ms/shot
+wall at 72–97 MB/s, bandwidth-bound → 5 000 shots ≈ 30 s cold.  A rerun
+reads only the cache file (55 shots: 0.3 ms).  The identical-file check on an exported-twice day:
+192 KB per file at ~56 MB/s (22-Feb: 312 files, 1.1 s).  Working the hints
+out on the UI thread: 14 ms at 10 000 files (debounced to ≤ 2/s while
+results stream in).
+
+**What the UI pass needs to do.**
+
+- A command to analyse (`quality::start`), probably `quality::start_cached`
+  after `on_scan_complete` so earlier results show at once (no photo read);
+  progress and the end summary from `app.quality.status_text()`; the busy
+  sweep while `app.quality.running()`.
+- Hint plates from `app.quality.hints.get(id)`: `soft` (with `relative` and
+  `best_alike` for the tooltip), `accidental` (`Accident::label`),
+  `sharpest`, `duplicate_of(id)` (kept or suggested copy).  Hide on decided
+  photos.
+- Brackets per moment once analysed (`moment_of`, `Moment::presses` for the
+  press ticks); Review burst's first panes from `ranked(frames)`.
+- The three bulk actions (and a duplicates one) from the `Plan`s, applied
+  through `refresh_prune` / `refresh_mark` with one undo step.
+- A Hints filter (`ShotHint::problem`, `duplicate_of`).
+- The Storage section of Preferences: the new cache folder.
+- When an analysis stops with `Finished::error` (share away), the network
+  banner; a rerun resumes from the cache.
+
+**Known gaps.**  Thresholds come from one body (A7 V) and its preview;
+other bodies get them as they are (decision 9).  No motion-versus-defocus
+label, no exposure-bracket grouping (ShotMeta has no exposure values), no
+full-resolution AF crop (phase 4).  The pass doesn't follow the network
+banner's pause/resume itself.  Same-capture copies need both files
+measured, so a RAW-only copy of a paired RAW is found only when
+byte-identical.
+
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling
 800 frames: use past prune and keep decisions from culled folders' sidecars as

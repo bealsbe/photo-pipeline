@@ -31,6 +31,12 @@ const CAPTURE_HEAD_JPEG: usize = 73_728;
 /// A RAW's IFD0 and EXIF IFD sit at the front of the file.  One read of this
 /// covers them; anything further is read in place.
 const CAPTURE_HEAD_RAW: usize = 65_536;
+/// The first read when looking for a JPEG's embedded preview: enough for
+/// its EXIF, XMP and MPF segments (an A7 V puts the MPF index at 106–108 KB,
+/// after 57 KB of XMP).  A file that keeps the index further in is read on
+/// to `HEADER_BYTES`.  The preview itself is read where it is: on a network
+/// share this reads ~0.34 MB per JPEG instead of ~0.47 MB.
+const PREVIEW_HEAD: usize = 131_072;
 
 /// Open a file to read a few scattered pieces of it.  Read-ahead is turned
 /// off: on a CIFS/SMB share it turned a 64 KB header read into 1–2.5 MB on
@@ -584,9 +590,13 @@ fn exif_thumbnail_span(head: &[u8]) -> Option<(usize, usize)> {
 /// caller can take the primary image's orientation from it.
 pub fn jpeg_preview_bytes(path: &Path, min_edge: u32) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut f = open_for_header(path).ok()?;
-    let head = read_head(&mut f, HEADER_BYTES)?;
+    let mut head = read_head(&mut f, PREVIEW_HEAD)?;
     if head.get(..2) != Some(&[0xFF, 0xD8]) {
         return None;
+    }
+    if head.len() == PREVIEW_HEAD && !preview_index_settled(&head) {
+        let rest = read_head(&mut f, HEADER_BYTES - PREVIEW_HEAD).unwrap_or_default();
+        head.extend_from_slice(&rest);
     }
     let (offset, length) = mpf_preview_span(&head).or_else(|| exif_thumbnail_span(&head))?;
     if min_edge > 0 && (length as u64) < (min_edge as u64 * min_edge as u64) / 64 {
@@ -603,6 +613,32 @@ pub fn jpeg_preview_bytes(path: &Path, min_edge: u32) -> Option<(Vec<u8>, Vec<u8
         d
     };
     Some((data, head))
+}
+
+/// Does `head` show where the preview is: the whole MPF segment, or the scan
+/// data reached without one (then there is none, or only the EXIF
+/// thumbnail)?  False when the segments run on past the buffer.
+fn preview_index_settled(head: &[u8]) -> bool {
+    let mut i = 2;
+    while i + 4 <= head.len() {
+        let marker = head[i + 1];
+        if head[i] != 0xFF || marker == SOS {
+            return true;
+        }
+        let length = u16::from_be_bytes([head[i + 2], head[i + 3]]) as usize;
+        if length < 2 {
+            return true;
+        }
+        let stop = i + 2 + length;
+        if stop > head.len() {
+            return false;
+        }
+        if marker == APP2 && head.get(i + 4..i + 8) == Some(b"MPF\0") {
+            return true;
+        }
+        i = stop;
+    }
+    false
 }
 
 pub fn read_head(f: &mut File, n: usize) -> Option<Vec<u8>> {
@@ -712,6 +748,37 @@ mod tests {
         }
         // Not a Sony: a maker note isn't read as one.
         assert_eq!(shot_from_tiff_bytes(T6_CR2).1.sequence, None);
+    }
+
+    /// The preview is found from a short first read, and from a longer one
+    /// when the MPF index lies further in (a real A7 V JPEG, as is and with
+    /// 40 KB of comment segments put in front of its metadata, which moves
+    /// the index past the first read; MPF offsets are relative to the index
+    /// itself, so the preview moves with it).
+    #[test]
+    fn previews_are_found_whatever_the_index_offset() {
+        let src = Path::new("/tmp/scratch/fixture/shoot1/20260724_0108_0001.JPG");
+        let Ok(data) = std::fs::read(src) else { return };
+        let dir = std::env::temp_dir().join(format!("pp-exif-preview-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut padded = data[..2].to_vec();
+        for _ in 0..2 {
+            padded.extend_from_slice(&[0xFF, 0xFE, 0x4E, 0x22]);
+            padded.extend(std::iter::repeat_n(b'.', 0x4E22 - 2));
+        }
+        padded.extend_from_slice(&data[2..]);
+        let (a, b) = (dir.join("a.jpg"), dir.join("b.jpg"));
+        std::fs::write(&a, &data).unwrap();
+        std::fs::write(&b, &padded).unwrap();
+        let (pa, ha) = jpeg_preview_bytes(&a, 1000).expect("a preview");
+        let (pb, hb) = jpeg_preview_bytes(&b, 1000).expect("a preview further in");
+        assert_eq!(pa, pb);
+        assert!(pa.len() > 100_000 && pa.starts_with(&[0xFF, 0xD8]));
+        assert_eq!(ha.len(), PREVIEW_HEAD, "the index was in the first read");
+        assert_eq!(hb.len(), HEADER_BYTES, "read on to find it");
+        assert_eq!(orientation_from_jpeg_head(&ha), orientation_from_jpeg_head(&hb));
+        assert!(preview_index_settled(&ha) && !preview_index_settled(&hb[..PREVIEW_HEAD]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

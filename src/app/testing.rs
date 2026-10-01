@@ -14,6 +14,12 @@
 //! cfocus 2                    # click the 3rd pane of the compare view
 //! cfilm 5                     # click the 6th frame in Review burst's strip
 //! bursts                      # print the working folder's bursts
+//! analyse [cached|cancel]     # start the quality analysis (or show the
+//!                             # cache only, or stop it)
+//! quality [all|plans]         # print its state, flagged frames, moments
+//!                             # and duplicates (all: every shot; plans:
+//!                             # what each bulk action would mark, keep-this
+//!                             # on the grid's selected photo)
 //! film 5                      # click the 6th photo in the viewer's filmstrip
 //! vresize 1300 800            # resize the viewer window
 //! vmax on|off                 # maximise the viewer window, or restore it
@@ -212,6 +218,22 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let b = &app.bursts;
             let lens: Vec<usize> = (0..b.len() as u32).map(|i| b.frames(i).len()).collect();
             eprintln!("[bursts] {} bursts holding {} frames: {lens:?}", b.len(), b.frame_count());
+            Task::none()
+        }
+        "analyse" => match arg.as_str() {
+            "cached" => super::quality::start_cached(app),
+            "cancel" => {
+                super::quality::cancel(app);
+                Task::none()
+            }
+            _ => super::quality::start(app),
+        },
+        "quality" if arg == "plans" => {
+            quality_plans(app);
+            Task::none()
+        }
+        "quality" => {
+            quality_dump(app, arg == "all");
             Task::none()
         }
         "cdump" => {
@@ -478,6 +500,79 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         _ => Task::none(),
     };
     Task::batch([t, next(i + 1, 50)])
+}
+
+/// The analysis' state and suggestions, for scripts.
+fn quality_dump(app: &App, all: bool) {
+    let q = &app.quality;
+    let name = |id: crate::model::collection::RecordId| app.coll.get(id).map(|r| r.filename()).unwrap_or_default();
+    eprintln!("[quality] running={} progress={:?} status={:?}", q.running(), q.progress, q.status_text());
+    eprintln!("[quality] last={:?}", q.last);
+    eprintln!("[quality] summary={:?} failed={}", q.summary(), q.failed.len());
+    let h = &q.hints;
+    for (m, moment) in h.moments().iter().enumerate() {
+        let best = moment.ranking.first().map(|&id| name(id)).unwrap_or_default();
+        eprintln!("[quality] moment {m}: {} frames in {} presses, sharpest {best}", moment.frames.len(), moment.presses.len());
+    }
+    let mut shown: Vec<(String, String)> = Vec::new();
+    for (id, r) in app.coll.iter_ids() {
+        if h.rep(id) != Some(id) {
+            continue;
+        }
+        let Some(x) = h.get(id) else {
+            if all {
+                shown.push((r.filename(), "not measured".into()));
+            }
+            continue;
+        };
+        if all || x.problem() || x.sharpest {
+            shown.push((
+                r.filename(),
+                format!(
+                    "score={:.1} local={:.1} rel={:.2} soft={:?} accidental={:?} sharpest={} rank={:?} moment={:?} source={:?}",
+                    x.score,
+                    x.local,
+                    x.relative,
+                    x.soft,
+                    x.accidental.map(|a| a.label()),
+                    x.sharpest,
+                    x.rank,
+                    h.moment_of(id),
+                    q.features(&r.path).map(|f| f.source),
+                ),
+            ));
+        }
+    }
+    shown.sort();
+    for (n, t) in shown {
+        eprintln!("[quality]   {n} {t}");
+    }
+    for d in h.duplicates() {
+        let prune: Vec<String> = d.prune.iter().map(|&id| name(id)).collect();
+        eprintln!("[quality] duplicate {:?}: keep {} prune {prune:?}", d.kind, name(d.keep));
+    }
+}
+
+/// What each bulk action would mark (nothing is marked).
+fn quality_plans(app: &App) {
+    let h = &app.quality.hints;
+    let names = |ids: &[crate::model::collection::RecordId]| -> Vec<String> { ids.iter().filter_map(|&id| app.coll.get(id)).map(|r| r.filename()).collect() };
+    let all = app.coll.ids().to_vec();
+    eprintln!("[quality] prune soft: {:?}", names(&h.prune_soft(&app.coll, &all).prune));
+    eprintln!("[quality] prune accidental: {:?}", names(&h.prune_accidental(&app.coll, &all).prune));
+    eprintln!("[quality] prune duplicates: {:?}", names(&h.prune_duplicates(&app.coll, &all).prune));
+    for &id in app.derived.visible.iter().filter(|id| app.grid.selection.contains(id)).take(1) {
+        let Some(m) = h.moment_of(id).and_then(|m| h.moment(m)) else {
+            eprintln!("[quality] {} is in no moment", names(&[id]).join(""));
+            continue;
+        };
+        let plan = h.keep_this_prune_rest(&app.coll, &m.frames, id);
+        eprintln!("[quality] keep this: mark {:?} prune {:?}", names(&plan.mark), names(&plan.prune));
+        eprintln!("[quality] review burst panes: {:?}", names(&h.ranked(&m.frames)[..m.frames.len().min(4)]));
+        if let Some((g, prune)) = h.duplicate_of(id) {
+            eprintln!("[quality] duplicate of {:?}, suggested for pruning: {prune}", names(&g.ids));
+        }
+    }
 }
 
 fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
