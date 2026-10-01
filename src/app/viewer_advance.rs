@@ -102,7 +102,8 @@ pub fn mark_key(app: &mut App, mark: Mark) -> Task<Message> {
     let Some(v) = app.viewer.as_ref() else { return toggle };
     let Some(id) = v.record_id().filter(|_| !v.read_only) else { return toggle };
     let set = is_set(app, id, mark);
-    let last = v.index + 1 >= v.items.len();
+    // On a burst's sheet the outline moves along it, and stops at its end.
+    let last = super::viewer_burst::is_last(v);
     let advance = app.settings.viewer_advance;
     let Some(v) = app.viewer.as_mut() else { return toggle };
     match v.flow.marked(id, mark, set, advance, last, Instant::now()) {
@@ -123,7 +124,7 @@ pub fn on_beat(app: &mut App, seq: u64) -> Task<Message> {
     if let Some(v) = app.viewer.as_mut() {
         v.flow = flow;
     }
-    if go { viewer::navigate(app, index + 1, 1) } else { Task::none() }
+    if go { super::viewer_burst::advance(app, index + 1) } else { Task::none() }
 }
 
 /// The setting: the command (Ctrl+Shift+A, in either window) or the

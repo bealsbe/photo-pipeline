@@ -117,7 +117,7 @@ impl Cmd {
             Cmd::ToReview => "Show only photos not yet pruned or marked",
             Cmd::FileNames => "Show each photo's file name under it",
             Cmd::Compare => "Compare 2 to 4 selected photos side by side",
-            Cmd::ReviewBurst => "Compare the frames of the selected photo's burst, at 100 % on each one's focus point",
+            Cmd::ReviewBurst => "See every frame of the selected photo's burst in the viewer, to look closer at or compare",
             Cmd::AdvanceAfterMark => "In the viewer, move on to the next photo when P or M marks one",
             Cmd::Preferences => "Settings for culling, the grid, the viewer, folders and storage",
             _ => "",

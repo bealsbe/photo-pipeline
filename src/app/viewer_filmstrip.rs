@@ -7,7 +7,7 @@
 
 use iced::{Element, Task};
 
-use super::viewer::{self, Msg, Source, Viewer};
+use super::viewer::{Msg, Source, Viewer};
 use super::{App, Message};
 use crate::imaging::thumbs::{PRIORITY_PREFETCH, PRIORITY_VISIBLE};
 use crate::ui::filmstrip::{FilmEvent, Filmstrip};
@@ -19,16 +19,14 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer, interactive: bool) -> Element<'a, M
     };
     Filmstrip::new(&v.items, coll, thumbs, v.index, app.scale_factor, |e| Message::Viewer(Msg::Film(e)))
         .interactive(interactive)
+        .bursts(&v.burst_of)
         .into()
 }
 
 pub fn on_event(app: &mut App, ev: FilmEvent) -> Task<Message> {
     let Some(v) = app.viewer.as_ref() else { return Task::none() };
     match ev {
-        FilmEvent::Jump(i) => {
-            let dir = if i > v.index { 1 } else { -1 };
-            viewer::navigate(app, i, dir)
-        }
+        FilmEvent::Jump(i) => super::viewer_burst::film_jump(app, i),
         FilmEvent::Thumbs { visible, nearby } => {
             let wanted = visible.iter().map(|&id| (id, PRIORITY_VISIBLE)).chain(nearby.iter().map(|&id| (id, PRIORITY_PREFETCH)));
             match &v.source {

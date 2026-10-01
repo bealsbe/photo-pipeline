@@ -49,6 +49,7 @@ pub enum Control {
     FileNames,
     ThumbSize,
     Filmstrip,
+    BurstSheet,
     ViewerSize,
     Library,
     EditCopyFolder,
@@ -67,6 +68,7 @@ impl Control {
             Control::FileNames => "pref-names",
             Control::ThumbSize => "pref-thumb-size",
             Control::Filmstrip => "pref-filmstrip",
+            Control::BurstSheet => "pref-burst-sheet",
             Control::ViewerSize => "pref-viewer-size",
             Control::Library => "pref-library",
             Control::EditCopyFolder => "pref-edit-copy",
@@ -316,6 +318,11 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             viewer_filmstrip::toggle(app);
             Task::none()
         }
+        Control::BurstSheet => {
+            app.settings.viewer_burst_sheet = !app.settings.viewer_burst_sheet;
+            app.settings.save_in_background();
+            Task::none()
+        }
         Control::ViewerSize => {
             let s = &mut app.settings;
             (s.viewer_width, s.viewer_height, s.viewer_x, s.viewer_y, s.viewer_maximized) = (0.0, 0.0, None, None, false);
@@ -371,7 +378,7 @@ fn remembered_viewer_size(s: &Settings) -> bool {
 /// right now are skipped).
 fn controls(app: &App) -> Vec<Control> {
     let p = &app.prefs;
-    let mut v = vec![Control::Advance, Control::FileNames, Control::ThumbSize, Control::Filmstrip];
+    let mut v = vec![Control::Advance, Control::FileNames, Control::ThumbSize, Control::Filmstrip, Control::BurstSheet];
     if remembered_viewer_size(&app.settings) {
         v.push(Control::ViewerSize);
     }
@@ -623,6 +630,11 @@ fn viewer(app: &App) -> Element<'_, Message> {
                 "Show the filmstrip",
                 about("The neighbouring photos in a strip along the bottom of the viewer."),
                 row![keycap("T"), switch(p, Control::Filmstrip, s.viewer_filmstrip, true)].spacing(t::S3).align_y(Alignment::Center).into(),
+            ),
+            setting(
+                "Show a burst's frames first",
+                about("Arriving at a burst, the viewer shows all its frames side by side; click one to look closer. Off, it steps through them one at a time, and B still shows them all."),
+                switch(p, Control::BurstSheet, s.viewer_burst_sheet, true),
             ),
             setting("Window size", about(size_note), reset),
         ],

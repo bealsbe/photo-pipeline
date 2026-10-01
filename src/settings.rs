@@ -48,6 +48,9 @@ pub struct Settings {
     pub viewer_advance: bool,
     /// Viewer: the filmstrip along the bottom of the photo.
     pub viewer_filmstrip: bool,
+    /// Viewer: arriving at a burst shows all its frames (the burst sheet)
+    /// before any one of them.
+    pub viewer_burst_sheet: bool,
     /// The viewer window's last un-maximised size (0 × 0: never resized, so
     /// it opens at a share of the screen).
     pub viewer_width: f32,
@@ -90,6 +93,7 @@ impl Default for Settings {
             show_file_names: true,
             viewer_advance: false,
             viewer_filmstrip: true,
+            viewer_burst_sheet: true,
             viewer_width: 0.0,
             viewer_height: 0.0,
             viewer_x: None,

@@ -12,7 +12,10 @@
 //! vkey right                  # a key press in the viewer window
 //! ckey tab                    # a key press in the compare window
 //! cfocus 2                    # click the 3rd pane of the compare view
-//! cfilm 5                     # click the 6th frame in Review burst's strip
+//! sheet open 3                # click the 4th tile of the viewer's burst sheet
+//! sheet pick 3                # Ctrl+click it (pick it to compare)
+//! sheet back                  # the wheel zooming out past fit on a frame
+//! sdump                       # print the viewer's burst sheet state
 //! bursts                      # print the working folder's bursts
 //! film 5                      # click the 6th photo in the viewer's filmstrip
 //! vresize 1300 800            # resize the viewer window
@@ -204,9 +207,28 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             Some(id) => app.update(Message::List(crate::ui::list::ListEvent::Click { id, modifiers: Modifiers::empty() })),
             None => Task::none(),
         },
-        "cfilm" => {
-            let ev = crate::ui::filmstrip::FilmEvent::Jump(arg.parse().unwrap_or(0));
-            app.update(Message::Compare(super::compare::Msg::Film(ev)))
+        "sheet" => {
+            use crate::ui::image_stage::{SheetEvent, StageEvent};
+            let mut a = arg.split_whitespace();
+            let what = a.next().unwrap_or("");
+            let n: usize = a.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+            let ev = match what {
+                "open" => Some(SheetEvent::Open(n)),
+                "pick" => Some(SheetEvent::Pick(n)),
+                "back" => Some(SheetEvent::Back),
+                _ => None,
+            };
+            match ev {
+                Some(ev) => app.update(Message::Viewer(super::viewer::Msg::Stage(StageEvent::Sheet(ev)))),
+                None => Task::none(),
+            }
+        }
+        "sdump" => {
+            match app.viewer.as_ref() {
+                Some(v) => eprintln!("[sdump] {}", super::viewer_burst::debug_state(app, v)),
+                None => eprintln!("[sdump] no viewer (compare open: {})", app.compare.is_some()),
+            }
+            Task::none()
         }
         "bursts" => {
             let b = &app.bursts;
@@ -489,6 +511,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "advance" => Some(Control::Advance),
         "names" => Some(Control::FileNames),
         "filmstrip" => Some(Control::Filmstrip),
+        "burstsheet" => Some(Control::BurstSheet),
         "viewersize" => Some(Control::ViewerSize),
         "librarybutton" => Some(Control::Library),
         "editcopybutton" => Some(Control::EditCopyFolder),
@@ -529,11 +552,12 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             let s = &app.settings;
             eprintln!("[prefs] {}", app.prefs.debug_state());
             eprintln!(
-                "[prefs] settings advance={} names={} thumb={} filmstrip={} viewer={}x{} max={} library={:?} edit_copy={:?} subfolder={} global_menu={}",
+                "[prefs] settings advance={} names={} thumb={} filmstrip={} burst_sheet={} viewer={}x{} max={} library={:?} edit_copy={:?} subfolder={} global_menu={}",
                 s.viewer_advance,
                 s.show_file_names,
                 s.thumb_size,
                 s.viewer_filmstrip,
+                s.viewer_burst_sheet,
                 s.viewer_width,
                 s.viewer_height,
                 s.viewer_maximized,

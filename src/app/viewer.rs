@@ -2,7 +2,8 @@
 //!
 //! A separate, non-modal window.  Navigation slides between photos; the
 //! crop tool, prune / keep marks and the pair toggle work on the record in
-//! view.  Library photos (from the calendar) open read-only.
+//! view.  Library photos (from the calendar) open read-only.  On a burst
+//! the viewer shows the burst's sheet first (see `viewer_burst`).
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -15,12 +16,14 @@ use iced::{Alignment, Element, Length, Padding, Size, Task, window};
 use super::kit;
 use super::style;
 use super::viewer_advance::{self, Mark};
+use super::viewer_burst::{self, Land, SheetUi};
 use super::viewer_filmstrip;
 use super::viewer_window::{self, WinMsg};
 use super::{App, Message};
 use crate::bus::BgEvent;
 use crate::exif_panel::{self, Sections};
 use crate::imaging::loader::FullImage;
+use crate::model::bursts::BurstId;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::crop::{self, AspectRatio, Crop, FREEFORM, ORIGINAL};
 use crate::model::crop_math;
@@ -51,15 +54,15 @@ pub struct Viewer {
     shown_at: std::time::Instant,
     transition: Transition,
     cmd: (u64, ViewCmd),
-    zoom: f32,
+    pub(super) zoom: f32,
     viewport: Size,
     info: bool,
     exif_cache: HashMap<(PathBuf, Option<PathBuf>), Sections>,
     exif_pending: Option<(PathBuf, Option<PathBuf>)>,
     et_pending: Option<PathBuf>,
     status: Option<String>,
-    image: Option<Arc<FullImage>>,
-    crop_mode: bool,
+    pub(super) image: Option<Arc<FullImage>>,
+    pub(super) crop_mode: bool,
     crop_pending: bool,
     crop: Crop,
     ratio_sel: AspectRatio,
@@ -70,7 +73,14 @@ pub struct Viewer {
     pub(super) flow: viewer_advance::Flow,
     /// Full screen, width, placement (see `viewer_window`).
     pub(super) win: viewer_window::WinState,
+    /// Each item's burst (see `viewer_burst`).
+    pub(super) burst_of: Vec<Option<BurstId>>,
+    /// The burst sheet: on screen or not, the burst open, frames picked.
+    pub(super) sheet: SheetUi,
 }
+
+/// The status while a photo decodes.
+const LOADING: &str = "Loading…";
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -103,6 +113,12 @@ pub enum Msg {
     ToggleFullscreen,
     Film(FilmEvent),
     Window(WinMsg),
+    /// "All frames": back out to the burst's sheet.
+    ToSheet,
+    /// The sheet's chevrons: out of the burst, backwards or forwards.
+    Leave(i32),
+    /// The sheet's Compare button.
+    CompareFrames,
 }
 
 impl std::fmt::Debug for Viewer {
@@ -127,6 +143,11 @@ impl Viewer {
         self.items.get(self.index).copied()
     }
 
+    /// The photo area's size (a guess until the stage reports it).
+    pub(super) fn stage_size(&self) -> Size {
+        if self.viewport.width > 0.0 && self.viewport.height > 0.0 { self.viewport } else { Size::new(1100.0, 650.0) }
+    }
+
     /// The record on screen — the pair file in pair view.
     pub fn display_id(&self) -> Option<RecordId> {
         if self.show_pair { self.pair.or(self.record_id()) } else { self.record_id() }
@@ -142,11 +163,20 @@ impl Viewer {
 
 // ── opening / navigation ────────────────────────────────────────────────────
 
+/// Open the viewer on `items[index]`: on a burst's frame, its sheet (with
+/// "Show a burst's frames first" on).
 pub fn open(app: &mut App, source: Source, items: Vec<RecordId>, index: usize, read_only: bool) -> Task<Message> {
+    open_as(app, source, items, index, read_only, Land::Auto)
+}
+
+/// Open the viewer, landing as `land` says on a burst's frame.
+pub fn open_as(app: &mut App, source: Source, items: Vec<RecordId>, index: usize, read_only: bool, land: Land) -> Task<Message> {
     crate::profile::mark("open to first frame");
     if items.is_empty() {
         return Task::none();
     }
+    let burst_of = viewer_burst::burst_of(&app.bursts, &source, &items);
+    let pref = app.settings.viewer_burst_sheet;
     // A compare showing in the viewer's window hands it back first.
     super::compare::release(app);
     let index = index.min(items.len() - 1);
@@ -160,6 +190,9 @@ pub fn open(app: &mut App, source: Source, items: Vec<RecordId>, index: usize, r
         v.source = source;
         v.items = items;
         v.index = index;
+        v.burst_of = burst_of;
+        // Opening counts as arriving from outside any burst.
+        viewer_burst::arrive(v, index, land, None, pref);
         let id = v.id;
         tasks.push(load_current(app, Transition::Cut));
         tasks.push(window::gain_focus(id));
@@ -199,7 +232,12 @@ pub fn open(app: &mut App, source: Source, items: Vec<RecordId>, index: usize, r
         spin_h: "2".into(),
         flow: viewer_advance::Flow::default(),
         win,
+        burst_of,
+        sheet: SheetUi::default(),
     });
+    if let Some(v) = app.viewer.as_mut() {
+        viewer_burst::arrive(v, index, land, None, pref);
+    }
     tasks.push(open.map(Message::WindowOpened));
     tasks.push(load_current(app, Transition::Cut));
     Task::batch(tasks)
@@ -212,19 +250,30 @@ fn display_paths(app: &App, v: &Viewer) -> Option<(PathBuf, FileType)> {
 
 fn load_current(app: &mut App, transition: Transition) -> Task<Message> {
     let Some(v) = app.viewer.as_mut() else { return Task::none() };
+    if v.record_id().is_none() {
+        return Task::none();
+    }
+    v.key += 1;
+    v.shown_at = std::time::Instant::now();
+    v.transition = transition;
+    show_record(app)
+}
+
+/// Show the record at the viewer's index (its image, pair and details)
+/// without a transition of its own: the burst sheet moves its outline so.
+pub(super) fn show_record(app: &mut App) -> Task<Message> {
+    let Some(v) = app.viewer.as_mut() else { return Task::none() };
     exit_crop(v, false);
     v.crop_pending = false;
     v.show_pair = false;
     v.flow.cancel();
+    v.shown_at = std::time::Instant::now();
     let Some(id) = v.record_id() else { return Task::none() };
     let c = match &v.source {
         Source::Working => &app.coll,
         Source::Library(c) => c.as_ref(),
     };
     v.pair = c.find_pair(id);
-    v.key += 1;
-    v.shown_at = std::time::Instant::now();
-    v.transition = transition;
     let (path, ft) = match c.get(id) {
         Some(r) => (r.path.clone(), r.file_type),
         None => return Task::none(),
@@ -232,6 +281,7 @@ fn load_current(app: &mut App, transition: Transition) -> Task<Message> {
     show_path(app, &path, ft);
     preload_adjacent(app);
     populate_exif(app);
+    viewer_burst::want_previews(app);
     allocate_current(app)
 }
 
@@ -250,7 +300,7 @@ fn show_path(app: &mut App, path: &std::path::Path, ft: FileType) {
         }
         None => {
             v.image = None;
-            v.status = Some("Loading…".into());
+            v.status = Some(LOADING.into());
         }
     }
 }
@@ -275,12 +325,27 @@ fn preload_adjacent(app: &mut App) {
 }
 
 pub(super) fn navigate(app: &mut App, to: usize, dir: i32) -> Task<Message> {
+    let pref = app.settings.viewer_burst_sheet;
     let Some(v) = app.viewer.as_mut() else { return Task::none() };
     if v.crop_mode || to >= v.items.len() || to == v.index {
         return Task::none();
     }
+    let from = viewer_burst::run_key(v);
+    viewer_burst::arrive(v, to, Land::Auto, from, pref);
     v.index = to;
     load_current(app, Transition::Slide(dir))
+}
+
+/// Back from the compare view that borrowed the window: as it was, the
+/// sheet's outline on the frame compare had in focus.
+pub fn resume(app: &mut App, focus: Option<RecordId>) -> Task<Message> {
+    let Some(v) = app.viewer.as_mut() else { return Task::none() };
+    if let (Some(run), Some(id)) = (viewer_burst::run(v).filter(|_| v.sheet.on), focus) {
+        if let Some(i) = run.clone().find(|&i| v.items[i] == id) {
+            v.index = i;
+        }
+    }
+    load_current(app, Transition::Cut)
 }
 
 pub fn close(app: &mut App) -> Task<Message> {
@@ -534,6 +599,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         return Task::none();
     }
     let Some(v) = app.viewer.as_mut() else { return Task::none() };
+    let sheet = viewer_burst::on_sheet(v);
     match msg {
         Msg::Prev => {
             let i = v.index;
@@ -546,7 +612,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             return navigate(app, i + 1, 1);
         }
         Msg::TogglePair => {
-            if v.pair.is_none() || v.crop_mode {
+            if v.pair.is_none() || v.crop_mode || sheet {
                 return Task::none();
             }
             v.show_pair = !v.show_pair;
@@ -557,10 +623,24 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             return allocate_current(app);
         }
+        // On the sheet, zooming in opens the outlined frame.
+        Msg::Actual | Msg::ZoomIn if sheet => {
+            let at = v.index;
+            return viewer_burst::zoom_in(app, at);
+        }
+        Msg::Fit if sheet => {}
         Msg::Fit => v.cmd = (v.cmd.0 + 1, ViewCmd::Fit),
         Msg::Actual => v.cmd = (v.cmd.0 + 1, ViewCmd::Actual),
         Msg::ZoomIn => v.cmd = (v.cmd.0 + 1, ViewCmd::ZoomIn),
-        Msg::ZoomOut => v.cmd = (v.cmd.0 + 1, ViewCmd::ZoomOut),
+        Msg::ZoomOut => {
+            // A burst's frame zooms out to its sheet.
+            if let Some(t) = viewer_burst::zoom_out(app) {
+                return t;
+            }
+            if let Some(v) = app.viewer.as_mut() {
+                v.cmd = (v.cmd.0 + 1, ViewCmd::ZoomOut);
+            }
+        }
         Msg::TogglePrune => {
             if v.read_only {
                 return Task::none();
@@ -592,7 +672,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if v.crop_mode {
                 return apply_crop_exit(app, true);
             }
-            enter_crop(app);
+            if !sheet {
+                enter_crop(app);
+            }
         }
         Msg::CropApply => return apply_crop_exit(app, true),
         Msg::CropCancel => return apply_crop_exit(app, false),
@@ -641,14 +723,19 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             StageEvent::Swipe(dir) => {
                 let to = v.index as i64 + dir as i64;
                 if to >= 0 && (to as usize) < v.items.len() {
+                    // The swipe has already shown the photo: it stays.
+                    let from = viewer_burst::run_key(v);
+                    viewer_burst::arrive(v, to as usize, Land::Frame, from, false);
                     v.index = to as usize;
                     return load_current(app, Transition::Keep);
                 }
             }
             StageEvent::Viewport(s) => {
                 v.viewport = s;
+                viewer_burst::want_previews(app);
                 return allocate_current(app);
             }
+            StageEvent::Sheet(ev) => return viewer_burst::on_stage(app, ev),
         },
         Msg::Allocated(path, Ok(allocation)) => app.loader.hold_allocation(&path, allocation),
         Msg::Allocated(_, Err(_)) => {}
@@ -658,6 +745,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::ToggleFullscreen => return viewer_window::toggle_fullscreen(app),
         Msg::Film(ev) => return viewer_filmstrip::on_event(app, ev),
         Msg::Window(_) => {}
+        Msg::ToSheet => return viewer_burst::to_sheet(app),
+        Msg::Leave(dir) => return viewer_burst::leave(app, dir),
+        Msg::CompareFrames => return viewer_burst::compare(app),
     }
     Task::none()
 }
@@ -691,6 +781,12 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
     if mods.control() || mods.alt() {
         return Task::none();
     }
+    if !v.crop_mode {
+        if let Some(t) = viewer_burst::on_key(app, &key, c) {
+            return t;
+        }
+    }
+    let Some(v) = app.viewer.as_ref() else { return Task::none() };
     if v.crop_mode {
         return match (&key, c) {
             (Key::Named(Named::Enter), _) | (_, Some("c")) => update(app, Msg::CropApply),
@@ -710,6 +806,8 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
         (Key::Named(Named::ArrowRight), _) | (_, Some("d")) => update(app, Msg::Next),
         (Key::Named(Named::Home), _) => navigate(app, 0, -1),
         (Key::Named(Named::End), _) => navigate(app, len.saturating_sub(1), 1),
+        (Key::Named(Named::PageUp), _) => update(app, Msg::Prev),
+        (Key::Named(Named::PageDown), _) => update(app, Msg::Next),
         (Key::Named(Named::Escape), _) if fullscreen => viewer_window::leave_fullscreen(app),
         (Key::Named(Named::Escape), _) => close(app),
         (Key::Named(Named::Space), _) | (_, Some("f")) => update(app, Msg::Fit),
@@ -722,10 +820,7 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
             viewer_filmstrip::toggle(app);
             Task::none()
         }
-        (_, Some("b")) if !v.read_only => match v.items.get(v.index).copied() {
-            Some(id) => super::compare::review_burst_of(app, id),
-            None => Task::none(),
-        },
+        (_, Some("b")) if !v.read_only => viewer_burst::to_sheet(app),
         (_, Some("c")) => {
             enter_crop(app);
             Task::none()
@@ -822,31 +917,55 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     let display = v.display_id().and_then(|id| c.get(id));
     let n = v.items.len();
     let nav_ok = !v.crop_mode;
+    let run = viewer_burst::run(v);
+    let on_sheet = viewer_burst::on_sheet(v);
 
     // ── top bar ─────────────────────────────────────────────────────────
-    let prev = kit::tip(
-        kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), if nav_ok && v.index > 0 { vmsg(Msg::Prev) } else { None }),
-        "Previous  (←)",
-        true,
-    );
-    let next = kit::tip(
-        kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), if nav_ok && v.index + 1 < n { vmsg(Msg::Next) } else { None }),
-        "Next  (→)",
-        true,
-    );
+    let (prev, next) = match run.as_ref().filter(|_| on_sheet) {
+        // On the sheet the chevrons leave the burst.
+        Some(r) => (
+            kit::tip(kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), (r.start > 0).then_some(Message::Viewer(Msg::Leave(-1)))), "Before this burst  (PgUp)", true),
+            kit::tip(kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), (r.end < n).then_some(Message::Viewer(Msg::Leave(1)))), "After this burst  (PgDn)", true),
+        ),
+        None => (
+            kit::tip(
+                kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), if nav_ok && v.index > 0 { vmsg(Msg::Prev) } else { None }),
+                "Previous  (←)",
+                true,
+            ),
+            kit::tip(
+                kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), if nav_ok && v.index + 1 < n { vmsg(Msg::Next) } else { None }),
+                "Next  (→)",
+                true,
+            ),
+        ),
+    };
     let name = display.map(|r| r.filename()).unwrap_or_default();
-    let mut top = row![
-        prev,
-        next,
-        Space::new().width(t::S2),
-        text(name).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
-        kit::caption(format!("{} of {}", util::thousands(v.index as u64 + 1), util::thousands(n as u64))),
-        Space::new().width(Length::Fill),
-    ]
-    .spacing(t::S2)
-    .align_y(Alignment::Center);
+    let mut top = row![prev, next, Space::new().width(t::S2)].spacing(t::S2).align_y(Alignment::Center);
+    if on_sheet {
+        // The burst, and the frame the outline is on.
+        let title = viewer_burst::title(app, v).unwrap_or_default();
+        let frame = record.and_then(|r| viewer_burst::frame_caption(app, v).map(|f| format!("{f}, {}", r.filename())));
+        top = top.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+        top = top.push(kit::caption(v.sheet.note.clone().or(frame).unwrap_or_default()));
+    } else {
+        top = top.push(text(name).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+        match viewer_burst::frame_caption(app, v) {
+            Some(frame) => {
+                top = top.push(kit::caption(frame));
+                let tip = if viewer_burst::sheet_open(v) { "See every frame of this burst  (Esc, B or −)" } else { "See every frame of this burst  (B or −)" };
+                top = top.push(kit::tip(
+                    kit::icon_text_btn(Glyph::Grid, "All frames", t::INK2, style::ghost(), if nav_ok { vmsg(Msg::ToSheet) } else { None }),
+                    tip,
+                    true,
+                ));
+            }
+            None => top = top.push(kit::caption(format!("{} of {}", util::thousands(v.index as u64 + 1), util::thousands(n as u64)))),
+        }
+    }
+    top = top.push(Space::new().width(Length::Fill));
 
-    let pair_btn: Element<'a, Message> = match (v.pair.is_some(), display) {
+    let pair_btn: Element<'a, Message> = match (v.pair.is_some() && !on_sheet, display) {
         (true, Some(d)) => {
             let other = match d.file_type {
                 FileType::Raw => "JPG",
@@ -862,7 +981,16 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         _ => Space::new().width(0).into(),
     };
     top = top.push(pair_btn);
-    if !v.read_only {
+    if on_sheet {
+        let picked = v.sheet.picked.len();
+        let label = if picked >= 2 { format!("Compare {picked}") } else { "Compare".to_string() };
+        let tip = if picked >= 2 {
+            "Compare the picked frames side by side  (C)"
+        } else {
+            "Compare this frame with its neighbours, or with frames you pick: Ctrl+click or Space  (C)"
+        };
+        top = top.push(kit::tip(kit::icon_text_btn(Glyph::Compare, label, t::INK2, style::ghost(), vmsg(Msg::CompareFrames)), tip, true));
+    } else if !v.read_only {
         let cropped = display.is_some_and(|r| r.is_cropped());
         let active = v.crop_mode || cropped;
         let look = if active { style::toggle(true, t::SIGNAL) } else { style::ghost() };
@@ -910,12 +1038,16 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
 
     let mut body = column![top_bar, kit::hairline()];
 
-    if v.crop_mode {
-        body = body.push(crop_bar(v));
-    }
+    // The crop bar and the prune banner come and go in slots of their own,
+    // so the photo keeps its place in the widget tree: its zoom, a slide or
+    // the burst sheet's zoom carry on when either appears.
+    body = body.push(if v.crop_mode { crop_bar(v) } else { Space::new().height(0).into() });
     // Held back while auto-advance is about to move on, so the layout
     // doesn't jump twice; the stamp says what happened instead.
-    if !v.read_only && record.is_some_and(|r| r.is_pruned) && !v.flow.waiting() {
+    // (Not on the sheet: its tiles say so, and the banner coming and going
+    // as the outline moves would shift every tile.)
+    let mut banner_slot = column![];
+    if !v.read_only && !on_sheet && record.is_some_and(|r| r.is_pruned) && !v.flow.waiting() {
         let banner = row![
             icons::view(Glyph::Prune, 16.0, t::REJECT),
             text("Marked to prune. It goes to the Trash when you review pruned files.").size(t::T_BODY).color(t::INK),
@@ -929,9 +1061,10 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         .spacing(t::S2)
         .align_y(Alignment::Center)
         .padding(Padding::from([0.0, t::S3]));
-        body = body.push(container(banner).height(36).center_y(36).width(Length::Fill).style(style::fill(t::alpha(t::REJECT, 0.12))));
-        body = body.push(container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::alpha(t::REJECT, 0.35))));
+        banner_slot = banner_slot.push(container(banner).height(36).center_y(36).width(Length::Fill).style(style::fill(t::alpha(t::REJECT, 0.12))));
+        banner_slot = banner_slot.push(container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::alpha(t::REJECT, 0.35))));
     }
+    body = body.push(banner_slot);
 
     // ── stage + EXIF panel ──────────────────────────────────────────────
     let neighbors = [
@@ -939,17 +1072,21 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         v.items.get(v.index + 1).and_then(|&id| c.get(id)).and_then(|r| app.loader.peek(&r.path).cloned()),
     ];
     let crop_props = v.crop_mode.then(|| CropProps { crop: v.crop.clone(), ratio: resolve_ratio(v, &v.ratio_sel) });
+    let sheet = viewer_burst::sheet(app, v);
+    // A burst's frame still loading shows its tile's picture, not the word.
+    let status = if sheet.is_some() && v.image.is_none() && v.status.as_deref() == Some(LOADING) { None } else { v.status.clone() };
     let stage = ImageStage::new(
         v.key,
         v.image.clone(),
-        v.status.clone(),
+        status,
         v.transition,
         v.cmd,
         crop_props,
         neighbors,
         app.scale_factor,
         |e| Message::Viewer(Msg::Stage(e)),
-    );
+    )
+    .sheet(sheet);
     // The stamp floats over the photo; the filmstrip runs under it.
     let mut photo = column![stack![stage, viewer_advance::stamp(v)]].height(Length::Fill);
     if app.settings.viewer_filmstrip {
@@ -962,12 +1099,23 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     body = body.push(middle);
 
     // ── bottom bar: zoom, what this file is, the info toggle ────────────
-    let zoom_label = text(format!("{:.0}%", v.zoom * 100.0)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2).width(44).center();
+    // On the sheet there is no zoom to show; zooming in opens a frame.
+    let zoom_label = text(if on_sheet { "All".to_string() } else { format!("{:.0}%", v.zoom * 100.0) })
+        .size(t::T_SMALL)
+        .font(paint::MEDIUM)
+        .color(t::INK2)
+        .width(44)
+        .center();
+    let (out_tip, in_tip) = match (on_sheet, run.is_some()) {
+        (true, _) => ("Zoom out  (−)", "Zoom into the outlined frame  (+ or Enter)"),
+        (false, true) => ("Zoom out; at fit, every frame of the burst  (−)", "Zoom in  (+)"),
+        (false, false) => ("Zoom out  (−)", "Zoom in  (+)"),
+    };
     let mut bottom = row![
-        kit::tip(kit::icon_btn(Glyph::ZoomOut, t::INK2, style::ghost(), vmsg(Msg::ZoomOut)), "Zoom out  (−)", false),
+        kit::tip(kit::icon_btn(Glyph::ZoomOut, t::INK2, style::ghost(), if on_sheet { None } else { vmsg(Msg::ZoomOut) }), out_tip, false),
         zoom_label,
-        kit::tip(kit::icon_btn(Glyph::ZoomIn, t::INK2, style::ghost(), vmsg(Msg::ZoomIn)), "Zoom in  (+)", false),
-        kit::tip(kit::icon_btn(Glyph::Fit, t::INK2, style::ghost(), vmsg(Msg::Fit)), "Fit to window  (F)", false),
+        kit::tip(kit::icon_btn(Glyph::ZoomIn, t::INK2, style::ghost(), vmsg(Msg::ZoomIn)), in_tip, false),
+        kit::tip(kit::icon_btn(Glyph::Fit, t::INK2, style::ghost(), if on_sheet { None } else { vmsg(Msg::Fit) }), "Fit to window  (F)", false),
         kit::tip(
             button(container(text("1:1").size(t::T_SMALL).font(paint::MEDIUM)).center(Length::Fill))
                 .width(t::CONTROL_H + 8.0)
@@ -1007,6 +1155,10 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         bottom = bottom.push(container(facts).padding(Padding::from([0.0, t::S2])));
     }
     bottom = bottom.push(Space::new().width(Length::Fill));
+    if on_sheet && v.win.width >= 1180.0 {
+        bottom = bottom.push(kit::caption("Click a frame to look closer  ·  Ctrl+click or Space picks frames  ·  C compares"));
+        bottom = bottom.push(Space::new().width(t::S3));
+    }
     let film = app.settings.viewer_filmstrip;
     bottom = bottom.push(kit::tip(
         kit::icon_text_btn(Glyph::Filmstrip, "Filmstrip", if film { t::INK } else { t::INK2 }, style::segment(film), vmsg(Msg::ToggleFilmstrip)),

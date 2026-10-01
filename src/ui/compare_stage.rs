@@ -8,9 +8,10 @@
 //! animation; the app sends commands (fit, 100 %, zoom) and the focus, and
 //! hears back which pane was clicked.
 //!
-//! In the AF view (Review burst's `1`) each pane's view is the shared one
-//! moved by its own AF point's offset from the middle, so every pane shows
-//! its camera's focus point at 100 % and zoom and pan still move them all.
+//! In the AF view (`1` on frames of a burst) each pane's view is the shared
+//! one moved by its own AF point's offset from the middle, so every pane
+//! shows its camera's focus point at 100 % and zoom and pan still move them
+//! all.
 //!
 //! The layout picks the grid (a row, a column or 2 × 2) that shows the most
 //! photo for the window and the photos' shapes.  Each photo sits in a mount

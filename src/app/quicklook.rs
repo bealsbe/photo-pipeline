@@ -17,7 +17,7 @@ use iced::keyboard::{self, Key, key::Named};
 use iced::widget::image as iimage;
 use iced::{Element, Point, Rectangle, Size, Task};
 
-use super::{App, Message, View, viewer};
+use super::{App, Message, View, viewer, viewer_burst};
 use crate::imaging::loader::FullImage;
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
@@ -283,8 +283,9 @@ fn toggle_flag(app: &mut App, prune: bool) -> Task<Message> {
 }
 
 /// Close, then open the viewer on the photo (back in its place in the
-/// grid's order if a filter hides it now).
-fn open_viewer(app: &mut App) -> Task<Message> {
+/// grid's order if a filter hides it now): Enter opens the photo itself, B
+/// its burst's sheet.
+pub fn open_viewer(app: &mut App, land: viewer_burst::Land) -> Task<Message> {
     let Some((id, hint)) = app.quicklook.as_ref().map(|q| (q.id, q.hint)) else { return Task::none() };
     let closed = close(app);
     let mut items = app.derived.visible.clone();
@@ -298,7 +299,7 @@ fn open_viewer(app: &mut App) -> Task<Message> {
             at
         }
     };
-    Task::batch([closed, viewer::open(app, viewer::Source::Working, items, index, false)])
+    Task::batch([closed, viewer::open_as(app, viewer::Source::Working, items, index, false, land)])
 }
 
 // ── keys and messages ───────────────────────────────────────────────────────
@@ -322,7 +323,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Option<Tas
         (Key::Named(Named::PageUp), _) => Move::PrevDay,
         (Key::Named(Named::PageDown), _) => Move::NextDay,
         (Key::Named(Named::Escape), _) => return Some(close(app)),
-        (Key::Named(Named::Enter), _) => return Some(open_viewer(app)),
+        (Key::Named(Named::Enter), _) => return Some(open_viewer(app, viewer_burst::Land::Frame)),
         (Key::Named(Named::Delete), _) | (_, Some("p")) => return Some(toggle_flag(app, true)),
         (_, Some("m")) => return Some(toggle_flag(app, false)),
         (_, Some("u")) => {
@@ -337,7 +338,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Option<Tas
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Widget(QuickLookEvent::Close) => close(app),
-        Msg::Widget(QuickLookEvent::Activate) => open_viewer(app),
+        Msg::Widget(QuickLookEvent::Activate) => open_viewer(app, viewer_burst::Land::Frame),
         Msg::Widget(QuickLookEvent::Viewport(size)) => {
             // (The grid isn't scrolled to the photo yet: it would shift under
             // the fading backdrop.  Stepping and closing do that.)

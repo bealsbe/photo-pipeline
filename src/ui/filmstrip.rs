@@ -1,8 +1,8 @@
 //! The viewer's filmstrip: a row of thumbnails under the photo, in the
 //! viewer's order, with their prune / keep marks and crops.  The photo on
 //! screen is framed in the accent; click another to jump to it.  The strip
-//! glides to keep the current photo centred.  Review burst uses it too, for
-//! every frame of the burst, with the other panes' frames framed in grey.
+//! glides to keep the current photo centred.  A thin bracket under a run
+//! of frames from one burst marks it, as in the grid.
 //!
 //! One custom widget draws only the cells in view, from the same thumbnail
 //! caches as the grids (the working folder's, or the calendar's for library
@@ -26,6 +26,7 @@ use iced::{Color, Element, Event, Length, Point, Rectangle, Size, window};
 use super::paint::{self, Renderer, rect};
 use super::theme as t;
 use crate::imaging::thumbs::ThumbCache;
+use crate::model::bursts::BurstId;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::record::PhotoRecord;
 
@@ -41,6 +42,10 @@ const PAD: f32 = 3.0;
 const GLIDE_MS: f32 = 240.0;
 /// Cells either side of the view whose thumbnails are fetched ahead.
 const PREFETCH: usize = 6;
+/// A burst's bracket: below the mounts (clear of the current photo's
+/// frame), rising a little at the run's ends.
+const BRACKET_DROP: f32 = 5.0;
+const BRACKET_RISE: f32 = 7.0;
 
 /// What the strip reports to the app.
 #[derive(Debug, Clone)]
@@ -190,9 +195,8 @@ pub struct Filmstrip<'a, Message> {
     coll: &'a Collection,
     thumbs: &'a ThumbCache,
     current: usize,
-    /// Other cells on show elsewhere (the compare view's other panes),
-    /// framed quietly.
-    also: Vec<usize>,
+    /// Each cell's burst, for the brackets (empty: none).
+    bursts: &'a [Option<BurstId>],
     interactive: bool,
     scale_factor: f32,
     on: Box<dyn Fn(FilmEvent) -> Message + 'a>,
@@ -207,7 +211,7 @@ impl<'a, Message> Filmstrip<'a, Message> {
         scale_factor: f32,
         on: impl Fn(FilmEvent) -> Message + 'a,
     ) -> Self {
-        Self { items, coll, thumbs, current, also: Vec::new(), interactive: true, scale_factor, on: Box::new(on) }
+        Self { items, coll, thumbs, current, bursts: &[], interactive: true, scale_factor, on: Box::new(on) }
     }
 
     /// Whether clicks jump (off while the crop tool holds the photo).
@@ -216,10 +220,20 @@ impl<'a, Message> Filmstrip<'a, Message> {
         self
     }
 
-    /// Cells also on show, besides the current one: framed in grey.
-    pub fn also(mut self, cells: Vec<usize>) -> Self {
-        self.also = cells;
+    /// Each cell's burst (parallel to the items): runs of two or more
+    /// get a bracket.
+    pub fn bursts(mut self, bursts: &'a [Option<BurstId>]) -> Self {
+        self.bursts = bursts;
         self
+    }
+
+    /// Cell `i`'s place in a run of one burst's frames: (first, last), or
+    /// `None` when it isn't in a run of two or more.
+    fn run_mark(&self, i: usize) -> Option<(bool, bool)> {
+        let b = (*self.bursts.get(i)?)?;
+        let same = |j: Option<usize>| j.and_then(|j| self.bursts.get(j).copied().flatten()) == Some(b);
+        let (prev, next) = (same(i.checked_sub(1)), same(Some(i + 1)));
+        (prev || next).then_some((!prev, !next))
     }
 
     fn record(&self, i: usize) -> Option<&'a PhotoRecord> {
@@ -494,13 +508,27 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Filmstrip<'a, Messa
             }
         });
         r.with_layer(b, |r| {
+            let current_burst = self.bursts.get(self.current).copied().flatten();
             for (i, rec, ir) in placed {
                 paint_marks(r, rec, ir);
                 let m = mount_at(i);
                 if i == self.current {
                     paint::framed(r, rect(m.x - 3.0, m.y - 3.0, m.width + 6.0, m.height + 6.0), t::R_CELL + 3.0, Color::TRANSPARENT, t::SIGNAL, 2.0);
-                } else if self.also.contains(&i) {
-                    paint::framed(r, rect(m.x - 3.0, m.y - 3.0, m.width + 6.0, m.height + 6.0), t::R_CELL + 3.0, Color::TRANSPARENT, t::PHOTO_INK3, 1.5);
+                }
+                if let Some((first, last)) = self.run_mark(i) {
+                    // The burst being looked at reads a little brighter.
+                    let ink = if self.bursts.get(i).copied().flatten() == current_burst { t::PHOTO_INK2 } else { t::PHOTO_INK4 };
+                    let y = (m.y + m.height + BRACKET_DROP).round();
+                    let (left, right) = (m.x - BRACKET_DROP, m.x + m.width + BRACKET_DROP - 1.0);
+                    let x0 = if first { left } else { m.x - GAP };
+                    let x1 = if last { right + 1.0 } else { m.x + m.width };
+                    paint::hline(r, x0, x1, y, 1.0, ink);
+                    if first {
+                        paint::vline(r, left, y - BRACKET_RISE, y + 1.0, 1.0, ink);
+                    }
+                    if last {
+                        paint::vline(r, right, y - BRACKET_RISE, y + 1.0, 1.0, ink);
+                    }
                 }
             }
         });
