@@ -67,12 +67,16 @@ src/app/               the application: state, update, views
   viewer.rs            the image viewer window (crop tool, EXIF panel)
   calendar.rs          library calendar state and views
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
+  quality.rs           the analysis as the app holds it (runs on request)
+  hints_ui.rs          its Hints control and menu, progress, banner
+  bulk.rs              the bulk actions from its hints, and their dialog
   commands.rs          every command, its shortcut, icon and menu placement
   kit.rs, style.rs     shared view pieces and widget styles
   global_menu.rs       the KDE global menu (dbusmenu + KWin appmenu)
   testing.rs           PP_SCRIPT test driver (see below)
 src/ui/                custom widgets: grid, list, image stage, burst
-                       sheet, calendar stage, side menu, icons, symbols
+                       sheet, calendar stage, side menu, icons, symbols,
+                       hint plates (the analysis' marks on photos)
   theme.rs             the design tokens: colours, type, spacing, motion
   motion.rs, tags.rs   entrance animation, activity bar, file-type tags
 src/model/             records, collection & pairing, filters, crops,
@@ -182,6 +186,57 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   the selected photo's burst.  Preferences ▸ *Show a burst's frames first*
   turns the arrival view off (the viewer then steps frame by frame, and B
   still shows them all).
+- **Analysing a folder.** Prune ▸ *Analyse this folder* (also on the side
+  rail, and in the Hints menu) reads each photo's embedded preview once
+  and looks for frames that look out of focus, accidental frames (almost
+  black, white or one tone: a lens cap, a pocket, the floor), files that
+  are in the folder twice, and the sharpest frame of each burst.  It only
+  ever runs when you ask, in the background: the status bar shows how far
+  it has got, with a × to stop it (what it checked is kept), and you can
+  go on culling.  Allow about 30 seconds per 5,000 shots on a network
+  share, a few seconds on a local disk.  Analysing again reads only new or
+  changed photos, and an analysed folder shows its hints as soon as it
+  opens.  When it ends, the status bar says what it found, with *Show
+  them*.
+  - **Hints are suggestions; nothing is marked.**  A photo with a hint
+    wears one small plate on its lower left corner, hollow and grey so it
+    never reads as a decision: a crisp ring for the sharpest frame of its
+    burst, the same ring broken for a frame that looks out of focus, an
+    empty frame (yellow) for an accident, two frames for a copy.  Hover
+    the photo and the tooltip says why ("Looks out of focus: 4× softer
+    than …0757, a frame of this burst that shows the same.").  The plate
+    goes once you prune or mark the photo, and a stack shows none (its
+    sharpest frame is on top).  Quick look, the viewer and compare name
+    the hint beside the file name ("Sharpest of 11", "3rd sharpest of
+    11"); a burst's sheet puts it beside each frame's number.
+  - **Moments.**  Bursts of the same scene a moment apart (the next within
+    2 seconds, and alike) are joined across the gutter by a narrow band,
+    so each burst still shows where it starts.  The tooltip says how many
+    bursts and frames the moment holds.
+  - **The Hints filter** on the filter bar (the Hints control, with how
+    many possible problems there are) shows only photos with a hint:
+    possible problems (out of focus, accidental, or a copy), out of focus,
+    accidental, duplicates (both copies), or the sharpest of each burst,
+    each with its count.  It works with All · To review · Marked: *To
+    review* and *Possible problems* make a quick pile to go through with
+    P.  View ▸ *Show only possible problems* turns that one on and off.
+    Before a folder is analysed, the Hints menu says what analysing does
+    and how long it should take.
+  - **Bulk actions** (Prune menu): *Keep this, prune the rest* (the
+    selected frame; in the viewer, the frame outlined on a burst's sheet),
+    *Prune all soft frames…*, *Prune accidental frames…* and *Prune
+    duplicate copies…*.  Each asks first: a dialog shows how many photos
+    it will mark, and the photos themselves with why each is there.  Only
+    photos still to review are touched (the ones shown, frames in stacks
+    included), it is one undo step, and nothing goes to the Trash before
+    Review pruned files.  Of two copies, the one kept is the one whose
+    name doesn't read like a copy's ("copy", "(1)"), else the earlier
+    export to the library, else the older file.
+  - **Compare** from a burst's sheet with nothing picked shows the
+    outlined frame with the burst's two sharpest others, once analysed.
+  - If the folder stops answering part-way (a network share dropping), a
+    banner says how many shots were checked and kept; *Analyse again*
+    carries on from there once the folder is back.
 - **Viewer.** A filmstrip under the photo shows its neighbours with their
   marks and crops; click to jump, T to hide it.  With *Advance after marking*
   on (Ctrl+Shift+A, or the Auto-advance toggle), P or M marks the photo and
@@ -213,9 +268,10 @@ effect at the next start; `PP_NO_GLOBAL_MENU=1` still forces the in-window
 menus).  Changes apply at once and are saved; the menus and the viewer's
 toggles stay in step with the page.
 
-The Storage section shows how much space the thumbnail, library-index and
-capture-time caches take, and clears any of them after saying what that costs;
-they are rebuilt as you work.  It also shows any marks waiting to be saved to a
+The Storage section shows how much space the thumbnail, library-index,
+capture-time and photo-analysis caches take, and clears any of them after
+saying what that costs; they are rebuilt as you work (the analysis when you
+next analyse a folder).  It also shows any marks waiting to be saved to a
 folder that couldn't be reached.  Those live in
 `~/.local/share/photo-pipeline/unsaved/` and are never cleared from the app:
 they are your marks, not a cache.
@@ -302,7 +358,8 @@ These are deliberate:
 - **KDE global menu** support (see above); the Python app had none.
 - **New culling tools** (see "Working through a shoot"): culling progress and
   the To review filter, quick look, compare, the viewer's filmstrip and
-  auto-advance, undo/redo, and the combined RAW+JPG tag.
+  auto-advance, undo/redo, the combined RAW+JPG tag, bursts, and analysing a
+  folder (hints, the Hints filter and the bulk actions).
 - **Library calendar** keeps its index between runs and re-reads only
   changed folders (see above).  In a day's grid, a renamed file's capture
   time is read from its name, to the minute, instead of from EXIF.  The order

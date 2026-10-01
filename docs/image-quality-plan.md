@@ -65,7 +65,7 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 ### Phase 2 engine as built (2026-09-30)
 
 The non-UI half of phase 2: measurements, decisions, cache and the pass.
-Nothing is drawn and no command exists yet (see "What the UI pass needs").
+Its interface came next: see "Phase 2 UI as built" below.
 
 **Modules.**
 
@@ -187,6 +187,68 @@ full-resolution AF crop (phase 4).  The pass doesn't follow the network
 banner's pause/resume itself.  Same-capture copies need both files
 measured, so a RAW-only copy of a paired RAW is found only when
 byte-identical.
+
+### Phase 2 UI as built (2026-10-01)
+
+The engine above now has its interface.  Everything in "What the UI pass
+needs to do" is built; where it differs, it says so here.
+
+| File | What it holds |
+|---|---|
+| `app/hints_ui.rs` | The filter bar's Hints control and its menu (the hints filter with counts; before an analysis, what it does and an estimate), the status bar's progress slot with Stop, the summary when a pass ends ("Show them"), the "analysing stopped" banner, the page for an empty hints filter. |
+| `ui/hint_plate.rs` | The plate (glyph, colour, place), the short phrase ("Sharpest of 8"), the reasons for tooltips and dialogs, by lookup only. |
+| `app/bulk.rs` | The four bulk actions, their confirmation dialog (counts, thumbnails, reasons; in the window asked from), applying them as one undo step. |
+| `app/undo.rs` | `undo::batch` and `Kind::Batch`: several fields' mark changes as one step. |
+| `model/hints.rs` | `Plate`, `HintFilter`, `moment_links`, `joined_moment`, `coverage`, `copies`. |
+| `model/duplicates.rs` | `why`: which test of `keeper` decided, in words. |
+
+**Choices made.**
+
+- *Analyse this folder* is `Cmd::Analyse` (Prune menu, side rail, the
+  Hints menu); no shortcut.  Opening a folder runs `start_cached`, so an
+  analysed folder shows its hints at once without reading a photo; the
+  status bar announces only passes the user started.
+- *Plates*: bottom-left of the photo, one per photo (accidental, then
+  soft, then a copy, then sharpest), a dark disc with a light outline
+  glyph: a crisp ring with a point (sharpest), the ring broken into six
+  dashes (soft), an empty frame in `WARN` (accidental), a frame over a
+  frame (copy).  Hidden on decided photos and on stacks.  The cell's
+  tooltip puts the reasons first.  A rank without a plate ("3rd sharpest
+  of 11") shows in quick look, the viewer and compare only.
+- *Moments* (decision 3): presses stay the strips; the presses of one
+  moment are spliced by a band a quarter of the photo's height across the
+  gutter between them (stubs where a row wraps).  Not drawn mid-slide.
+- *Sharpest*: the plate in the grid strip, a ring in the sheet's frame
+  number, and the stack's cover (already).  The sheet still opens on the
+  frame arrived at; C on it with nothing picked now compares the outlined
+  frame with the burst's two sharpest others (was: its neighbours).
+- *Hints filter*: Possible problems (soft, accidental or a suggested copy),
+  Out of focus (soft and not accidental), Accidental, Duplicates (every
+  file with a copy, kept ones too), Sharpest of each burst.  A pair passes
+  by either half.  Independent of All · To review · Marked; not saved.
+  View ▸ *Show only possible problems* toggles the first.
+- *Bulk actions*: scope is what the grid shows (`derived.visible`, frames
+  in stacks included); *Keep this* takes the burst as shown, or its whole
+  burst when the hints filter hides the rest.  The plan is checked again
+  when applied.  Decision 7b's rule picks the copy kept, and the dialog
+  says so.  *Keep this* clears a prune mark on the frame kept.
+- *Network trouble*: the banner names the share (or "the folder"), how
+  many shots were checked and kept, and offers Analyse again.  The pass
+  still doesn't pause for the network banner itself.
+
+**Checked** (scratch symlink folders, fake `HOME`, headless KWin):
+the 20-Sep sample (369 shots: 5 soft, 79 sharpest, 6 joined
+moments) and the exported-twice 23-May day (6,598 shots, 13,196 files:
+3,299 copies, 428 soft, 218 accidental).  A pass on 23-May stopped by
+renaming the folder mid-pass at 3,045 shots; Analyse again measured the
+other 3,553 and took 3,045 from the cache.  Scrolling 23-May's grid
+end to end in 8 s, with hints and without: draw 0.07 / 0.08 ms a frame,
+the same frame gaps.  Opening it with its cache: two derives of
+~20 ms on the UI thread (the engine's; see Known gaps).
+
+**Open.**  The derive at 13 k files costs 20–40 ms on the UI thread when
+results arrive; the pass still doesn't pause for the network banner; no
+shortcut for Analyse or the bulk actions (the user's call).
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling
