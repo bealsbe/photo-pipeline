@@ -243,7 +243,9 @@ pub fn read_full(path: &Path) -> Option<Flat> {
     if let Some(dt) = dt {
         let chars: Vec<char> = dt.trim().chars().collect();
         let d: String = chars.iter().take(10).collect::<String>().replace(':', "-");
-        let t: String = chars.iter().skip(11).take(5).collect();
+        // With seconds (the Python app stopped at minutes): frames of a
+        // burst are seconds apart.
+        let t: String = chars.iter().skip(11).take(8).collect();
         put("Date", format!("{d}  {t}"));
     }
 

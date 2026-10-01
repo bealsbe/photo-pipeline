@@ -828,7 +828,7 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
             facts = facts.push(kit::caption(format!("{} × {} px", img.width, img.height)));
         }
         facts = facts.push(kit::caption(util::fmt_size(r.file_size)));
-        facts = facts.push(kit::caption(r.modified.local.format("%Y-%m-%d %H:%M").to_string()));
+        facts = facts.push(kit::caption(r.modified.local.format("%Y-%m-%d %H:%M:%S").to_string()));
         bottom = bottom.push(container(facts).padding(Padding::from([0.0, t::S2])));
     }
     bottom = bottom.push(Space::new().width(Length::Fill));

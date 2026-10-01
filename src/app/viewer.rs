@@ -989,7 +989,7 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
             facts = facts.push(kit::caption(format!("{} × {} px", img.width, img.height)));
         }
         facts = facts.push(kit::caption(util::fmt_size(r.file_size)));
-        facts = facts.push(kit::caption(r.modified.local.format("%Y-%m-%d %H:%M").to_string()));
+        facts = facts.push(kit::caption(r.modified.local.format("%Y-%m-%d %H:%M:%S").to_string()));
         if r.is_cropped() {
             let crop = r.crop.clone().unwrap_or_else(|| Crop::full(None));
             let label = match &v.image {
@@ -1113,7 +1113,7 @@ fn exif_panel<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
             let mut rows = vec![
                 ("Type".to_string(), r.file_type.label().to_string()),
                 ("Size".to_string(), util::fmt_size(r.file_size)),
-                ("Modified".to_string(), r.modified.local.format("%Y-%m-%d %H:%M").to_string()),
+                ("Modified".to_string(), r.modified.local.format("%Y-%m-%d %H:%M:%S").to_string()),
             ];
             if let Some(p) = v.pair.and_then(|p| c.get(p)) {
                 let (raw, jpg) = if r.file_type == FileType::Raw { (r, p) } else { (p, r) };
