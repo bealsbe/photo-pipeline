@@ -122,8 +122,10 @@ impl Bursts {
                 if k < g.len() && continues(&shots[g[k - 1]], &shots[g[k]], limit) {
                     continue;
                 }
-                if k - start >= 2 {
-                    out.add(g[start..k].iter().map(|&i| &shots[i]));
+                // Copies of one frame don't make a burst on their own.
+                let press: Vec<&Shot<'_>> = g[start..k].iter().map(|&i| &shots[i]).collect();
+                if distinct_frames(&press) >= 2 {
+                    out.add(press.into_iter());
                 }
                 start = k;
             }
@@ -276,6 +278,10 @@ fn press_gap(shots: &[&Shot<'_>]) -> i64 {
 /// Does `b` (later) belong to the same press as `a`?  `limit`: see
 /// [`press_gap`].
 fn continues(a: &Shot<'_>, b: &Shot<'_>, limit: i64) -> bool {
+    // A copy of the same frame (a day exported twice) belongs with it.
+    if same_capture(a, b) {
+        return true;
+    }
     let gap = b.millis - a.millis;
     if gap < 0 {
         return false;
@@ -285,6 +291,21 @@ fn continues(a: &Shot<'_>, b: &Shot<'_>, limit: i64) -> bool {
         _ if a.meta.subsec_ms.is_some() && b.meta.subsec_ms.is_some() => gap <= limit,
         _ => gap <= 1000 && file_number(a.name).zip(file_number(b.name)).is_some_and(|(x, y)| y == x + 1),
     }
+}
+
+/// Two files of one frame: the same capture to the millisecond and the same
+/// place in its press.  Only trusted with sub-seconds or a sequence number;
+/// whole-second times can't tell frames of one second apart.
+fn same_capture(a: &Shot<'_>, b: &Shot<'_>) -> bool {
+    a.millis == b.millis
+        && a.meta.sequence == b.meta.sequence
+        && a.meta.camera == b.meta.camera
+        && (a.meta.sequence.is_some() || a.meta.subsec_ms.is_some())
+}
+
+/// Frames in a press, counting copies of one frame once.
+fn distinct_frames(press: &[&Shot<'_>]) -> usize {
+    1 + press.windows(2).filter(|w| !same_capture(w[0], w[1])).count()
 }
 
 /// The number a camera ends its file names with ("dsc01234.arw" → 1234).
@@ -360,6 +381,29 @@ mod tests {
         let a3 = c.id_of(Path::new("/s/a3.JPG")).unwrap();
         assert_eq!(b.frame_index(a3), Some(2));
         assert!(b.is_current(&c));
+    }
+
+    #[test]
+    fn a_folder_exported_twice_keeps_its_presses_whole() {
+        // Every frame twice under two names (as on 23-May-2026): in capture
+        // order the copies interleave, 0001, 3356, 0002, 3357 …  They must
+        // not split the press into pairs.
+        let mut recs = Vec::new();
+        for (i, ms) in [(1u16, 784u16), (2, 117), (3, 450), (4, 783)] {
+            let sec = if i == 1 { 54 } else { 55 };
+            recs.push(rec(&format!("/s/x_{:04}.JPG", i), sec, Some(ms), Some(i)));
+            recs.push(rec(&format!("/s/x_{:04}.JPG", 3355 + i as u32), sec, Some(ms), Some(i)));
+        }
+        // A single frame, copied twice: copies alone don't make a burst.
+        recs.push(rec("/s/y_0014.JPG", 59, Some(118), Some(1)));
+        recs.push(rec("/s/y_3369.JPG", 59, Some(118), Some(1)));
+        let (c, b) = find(recs);
+        assert_eq!(
+            names(&c, &b),
+            [vec!["x_0001", "x_3356", "x_0002", "x_3357", "x_0003", "x_3358", "x_0004", "x_3359"]]
+        );
+        assert_eq!(b.of(c.id_of(Path::new("/s/y_0014.JPG")).unwrap()), None);
+        assert_eq!(b.of(c.id_of(Path::new("/s/y_3369.JPG")).unwrap()), None);
     }
 
     #[test]
