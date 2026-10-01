@@ -241,7 +241,7 @@ Measured on a 110 386-file library on an SMB share:
 | Opening a 294-file day | 2.1 s | 0.2 ms |
 | Opening a 19 072-file day | 168 s | 5 ms (+15 ms grid data, off the UI thread) |
 | EXIF capture times, 19 072 files | 168 s | 8–16 s |
-| JPEG thumbnail from the share | 14.8 ms, 2.7 MB | 6.5 ms, 0.46 MB |
+| JPEG thumbnail from the share | 14.8 ms, 2.7 MB | 6.5–10 ms, 0.3 MB |
 
 The first time a library is opened, or after F5, it's still read in full,
 about 3 s here.  Opening a working folder reads capture times with the same
