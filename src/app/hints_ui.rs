@@ -84,8 +84,8 @@ pub fn filter_label(f: HintFilter) -> &'static str {
 fn filter_about(f: HintFilter) -> &'static str {
     match f {
         HintFilter::Problems => "Out of focus, accidental, or a copy",
-        HintFilter::Soft => "Nothing sharp, or far softer than the burst's best",
-        HintFilter::Accidental => "Black, white or blank: a lens cap, a pocket",
+        HintFilter::Soft => "Nothing sharp, or much softer than its burst",
+        HintFilter::Accidental => "Almost black, white or one tone",
         HintFilter::Duplicates => "Files in the folder twice, both copies",
         HintFilter::Sharpest => "The sharpest frame of every burst",
     }
