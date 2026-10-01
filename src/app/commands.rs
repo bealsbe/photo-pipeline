@@ -218,7 +218,6 @@ pub const SIDE: &[Option<Cmd>] = &[
     Some(Cmd::EditCopy),
     None,
     Some(Cmd::Review),
-    Some(Cmd::Sort),
     None,
     Some(Cmd::ListView),
     Some(Cmd::GridView),
