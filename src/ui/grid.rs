@@ -57,12 +57,6 @@ const PREFETCH_SETTLE: Duration = Duration::from_millis(80);
 const TOOLTIP_DELAY: Duration = Duration::from_millis(700);
 pub const MIN_SIZE: f32 = 120.0;
 pub const MAX_SIZE: f32 = 480.0;
-/// A burst's bracket under its mounts: colour, weight, how far it sits
-/// outside them and how high its ends rise.
-const BRACKET: Color = t::PHOTO_INK3;
-const BRACKET_W: f32 = 1.0;
-const BRACKET_DROP: f32 = 3.0;
-const BRACKET_RISE: f32 = 14.0;
 
 
 /// One date group.
@@ -1181,6 +1175,17 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                     let mut drawn = Vec::with_capacity(last.saturating_sub(first));
                     let runs = data.bursts.get(s).map(Vec::as_slice).unwrap_or(&[]);
                     r.with_layer(clip, |r| {
+                        // Burst trays first: the mounts sit on them.
+                        for i in first..last {
+                            if let Some(run) = runs.get(i).copied().flatten() {
+                                let mut cell = m.cell_rect(s, i);
+                                cell.x += bounds.x;
+                                cell.y += origin_y;
+                                let row_end = i % m.cols == m.cols - 1;
+                                let edges = (bounds.x, bounds.x + bounds.width - SCROLLBAR_W);
+                                paint_tray(r, cell, run, i % m.cols == 0, row_end, edges, op);
+                            }
+                        }
                         for i in first..last {
                             let id = sec.ids[i];
                             let Some(rec) = data.coll.get(id) else { continue };
@@ -1188,11 +1193,9 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                             cell.x += bounds.x;
                             cell.y += origin_y;
                             let hover = (ps.hover_amt)(id);
-                            let (thumb_rect, image_rect) = paint_cell(r, cell, id, rec, data, m.ts, m.label_h, hover, ps.now, op, ps.elide, clip);
                             let run = runs.get(i).copied().flatten();
-                            if let Some(run) = run {
-                                paint_bracket(r, cell, run, i % m.cols == 0, op);
-                            }
+                            let (thumb_rect, image_rect) =
+                                paint_cell(r, cell, id, rec, data, m.ts, m.label_h, hover, run.is_some(), ps.now, op, ps.elide, clip);
                             drawn.push((id, rec, thumb_rect, image_rect, run));
                         }
                     });
@@ -1209,8 +1212,9 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
                     let corner = 1.0 - m.label_h / LABEL_H;
                     if corner > 0.01 {
                         r.with_layer(clip, |r| {
-                            for &(id, rec, thumb_rect, image_rect, _) in &drawn {
-                                let mount = paint::lerp_color(t::PHOTO_MOUNT, t::PHOTO_RAISED, (ps.hover_amt)(id));
+                            for &(id, rec, thumb_rect, image_rect, run) in &drawn {
+                                let base = if run.is_some() { t::PHOTO_TRAY } else { t::PHOTO_MOUNT };
+                                let mount = paint::lerp_color(base, t::PHOTO_RAISED, (ps.hover_amt)(id));
                                 paint_corner_tag(r, rec, thumb_rect, image_rect, mount, op * corner, clip);
                             }
                         });
@@ -1311,6 +1315,7 @@ fn paint_cell(
     ts: f32,
     label_h: f32,
     hover: f32,
+    in_burst: bool,
     now: Instant,
     op: f32,
     elide: Option<&RefCell<HashMap<(RecordId, u32), String>>>,
@@ -1319,7 +1324,10 @@ fn paint_cell(
     let c = |col: Color| paint::with_alpha(col, op);
     let selected = data.selection.contains(&id);
     let mount = mount_rect(cell);
-    paint::rounded(r, mount, t::R_CELL, c(paint::lerp_color(t::PHOTO_MOUNT, t::PHOTO_RAISED, hover)));
+    // A burst's frames share one card (see `paint_tray`); a frame's own
+    // mount only shows when hovered.
+    let base = if in_burst { t::PHOTO_TRAY } else { t::PHOTO_MOUNT };
+    paint::rounded(r, mount, t::R_CELL, c(paint::lerp_color(base, t::PHOTO_RAISED, hover)));
 
     let thumb_rect = rect(mount.x + PAD, mount.y + PAD, ts, ts);
     let thumb = data.thumbs.get(&rec.path);
@@ -1452,30 +1460,32 @@ fn paint_cell_marks(
     }
 }
 
-/// A burst's bracket: a rule through the gutter just under its run of
-/// mounts, rising a little beside the first and the last.  Between tiles
-/// it runs on across the gap; where the run wraps to the next row it runs
-/// out into the gap, open, and picks up again under the next row.
-fn paint_bracket(r: &mut Renderer, cell: Rectangle, run: RunMark, row_start: bool, op: f32) {
+/// A burst's card: the mounts of a run joined into one, across the gutters
+/// between them, so the frames read as one group and neighbouring bursts
+/// stay apart.  Its ends are rounded; where the run wraps to the next row
+/// the card runs off the grid's right edge and comes back in from the left
+/// one, so it plainly carries on.  `edges`: the grid area's left and right.
+fn paint_tray(r: &mut Renderer, cell: Rectangle, run: RunMark, row_start: bool, row_end: bool, edges: (f32, f32), op: f32) {
     let mount = mount_rect(cell);
-    let color = paint::with_alpha(BRACKET, op);
-    let bottom = mount.y + mount.height;
-    let y = (bottom + BRACKET_DROP).round();
-    let (left, right) = (mount.x - BRACKET_DROP, mount.x + mount.width + BRACKET_DROP - BRACKET_W);
-    let x0 = if run.first {
-        left
-    } else if row_start {
-        mount.x - GAP / 2.0
+    let color = paint::with_alpha(t::PHOTO_TRAY, op);
+    let x0 = if run.first || !row_start { mount.x } else { edges.0 };
+    let x1 = if run.last {
+        mount.x + mount.width
+    } else if row_end {
+        edges.1.max(mount.x + mount.width)
     } else {
-        mount.x
+        // Across the gutter to the next mount.
+        cell.x + cell.width
     };
-    let x1 = if run.last { right + BRACKET_W } else { cell.x + cell.width };
-    paint::hline(r, x0, x1, y, BRACKET_W, color);
-    if run.first {
-        paint::vline(r, left, y - BRACKET_RISE, y + BRACKET_W, BRACKET_W, color);
+    let band = rect(x0, mount.y, x1 - x0, mount.height);
+    paint::rounded(r, band, t::R_CELL, color);
+    // Square off the sides that join on to the rest of the burst.
+    let side = t::R_CELL + 1.0;
+    if !run.first {
+        paint::fill(r, rect(band.x, band.y, side, band.height), color);
     }
-    if run.last {
-        paint::vline(r, right, y - BRACKET_RISE, y + BRACKET_W, BRACKET_W, color);
+    if !run.last {
+        paint::fill(r, rect(band.x + band.width - side, band.y, side, band.height), color);
     }
 }
 
