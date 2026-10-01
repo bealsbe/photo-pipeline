@@ -159,11 +159,13 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   frames under it showing below and its tab adding how many are kept and
   pruned; **Shift+G** (View ▸ Stack all bursts, or Preferences) stacks
   every burst and is remembered.  A stack is one photo to the arrow keys,
-  quick look and selection, and P and M mark only the photo on top, never
-  the frames under it; the viewer still steps through every frame.  With
-  To review on, a stack shows its first frame still to review.  The
-  viewer's filmstrip brackets bursts too.  Arriving at
-  a burst in the viewer — stepping to it from the photo before or after,
+  quick look and selection.  It shows its sharpest frame on top once the
+  folder has been analysed (its first until then), and it can't be marked:
+  P and M only ever mark a photo you can see on its own, so open the stack
+  (Enter, a double-click or B shows all its frames) or unstack it first.
+  With To review on, the photo on top is one still to review.  The
+  viewer's filmstrip brackets bursts too.  Arriving at a burst in the
+  viewer — stepping to it from the photo before or after,
   or opening the viewer on one of its frames — shows **all its frames**
   first, laid out over the photo area with the one you came to outlined.
   The arrow keys move the outline (Home / End: first and last frame), and P,

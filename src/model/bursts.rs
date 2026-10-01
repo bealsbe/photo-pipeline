@@ -252,7 +252,13 @@ impl Bursts {
     /// of tiles, or folds into one tile when `stacked(burst)`.  The stack's
     /// cover is the run's first frame shown — with To review on, the first
     /// still to review.  (The sharpest frame, once the analysis knows it.)
-    pub fn tiles(&self, ids: &[RecordId], stacked: impl Fn(BurstId) -> bool, coll: &Collection) -> (Vec<RecordId>, Vec<Option<RunMark>>) {
+    pub fn tiles(
+        &self,
+        ids: &[RecordId],
+        stacked: impl Fn(BurstId) -> bool,
+        cover: impl Fn(&[RecordId]) -> RecordId,
+        coll: &Collection,
+    ) -> (Vec<RecordId>, Vec<Option<RunMark>>) {
         let mut runs: Vec<(usize, usize, BurstId)> = Vec::new();
         self.each_run(ids, |b, i, j| runs.push((i, j, b)));
         if runs.is_empty() {
@@ -271,7 +277,7 @@ impl Bursts {
                     kept = kept.saturating_add(r.is_marked as u16);
                     pruned = pruned.saturating_add(r.is_pruned as u16);
                 }
-                tiles.push(ids[i]);
+                tiles.push(cover(&ids[i..j]));
                 marks.push(Some(RunMark { burst: b, first: true, last: true, shown, total, stacked: true, kept, pruned }));
             } else {
                 for (k, &id) in ids.iter().enumerate().take(j).skip(i) {
@@ -646,7 +652,7 @@ mod tests {
 
     /// Marks for tiles shown in this order, every burst open.
     fn open_runs(b: &Bursts, c: &Collection, ids: &[RecordId]) -> Vec<Option<RunMark>> {
-        let (tiles, marks) = b.tiles(ids, |_| false, c);
+        let (tiles, marks) = b.tiles(ids, |_| false, |run| run[0], c);
         assert_eq!(tiles, ids, "nothing folds when nothing is stacked");
         marks
     }
@@ -696,13 +702,13 @@ mod tests {
         let order: Vec<RecordId> = ["a1", "a2", "a3", "x", "b1", "b2"].iter().map(|n| id(&c, n)).collect();
         let (ba, bb) = (b.of(order[0]).unwrap(), b.of(order[4]).unwrap());
         // Nothing stacked: the tiles are the photos, each run a strip.
-        let (tiles, marks) = b.tiles(&order, |_| false, &c);
+        let (tiles, marks) = b.tiles(&order, |_| false, |run| run[0], &c);
         assert_eq!(tiles, order);
         assert_eq!(marks.iter().filter(|m| m.is_some_and(|m| !m.stacked)).count(), 5);
         // Burst a stacked: one tile, a1, standing for three frames.
         c.get_mut(order[1]).unwrap().is_pruned = true;
         c.get_mut(order[2]).unwrap().is_marked = true;
-        let (tiles, marks) = b.tiles(&order, |x| x == ba, &c);
+        let (tiles, marks) = b.tiles(&order, |x| x == ba, |run| run[0], &c);
         assert_eq!(tiles, [order[0], order[3], order[4], order[5]]);
         assert_eq!(marks[0], Some(RunMark { burst: ba, first: true, last: true, shown: 3, total: 3, stacked: true, kept: 1, pruned: 1 }));
         assert_eq!(marks[1], None);
@@ -710,12 +716,17 @@ mod tests {
         // Both stacked; a filter hid a1, so a2 is the cover of "2 of 3", and
         // the marks still count the whole burst.
         let shown = [order[1], order[2], order[3], order[4], order[5]];
-        let (tiles, marks) = b.tiles(&shown, |_| true, &c);
+        let (tiles, marks) = b.tiles(&shown, |_| true, |run| run[0], &c);
         assert_eq!(tiles, [order[1], order[3], order[4]]);
         assert_eq!(marks[0].map(|m| (m.shown, m.total, m.kept, m.pruned)), Some((2, 3, 1, 1)));
         assert_eq!(marks[2].map(|m| (m.shown, m.stacked)), Some((2, true)));
+        // The cover is chosen from the frames shown (the sharpest, once
+        // analysed): here the last of a's, the marks unchanged.
+        let (tiles, marks) = b.tiles(&order, |x| x == ba, |run| *run.last().unwrap(), &c);
+        assert_eq!(tiles, [order[2], order[3], order[4], order[5]]);
+        assert_eq!(marks[0].map(|m| (m.shown, m.stacked)), Some((3, true)));
         // One frame left of a burst isn't a run, stacked or not.
-        let (tiles, marks) = b.tiles(&[order[0], order[3]], |_| true, &c);
+        let (tiles, marks) = b.tiles(&[order[0], order[3]], |_| true, |run| run[0], &c);
         assert_eq!(tiles, [order[0], order[3]]);
         assert_eq!(marks, [None, None]);
     }

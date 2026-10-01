@@ -682,8 +682,9 @@ impl App {
         } else if !self.bursts.is_current(&self.coll) {
             self.bursts = Bursts::find(&self.coll);
         }
-        self.build_tiles();
+        // Hints first: a stack's cover is its sharpest frame once analysed.
         quality::refresh(self);
+        self.build_tiles();
         self.derived.accepted = sorted.len();
         self.derived.visible = self.derived.days.iter().flat_map(|s| s.ids.iter().copied()).collect();
         self.derived.list_rows = filter::list_rows(&self.coll, &state);
@@ -709,7 +710,7 @@ impl App {
         let mut sections = Vec::with_capacity(self.derived.days.len());
         let mut runs = Vec::with_capacity(self.derived.days.len());
         for day in &self.derived.days {
-            let (ids, marks) = self.bursts.tiles(&day.ids, stacked, &self.coll);
+            let (ids, marks) = self.bursts.tiles(&day.ids, stacked, |run| self.quality.sharpest_of(run), &self.coll);
             sections.push(Section { date: day.date, label: day.label.clone(), photos: day.photos, ids });
             runs.push(marks);
         }
@@ -745,6 +746,16 @@ impl App {
             }
         }
         covers
+    }
+
+    /// `id` is a stacked burst's tile in the grid (its cover photo).
+    pub fn is_stack(&self, id: RecordId) -> bool {
+        self.bursts.of(id).is_some_and(|b| self.stack_covers().get(&b) == Some(&id))
+    }
+
+    /// What P or M on a stacked burst says instead of marking.
+    pub fn stack_mark_hint(&mut self) -> Task<Message> {
+        self.show_status("A stacked burst can't be marked. Open it (B or Enter) to mark its frames, or press G to unstack it.", 5000)
     }
 
     /// The tile that shows `id` in the grid: itself, or the stack it is
@@ -1122,6 +1133,7 @@ impl App {
     }
 
     fn toggle_flag_selected(&mut self, prune: bool) -> Task<Message> {
+        let mut hint = Task::none();
         let ids: Vec<RecordId> = match self.view {
             View::List => self
                 .derived
@@ -1130,15 +1142,23 @@ impl App {
                 .filter(|r| self.list.selection.contains(&r.primary()))
                 .flat_map(|r| r.members())
                 .collect(),
-            // A stack is its cover: marks go to the photo shown, never to
-            // the frames folded under it.
-            View::Grid => self.derived.tiles.iter().copied().filter(|id| self.grid.selection.contains(id)).collect(),
+            // A stacked burst can't be marked at all: only photos you can
+            // see on their own are.
+            View::Grid => {
+                let selected: Vec<RecordId> =
+                    self.derived.tiles.iter().copied().filter(|id| self.grid.selection.contains(id)).collect();
+                let open: Vec<RecordId> = selected.iter().copied().filter(|&id| !self.is_stack(id)).collect();
+                if open.len() < selected.len() {
+                    hint = self.stack_mark_hint();
+                }
+                open
+            }
             View::Calendar => return Task::none(),
         };
         if ids.is_empty() {
-            return Task::none();
+            return hint;
         }
-        if prune {
+        let marked = if prune {
             let all = ids.iter().all(|&id| self.coll.get(id).is_some_and(|r| r.is_pruned));
             for &id in &ids {
                 if let Some(r) = self.coll.get_mut(id) {
@@ -1154,7 +1174,8 @@ impl App {
                 }
             }
             self.refresh_mark(&ids)
-        }
+        };
+        Task::batch([marked, hint])
     }
 
     // ── selection ───────────────────────────────────────────────────────
@@ -1852,6 +1873,8 @@ impl App {
                 self.grid_click(id, modifiers);
                 Task::none()
             }
+            // A stacked burst opens on all its frames (the sheet).
+            GridEvent::Activate(id) if self.is_stack(id) => self.open_viewer_working(id, viewer_burst::Land::Sheet),
             GridEvent::Activate(id) => self.open_viewer_working(id, viewer_burst::Land::Auto),
             GridEvent::ClearSelection => {
                 self.grid.selection.clear();

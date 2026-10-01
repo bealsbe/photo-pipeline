@@ -59,17 +59,17 @@ const CORNER_INSET: f32 = 4.0;
 const GAP: f32 = 8.0;
 /// Gutter between rows: wider than [`GAP`], so a row reads as a strip and
 /// a burst's tab and a stack's edges have room above and below a mount.
-const ROW_GAP: f32 = 14.0;
+const ROW_GAP: f32 = 10.0;
 /// A burst's tab: how far it rises above the strip, its height (down to
 /// the photo's top edge, never over it), and its inner padding.
-const TAB_RISE: f32 = 7.0;
+const TAB_RISE: f32 = 6.0;
 const TAB_H: f32 = TAB_RISE + PAD;
 const TAB_PAD: f32 = 5.0;
 /// The tab's chevron and mark glyphs.
 const TAB_GLYPH: f32 = 9.0;
 /// The edges of the frames under a stack, showing below its mount: each
 /// edge's inset from the mount's sides and its height.
-const STACK_EDGES: [(f32, f32); 2] = [(5.0, 3.0), (10.0, 3.0)];
+const STACK_EDGES: [(f32, f32); 2] = [(5.0, 2.0), (10.0, 1.0)];
 /// Mid-slide, how far (in cells) a tile changing rows drifts as it fades
 /// out of one row and into the next: enough to show which way the row
 /// moved, too little to cross other tiles.
@@ -1318,7 +1318,7 @@ fn tab_tooltip(run: RunMark) -> String {
             (0, p) => format!("{p} pruned"),
             (k, p) => format!("{k} kept, {p} pruned"),
         };
-        format!("{frames}, stacked: {marks}.\nMarks go to the photo on top.\nClick or press G to show every frame.")
+        format!("{frames}, stacked: {marks}.\nIt can't be marked: open it (B or Enter) or press G to show every frame.")
     } else {
         format!("{frames}.\nClick or press G to stack it.")
     }
@@ -1952,8 +1952,10 @@ fn paint_corners(r: &mut Renderer, bounds: Rectangle, (tl, tr, br, bl): (f32, f3
 fn paint_stack_edges(r: &mut Renderer, mount: Rectangle, op: f32) {
     let mut y = mount.y + mount.height;
     for (k, &(inset, h)) in STACK_EDGES.iter().enumerate() {
-        let shade = paint::lerp_color(t::PHOTO_TRAY, t::PHOTO_GROUND, 0.12 + 0.3 * k as f32);
-        paint_corners(r, rect(mount.x + inset, y, mount.width - 2.0 * inset, h), (0.0, 0.0, 1.5, 1.5), paint::with_alpha(shade, op));
+        // Even steps of grey from the tray down to the ground, so each
+        // edge reads as a frame of its own, not as more of the mount.
+        let shade = paint::lerp_color(t::PHOTO_TRAY, t::PHOTO_GROUND, 0.35 + 0.3 * k as f32);
+        paint_corners(r, rect(mount.x + inset, y, mount.width - 2.0 * inset, h), (0.0, 0.0, 1.0, 1.0), paint::with_alpha(shade, op));
         y += h;
     }
 }

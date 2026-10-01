@@ -65,6 +65,20 @@ impl Quality {
         !self.features.is_empty() || !self.exact.is_empty()
     }
 
+    /// The frame a stacked burst shows on top: the sharpest of `run` (the
+    /// frames shown) once analysed, else the first.  Ties keep the earlier.
+    pub fn sharpest_of(&self, run: &[crate::model::collection::RecordId]) -> crate::model::collection::RecordId {
+        let mut best = (run[0], f32::NEG_INFINITY);
+        for &id in run {
+            if let Some(h) = self.hints.get(id) {
+                if h.score > best.1 {
+                    best = (id, h.score);
+                }
+            }
+        }
+        best.0
+    }
+
     pub fn features(&self, path: &Path) -> Option<&Arc<Features>> {
         self.features.get(&canonical_key(path))
     }
@@ -191,7 +205,12 @@ pub fn on_batch(app: &mut App, run: u64, batch: Arc<Batch>) -> Task<Message> {
             h.set_busy(app.thumbs.pending());
         }
     }
-    refresh(app);
+    if batch.finished.is_some() {
+        // Final hints: stacks take their sharpest frame on top.
+        app.refresh_views();
+    } else {
+        refresh(app);
+    }
     Task::none()
 }
 

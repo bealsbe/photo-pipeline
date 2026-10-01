@@ -287,6 +287,10 @@ fn show(app: &mut App, nav: &Nav, i: usize, browsing: bool) -> Task<Message> {
 
 fn toggle_flag(app: &mut App, prune: bool) -> Task<Message> {
     let Some(id) = app.quicklook.as_ref().map(|q| q.id) else { return Task::none() };
+    // A stacked burst can't be marked, here as in the grid.
+    if app.is_stack(id) {
+        return app.stack_mark_hint();
+    }
     let Some(r) = app.coll.get_mut(id) else { return Task::none() };
     if prune {
         r.is_pruned = !r.is_pruned;
@@ -300,6 +304,15 @@ fn toggle_flag(app: &mut App, prune: bool) -> Task<Message> {
 /// Close, then open the viewer on the photo (back in its place in the
 /// grid's order if a filter hides it now): Enter opens the photo itself, B
 /// its burst's sheet.
+/// Enter on quick look: the photo itself, or all the frames of a stacked
+/// burst (as in the grid).
+fn enter_land(app: &App) -> viewer_burst::Land {
+    match app.quicklook.as_ref() {
+        Some(q) if app.is_stack(q.id) => viewer_burst::Land::Sheet,
+        _ => viewer_burst::Land::Frame,
+    }
+}
+
 pub fn open_viewer(app: &mut App, land: viewer_burst::Land) -> Task<Message> {
     let Some((id, hint)) = app.quicklook.as_ref().map(|q| (q.id, q.hint)) else { return Task::none() };
     let closed = close(app);
@@ -338,7 +351,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Option<Tas
         (Key::Named(Named::PageUp), _) => Move::PrevDay,
         (Key::Named(Named::PageDown), _) => Move::NextDay,
         (Key::Named(Named::Escape), _) => return Some(close(app)),
-        (Key::Named(Named::Enter), _) => return Some(open_viewer(app, viewer_burst::Land::Frame)),
+        (Key::Named(Named::Enter), _) => return Some(open_viewer(app, enter_land(app))),
         (Key::Named(Named::Delete), _) | (_, Some("p")) => return Some(toggle_flag(app, true)),
         (_, Some("m")) => return Some(toggle_flag(app, false)),
         (_, Some("u")) => {
@@ -353,7 +366,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Option<Tas
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Widget(QuickLookEvent::Close) => close(app),
-        Msg::Widget(QuickLookEvent::Activate) => open_viewer(app, viewer_burst::Land::Frame),
+        Msg::Widget(QuickLookEvent::Activate) => open_viewer(app, enter_land(app)),
         Msg::Widget(QuickLookEvent::Viewport(size)) => {
             // (The grid isn't scrolled to the photo yet: it would shift under
             // the fading backdrop.  Stepping and closing do that.)
