@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+<!-- Photo Pipeline app icon, drawn on a 64-unit grid.  The 16 and 22 px PNGs come from their own pixel-fitted drawings in 16/ and 22/; the other sizes are this one rendered.  Colours: the app accent and Catppuccin Mocha (src/ui/theme.rs). -->
+<defs><linearGradient id="pbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cb95e8"/><stop offset="1" stop-color="#9a5ac2"/></linearGradient><mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="64" height="64"><rect width="64" height="64" fill="#fff"/><circle cx="48" cy="48" r="14.5" fill="#000"/></mask></defs>
+<g mask="url(#cut)"><rect x="4" y="4" width="56" height="56" rx="14" fill="url(#pbg)"/>
+<path d="M14.6 41.6 L25.7 29.9 L34.1 38.4 L39.4 33.1 L49.4 43.3 L49.4 46 L14.6 46 Z" fill="#11111b" fill-opacity="0.85" stroke="#11111b" stroke-opacity="0.85" stroke-width="3.5" stroke-linejoin="round"/>
+<rect x="13" y="17" width="38" height="30" rx="5" fill="none" stroke="#11111b" stroke-width="3.5"/>
+<circle cx="39.4" cy="25.4" r="3.6" fill="#11111b"/></g>
+<circle cx="48" cy="48" r="11.5" fill="#a6e3a1"/>
+<path d="M42.6 48.4 L46.4 52.2 L53.6 44.6" fill="none" stroke="#11111b" stroke-width="3.6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

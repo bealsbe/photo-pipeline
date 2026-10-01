@@ -92,9 +92,7 @@ pub fn open_settings(s: &Settings, monitor: Option<Size>) -> window::Settings {
         position,
         maximized: s.viewer_maximized,
         min_size: Some(MIN_SIZE),
-        exit_on_close_request: false,
-        icon: crate::ui::icons::window_icon(),
-        ..window::Settings::default()
+        ..super::window_settings()
     }
 }
 

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 22 22">
+<!-- The 22 px app icon: the scalable icon redrawn on the pixel grid. -->
+<defs><linearGradient id="pbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cb95e8"/><stop offset="1" stop-color="#9a5ac2"/></linearGradient><mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="22" height="22"><rect width="22" height="22" fill="#fff"/><circle cx="16.5" cy="16.5" r="6" fill="#000"/></mask></defs>
+<g mask="url(#cut)"><rect x="1" y="1" width="20" height="20" rx="5" fill="url(#pbg)"/>
+<rect x="4.5" y="5.5" width="13" height="11" rx="2" fill="none" stroke="#11111b" stroke-width="1.5"/>
+<path d="M5 16 L9 11.5 L12 14.5 L13.5 13 L17 16.5 L5 16.5 Z" fill="#11111b" stroke="#11111b" stroke-width="1" stroke-linejoin="round"/>
+<circle cx="13.5" cy="9" r="1.4" fill="#11111b"/></g>
+<circle cx="16.5" cy="16.5" r="4.8" fill="#a6e3a1"/>
+<path d="M14.4 16.6 L15.9 18.1 L18.7 15.1" fill="none" stroke="#11111b" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

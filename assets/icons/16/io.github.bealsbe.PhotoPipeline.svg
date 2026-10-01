@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16">
+<!-- The 16 px app icon: the scalable icon redrawn on the pixel grid, with the frame dropped so the photo still reads. -->
+<defs><linearGradient id="pbg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#cb95e8"/><stop offset="1" stop-color="#9a5ac2"/></linearGradient><mask id="cut" maskUnits="userSpaceOnUse" x="0" y="0" width="16" height="16"><rect width="16" height="16" fill="#fff"/><circle cx="12" cy="12" r="4.6" fill="#000"/></mask></defs>
+<g mask="url(#cut)"><rect x="0.5" y="0.5" width="15.0" height="15.0" rx="3.5" fill="url(#pbg)"/>
+<path d="M2 13.5 L5.5 8.5 L8.5 11.5 L10 10 L13 13.5 Z" fill="#11111b" stroke="#11111b" stroke-width="1" stroke-linejoin="round"/>
+<circle cx="10" cy="5" r="1.5" fill="#11111b"/></g>
+<circle cx="12" cy="12" r="3.6" fill="#a6e3a1"/>
+<path d="M10.4 12.1 L11.5 13.2 L13.6 10.9" fill="none" stroke="#11111b" stroke-width="1.1" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -227,6 +227,16 @@ pub fn on_export_done(app: &mut App, report: Arc<ExportReport>) -> Task<Message>
 
 // ── edit copy ───────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EcGoAction {
+    None,
+    /// No destination yet: ask for one.
+    ChooseFolder,
+    Copy,
+    /// Copied, or everything was already there.
+    OpenFolder,
+}
+
 pub struct EditCopy {
     sel: MarkedRaws,
     working: Option<PathBuf>,
@@ -240,10 +250,25 @@ pub struct EditCopy {
 }
 
 impl EditCopy {
-    /// The primary button (Copy / Open Folder) is clickable.
+    /// What the primary button does.
+    fn go(&self) -> EcGoAction {
+        let plan = self.plan.as_ref();
+        if self.running.is_some() {
+            EcGoAction::None
+        } else if self.done.is_some() || plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0) {
+            EcGoAction::OpenFolder
+        } else if self.base.is_none() && !self.sel.raws.is_empty() {
+            EcGoAction::ChooseFolder
+        } else if plan.is_some_and(|p| p.to_copy_count() > 0) {
+            EcGoAction::Copy
+        } else {
+            EcGoAction::None
+        }
+    }
+
+    /// The primary button (Copy / Choose folder / Open folder) is clickable.
     fn go_enabled(&self) -> bool {
-        let n = self.plan.as_ref().map(|p| p.to_copy_count()).unwrap_or(0);
-        self.done.is_some() || (n > 0 && self.running.is_none())
+        self.go() != EcGoAction::None
     }
 
     fn dest_dir(&self) -> Option<PathBuf> {
@@ -263,7 +288,7 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
     if sel.raws.is_empty() && sel.jpg_only.is_empty() {
         return info(
             app,
-            "Nothing Marked",
+            "Nothing marked",
             "No shots are marked.\n\nSelect photos and press M (or Keep in the viewer) to mark the ones you want to edit.",
         );
     }
@@ -609,31 +634,39 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     app.modal = Some(Modal { kind: Kind::EditCopy(ec), confirm });
                     return app.pick_folder(FolderTarget::EditCopy);
                 }
-                Msg::EcGo => {
-                    if ec.done.is_some() {
+                Msg::EcGo => match ec.go() {
+                    EcGoAction::None => {}
+                    EcGoAction::OpenFolder => {
                         if let Some(d) = ec.dest_dir() {
                             open_folder(&d);
                         }
-                    } else if let Some(dest) = ec.dest_dir() {
-                        // Re-plan: the folder may have changed while the dialog sat open.
-                        let plan = EditCopyPlan::new(&ec.sel.raws, &app.coll, &dest);
-                        if plan.to_copy_count() > 0 {
-                            ec.running = Some((0, plan.to_copy_count(), 0, plan.total_bytes()));
-                            ec.cancel = Arc::new(AtomicBool::new(false));
-                            let cancel = ec.cancel.clone();
-                            let run_plan = plan.clone();
-                            let bus = bus.clone();
-                            std::thread::spawn(move || {
-                                let pbus = bus.clone();
-                                let report = run_plan.execute(&cancel, &move |f, ft, b, bt| {
-                                    let _ = pbus.unbounded_send(BgEvent::CopyProgress { files: f, files_total: ft, bytes: b, bytes_total: bt });
-                                });
-                                let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
-                            });
-                        }
-                        ec.plan = Some(plan);
                     }
-                }
+                    EcGoAction::ChooseFolder => {
+                        app.modal = Some(Modal { kind: Kind::EditCopy(ec), confirm });
+                        return app.pick_folder(FolderTarget::EditCopy);
+                    }
+                    EcGoAction::Copy => {
+                        if let Some(dest) = ec.dest_dir() {
+                            // Re-plan: the folder may have changed while the dialog sat open.
+                            let plan = EditCopyPlan::new(&ec.sel.raws, &app.coll, &dest);
+                            if plan.to_copy_count() > 0 {
+                                ec.running = Some((0, plan.to_copy_count(), 0, plan.total_bytes()));
+                                ec.cancel = Arc::new(AtomicBool::new(false));
+                                let cancel = ec.cancel.clone();
+                                let run_plan = plan.clone();
+                                let bus = bus.clone();
+                                std::thread::spawn(move || {
+                                    let pbus = bus.clone();
+                                    let report = run_plan.execute(&cancel, &move |f, ft, b, bt| {
+                                        let _ = pbus.unbounded_send(BgEvent::CopyProgress { files: f, files_total: ft, bytes: b, bytes_total: bt });
+                                    });
+                                    let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
+                                });
+                            }
+                            ec.plan = Some(plan);
+                        }
+                    }
+                },
                 Msg::EcStop => {
                     ec.cancel.store(true, Ordering::Relaxed);
                     ec.stopping = true;
@@ -754,7 +787,8 @@ pub fn on_key(app: &mut App, key: &Key, _mods: keyboard::Modifiers) -> Task<Mess
         Key::Named(Named::Enter) if has_confirm => update(app, Msg::ConfirmOk),
         Key::Named(Named::Enter) => match &app.modal {
             Some(Modal { kind: Kind::Info { .. }, .. }) => update(app, Msg::Close),
-            // The only default button in the Python dialogs: Copy / Open Folder.
+            // The only default button in the Python dialogs: Copy (or Choose
+            // folder / Open folder).
             Some(Modal { kind: Kind::EditCopy(ec), .. }) if ec.go_enabled() => update(app, Msg::EcGo),
             _ => Task::none(),
         },
@@ -1177,8 +1211,8 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     let dest = ec.dest_dir();
     let card = group_box(
         column![
-            path_row(Glyph::Folder, "From", ec.working.as_ref(), None),
-            path_row(Glyph::Folder, "To", dest.as_ref(), (!locked).then_some(Msg::EcChange)),
+            path_row(Glyph::Folder, "Working folder", ec.working.as_ref(), None),
+            path_row(Glyph::Folder, "Copy to", dest.as_ref(), (!locked).then_some(Msg::EcChange)),
             container(
                 checkbox(ec.subfolder)
                     .label(format!("Put them in a subfolder named “{shoot}”"))
@@ -1193,50 +1227,86 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         .into(),
     );
 
+    // What will happen (once copied: what did)
     let sel = &ec.sel;
+    let marked_raws = || sel.raws.iter().filter_map(|&i| app.coll.get(i));
+    let (n, bytes) = match &ec.plan {
+        Some(plan) => (plan.to_copy_count(), plan.total_bytes()),
+        None => (sel.raws.len(), marked_raws().map(|r| r.file_size).sum()),
+    };
+    let (renamed, cropped) = match (&ec.done, &ec.plan) {
+        (Some(report), _) => (report.copied.iter().filter(|o| o.renamed()).count(), report.copied.iter().filter(|o| o.is_cropped()).count()),
+        (None, Some(plan)) => (plan.renamed_count(), plan.cropped_count()),
+        (None, None) => (0, marked_raws().filter(|r| r.is_cropped()).count()),
+    };
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
-    match &ec.plan {
-        Some(plan) => {
-            let n = plan.to_copy_count();
-            chips = chips.push(chip(format!("{}, {}", plural(n as u64, "RAW file"), util::fmt_bytes(plan.total_bytes())), t::RAW));
-            if plan.existing_count() > 0 {
-                chips = chips.push(chip(format!("{} already in the folder", plan.existing_count()), t::INK2));
-            }
-            if plan.renamed_count() > 0 {
-                chips = chips.push(chip(format!("{} renamed", plan.renamed_count()), t::WARN));
-            }
-            if plan.cropped_count() > 0 {
-                chips = chips.push(chip(format!("✂ {} cropped", plan.cropped_count()), t::SIGNAL));
-            }
-        }
-        None => chips = chips.push(chip(plural(sel.raws.len() as u64, "RAW file"), t::RAW)),
+    chips = chips.push(if let Some(report) = &ec.done {
+        let copied: u64 = report.copied.iter().map(|o| o.file_size).sum();
+        chip(format!("{} copied, {}", plural(report.copied.len() as u64, "RAW file"), util::fmt_bytes(copied)), t::RAW)
+    } else if n > 0 {
+        chip(format!("{} to copy, {}", plural(n as u64, "RAW file"), util::fmt_bytes(bytes)), t::RAW)
+    } else {
+        chip("Nothing to copy".into(), t::INK2)
+    });
+    if let Some(k) = ec.plan.as_ref().map(|p| p.existing_count()).filter(|&k| k > 0) {
+        chips = chips.push(chip(format!("{k} already in the folder"), t::INK2));
     }
-    if sel.matched_by_name > 0 {
-        chips = chips.push(chip(format!("{} matched by name", sel.matched_by_name), t::INK2));
-    }
-    if !sel.jpg_only.is_empty() {
-        let names: Vec<String> = sel.jpg_only.iter().take(12).filter_map(|&i| app.coll.get(i)).map(|r| r.filename()).collect();
-        let more = if sel.jpg_only.len() > 12 { format!(" and {} more", sel.jpg_only.len() - 12) } else { String::new() };
+    if renamed > 0 {
         chips = chips.push(kit::tip(
-            chip(format!("⚠ {} with no RAW", plural(sel.jpg_only.len() as u64, "JPG")), t::WARN),
-            format!("Marked, but there is no RAW to copy for:\n{}{more}", names.join(", ")),
+            chip(format!("{renamed} renamed"), t::WARN),
+            "Other files in the folder have these names, so the copies get a number added. Nothing is overwritten.",
             false,
         ));
     }
+    if cropped > 0 {
+        chips = chips.push(kit::tip(
+            chip(format!("✂ {cropped} cropped"), t::SIGNAL),
+            "Cropped RAWs are copied untouched, with an .xmp sidecar holding the crop for Lightroom and Camera Raw.",
+            false,
+        ));
+    }
+    if sel.matched_by_name > 0 {
+        chips = chips.push(kit::tip(
+            chip(format!("{} matched by name", sel.matched_by_name), t::INK2),
+            "Marked JPGs whose RAW was found by its name, in the same folder.",
+            false,
+        ));
+    }
+    if !sel.jpg_only.is_empty() {
+        chips = chips.push(chip(format!("⚠ {} with no RAW", plural(sel.jpg_only.len() as u64, "JPG")), t::WARN));
+    }
     if sel.pruned > 0 {
-        chips = chips.push(chip(format!("{} pruned, skipped", sel.pruned), t::REJECT));
+        chips = chips.push(kit::tip(
+            chip(format!("{} pruned, skipped", sel.pruned), t::REJECT),
+            "Shots that are both marked and pruned are left out.",
+            false,
+        ));
     }
 
-    let item = |name: String, note: Option<(String, Color)>, cropped: bool, dim: bool| -> Element<'a, Message> {
+    // The files, in groups: what will be (or was) copied, what's already
+    // there, and marked JPGs with no RAW.
+    let file_row = |name: String, cropped: bool, note: Option<(String, Color)>, size: u64, dim: bool| -> Element<'a, Message> {
         let mut r = row![text(name).size(t::T_BODY).color(if dim { t::INK3 } else { t::INK })].spacing(t::S2).align_y(Alignment::Center);
         if cropped {
             r = r.push(icons::view(Glyph::Scissors, 14.0, t::SIGNAL));
         }
-        if let Some((n, tone)) = note {
-            r = r.push(text(n).size(t::T_SMALL).color(tone));
+        if let Some((note, tone)) = note {
+            r = r.push(text(note).size(t::T_SMALL).color(tone));
         }
-        container(r).padding(Padding::from([5.0, t::S3])).into()
+        r = r.push(Space::new().width(Length::Fill));
+        r = r.push(
+            text(util::fmt_size(size))
+                .size(t::T_SMALL)
+                .color(if dim { t::INK3 } else { t::INK2 })
+                .width(70)
+                .align_x(iced::alignment::Horizontal::Right),
+        );
+        container(r).padding(Padding::from([4.0, t::S3])).width(Length::Fill).into()
     };
+    let group = |label: &str, n: usize| -> Element<'a, Message> {
+        container(kit::heading(format!("{label} ({n})"))).padding(Padding { top: t::S2, bottom: t::S1, left: t::S3, right: t::S3 }).into()
+    };
+    let renamed_note = |op: &edit_copy::CopyOp| op.renamed().then(|| (format!("saved as {} (the name is taken)", util::file_name(&op.dest)), t::WARN));
     let mut list = column![].spacing(0);
     if let Some(report) = &ec.done {
         let tone = if !report.failed.is_empty() || report.cancelled { t::WARN } else { t::KEEP };
@@ -1259,32 +1329,69 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             )
             .padding(t::S3),
         );
-        for (op, err) in report.failed.iter().take(50) {
-            list = list.push(item(op.filename.clone(), Some((err.clone(), t::REJECT)), false, false));
+        if !report.failed.is_empty() {
+            list = list.push(group("Couldn't copy", report.failed.len()));
+            for (op, err) in report.failed.iter().take(50) {
+                list = list.push(file_row(op.filename.clone(), false, Some((err.clone(), t::REJECT)), op.file_size, false));
+            }
+            if report.failed.len() > 50 {
+                list = list.push(container(kit::caption(format!("and {} more", report.failed.len() - 50))).padding(Padding::from([4.0, t::S3])));
+            }
         }
-    } else if sel.raws.is_empty() {
-        list = list.push(container(kit::secondary("No RAW files are marked. Mark shots with M in the grid or the viewer first.")).padding(t::S3));
-    } else if let Some(plan) = &ec.plan {
-        for op in &plan.ops {
-            let note = if op.exists {
-                Some(("already in the folder".to_string(), t::INK3))
-            } else if op.renamed() {
-                Some((format!("saved as {} (the name is taken)", util::file_name(&op.dest)), t::WARN))
-            } else {
-                None
-            };
-            list = list.push(item(op.filename.clone(), note, op.is_cropped() && !op.exists, op.exists));
+        if !report.copied.is_empty() {
+            list = list.push(group("Copied", report.copied.len()));
+            for op in &report.copied {
+                list = list.push(file_row(op.filename.clone(), op.is_cropped(), renamed_note(op), op.file_size, false));
+            }
+        }
+        // Stopped part-way: what the copy never reached.
+        if report.cancelled {
+            let reached: HashSet<RecordId> = report.copied.iter().chain(report.failed.iter().map(|(op, _)| op)).map(|op| op.id).collect();
+            let left: Vec<_> = ec.plan.iter().flat_map(|p| p.to_copy()).filter(|op| !reached.contains(&op.id)).collect();
+            if !left.is_empty() {
+                list = list.push(group("Not copied", left.len()));
+                for op in left {
+                    list = list.push(file_row(op.filename.clone(), false, None, op.file_size, true));
+                }
+            }
         }
     } else {
-        let mut raws: Vec<_> = sel.raws.iter().filter_map(|&i| app.coll.get(i)).collect();
-        raws.sort_by(|a, b| a.shot_time().cmp(&b.shot_time()).then_with(|| a.name_lower.cmp(&b.name_lower)));
-        for r in raws {
-            list = list.push(item(r.filename(), None, false, false));
+        if sel.raws.is_empty() {
+            list = list.push(container(kit::secondary("No RAW files are marked. Mark shots with M in the grid or the viewer first.")).padding(t::S3));
+        } else if let Some(plan) = &ec.plan {
+            let (have, new): (Vec<_>, Vec<_>) = plan.ops.iter().partition(|op| op.exists);
+            if !new.is_empty() {
+                list = list.push(group("To copy", new.len()));
+                for op in new {
+                    list = list.push(file_row(op.filename.clone(), op.is_cropped(), renamed_note(op), op.file_size, false));
+                }
+            }
+            if !have.is_empty() {
+                list = list.push(group("Already in the folder", have.len()));
+                for op in have {
+                    list = list.push(file_row(op.filename.clone(), false, None, op.file_size, true));
+                }
+            }
+        } else {
+            let mut raws: Vec<_> = marked_raws().collect();
+            raws.sort_by(|a, b| a.shot_time().cmp(&b.shot_time()).then_with(|| a.name_lower.cmp(&b.name_lower)));
+            list = list.push(group("To copy", raws.len()));
+            for r in raws {
+                list = list.push(file_row(r.filename(), r.is_cropped(), None, r.file_size, false));
+            }
+        }
+        if !sel.jpg_only.is_empty() {
+            let mut jpgs: Vec<_> = sel.jpg_only.iter().filter_map(|&i| app.coll.get(i)).collect();
+            jpgs.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
+            list = list.push(group("Marked, but no RAW to copy", jpgs.len()));
+            for r in jpgs {
+                list = list.push(file_row(r.filename(), false, None, r.file_size, true));
+            }
         }
     }
 
     let mut col = column![
-        header("Copy marked RAWs for editing", Some("The RAW of every marked shot goes into one folder, ready to open in your editor. JPGs stay behind and the originals are not touched.".into())),
+        header("Copy marked RAWs for editing", Some("The RAW of each marked shot is copied into one folder to edit from. The originals stay put.".into())),
         card,
         chips,
         list_box(list.into()),
@@ -1303,23 +1410,27 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
                 .spacing(t::S1),
         );
     }
-    let n = ec.plan.as_ref().map(|p| p.to_copy_count()).unwrap_or(0);
-    let go_label = if ec.done.is_some() {
-        "Open folder".to_string()
-    } else if ec.plan.is_none() {
-        "Copy".into()
-    } else if n == 0 && ec.plan.as_ref().is_some_and(|p| p.existing_count() > 0) {
-        "Everything is already copied".into()
-    } else {
-        format!("Copy {}", plural(n as u64, "RAW file"))
+    let go = ec.go();
+    let go_label = match go {
+        _ if running => "Copying…".to_string(),
+        EcGoAction::OpenFolder => "Open folder".into(),
+        EcGoAction::ChooseFolder => "Choose folder…".into(),
+        EcGoAction::Copy => format!("Copy {}", plural(n as u64, "RAW file")),
+        EcGoAction::None => "Copy".into(),
     };
-    let go_enabled = ec.go_enabled();
-    let cancel_label = if ec.done.is_some() { "Close" } else if running { "Stop" } else { "Cancel" };
+    // Nothing left to do: there is nothing to cancel either.
+    let cancel_label = if running {
+        "Stop"
+    } else if ec.done.is_some() || go == EcGoAction::OpenFolder {
+        "Close"
+    } else {
+        "Cancel"
+    };
     col = col.push(footer(
         vec![],
         vec![
             kit::btn(cancel_label, style::secondary(), (!ec.stopping).then(|| d(if running { Msg::EcStop } else { Msg::Close }))).into(),
-            kit::btn(go_label, style::primary(), go_enabled.then(|| d(Msg::EcGo))).into(),
+            kit::btn(go_label, style::primary(), (go != EcGoAction::None).then(|| d(Msg::EcGo))).into(),
         ],
     ));
     frame(col.into(), 700f32.min(w), 640f32.min(h))

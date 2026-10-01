@@ -46,6 +46,24 @@ const ZOOM_STEP: f32 = 20.0;
 const MAIN_CACHE_BYTES: usize = 192 * 1024 * 1024;
 const CALENDAR_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
+/// The Wayland app id and X11 window class.  It names the desktop entry
+/// `install.sh` installs (`assets/<APP_ID>.desktop.in`): KWin and the Plasma
+/// taskbar find the app's icon through it, and show the generic Wayland logo
+/// when nothing matches.
+pub const APP_ID: &str = "io.github.bealsbe.PhotoPipeline";
+
+/// What every window shares: the app id and icon, and close requests routed
+/// through `update`.
+pub fn window_settings() -> window::Settings {
+    window::Settings {
+        icon: crate::ui::icons::window_icon(),
+        exit_on_close_request: false,
+        #[cfg(target_os = "linux")]
+        platform_specific: window::settings::PlatformSpecific { application_id: APP_ID.into(), ..Default::default() },
+        ..window::Settings::default()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
     List,
@@ -402,9 +420,7 @@ impl App {
             position,
             maximized: settings.window_maximized,
             min_size: Some(Size::new(640.0, 420.0)),
-            icon: crate::ui::icons::window_icon(),
-            exit_on_close_request: false,
-            ..window::Settings::default()
+            ..window_settings()
         });
 
         let mut app = App {
@@ -1530,9 +1546,7 @@ impl App {
             size: Size::new(520.0, 820.0),
             position: window::Position::Centered,
             min_size: Some(Size::new(480.0, 400.0)),
-            exit_on_close_request: false,
-            icon: crate::ui::icons::window_icon(),
-            ..window::Settings::default()
+            ..window_settings()
         });
         self.shortcuts = Some(id);
         open.map(Message::WindowOpened)

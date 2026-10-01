@@ -1,0 +1,18 @@
+# install.sh fills in @EXEC@ and installs this as
+# ~/.local/share/applications/io.github.bealsbe.PhotoPipeline.desktop.
+# The file name, Icon and StartupWMClass must match APP_ID in src/app/mod.rs:
+# KWin and the Plasma taskbar find the app's icon through it.
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Photo Pipeline
+GenericName=Photo Culler
+Comment=Cull and organise RAW+JPG photo shoots
+Exec=@EXEC@
+Icon=io.github.bealsbe.PhotoPipeline
+Terminal=false
+Categories=Graphics;Photography;
+Keywords=photo;raw;jpg;cull;prune;culling;library;
+StartupNotify=true
+StartupWMClass=io.github.bealsbe.PhotoPipeline
+SingleMainWindow=true

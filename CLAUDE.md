@@ -38,6 +38,10 @@ cargo test --release  # unit tests; must pass with zero warnings
   `PHOTO_*` greys around photos (never tint those).  Sentence-case copy, plain
   verbs, no ALL-CAPS labels.  Shared view pieces in `src/app/kit.rs` and
   `style.rs`; icons are drawn in code (`src/ui/icons.rs`).
+- **Windows** open with `app::window_settings()`: it carries the Wayland app
+  id (`app::APP_ID`, which must match `assets/<id>.desktop.in` and
+  `install.sh`) and the icon.  A window without it shows the generic
+  Wayland logo.
 - **iced quirks:** within a layer, images draw above quads — overlays on
   images need `renderer.with_layer`; nested layers aren't clipped by parents.
 

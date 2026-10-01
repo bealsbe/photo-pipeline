@@ -102,11 +102,13 @@ pub fn view<'a, M: 'a>(glyph: Glyph, px: f32, color: Color) -> Element<'a, M> {
         .into()
 }
 
-/// The window icon: an aperture in the accent colour.
+/// The window icon: the app icon `install.sh` installs, at 64 px.  Only X11
+/// uses it.  On Wayland a window can't carry its own icon here; KWin and the
+/// taskbar find the installed one through the app id (`app::APP_ID`).
 pub fn window_icon() -> Option<iced::window::Icon> {
-    let size = 64;
-    let px = render(Glyph::Photos, size, super::theme::SIGNAL.into_rgba8());
-    iced::window::icon::from_rgba(px, size, size).ok()
+    const PNG: &[u8] = include_bytes!("../../assets/icons/64/io.github.bealsbe.PhotoPipeline.png");
+    let px = crate::imaging::decode::decode_png(PNG).filter(|p| p.channels == 4)?;
+    iced::window::icon::from_rgba(px.data, px.width, px.height).ok()
 }
 
 // ── drawing ─────────────────────────────────────────────────────────────────
@@ -512,6 +514,30 @@ mod tests {
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");
+        }
+    }
+
+    #[test]
+    fn window_icon_is_the_bundled_app_icon() {
+        assert!(window_icon().is_some());
+    }
+
+    /// The windows, `install.sh` and the desktop entry agree on the app id,
+    /// and every icon size `install.sh` installs is there.
+    #[test]
+    fn app_id_matches_install_and_desktop_entry() {
+        use crate::app::APP_ID;
+        let install = include_str!("../../install.sh");
+        assert!(install.contains(&format!("\napp_id={APP_ID}\n")), "install.sh app_id");
+        let entry = include_str!("../../assets/io.github.bealsbe.PhotoPipeline.desktop.in");
+        for key in ["Icon", "StartupWMClass"] {
+            assert!(entry.contains(&format!("\n{key}={APP_ID}\n")), "desktop entry {key}");
+        }
+        let sizes = install.lines().find_map(|l| l.strip_prefix("sizes=(")).and_then(|l| l.strip_suffix(')')).expect("sizes");
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
+        assert!(root.join(format!("{APP_ID}.svg")).is_file());
+        for s in sizes.split_whitespace() {
+            assert!(root.join(s).join(format!("{APP_ID}.png")).is_file(), "{s} px icon");
         }
     }
 }

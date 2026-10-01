@@ -189,9 +189,7 @@ pub fn open(app: &mut App) -> Task<Message> {
         size: Size::new(700.0, 840.0),
         position: window::Position::Centered,
         min_size: Some(Size::new(540.0, 420.0)),
-        exit_on_close_request: false,
-        icon: icons::window_icon(),
-        ..window::Settings::default()
+        ..super::window_settings()
     });
     let p = &mut app.prefs;
     p.window = Some(id);

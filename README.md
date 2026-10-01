@@ -15,6 +15,7 @@ RAW+JPG pairing is automatic, and it adds culling tools of its own (see
 ./build.sh --test    # …then run the unit tests
 ./run.sh             # start the app (builds first if needed)
 ./run.sh --rebuild   # rebuild after source changes, then start
+./install.sh         # once: add the launcher and app icon to the desktop
 ```
 
 You need Rust 1.85 or newer, gcc/g++, pkg-config, zlib and libjpeg-turbo
@@ -22,6 +23,16 @@ headers, and libgomp.  On Fedora that means `rust cargo gcc-c++ pkgconf-pkg-conf
 zlib-ng-compat-devel libjpeg-turbo-devel`.  `build.sh` checks for them and
 says what's missing.  The first build compiles the vendored LibRaw and takes a
 few minutes.
+
+Run `./install.sh` once to add the app to your desktop: a launcher entry and
+the app icon, so the taskbar, title bars and Alt+Tab show it instead of the
+generic Wayland logo.  It installs for your user only, under `~/.local/share`,
+and needs no root.  The entry starts `run.sh` from this folder, so rebuilds
+are picked up; run `install.sh` again if you move the folder, and
+`./install.sh --uninstall` removes it.  On Wayland a window can't carry its
+own icon: KWin and the taskbar look it up through the window's app id,
+`io.github.bealsbe.PhotoPipeline`, which names the installed entry.  (KWin
+window rules that matched the app before need the new id.)
 
 ## Shared with the Python app
 
@@ -69,6 +80,8 @@ src/exif.rs            container metadata without decoding pixels
 native/                C shims over LibRaw and libjpeg-turbo
 vendor/LibRaw          LibRaw 0.22.2, the version rawpy uses
 assets/fonts           Barlow, with tabular figures built in (see its README)
+assets/icons           the app icon (SVG, and PNGs from 16 to 256 px)
+assets/*.desktop.in    the desktop entry install.sh fills in and installs
 ```
 
 ## Look
@@ -96,7 +109,9 @@ The type is Barlow, a DIN-like face in the spirit of the lettering on lenses
 and camera dials.  It's bundled, so the app looks the same on any machine.
 Spacing follows one 4 px scale, and all colours, sizes, radii and timings come
 from `src/ui/theme.rs`.  The icons are drawn in code (`src/ui/icons.rs`) with
-one stroke weight, each named for what it does.
+one stroke weight, each named for what it does.  The app icon is a photo on
+a purple tile with a green keep check (`assets/icons`); the 16 and 22 px
+sizes are redrawn on the pixel grid rather than scaled down.
 
 ## KDE global menu
 
