@@ -1,0 +1,60 @@
+[package]
+name = "photo-pipeline"
+version = "0.1.0"
+edition = "2024"
+description = "Keyboard-driven RAW+JPG culling and library organisation (Rust / iced port)"
+license = "MIT"
+build = "build.rs"
+
+[dependencies]
+iced = { version = "0.14", features = ["image", "canvas", "advanced", "tokio", "wgpu"] }
+chrono = "0.4"
+crossbeam-channel = "0.5"
+dirs = "7"
+fast_image_resize = "6.1"
+filetime = "0.2"
+jpeg-encoder = { version = "0.7", features = ["simd"] }
+kamadak-exif = "0.6"
+md-5 = "0.11"
+parking_lot = "0.12"
+png = "0.18"
+quick-xml = "0.42"
+rayon = "1.12"
+rfd = "0.17"
+rustix = { version = "1", features = ["fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+tiny-skia = "0.11"
+trash = "5.2"
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "time"] }
+# KDE global menu: dbusmenu over the session bus, and KWin's appmenu
+# protocol on the window's own Wayland connection.  All three are already
+# in the tree through iced/winit.
+zbus = "5"
+wayland-client = "0.31"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+# In-process CPU sampling for performance work: `--features profiler`, then
+# run with PP_PROFILE_OUT=<file> (see src/profile.rs).  Not in normal builds.
+pprof = { version = "0.15", optional = true }
+
+[features]
+profiler = ["dep:pprof"]
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }
+pkg-config = "0.3"
+
+[profile.dev]
+opt-level = 1
+
+# Image decoding and resizing are unusable unoptimised; keep dependencies fast
+# even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+debug = "line-tables-only"

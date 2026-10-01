@@ -1,0 +1,116 @@
+//! Shared building blocks for the views: text roles, buttons, tooltips and
+//! rules, all on the design tokens.
+
+use iced::widget::{Button, Space, Text, button, container, row, text, tooltip};
+use iced::{Alignment, Color, Element, Length, Padding};
+
+use super::Message;
+use super::style::{self, Look};
+use crate::ui::icons::{self, Glyph};
+use crate::ui::paint;
+use crate::ui::theme as t;
+
+// ── text ────────────────────────────────────────────────────────────────────
+
+pub fn secondary<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(s).size(t::T_BODY).color(t::INK2)
+}
+
+pub fn caption<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(s).size(t::T_SMALL).color(t::INK3)
+}
+
+pub fn title<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(s).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK)
+}
+
+/// A group heading inside a panel or dialog.
+pub fn heading<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(s).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::INK2)
+}
+
+// ── rules ───────────────────────────────────────────────────────────────────
+
+pub fn hairline<'a>() -> Element<'a, Message> {
+    container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::LINE)).into()
+}
+
+pub fn vrule<'a>(height: f32) -> Element<'a, Message> {
+    container(Space::new().width(1).height(height)).style(style::fill(t::LINE)).into()
+}
+
+// ── tooltips ────────────────────────────────────────────────────────────────
+
+pub fn tip<'a>(content: impl Into<Element<'a, Message>>, label: impl Into<String>, below: bool) -> Element<'a, Message> {
+    let bubble = container(text(label.into()).size(t::T_SMALL).color(t::INK)).padding(Padding::from([5.0, 8.0])).style(style::tip);
+    let pos = if below { tooltip::Position::Bottom } else { tooltip::Position::Top };
+    tooltip(content, bubble, pos).gap(4).into()
+}
+
+// ── buttons ─────────────────────────────────────────────────────────────────
+
+/// A text button of standard height.
+pub fn btn<'a>(label: impl Into<String>, look: Look, on: Option<Message>) -> Button<'a, Message> {
+    button(container(text(label.into()).size(t::T_BODY).font(paint::MEDIUM)).center_y(Length::Fill))
+        .height(t::CONTROL_H)
+        .padding(Padding::from([0.0, t::S4]))
+        .style(look.style())
+        .on_press_maybe(on)
+}
+
+/// A square icon-only button.
+pub fn icon_btn<'a>(glyph: Glyph, color: Color, look: Look, on: Option<Message>) -> Button<'a, Message> {
+    let c = if on.is_some() { color } else { t::INK4 };
+    button(container(icons::view(glyph, 16.0, c)).center(Length::Fill))
+        .width(t::CONTROL_H)
+        .height(t::CONTROL_H)
+        .padding(0)
+        .style(look.style())
+        .on_press_maybe(on)
+}
+
+/// Icon then label.
+pub fn icon_text_btn<'a>(glyph: Glyph, label: impl Into<String>, color: Color, look: Look, on: Option<Message>) -> Button<'a, Message> {
+    let c = if on.is_some() { color } else { t::INK4 };
+    let content = row![icons::view(glyph, 16.0, c), text(label.into()).size(t::T_BODY).font(paint::MEDIUM)]
+        .spacing(t::S2)
+        .align_y(Alignment::Center);
+    button(container(content).center_y(Length::Fill))
+        .height(t::CONTROL_H)
+        .padding(Padding::from([0.0, t::S3]))
+        .style(look.style())
+        .on_press_maybe(on)
+}
+
+/// Options of a segmented control, joined on one recessed track.
+pub fn segmented<'a>(items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    let mut r = row![].spacing(2).align_y(Alignment::Center);
+    for it in items {
+        r = r.push(it);
+    }
+    container(r).padding(2).style(style::group()).into()
+}
+
+/// One segment: text, optionally with a trailing icon.
+pub fn segment<'a>(label: impl Into<String>, active: bool, trailing: Option<Glyph>, on: Message) -> Element<'a, Message> {
+    segment_padded(label, active, trailing, on, t::S3)
+}
+
+/// A segment with tighter sides, for long rows of short options.
+pub fn segment_compact<'a>(label: impl Into<String>, active: bool, on: Message) -> Element<'a, Message> {
+    segment_padded(label, active, None, on, t::S2)
+}
+
+fn segment_padded<'a>(label: impl Into<String>, active: bool, trailing: Option<Glyph>, on: Message, pad: f32) -> Element<'a, Message> {
+    let fg = if active { t::INK } else { t::INK2 };
+    let mut content = row![text(label.into()).size(t::T_SMALL).font(paint::MEDIUM)].spacing(t::S1).align_y(Alignment::Center);
+    if let Some(g) = trailing {
+        content = content.push(icons::view(g, 12.0, fg));
+    }
+    button(container(content).center_y(Length::Fill))
+        .height(t::CONTROL_SM - 4.0)
+        .padding(Padding::from([0.0, pad]))
+        .style(style::segment(active).radius(3.0).style())
+        .on_press(on)
+        .into()
+}

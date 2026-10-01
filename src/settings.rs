@@ -1,0 +1,280 @@
+//! Persisted session state (the Python app's QSettings keys).
+//!
+//! Stored as JSON in the config directory.  On first run the Python app's
+//! `~/.config/PhotoPipeline/PhotoPipeline.conf` is imported, so the last
+//! working folder, library, filters and calendar position carry over.
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde::{Deserialize, Serialize};
+
+/// Serialises settings writes (see [`Settings::save_in_background`]).
+static SAVE_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+/// Bumped by every save; a background save writes only if still the newest.
+static SAVE_GEN: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub view_index: u32,
+    pub filter_pruned: bool,
+    pub filter_marked_only: bool,
+    /// Rust only: the "To review" filter.
+    pub filter_to_review: bool,
+    pub sort_key: String,
+    pub sort_asc: bool,
+    pub filter_date_from: String,
+    pub filter_date_to: String,
+    pub last_folder: String,
+    pub library_folder: String,
+    pub folder_bar_visible: bool,
+    pub folder_bar_collapsed: bool,
+    pub calendar_mode: String,
+    pub calendar_year: i32,
+    pub calendar_month: u32,
+    pub edit_copy_folder: String,
+    pub edit_copy_subfolder: bool,
+    pub window_width: f32,
+    pub window_height: f32,
+    pub window_x: Option<f32>,
+    pub window_y: Option<f32>,
+    pub window_maximized: bool,
+    pub thumb_size: u32,
+    /// File names under the grid's photos.
+    pub show_file_names: bool,
+    /// Viewer: a P / M key press that sets a mark moves on to the next photo.
+    pub viewer_advance: bool,
+    /// Viewer: the filmstrip along the bottom of the photo.
+    pub viewer_filmstrip: bool,
+    /// The viewer window's last un-maximised size (0 × 0: never resized, so
+    /// it opens at a share of the screen).
+    pub viewer_width: f32,
+    pub viewer_height: f32,
+    /// Its position, where the platform reports one (not on Wayland).
+    pub viewer_x: Option<f32>,
+    pub viewer_y: Option<f32>,
+    pub viewer_maximized: bool,
+    /// Show the menus in the KDE global menu when the panel has one.  Read
+    /// at start; `PP_NO_GLOBAL_MENU` in the environment overrides it.
+    pub global_menu: bool,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            view_index: 1,
+            filter_pruned: false,
+            filter_marked_only: false,
+            filter_to_review: false,
+            sort_key: "date".into(),
+            sort_asc: true,
+            filter_date_from: String::new(),
+            filter_date_to: String::new(),
+            last_folder: String::new(),
+            library_folder: String::new(),
+            folder_bar_visible: true,
+            folder_bar_collapsed: false,
+            calendar_mode: String::new(),
+            calendar_year: 0,
+            calendar_month: 0,
+            edit_copy_folder: String::new(),
+            edit_copy_subfolder: true,
+            window_width: 1200.0,
+            window_height: 780.0,
+            window_x: None,
+            window_y: None,
+            window_maximized: false,
+            thumb_size: 180,
+            show_file_names: true,
+            viewer_advance: false,
+            viewer_filmstrip: true,
+            viewer_width: 0.0,
+            viewer_height: 0.0,
+            viewer_x: None,
+            viewer_y: None,
+            viewer_maximized: false,
+            global_menu: true,
+        }
+    }
+}
+
+/// `PP_NO_GLOBAL_MENU` is set: the menus stay in the window whatever the
+/// setting says.
+pub fn global_menu_forced_off() -> bool {
+    std::env::var_os("PP_NO_GLOBAL_MENU").is_some()
+}
+
+/// Where the settings are kept.
+pub fn path() -> Option<PathBuf> {
+    Some(dirs::config_dir()?.join("photo-pipeline").join("settings.json"))
+}
+
+impl Settings {
+    pub fn load() -> Settings {
+        if let Some(p) = path() {
+            if let Ok(text) = fs::read_to_string(&p) {
+                if let Ok(s) = serde_json::from_str(&text) {
+                    return s;
+                }
+            }
+        }
+        Self::import_qsettings().unwrap_or_default()
+    }
+
+    /// Whether to offer the menus to the KDE global menu, given whether the
+    /// environment forces it off.
+    pub fn global_menu_wanted(&self, forced_off: bool) -> bool {
+        self.global_menu && !forced_off
+    }
+
+    pub fn save(&self) -> std::io::Result<()> {
+        // Supersedes any background save still waiting, and waits for one
+        // being written, so the two never interleave.
+        SAVE_GEN.fetch_add(1, Ordering::SeqCst);
+        let _writing = SAVE_LOCK.lock();
+        self.write()
+    }
+
+    /// Save on a background thread, so the UI thread never waits on the
+    /// disk.  Saves land in order; one overtaken by a newer save is skipped.
+    pub fn save_in_background(&self) {
+        let generation = SAVE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        let s = self.clone();
+        let spawned = std::thread::Builder::new().name("settings-save".into()).spawn(move || {
+            let _writing = SAVE_LOCK.lock();
+            if SAVE_GEN.load(Ordering::SeqCst) == generation {
+                if let Err(e) = s.write() {
+                    eprintln!("settings: could not save: {e}");
+                }
+            }
+        });
+        if spawned.is_err() {
+            let _ = self.save();
+        }
+    }
+
+    fn write(&self) -> std::io::Result<()> {
+        let Some(p) = path() else { return Ok(()) };
+        if let Some(dir) = p.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        let text = serde_json::to_string_pretty(self).unwrap_or_default();
+        crate::model::sidecar::atomic_write_text(&p, &text)
+    }
+
+    /// Read the Python app's QSettings INI, if there is one.
+    fn import_qsettings() -> Option<Settings> {
+        let p = dirs::config_dir()?.join("PhotoPipeline").join("PhotoPipeline.conf");
+        let text = fs::read_to_string(p).ok()?;
+        let mut s = Settings::default();
+        let mut section = String::from("General");
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') && line.ends_with(']') {
+                section = line[1..line.len() - 1].to_string();
+                continue;
+            }
+            let Some((k, v)) = line.split_once('=') else { continue };
+            let key = if section == "General" { k.trim().to_string() } else { format!("{section}/{}", k.trim()) };
+            let v = unquote(v.trim());
+            let b = v == "true";
+            match key.as_str() {
+                "view_index" => s.view_index = v.parse().unwrap_or(1),
+                "filter/pruned" => s.filter_pruned = b,
+                "filter/marked_only" => s.filter_marked_only = b,
+                "sort/key" => s.sort_key = v,
+                "sort/asc" => s.sort_asc = b,
+                "filter/date_from" => s.filter_date_from = v,
+                "filter/date_to" => s.filter_date_to = v,
+                "last_folder" => s.last_folder = v,
+                "library_folder" => s.library_folder = v,
+                "folder_bar_visible" => s.folder_bar_visible = b,
+                "folder_bar_collapsed" => s.folder_bar_collapsed = b,
+                "calendar/mode" => s.calendar_mode = v,
+                "calendar/year" => s.calendar_year = v.parse().unwrap_or(0),
+                "calendar/month" => s.calendar_month = v.parse().unwrap_or(0),
+                "edit_copy/folder" => s.edit_copy_folder = v,
+                "edit_copy/subfolder" => s.edit_copy_subfolder = b,
+                _ => {}
+            }
+        }
+        Some(s)
+    }
+}
+
+/// QSettings quotes values containing special characters and escapes
+/// backslashes; undo both.
+fn unquote(v: &str) -> String {
+    let v = v.strip_prefix('"').and_then(|x| x.strip_suffix('"')).unwrap_or(v);
+    let mut out = String::with_capacity(v.len());
+    let mut chars = v.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(o) => {
+                    out.push('\\');
+                    out.push(o);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_cover_every_preference() {
+        let s = Settings::default();
+        assert!(!s.viewer_advance);
+        assert!(s.show_file_names && s.viewer_filmstrip && s.edit_copy_subfolder && s.global_menu);
+        assert_eq!(s.thumb_size, 180);
+        assert!(s.library_folder.is_empty() && s.edit_copy_folder.is_empty());
+        // An older settings.json, written before the global-menu setting.
+        let old: Settings = serde_json::from_str(r#"{"show_file_names": false, "viewer_advance": true}"#).expect("parses");
+        assert!(old.global_menu);
+        assert!(!old.show_file_names && old.viewer_advance);
+    }
+
+    #[test]
+    fn preferences_round_trip_through_json() {
+        let s = Settings {
+            viewer_advance: true,
+            show_file_names: false,
+            thumb_size: 260,
+            viewer_filmstrip: false,
+            viewer_width: 0.0,
+            viewer_height: 0.0,
+            library_folder: "/mnt/library".into(),
+            edit_copy_folder: "/home/me/RAW edits".into(),
+            edit_copy_subfolder: false,
+            global_menu: false,
+            ..Settings::default()
+        };
+        let text = serde_json::to_string_pretty(&s).expect("serialises");
+        let back: Settings = serde_json::from_str(&text).expect("parses");
+        assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&s).unwrap());
+        assert!(text.contains("\"global_menu\": false"));
+    }
+
+    #[test]
+    fn the_environment_forces_the_global_menu_off() {
+        let on = Settings::default();
+        let off = Settings { global_menu: false, ..Settings::default() };
+        assert!(on.global_menu_wanted(false));
+        assert!(!on.global_menu_wanted(true), "PP_NO_GLOBAL_MENU wins over the setting");
+        assert!(!off.global_menu_wanted(false));
+        assert!(!off.global_menu_wanted(true));
+    }
+}

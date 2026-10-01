@@ -1,0 +1,157 @@
+//! One channel from every background worker to the UI.
+//!
+//! Workers (scanner, thumbnailers, the viewer loader, indexers, exports) send
+//! [`BgEvent`]s on an unbounded channel.  A single subscription drains it and
+//! delivers events to `update` in batches, so thousands of thumbnails arriving
+//! during a fast scroll cost a handful of UI updates, not one each.
+
+use std::fmt;
+use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chrono::NaiveDate;
+use iced::futures::channel::mpsc;
+use iced::futures::{Stream, StreamExt};
+use parking_lot::Mutex;
+
+use crate::exif_panel::Sections;
+use crate::imaging::loader::FullImage;
+use crate::imaging::thumbs::{OwnerId, Thumb};
+use crate::model::library_index::LibraryIndex;
+use crate::model::record::PhotoRecord;
+use crate::ops::edit_copy::CopyReport;
+use crate::ops::library::ExportReport;
+
+pub type Bus = mpsc::UnboundedSender<BgEvent>;
+
+#[derive(Clone)]
+pub enum BgEvent {
+    ScanBatch { scan: u64, records: Arc<Vec<PhotoRecord>> },
+    ScanProgress { scan: u64, count: usize },
+    ScanComplete { scan: u64, count: usize },
+    ScanError { scan: u64, message: String },
+
+    Thumb { owner: OwnerId, path: PathBuf, thumb: Arc<Thumb> },
+    Full { path: PathBuf, result: Result<Arc<FullImage>, String> },
+    /// The embedded preview shown while `Full` decodes (`None`: there is none).
+    Preview { path: PathBuf, image: Option<Arc<FullImage>> },
+
+    Exif { key: (PathBuf, Option<PathBuf>), sections: Sections },
+    ExifTool { path: PathBuf, flat: Vec<(String, String)> },
+
+    IndexProgress { job: u64, count: usize },
+    /// A library index.  `done` is false for the one built from the saved
+    /// tree while the job goes on to check the disk for changes.
+    IndexReady { job: u64, index: Arc<LibraryIndex>, done: bool },
+    /// The job finished without a new index: the one shown is current
+    /// (`checked`), or there was nothing saved to show yet.
+    IndexIdle { job: u64, checked: bool },
+    IndexError { job: u64, message: String },
+    /// A day's grid data for index generation `generation`.  `complete` is
+    /// false for a first delivery sent while capture times are still read.
+    DayRecords { date: NaiveDate, generation: u64, data: Arc<crate::app::calendar::DayData>, complete: bool },
+
+    ExportProgress { done: usize, total: usize },
+    ExportDone(Arc<ExportReport>),
+    CopyProgress { files: usize, files_total: usize, bytes: u64, bytes_total: u64 },
+    CopyDone(Arc<CopyReport>),
+
+    Trashed(Arc<crate::ops::trash::TrashResult>),
+    Sorted(Arc<SortResult>),
+    /// An undo or redo that ran on a worker finished.
+    Undo(Arc<crate::app::undo::Done>),
+    /// The desktop's global menu came or went.
+    GlobalMenu(bool),
+    /// A command chosen in the global menu.
+    MenuCommand(crate::app::commands::Cmd),
+    /// Sidecar saves started or stopped failing.
+    Saver(Arc<crate::model::saver::Report>),
+    /// Where a folder lives and whether it answered (`ops::netfs::probe`).
+    NetProbe { path: PathBuf, seq: u64, probe: Arc<crate::ops::netfs::Probe> },
+}
+
+/// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
+pub type SortResult = (
+    Vec<(crate::model::collection::RecordId, PathBuf)>,
+    Vec<(crate::model::collection::RecordId, String, String)>,
+);
+
+impl BgEvent {
+    pub fn name(&self) -> &'static str {
+        match self {
+            BgEvent::ScanBatch { .. } => "ScanBatch",
+            BgEvent::ScanProgress { .. } => "ScanProgress",
+            BgEvent::ScanComplete { .. } => "ScanComplete",
+            BgEvent::ScanError { .. } => "ScanError",
+            BgEvent::Thumb { .. } => "Thumb",
+            BgEvent::Full { .. } => "Full",
+            BgEvent::Preview { .. } => "Preview",
+            BgEvent::Exif { .. } => "Exif",
+            BgEvent::ExifTool { .. } => "ExifTool",
+            BgEvent::IndexProgress { .. } => "IndexProgress",
+            BgEvent::IndexReady { .. } => "IndexReady",
+            BgEvent::IndexIdle { .. } => "IndexIdle",
+            BgEvent::IndexError { .. } => "IndexError",
+            BgEvent::DayRecords { .. } => "DayRecords",
+            BgEvent::ExportProgress { .. } => "ExportProgress",
+            BgEvent::ExportDone(_) => "ExportDone",
+            BgEvent::CopyProgress { .. } => "CopyProgress",
+            BgEvent::CopyDone(_) => "CopyDone",
+            BgEvent::Trashed(_) => "Trashed",
+            BgEvent::Sorted(_) => "Sorted",
+            BgEvent::Undo(_) => "Undo",
+            BgEvent::GlobalMenu(_) => "GlobalMenu",
+            BgEvent::MenuCommand(_) => "MenuCommand",
+            BgEvent::Saver(_) => "Saver",
+            BgEvent::NetProbe { .. } => "NetProbe",
+        }
+    }
+}
+
+impl fmt::Debug for BgEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// The receiving end, handed to the subscription exactly once.
+#[derive(Clone)]
+pub struct Receiver(Arc<Mutex<Option<mpsc::UnboundedReceiver<BgEvent>>>>);
+
+impl Hash for Receiver {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        (Arc::as_ptr(&self.0) as usize).hash(state);
+    }
+}
+
+pub fn channel() -> (Bus, Receiver) {
+    let (tx, rx) = mpsc::unbounded();
+    (tx, Receiver(Arc::new(Mutex::new(Some(rx)))))
+}
+
+/// Batches of events: whatever is queued when the first one arrives, then a
+/// short pause so bursts coalesce into one UI update per frame or so.
+pub fn stream(rx: &Receiver) -> impl Stream<Item = Vec<BgEvent>> + use<> {
+    let taken = rx.0.lock().take();
+    iced::futures::stream::unfold(taken, |rx| async move {
+        let mut rx = rx?;
+        let first = rx.next().await?;
+        let mut batch = vec![first];
+        while let Ok(ev) = rx.try_recv() {
+            batch.push(ev);
+            if batch.len() >= 2048 {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(6)).await;
+        while let Ok(ev) = rx.try_recv() {
+            batch.push(ev);
+            if batch.len() >= 4096 {
+                break;
+            }
+        }
+        Some((batch, Some(rx)))
+    })
+}
