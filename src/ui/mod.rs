@@ -1,3 +1,4 @@
+pub mod burst_sheet;
 pub mod calendar_stage;
 pub mod compare_stage;
 pub mod filmstrip;

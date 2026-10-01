@@ -9,13 +9,14 @@
 //! load as in the viewer (the camera's preview first, then the full image)
 //! and stay pinned in the loader's cache while they are on screen.
 //!
-//! **Review burst** (B) is the same view over one burst: up to four of its
-//! frames in the panes, every frame in a strip below.  The panes change
-//! without resetting the view, so a zoom carries on as frames change: `,`
-//! and `.` swap the outlined pane's frame for the previous or next one not
-//! already shown, PgUp / PgDn page through the burst, a click on the strip
-//! puts that frame in the outlined pane.  `1` zooms every pane to 100 % on
-//! its own AF point (the camera's FocusLocation), still linked.
+//! **Frames of a burst** (C on the viewer's burst sheet) open the same view
+//! as a level below the sheet: Esc goes back to it, the outline on the
+//! frame that had focus here.  The panes change without resetting the
+//! view, so a zoom carries on as frames change: `,` and `.` swap the
+//! outlined pane's frame for the previous or next one of the burst not
+//! already shown, and PgUp / PgDn page through the burst.  `1` zooms every
+//! pane to 100 % on its own AF point (the camera's FocusLocation), still
+//! linked.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,11 +30,10 @@ use super::style;
 use super::viewer::{self, Source, Viewer};
 use super::{App, Message, View};
 use crate::imaging::loader::FullImage;
-use crate::imaging::thumbs::{PRIORITY_PREFETCH, PRIORITY_VISIBLE, ThumbCache};
+use crate::imaging::thumbs::ThumbCache;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::record::FileType;
 use crate::ui::compare_stage::{self, CompareEvent, CompareStage, MAX_PANES, Pane};
-use crate::ui::filmstrip::{FilmEvent, Filmstrip};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::image_stage::ViewCmd;
 use crate::ui::paint;
@@ -60,11 +60,11 @@ pub struct Compare {
     cmd: (u64, ViewCmd),
     zoom: f32,
     stage: Size,
-    /// Review burst: the burst the panes show frames of.
+    /// Comparing frames of a burst: the burst the panes show frames of.
     pub burst: Option<BurstView>,
 }
 
-/// Review burst's state.
+/// The burst the panes show frames of.
 pub struct BurstView {
     /// Every frame of the burst, in capture order (one record per shot).
     pub frames: Vec<RecordId>,
@@ -83,13 +83,11 @@ pub enum Msg {
     Leave,
     Stage(CompareEvent),
     Allocated(PathBuf, Result<iimage::Allocation, iimage::Error>),
-    /// Review burst: the outlined pane shows the previous / next frame.
+    /// Frames of a burst: the outlined pane shows the previous / next frame.
     Step(i32),
-    /// Review burst: the previous / next set of frames (`i32::MIN` / `MAX`:
-    /// the first / last).
+    /// Frames of a burst: the previous / next set of frames (`i32::MIN` /
+    /// `MAX`: the first / last).
     Page(i32),
-    /// Review burst's strip.
-    Film(FilmEvent),
 }
 
 impl Compare {
@@ -104,7 +102,7 @@ impl Compare {
 
     pub fn title(&self) -> String {
         match &self.burst {
-            Some(b) => format!("Review burst of {} frames", b.frames.len()),
+            Some(_) => format!("Compare {} frames of a burst", self.items.len()),
             None => format!("Compare {} photos", self.items.len()),
         }
     }
@@ -115,7 +113,7 @@ impl Compare {
         format!("zoom={:.0}%{burst}", self.zoom * 100.0)
     }
 
-    /// Review burst: where each pane's frame sits in the burst.
+    /// Frames of a burst: where each pane's frame sits in the burst.
     fn frame_positions(&self) -> Vec<usize> {
         let Some(b) = &self.burst else { return Vec::new() };
         self.items.iter().filter_map(|id| b.frames.iter().position(|f| f == id)).collect()
@@ -237,53 +235,17 @@ pub fn open(app: &mut App, items: Vec<RecordId>) -> Task<Message> {
     Task::batch(tasks)
 }
 
-// ── review burst ────────────────────────────────────────────────────────────
+// ── frames of a burst ───────────────────────────────────────────────────────
 
-/// The photo Review burst starts from: the one quick look shows, else the
-/// grid's or list's selected photo (the keyboard anchor of several).
-fn burst_target(app: &App) -> Option<RecordId> {
-    if let Some(q) = &app.quicklook {
-        return Some(q.id);
-    }
-    let pick = |anchor: Option<RecordId>, sel: &std::collections::HashSet<RecordId>| {
-        anchor.filter(|a| sel.contains(a)).or_else(|| if sel.len() == 1 { sel.iter().next().copied() } else { None })
-    };
-    match app.view {
-        View::Grid => pick(app.grid.anchor, &app.grid.selection),
-        View::List => pick(app.list.current.or(app.list.anchor), &app.list.selection),
-        View::Calendar => None,
-    }
-}
-
-/// The command is available: the selected photo is in a burst.
-pub fn can_review_burst(app: &App) -> bool {
-    app.view != View::Calendar && burst_target(app).is_some_and(|id| app.bursts.of(id).is_some())
-}
-
-/// Review the selected photo's burst (the B key): its frames in the panes,
-/// starting from that photo, and all of them in the strip.
-pub fn review_burst(app: &mut App) -> Task<Message> {
-    if app.view == View::Calendar {
+/// Compare `shown`, frames of the burst `frames` (the viewer's burst sheet,
+/// whose window this borrows), the pane at `focus` outlined.
+pub fn open_frames(app: &mut App, frames: Vec<RecordId>, shown: Vec<RecordId>, focus: usize) -> Task<Message> {
+    if shown.is_empty() {
         return Task::none();
     }
-    let Some(id) = burst_target(app) else {
-        return app.show_status("Select a photo to review its burst.", 4000);
-    };
-    review_burst_of(app, id)
-}
-
-/// Review `id`'s burst (also from the viewer, whose window it borrows).
-pub fn review_burst_of(app: &mut App, id: RecordId) -> Task<Message> {
-    let (Some(b), Some(at)) = (app.bursts.of(id), app.bursts.frame_index(id)) else {
-        let name = app.coll.get(id).map(|r| r.stem()).unwrap_or_default();
-        return app.show_status(format!("{name} isn't part of a burst."), 4000);
-    };
-    let frames = app.bursts.frames(b).to_vec();
-    let n = frames.len().min(MAX_PANES);
-    let start = at.min(frames.len() - n);
-    let task = open(app, frames[start..start + n].to_vec());
+    let task = open(app, shown);
     let Some(c) = app.compare.as_mut() else { return task };
-    c.focus = at - start;
+    c.focus = focus.min(c.items.len().saturating_sub(1));
     c.burst = Some(BurstView { frames });
     prefetch(app);
     task
@@ -366,35 +328,6 @@ fn page(app: &mut App, dir: i32) -> Task<Message> {
     show_frames(app, items, focus)
 }
 
-/// A click on the strip: the outlined pane shows that frame (or the outline
-/// moves to the pane already showing it).
-fn film(app: &mut App, ev: FilmEvent) -> Task<Message> {
-    match ev {
-        FilmEvent::Jump(i) => {
-            let Some(c) = app.compare.as_ref() else { return Task::none() };
-            let Some(&id) = c.burst.as_ref().and_then(|b| b.frames.get(i)) else { return Task::none() };
-            if let Some(pane) = c.items.iter().position(|&x| x == id) {
-                return set_focus(app, pane);
-            }
-            let mut items = c.items.clone();
-            let focus = c.focus;
-            if let Some(slot) = items.get_mut(focus) {
-                *slot = id;
-            }
-            show_frames(app, items, focus)
-        }
-        FilmEvent::Thumbs { visible, nearby } => {
-            let wanted = visible.iter().map(|&id| (id, PRIORITY_VISIBLE)).chain(nearby.iter().map(|&id| (id, PRIORITY_PREFETCH)));
-            for (id, priority) in wanted {
-                if let Some(r) = app.coll.get(id) {
-                    app.thumbs.request(&app.workers, r, priority);
-                }
-            }
-            Task::none()
-        }
-    }
-}
-
 fn files(app: &App, c: &Compare) -> Vec<Option<(PathBuf, FileType)>> {
     c.items.iter().map(|&id| app.coll.get(id).map(|r| (r.path.clone(), r.file_type))).collect()
 }
@@ -431,7 +364,8 @@ pub fn release(app: &mut App) {
 pub fn leave(app: &mut App) -> Task<Message> {
     let Some(c) = app.compare.as_ref() else { return Task::none() };
     // The grid's keyboard focus follows the photo that had focus here.
-    if let Some(&id) = c.items.get(c.focus) {
+    let focused = c.items.get(c.focus).copied();
+    if let Some(id) = focused {
         if app.grid.selection.contains(&id) {
             app.grid.anchor = Some(id);
         }
@@ -447,9 +381,9 @@ pub fn leave(app: &mut App) -> Task<Message> {
         return Task::batch(tasks);
     }
     // Show the viewer's photo again (it reloads from the cache, and its
-    // look-ahead and details pick up where they were).
-    let (source, items, index, read_only) = (v.source.clone(), v.items.clone(), v.index, v.read_only);
-    viewer::open(app, source, items, index, read_only)
+    // look-ahead and details pick up where they were); a burst's sheet
+    // comes back with its outline on the frame that had focus here.
+    viewer::resume(app, focused)
 }
 
 /// The window's close button.
@@ -469,7 +403,7 @@ pub fn on_removed(app: &mut App, ids: &[RecordId]) {
     let Some(c) = app.compare.as_mut() else { return };
     if !c.viewer.read_only {
         c.viewer.items.retain(|x| !ids.contains(x));
-        c.viewer.index = c.viewer.index.min(c.viewer.items.len().saturating_sub(1));
+        super::viewer_burst::items_changed(&app.bursts, &mut c.viewer);
     }
     if let Some(b) = &mut c.burst {
         b.frames.retain(|x| !ids.contains(x));
@@ -597,11 +531,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     let reviewing = app.compare.as_ref().is_some_and(|c| c.burst.is_some());
     match msg {
         Msg::Fit => command(app, ViewCmd::Fit),
-        // Reviewing a burst, 100 % goes to each photo's AF point.
+        // Comparing frames of a burst, 100 % goes to each photo's AF point.
         Msg::Actual => command(app, if reviewing { ViewCmd::Focus } else { ViewCmd::Actual }),
         Msg::Step(dir) => return step(app, dir),
         Msg::Page(dir) => return page(app, dir),
-        Msg::Film(ev) => return film(app, ev),
         Msg::ZoomIn => command(app, ViewCmd::ZoomIn),
         Msg::ZoomOut => command(app, ViewCmd::ZoomOut),
         Msg::TogglePrune => {
@@ -621,12 +554,13 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::OpenInViewer => {
             let Some(c) = app.compare.as_ref() else { return Task::none() };
             let Some(&id) = c.items.get(c.focus) else { return Task::none() };
-            // Step through the grid from there, as if opened from it.
+            // Step through the grid from there, as if opened from it, on
+            // the photo itself.
             let (items, index) = match app.derived.visible.iter().position(|&x| x == id) {
                 Some(i) => (app.derived.visible.clone(), i),
                 None => (c.items.clone(), c.focus),
             };
-            return viewer::open(app, Source::Working, items, index, false);
+            return viewer::open_as(app, Source::Working, items, index, false, super::viewer_burst::Land::Frame);
         }
         Msg::Leave => return leave(app),
         Msg::Stage(ev) => match ev {
@@ -739,7 +673,7 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
             } else {
                 format!("{} frames", at.len())
             };
-            ("Review burst", format!("{shown} of {}  ·  Shift+arrow keys change the outlined photo, PgUp and PgDn page", b.frames.len()))
+            ("Compare frames", format!("{shown} of {}  ·  Shift+arrow keys change the outlined photo's frame, PgUp and PgDn page", b.frames.len()))
         }
         None => ("Compare", format!("{n} photos  ·  arrow keys or Tab move between them")),
     };
@@ -769,7 +703,8 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
         ));
     }
     top = top.push(kit::vrule(20.0));
-    top = top.push(kit::tip(kit::btn("Done", style::secondary(), cmsg(Msg::Leave)), "Leave compare  (Esc)", true));
+    let done_tip = if c.burst.is_some() { "Back to the burst's frames  (Esc)" } else { "Leave compare  (Esc)" };
+    top = top.push(kit::tip(kit::btn("Done", style::secondary(), cmsg(Msg::Leave)), done_tip, true));
     let top_bar = container(top.padding(Padding::from([0.0, t::S2]))).height(48).center_y(48).width(Length::Fill).style(style::fill(t::MOUNT));
 
     // ── the photos ──────────────────────────────────────────────────────
@@ -839,13 +774,6 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
     }));
     let bottom_bar = container(bottom.padding(Padding::from([0.0, t::S2]))).height(44).center_y(44).width(Length::Fill).style(style::fill(t::MOUNT));
 
-    // ── review burst: every frame, the panes' ones framed ────────────────
-    let mut body = column![top_bar, kit::hairline(), stage];
-    if let Some(b) = &c.burst {
-        let at = c.frame_positions();
-        let current = c.items.get(c.focus).and_then(|id| b.frames.iter().position(|f| f == id)).unwrap_or(0);
-        body = body.push(Filmstrip::new(&b.frames, &app.coll, &app.thumbs, current, app.scale_factor, |e| Message::Compare(Msg::Film(e))).also(at));
-    }
-    let body = body.push(kit::hairline()).push(bottom_bar);
+    let body = column![top_bar, kit::hairline(), stage, kit::hairline(), bottom_bar];
     container(body).width(Length::Fill).height(Length::Fill).style(style::fill(t::GROUND)).into()
 }

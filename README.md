@@ -67,8 +67,8 @@ src/app/               the application: state, update, views
   kit.rs, style.rs     shared view pieces and widget styles
   global_menu.rs       the KDE global menu (dbusmenu + KWin appmenu)
   testing.rs           PP_SCRIPT test driver (see below)
-src/ui/                custom widgets: grid, list, image stage, calendar
-                       stage, side menu, icons, drawn symbols
+src/ui/                custom widgets: grid, list, image stage, burst
+                       sheet, calendar stage, side menu, icons, symbols
   theme.rs             the design tokens: colours, type, spacing, motion
   motion.rs, tags.rs   entrance animation, activity bar, file-type tags
 src/model/             records, collection & pairing, filters, crops,
@@ -148,10 +148,24 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 - **Bursts.** The frames of each shutter press are found from the headers
   the scan reads anyway (sub-second times; on Sony bodies, each frame's
   number in its press), and a thin bracket with a frame count runs under
-  them in the grid.  **B** opens **Review burst**: compare on that burst,
-  every frame in a strip below.  Shift+← → change the outlined photo's
-  frame, PgUp/PgDn page, and **1** shows every pane at 100 % on its own AF
-  point, still linked.
+  them in the grid (the viewer's filmstrip brackets them too).  Arriving at
+  a burst in the viewer — stepping to it from the photo before or after,
+  or opening the viewer on one of its frames — shows **all its frames**
+  first, laid out over the photo area with the one you came to outlined.
+  The arrow keys move the outline (Home / End: first and last frame), and P,
+  M and U mark the outlined frame; *Advance after marking* moves the
+  outline along.  Click a frame (or Enter, +, the wheel) and it zooms up
+  into the ordinary viewer, where ← → step through the burst's frames;
+  Esc, − at fit, B or *All frames* zoom back out to all of them.
+  Ctrl+click or Space picks frames, and **C** compares them (with none
+  picked, the outlined frame and its neighbours): compare as above, with
+  **1** at 100 % on each frame's own AF point, `,` and `.` changing the
+  outlined photo's frame, and Esc back to the burst.  Stepping past either
+  end of a burst, or PgUp / PgDn, goes on to the photo or burst before or
+  after it.  **B** in the grid, the list or quick look opens the viewer on
+  the selected photo's burst.  Preferences ▸ *Show a burst's frames first*
+  turns the arrival view off (the viewer then steps frame by frame, and B
+  still shows them all).
 - **Viewer.** A filmstrip under the photo shows its neighbours with their
   marks and crops; click to jump, T to hide it.  With *Advance after marking*
   on (Ctrl+Shift+A, or the Auto-advance toggle), P or M marks the photo and
@@ -176,7 +190,8 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 
 Preferences (Ctrl+, — in the Edit menu, or at the foot of the side rail)
 gathers the settings on one page: advance after marking, file names and
-thumbnail size, the viewer's filmstrip and remembered size, the library and
+thumbnail size, the viewer's filmstrip, remembered size and whether a burst
+shows all its frames first, the library and
 edit-copy folders, and whether to use the KDE global menu (a change there takes
 effect at the next start; `PP_NO_GLOBAL_MENU=1` still forces the in-window
 menus).  Changes apply at once and are saved; the menus and the viewer's

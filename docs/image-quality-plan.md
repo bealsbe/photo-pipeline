@@ -41,10 +41,26 @@ plan, the change is noted here; the sections below are otherwise unchanged.
   (in-press gaps reach 0.9 s, presses start 0.235 s apart), so the
   sub-second fallback uses twice the folder's median close gap: 96.5 %.
   Whole seconds + file numbers, the last resort, manage 20 % at 10 fps.
-- **Review burst** opens from the selected frame (not always the first
-  four), keeps the zoom while frames change, and adds PgUp/PgDn paging to
-  `,` / `.`.  `1` there means 100 % on each pane's AF point; plain compare
-  keeps 1 = the same spot on every photo.
+- **Bursts in the viewer** (reworked after use: jumping straight into
+  compare didn't fit the review).  Arriving at a burst in the viewer from
+  outside it shows the burst's **sheet** — every frame as a tile over the
+  photo area, from the thumbnail caches, the arrival frame outlined
+  (`ui/burst_sheet.rs`, `app/viewer_burst.rs`).  Arrow keys move the
+  outline; a click, Enter or a zoom in grows the frame from its tile into
+  the normal viewer (270 ms, as the calendar's day zoom; a zoom that turns
+  round part-way starts from the frame on screen), where ← → step through
+  the burst; Esc, − at fit, B or *All frames* shrink it back onto its
+  tile.  P / M / U mark the outlined frame.  Ctrl+click or Space picks
+  frames and **C** compares them (none picked: the outlined frame and its
+  two neighbours) as a level below the sheet: Esc returns to it, the
+  outline on the frame compare had in focus.  Compare keeps `,` / `.`
+  stepping, PgUp/PgDn paging and `1` = 100 % on each pane's AF point; the
+  burst strip is gone (the sheet replaces it).  A burst in the viewer is a
+  run of consecutive frames of one press in its order, so a filter that
+  hides some shows the rest ("Burst of 20, 18 shown").  **B** opens the
+  viewer on the selected photo's sheet; *Show a burst's frames first*
+  (Preferences ▸ Viewer, on by default) off keeps frame-by-frame stepping.
+  The viewer's filmstrip brackets each burst.
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling

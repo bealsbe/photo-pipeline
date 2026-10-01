@@ -199,7 +199,7 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
         return super::compare::can_open(app);
     }
     if cmd == Cmd::ReviewBurst {
-        return super::compare::can_review_burst(app);
+        return super::viewer_burst::can_open(app);
     }
     if cmd == Cmd::QuickLook {
         return app.view == View::Grid && !app.derived.visible.is_empty();

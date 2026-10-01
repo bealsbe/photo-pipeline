@@ -58,7 +58,7 @@ pub struct Shown {
     /// (1-based position, count) in the grid; `None` while it is hidden.
     pub position: Option<(usize, usize)>,
     pub when: String,
-    /// (1-based frame, frames) when the photo is in a burst (B reviews it).
+    /// (1-based frame, frames) when the photo is in a burst (B shows them all).
     pub burst: Option<(usize, usize)>,
     pub pruned: bool,
     pub marked: bool,

@@ -18,6 +18,7 @@ pub mod testing;
 pub mod undo;
 pub mod viewer;
 pub mod viewer_advance;
+pub mod viewer_burst;
 pub mod viewer_filmstrip;
 pub mod viewer_window;
 
@@ -1084,7 +1085,9 @@ impl App {
 
     // ── viewer ──────────────────────────────────────────────────────────
 
-    fn open_viewer_working(&mut self, id: RecordId) -> Task<Message> {
+    /// Open the viewer on `id`, stepping through the grid's (or list's)
+    /// order, landing on a burst's frame as `land` says.
+    pub(super) fn open_viewer_working(&mut self, id: RecordId, land: viewer_burst::Land) -> Task<Message> {
         let items = match self.view {
             View::List => filter::visible_sorted(&self.coll, &self.filter.state())
                 .into_iter()
@@ -1093,7 +1096,7 @@ impl App {
             _ => self.derived.visible.clone(),
         };
         let index = items.iter().position(|&x| x == id).unwrap_or(0);
-        viewer::open(self, viewer::Source::Working, items, index, false)
+        viewer::open_as(self, viewer::Source::Working, items, index, false, land)
     }
 
     // ── keyboard ────────────────────────────────────────────────────────
@@ -1212,7 +1215,7 @@ impl App {
                 Task::none()
             }
             Key::Named(Named::Enter) => match self.grid.anchor.filter(|a| self.grid.selection.contains(a)) {
-                Some(id) if !self.grid.select_mode => self.open_viewer_working(id),
+                Some(id) if !self.grid.select_mode => self.open_viewer_working(id, viewer_burst::Land::Auto),
                 _ => Task::none(),
             },
             Key::Named(Named::ArrowLeft) | Key::Named(Named::ArrowRight) if !self.grid.select_mode => {
@@ -1550,7 +1553,7 @@ impl App {
                 Task::none()
             }
             Cmd::Compare => compare::open_selected(self),
-            Cmd::ReviewBurst => compare::review_burst(self),
+            Cmd::ReviewBurst => viewer_burst::open_from_main(self),
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
             Cmd::Preferences => preferences::open(self),
         }
@@ -1696,7 +1699,7 @@ impl App {
                 self.grid_click(id, modifiers);
                 Task::none()
             }
-            GridEvent::Activate(id) => self.open_viewer_working(id),
+            GridEvent::Activate(id) => self.open_viewer_working(id, viewer_burst::Land::Auto),
             GridEvent::ClearSelection => {
                 self.grid.selection.clear();
                 Task::none()
@@ -1765,7 +1768,7 @@ impl App {
                 self.list_click(id, modifiers);
                 Task::none()
             }
-            ListEvent::Activate(id) => self.open_viewer_working(id),
+            ListEvent::Activate(id) => self.open_viewer_working(id, viewer_burst::Land::Auto),
             ListEvent::SelectAll => {
                 self.list.selection = self.derived.list_rows.iter().map(|r| r.primary()).collect();
                 Task::none()
@@ -1908,6 +1911,10 @@ impl App {
         }
         compare::on_removed(self, &ids);
         self.refresh_views();
+        // The bursts are found again: the viewer's follow.
+        if let Some(v) = self.viewer.as_mut().filter(|v| !v.read_only) {
+            viewer_burst::items_changed(&self.bursts, v);
+        }
     }
 
     pub fn bus(&self) -> Bus {

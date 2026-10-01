@@ -1390,18 +1390,37 @@ fn paint_cell_marks(
     op: f32,
     _clip: Rectangle,
 ) {
-    let c = |col: Color| paint::with_alpha(col, op);
     let selected = data.selection.contains(&id);
-    let ir = image_rect;
+    let crop = rec.crop.as_ref().filter(|cr| !cr.is_full()).map(|cr| [cr.left as f32, cr.top as f32, cr.right as f32, cr.bottom as f32]);
+    let checkbox = data.select_mode.then_some(selected);
+    paint_marks(r, image_rect, ts, crop, rec.is_pruned, rec.is_marked, checkbox, op);
+
+    // Selection: an accent outline around the whole mount.
+    if selected {
+        let c = |col: Color| paint::with_alpha(col, op);
+        let mount = rect(thumb_rect.x - PAD, thumb_rect.y - PAD, ts + 2.0 * PAD, ts + 2.0 * PAD + label_h);
+        paint::framed(r, mount, t::R_CELL, Color::TRANSPARENT, c(t::SIGNAL), 2.0);
+    }
+}
+
+/// A photo's marks as the grid draws them, on the photo's rectangle `ir`
+/// and sized for a `ts`-pixel tile: the crop's discarded margins scrimmed
+/// (`crop` is left, top, right, bottom as fractions), the prune cross-out,
+/// the keep check and, in select mode (`checkbox`: whether ticked), the
+/// checkbox on the other corner.  The burst sheet draws its tiles' marks
+/// with this too.
+#[allow(clippy::too_many_arguments)]
+pub fn paint_marks(r: &mut Renderer, ir: Rectangle, ts: f32, crop: Option<[f32; 4]>, pruned: bool, marked: bool, checkbox: Option<bool>, op: f32) {
+    let c = |col: Color| paint::with_alpha(col, op);
 
     // Crop framing: the discarded margins are scrimmed.
-    if let Some(crop) = rec.crop.as_ref().filter(|cr| !cr.is_full()) {
-        if !rec.is_pruned && ir.width > 0.0 && ir.height > 0.0 {
+    if let Some([left, top, right, bottom]) = crop {
+        if !pruned && ir.width > 0.0 && ir.height > 0.0 {
             let (w, h) = (ir.width, ir.height);
-            let cx = ir.x + (crop.left as f32 * w).floor();
-            let cy = ir.y + (crop.top as f32 * h).floor();
-            let cw = (crop.width() as f32 * w).floor().max(1.0);
-            let ch = (crop.height() as f32 * h).floor().max(1.0);
+            let cx = ir.x + (left * w).floor();
+            let cy = ir.y + (top * h).floor();
+            let cw = ((right - left) * w).floor().max(1.0);
+            let ch = ((bottom - top) * h).floor().max(1.0);
             let scrim = c(t::alpha(Color::BLACK, 0.6));
             paint::fill(r, rect(ir.x, ir.y, w, cy - ir.y), scrim);
             paint::fill(r, rect(ir.x, cy + ch, w, ir.y + h - (cy + ch)), scrim);
@@ -1412,7 +1431,7 @@ fn paint_cell_marks(
     }
 
     // Pruned: dimmed and crossed out, corner to corner.
-    if rec.is_pruned {
+    if pruned {
         paint::fill(r, ir, c(t::alpha(t::PHOTO_GROUND, 0.62)));
         let inset = (ir.width.min(ir.height) * 0.1).max(4.0);
         let (x0, y0, x1, y1) = (ir.x + inset, ir.y + inset, ir.x + ir.width - inset, ir.y + ir.height - inset);
@@ -1427,7 +1446,7 @@ fn paint_cell_marks(
     }
 
     // Kept: a green check on the photo's corner.
-    if rec.is_marked {
+    if marked {
         let d = (ts / 7.0).floor().clamp(20.0, 30.0);
         let (bx, by) = (ir.x + ir.width - d - 6.0, ir.y + 6.0);
         let centre = Point::new(bx + d / 2.0, by + d / 2.0);
@@ -1439,7 +1458,7 @@ fn paint_cell_marks(
     }
 
     // Select-mode checkbox on the photo's other corner.
-    if data.select_mode {
+    if let Some(selected) = checkbox {
         let d = (ts / 8.0).floor().clamp(18.0, 26.0);
         let (bx, by) = (ir.x + 6.0, ir.y + 6.0);
         let centre = Point::new(bx + d / 2.0, by + d / 2.0);
@@ -1451,12 +1470,6 @@ fn paint_cell_marks(
         } else {
             paint::circle(r, centre, d / 2.0, c(t::alpha(Color::BLACK, 0.4)), c(t::alpha(Color::WHITE, 0.85)), 1.5);
         }
-    }
-
-    // Selection: an accent outline around the whole mount.
-    if selected {
-        let mount = rect(thumb_rect.x - PAD, thumb_rect.y - PAD, ts + 2.0 * PAD, ts + 2.0 * PAD + label_h);
-        paint::framed(r, mount, t::R_CELL, Color::TRANSPARENT, c(t::SIGNAL), 2.0);
     }
 }
 
