@@ -456,7 +456,13 @@ fn tile<'a>(app: &'a App, c: &Confirm, id: RecordId) -> Element<'a, Message> {
                 room -= 17.0;
             }
             // "copy of …0846_0001": the end of a long name is what tells.
-            let words = paint::elide_start(&words, t::T_SMALL, paint::REGULAR, room);
+            let words = match words.strip_prefix("copy of ") {
+                Some(name) => {
+                    let lead = paint::text_width("copy of ", t::T_SMALL, paint::REGULAR);
+                    format!("copy of {}", paint::elide_start(name, t::T_SMALL, paint::REGULAR, (room - lead).max(0.0)))
+                }
+                None => paint::elide_start(&words, t::T_SMALL, paint::REGULAR, room),
+            };
             line.push(text(words).size(t::T_SMALL).color(t::PHOTO_INK2)).into()
         }
     };

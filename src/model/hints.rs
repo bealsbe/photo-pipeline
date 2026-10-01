@@ -51,10 +51,24 @@ pub const BLANK_P1: u8 = 235;
 /// … nearly one tone (the 1st and 99th percentiles this close: a wall, a
 /// sleeve, the inside of a bag) with nothing sharp …
 pub const FLAT_SPAN: u8 = 40;
-/// … dark and with nothing sharp in it (night shots that worked keep
-/// detail: 60+ even at a median luma of 4) …
-pub const DARK_P50: u8 = 12;
+/// … very dark, with nothing sharp in it and nothing anywhere: the median
+/// luma at most [`DARK_P50`], the sharpest area below [`DARK_LOCAL`] and
+/// the whole frame ([`Features::global`]) below [`DARK_GLOBAL`] …
+///
+/// A dim frame (median at most [`DIM_P50`]) with nothing sharp that
+/// misses either of the other two is a dim photo, not an accident: it is
+/// judged for focus like any other frame ([`SOFT_LOCAL`]), and not as
+/// featureless below.  Set on a night shoot (3,299 captures): of 75 dim
+/// frames of real subjects the old rule (median 12, sharpest area 12)
+/// called accidents, 73 aren't now (their whole frame measures 1.02–8.5,
+/// a median of 1.95; the two left are at 1.19 and 1.20).  The dark
+/// accidents found (a costume swept past the lens, two shoots) measure
+/// 0.99 and 1.11 at medians of 5 and 3, and in 2,758 frames of eight
+/// other shoots only accidents measure below 1.3.
+pub const DARK_P50: u8 = 6;
 pub const DARK_LOCAL: f32 = 12.0;
+pub const DARK_GLOBAL: f32 = 1.25;
+pub const DIM_P50: u8 = 12;
 /// … or nothing sharp anywhere at any exposure (a blurred wall).
 pub const FEATURELESS_LOCAL: f32 = 5.0;
 
@@ -622,8 +636,10 @@ fn accident(f: &Features) -> Option<Accident> {
         Some(Accident::Blank)
     } else if f.p99().saturating_sub(f.p1()) <= FLAT_SPAN && local < SOFT_LOCAL {
         Some(Accident::Flat)
-    } else if f.p50() <= DARK_P50 && local < DARK_LOCAL {
-        Some(Accident::Dark)
+    } else if f.p50() <= DIM_P50 && local < DARK_LOCAL {
+        // Dim with nothing sharp: an accident only when darker still and
+        // empty all over; else a dim photo (perhaps soft, never featureless).
+        (f.p50() <= DARK_P50 && f.global < DARK_GLOBAL).then_some(Accident::Dark)
     } else if local < FEATURELESS_LOCAL {
         Some(Accident::Featureless)
     } else {
@@ -867,6 +883,50 @@ mod tests {
         let h = s.hints(&[]);
         let a3 = h.get(s.id("/s/a3.JPG")).unwrap();
         assert_eq!((a3.relative, a3.best_alike, a3.soft), (1.0, None, None));
+    }
+
+    /// A dim scene, `dark` of full exposure, with a brighter subject in the
+    /// middle at `subject`, all blurred by `blur`, plus sensor noise.
+    fn dim(dark: f32, subject: f32, blur: usize, noise: f32) -> Features {
+        let mut img = texture(192, 128, 3).blur(blur).darker(dark);
+        img.paste(&texture(192, 128, 5).darker(subject), 70, 30, 130, 100);
+        feats(&img.blur(blur).noisy(noise, 9))
+    }
+
+    #[test]
+    fn a_dim_photo_of_a_real_subject_is_soft_not_an_accident() {
+        // The old rule (median 12, sharpest area 12) called all three dark
+        // accidents; a night shoot's dim, soft photos of people looked so.
+        let old = |f: &Features| f.p50() <= DIM_P50 && f.local() < DARK_LOCAL;
+        // Darker than DARK_P50, but the frame holds detail all over (the
+        // noise of a high ISO, edges): a dim photo.
+        let noisy = dim(0.04, 0.5, 6, 0.3);
+        assert!(old(&noisy) && noisy.p50() <= DARK_P50 && noisy.global >= DARK_GLOBAL, "{} {} {}", noisy.p50(), noisy.local(), noisy.global);
+        assert_eq!(accident(&noisy), None);
+        // Empty all over and with nothing sharp, but not that dark: a dim
+        // photo too, and not "featureless" either.
+        let murky = dim(0.06, 0.5, 12, 0.0);
+        assert!(old(&murky) && murky.p50() > DARK_P50 && murky.global < DARK_GLOBAL && murky.local() < FEATURELESS_LOCAL);
+        assert_eq!(accident(&murky), None);
+        // Darker still and empty all over: an accident.
+        let swept = dim(0.03, 0.5, 12, 0.0);
+        assert!(swept.p50() <= DARK_P50 && swept.global < DARK_GLOBAL);
+        assert_eq!(accident(&swept), Some(Accident::Dark));
+        // The two dim photos are judged for focus like any frame: nothing
+        // sharp, so out of focus (and not counted as accidental).
+        let s = Shoot::new(vec![
+            (rec("/s/noisy.JPG", 0, Some(0)), Some(noisy)),
+            (rec("/s/murky.JPG", 10_000, Some(0)), Some(murky)),
+            (rec("/s/swept.JPG", 20_000, Some(0)), Some(swept)),
+        ]);
+        let h = s.hints(&[]);
+        for n in ["noisy", "murky"] {
+            let x = h.get(s.id(&format!("/s/{n}.JPG"))).unwrap();
+            assert_eq!((x.accidental, x.soft), (None, Some(Soft::Absolute)), "{n}");
+            assert_eq!(h.plate(s.id(&format!("/s/{n}.JPG"))), Some(Plate::Soft));
+        }
+        assert_eq!(h.plate(s.id("/s/swept.JPG")), Some(Plate::Accidental));
+        assert_eq!((h.summary().accidental, h.summary().soft_only), (1, 2));
     }
 
     #[test]

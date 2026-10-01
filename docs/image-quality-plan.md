@@ -24,6 +24,18 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 | 8 | Library calendar | **Neither:** no calendar hints, and no "already in library" warning in Export for now. | Drop the library-calendar phase and the Export check. |
 | 9 | Older bodies | **Best effort.**  Use the fallbacks (whole-second times plus file order, sharpest area instead of the focus point). | No dedicated tuning for the A7R II or the Canon T6. |
 
+## Decisions (2026-10-01)
+
+The user's answers to the questions the UI pass raised.
+
+| # | Question | Decision | What it changes |
+|---|---|---|---|
+| 1 | "Accidental" on night shoots: dim, soft photos of real subjects were called dark accidents | **Stricter threshold** (option c): keep the dark rule, but a frame must be darker and emptier to be an accident.  One that no longer qualifies is simply not accidental; it goes through the out-of-focus rule like any other frame, and isn't relabelled. | The dark rule: median ≤ 6 (was 12), sharpest area < 12 as before, and the whole frame < 1.25 (new).  See "The dark rule, tightened" below. |
+| 2 | Shortcuts for Analyse and the bulk actions | **None for now.** | Menus, the side rail and the Hints menu only. |
+| 3 | Where a burst's sheet opens | **On the frame you came from**, the sharpest marked with its ring. | As built. |
+| 4 | Hints in the list view | **Not now.** | As built (grid, quick look, viewer, sheet, compare). |
+| 5 | What the Duplicates filter shows | **Both copies**, the one kept and the ones suggested for pruning. | As built ("Possible problems" lists only the copies). |
+
 ### Phase 1 as built (2026-09-30)
 
 - **Metadata** (`exif::read_shot`, cached in capture cache v2): SubSec,
@@ -109,8 +121,11 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
   `local` < 60.  Good night shots start at local 21; the 13:50
   minimum-focus-distance frames are 5–10.
 - *Accidental*: p99 ≤ 24 (black); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
-  local < 15 (one tone: wall, sleeve); median ≤ 12 with local < 12 (dark,
-  nothing sharp; good night shots keep 60+ at a median of 4); local < 5.
+  local < 15 (one tone: wall, sleeve); median ≤ 6 with local < 12 and the
+  whole frame (`Features::global`) < 1.25 (dark, nothing sharp, nothing
+  anywhere: tightened 2026-10-01, see "The dark rule, tightened"); local
+  < 5 (featureless).  A dim frame (median ≤ 12, local < 12) that misses
+  the dark rule is a dim photo: not accidental, and not featureless.
 - *Moments*: consecutive presses (singles included) of one folder and
   camera merge when the next starts ≤ 2 s after the last ends and any of the
   last three / first three frames are ≤ 16 pHash bits apart.  On the
@@ -236,19 +251,65 @@ needs to do" is built; where it differs, it says so here.
   many shots were checked and kept, and offers Analyse again.  The pass
   still doesn't pause for the network banner itself.
 
-**Checked** (scratch symlink folders, fake `HOME`, headless KWin):
-the 20-Sep sample (369 shots: 5 soft, 79 sharpest, 6 joined
-moments) and the exported-twice 23-May day (6,598 shots, 13,196 files:
-3,299 copies, 428 soft, 218 accidental).  A pass on 23-May stopped by
-renaming the folder mid-pass at 3,045 shots; Analyse again measured the
-other 3,553 and took 3,045 from the cache.  Scrolling 23-May's grid
-end to end in 8 s, with hints and without: draw 0.07 / 0.08 ms a frame,
-the same frame gaps.  Opening it with its cache: two derives of
-~20 ms on the UI thread (the engine's; see Known gaps).
+**Checked** (scratch copies, a throwaway `HOME`, headless KWin): an
+event day (369 shots: 5 soft, 79 sharpest, 6 joined moments) and a night
+shoot exported to the library twice (6,598 shots, 13,196 files: 3,299
+copies, 428 soft, 218 accidental before the dark rule was tightened).  A
+pass on the night shoot stopped by renaming its folder mid-pass at 3,045
+shots; Analyse again measured the other 3,553 and took 3,045 from the
+cache.  Scrolling its grid end to end in 8 s, with hints and without:
+draw 0.07 / 0.08 ms a frame, the same frame gaps.  Opening it with its
+cache: two derives of ~20 ms on the UI thread (the engine's; see Known
+gaps).
 
 **Open.**  The derive at 13 k files costs 20–40 ms on the UI thread when
-results arrive; the pass still doesn't pause for the network banner; no
-shortcut for Analyse or the bulk actions (the user's call).
+results arrive; the pass still doesn't pause for the network banner.
+
+### The dark rule, tightened (2026-10-01)
+
+Decision 1 of 2026-10-01.  On the night shoot the old dark rule (median
+≤ 12, sharpest area < 12) called 150 files (75 captures) accidents.  By
+eye, every one is a dim, soft photo of a real subject on a dance floor:
+nothing like a lens cap.  The dark accidents to keep were found in two
+other shoots: a dark costume swept past the lens at close range, one in
+each.
+
+**What tells them apart.**  Median and sharpest area overlap: the
+accidents sit at medians 3 and 5 and sharpest areas 9.3 and 4.4, inside
+the dim photos' 2–11 and 2.6–11.7.  The whole frame's sharpness
+(`Features::global`) doesn't: a dim photo keeps detail somewhere (eyes,
+lights, the noise of a high ISO), 1.02–8.5 with a median of 1.95, while
+the accidents measure 0.99 and 1.11.  In 2,758 frames of eight other
+shoots, only accidents measure below 1.3.
+
+**The rule.**  A dark accident is now: median ≤ 6, sharpest area < 12,
+whole frame < 1.25.  A dim frame (median ≤ 12, sharpest area < 12) that
+misses it is not accidental and, explicitly, not "featureless" either (it
+would otherwise fall through to that rule).  Its softness is judged as
+for any frame: with nothing sharp (< 15) it shows as out of focus.
+
+| Shoot | Dark rule, files (captures) | All accidental, files (captures) |
+|---|---|---|
+| Night shoot, exported twice | 150 (75) → 4 (2) | 218 (109) → 72 (36) |
+| Event day | 0 → 0 | 0 → 0 |
+| Tuning sample S1 | 1 → 1 | 1 → 1 |
+| Tuning samples S2, S3 | 0 → 0, 1 → 1 | 0 → 0, 2 → 2 |
+| Four more library days | 0 → 0 | 2 → 2 |
+
+Both dark accidents stay flagged; no true accident was lost.  Two dim
+photos stay flagged (whole frame 1.19 and 1.20, medians 4 and 3).  The
+engine's soft count doesn't change (those frames were soft already); the
+hints now show them as out of focus rather than accidental (night shoot,
+Out of focus: 428 → 574 files).
+
+**Still open (not decided).**  On the same night shoot other rules call
+dim real subjects accidents too: *one tone* (all 21 of its captures:
+dancers lit dimly, a luma span ≤ 40), *almost black* (4 of 7: sharp shots
+of a DJ booth, sharpest area 88–145) and *nothing in focus anywhere* (2
+of 6).  The one-tone accident found elsewhere (a wall) measures 1.56 over
+the whole frame, so the whole-frame test wouldn't separate those;
+requiring "nothing sharp" of the black rule would (true black frames:
+sharpest area 0.3–0.4).
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling

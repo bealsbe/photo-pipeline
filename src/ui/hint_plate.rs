@@ -126,7 +126,7 @@ pub fn reason(h: &Hints, coll: &Collection, id: RecordId) -> Option<String> {
             Accident::Black => "almost black",
             Accident::Blank => "almost white",
             Accident::Flat => "one tone",
-            Accident::Dark => "dark, nothing sharp",
+            Accident::Dark => "dark, no detail",
             Accident::Featureless => "nothing in focus",
         };
         return Some(short.into());
