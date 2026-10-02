@@ -51,7 +51,7 @@ what waits for later, follow the table.
 | UI 1 | Where people, fursuits and pets live | **Their own side-rail entry, *Subjects*, next to Search**, with *People \| Fursuits \| Pets* tabs (Ctrl+4).  This replaces an earlier "inside Search" answer. | The user confirmed it when asked about the conflict. |
 | UI 2 | Pointing search out the first time | **Quietly**: the rail, the View menu, Ctrl+F, and the page explains itself. | No dot, tip or status line. |
 | UI 3 | Fursuits after *Show fursuits too* | **A section of their own**, after the real animals. | Pets and fursuits never share a list, anywhere. |
-| UI 4 | Loosening results | **A Preferences setting**, *How close matches must be*, with a default set in phase 0.  Nothing on the search page. | Keeps the page quiet. |
+| UI 4 | Loosening results | **A Preferences slider**, *How close matches must be*, with a small reset button; the default (set in phase 0) is what works for most people: good matches.  Nothing on the search page. | Keeps the page quiet; the slider was the user's choice over three steps. |
 | UI 5 | Names in the query | **Chips, typed with @.** | Names with spaces stay whole; the chip shows whose photos these are. |
 | UI 6 | Bursts | **Stacked in results like the grid's, collapsed by default and expandable; one review answer covers a whole burst.** | A burst nearly always shows one pose. |
 | UI 7 | Yes and No in the review | **The keep and prune colours**, check and cross. | Reviewing reads like culling. |
@@ -726,9 +726,10 @@ keep photos on neutral grey:
   day.  Each photo's date sits under it (§7a.3).
 - **Closeness** (UI 4): a result needs a score above a threshold relative
   to the query's own spread (scores aren't comparable between queries).
-  Phase 0 sets three steps per model; Preferences ▸ Search, *How close
-  matches must be*, picks one (*Very close*, *Close* by default,
-  *Loose*).  The search page has no control for it.
+  Phase 0 sets the range and the default per model (the default: good
+  matches, what works for most people); Preferences ▸ Search, *How close
+  matches must be*, is a slider over that range with a small reset button
+  back to the default.  The search page has no control for it.
 - **Ranking:** photos carrying the query word as a hidden tag first
   (precise), then the rest by similarity.  Accidental frames left out.
 - **Animal words** (12b): when the vocabulary marks a word as a real
@@ -1204,8 +1205,8 @@ pattern:
     minutes for search, up to 15 more for faces, about 15 hours for
     fursuit heads.  Each new export: about 4 minutes a day."
   - *Index new exports* (on).
-  - *How close matches must be*: *Very close*, *Close* (the default),
-    *Loose*.
+  - *How close matches must be*: a slider from stricter to looser, with a
+    small reset button to the default (good matches).
   - *Search model*: SigLIP 2, shown as fixed.
   - *Recent searches*, with *Forget them*.
 - **People:** *Find people's faces* (on).  Turning it off offers, inline:
