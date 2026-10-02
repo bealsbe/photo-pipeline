@@ -1553,6 +1553,20 @@ in 10.0 s on the card (5.6 ms a photo, reading and decoding included);
 the helper starts in ~1.2 s.  `libwebgpu_dawn.so` sits beside the binary
 and is found through a runpath (`$ORIGIN`); `build.sh` checks both.
 
+### Costs measured on the share (`bench::bench_search_index`)
+
+Scratch libraries of symlinks into the archive, read over SMB, the index
+in a temporary folder, the card: a Sony day (126 shots, MPF previews)
+runs at 32 photos per ~230 ms once going, **7.2 ms a shot**, the plan's
+number; the whole bench including the helper's start and the library
+diff took 17 ms a shot on so small a set.  Older bodies' JPGs have no
+MPF preview, so the whole JPG is read and decoded at a DCT reduction:
+on the Canon days (2017–18) chunks took ~535 ms, **~17 ms a shot**.  The
+library's 3 230 RAW-only shots go through LibRaw's smallest preview of at
+least 300 px.  Queries: ~33 ms with the text encoded (27 ms of it in the
+text tower), 7 ms when the text is cached; the engine prints both with
+`PP_PROFILE=1`.
+
 ### The index (§6)
 
 As planned, with these details: the vectors file is append-only in sealed

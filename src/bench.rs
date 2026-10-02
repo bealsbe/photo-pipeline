@@ -388,6 +388,9 @@ fn bench_search_index() {
     let store = parking_lot::Mutex::new(Store::new(dir.clone()));
     let lib = Arc::new(library_index::index_from_tree(&dir, &scanned.tree, &store, &cancelled).unwrap());
     println!("library         {:>6} shots in {} days", lib.total_shots, lib.len());
+    for d in lib.days.values() {
+        println!("  {}  {:>5} shots  {:>5} files  ({} JPG, {} RAW)", d.date, d.shot_count, d.files.len(), d.jpg_count, d.raw_count);
+    }
     let scratch = std::env::temp_dir().join(format!("pp-bench-search-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let (bus, rx) = bus::channel();
