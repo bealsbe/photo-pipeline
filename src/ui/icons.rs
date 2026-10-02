@@ -83,6 +83,12 @@ pub enum Glyph {
     HintAccident,
     /// … a copy of another file, a frame on top of another.
     HintCopy,
+    /// Search the library: a magnifier.
+    Search,
+    /// The graphics card search runs on: a card with two fans.
+    GraphicsCard,
+    /// A clock: what is done so far, or a wait.
+    Clock,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -512,6 +518,22 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.rounded(&[(4.0, 15.5), (4.0, 4.0), (15.5, 4.0)], 2.5);
             p.rrect(8.5, 8.5, 11.5, 11.5, 2.0);
         }
+        Search => {
+            p.circle(10.5, 10.5, 6.5);
+            p.line(&[(15.3, 15.3), (20.0, 20.0)]);
+        }
+        GraphicsCard => {
+            p.rrect(2.5, 6.0, 19.0, 11.0, 2.0);
+            p.circle(8.5, 11.5, 2.6);
+            p.circle(15.5, 11.5, 2.6);
+            for x in [6.0, 10.0, 14.0] {
+                p.line(&[(x, 17.0), (x, 19.5)]);
+            }
+        }
+        Clock => {
+            p.circle(12.0, 12.0, 8.5);
+            p.line(&[(12.0, 7.5), (12.0, 12.0), (15.0, 14.0)]);
+        }
     }
 }
 
@@ -539,7 +561,7 @@ mod tests {
             Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
-            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy,
+            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");

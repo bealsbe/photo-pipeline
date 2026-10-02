@@ -43,6 +43,7 @@ pub const PRIORITY_PREFETCH: i32 = 2;
 pub type OwnerId = u32;
 pub const OWNER_MAIN: OwnerId = 1;
 pub const OWNER_CALENDAR: OwnerId = 2;
+pub const OWNER_SEARCH: OwnerId = 3;
 
 /// One mip level of a thumbnail, ready for the GPU.
 #[derive(Clone, Debug)]

@@ -1,0 +1,1417 @@
+//! Search the library (Ctrl+F): a page of its own, on the side rail beside
+//! the calendar.
+//!
+//! - **One field.**  The query is the page's title.  While typing, the
+//!   field offers recent searches (the last 10); ↑ ↓ choose, Enter or Tab
+//!   takes one, Enter alone searches what was typed and moves to the
+//!   results.  Esc closes the list and never leaves the page; the back
+//!   button and the rail do.
+//! - **Results best first**, in one list on the photos' grey: the grid of
+//!   a library day, read-only, with each photo's date under it (the date,
+//!   time and file name on hover).  A burst is one stacked tile at the
+//!   rank of its best frame, as in the grid: G or its tab opens it, Shift+G
+//!   every one.  ← → move, Space is quick look, Enter the viewer.
+//! - **Open day ›** shows the selected photo's day in the calendar, with
+//!   the photo selected; its back button returns here, query and place
+//!   kept.
+//! - **Before the first index** the page says what indexing costs and
+//!   offers it; the download dialog asks once (`search_setup`).  Indexing
+//!   then shows in the status bar, failures in a banner.
+//!
+//! The engine (`crate::search::Engine`, through `search_link`) answers on
+//! the bus; the records of a query's hits are built on a worker from the
+//! library index the calendar holds, reading no file.
+
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use chrono::{Datelike, NaiveDate};
+use iced::keyboard::{self, Key, key::Named};
+use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, row, scrollable, stack, text, text_input};
+use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task, Theme};
+
+use super::kit::{self, tip};
+use super::search_link::Link;
+use super::search_results::{self as res, Layout, Results};
+use super::style;
+use super::{App, Message, View};
+use crate::bus::Bus;
+use crate::imaging::thumbs::{OWNER_SEARCH, PRIORITY_PREFETCH, PRIORITY_VISIBLE, ThumbCache};
+use crate::ml::download::DownloadState;
+use crate::ml::models::ModelId;
+use crate::ml::{CardFailure, Device};
+use crate::model::bursts::RunMark;
+use crate::model::collection::RecordId;
+use crate::model::library_index::{FileEntry, LibraryIndex, MONTH_ABBR, MONTH_NAME};
+use crate::search::{Hit, PassKind, Status, Stopped, estimate};
+use crate::settings::Settings;
+use crate::ui::grid::{self, CellLabel, Grid, GridData, GridEvent, Restack, Section};
+use crate::ui::icons::{self, Glyph};
+use crate::ui::paint;
+use crate::ui::side_menu::RAIL_W;
+use crate::ui::theme::{self as t, alpha};
+use crate::util;
+
+/// The field's widget id (focus, select all).
+pub const FIELD: &str = "search-field";
+/// The field's height: larger than a control, the query being the title.
+const FIELD_H: f32 = 36.0;
+const HEADER_H: f32 = 60.0;
+const SEARCH_CACHE_BYTES: usize = 96 * 1024 * 1024;
+/// While the first index runs, a search shown is run again as it reaches
+/// more photos, at most this often.
+const REFRESH_EVERY: Duration = Duration::from_secs(3);
+
+/// The download dialog's two stages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stage {
+    /// What will be downloaded, its licence, what indexing costs.
+    Ask,
+    /// Progress, then done, or what failed.
+    Progress,
+}
+
+pub struct Dialog {
+    pub stage: Stage,
+    /// Show sources and checksums.
+    pub sums: bool,
+}
+
+/// A model's download, as last reported.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Download {
+    pub model: ModelId,
+    pub done: u64,
+    pub total: u64,
+    pub state: DownloadState,
+}
+
+/// How much of the library a search sees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Everything indexed (or what *Index new exports* lets in).
+    Whole,
+    /// The first index (or a rebuild) is running: newest days first.
+    Growing,
+    /// The first index stopped part-way (the card, the share, ×).
+    Stopped,
+}
+
+pub fn coverage(st: &Status) -> Coverage {
+    match &st.pass {
+        Some(p) if p.kind != PassKind::NewExports => Coverage::Growing,
+        None if st.stopped.is_some() && st.first_index_asked && st.indexed_shots < st.library_shots => Coverage::Stopped,
+        _ => Coverage::Whole,
+    }
+}
+
+pub struct Search {
+    pub link: Link,
+    /// The engine's status, as last reported.
+    pub status: Status,
+    pub downloads: Vec<Download>,
+
+    /// What is in the field.
+    pub query: String,
+    /// The recent searches list is open under the field.
+    pub completions: bool,
+    pub hi: Option<usize>,
+    /// Where the back button returns, and what it says.
+    pub from: View,
+    pub from_label: String,
+
+    seq: u64,
+    /// The query in flight, and whether it only refreshes the one shown.
+    pub pending: Option<(u64, bool)>,
+    /// The words of the results shown (or on their way).
+    pub ran: Option<String>,
+    pub results: Option<Arc<Results>>,
+    /// Why the last query couldn't run.
+    pub error: Option<String>,
+    pub layout: Layout,
+    /// Bursts stacked unless toggled (G, a tab); Shift+G flips them all.
+    stack_all: bool,
+    flipped: HashSet<u64>,
+    pub selection: HashSet<RecordId>,
+    pub anchor: Option<RecordId>,
+    pub collapsed: HashSet<NaiveDate>,
+    pub scroll: f32,
+    pub scroll_seq: u64,
+    pub reveal: (u64, Option<RecordId>),
+    pub key: u64,
+    before: (Vec<Section>, Vec<Vec<Option<RunMark>>>),
+    restack_seq: u64,
+    restack_focus: Option<(RecordId, RecordId)>,
+    pub thumbs: ThumbCache,
+    pub thumb_size: f32,
+    /// When the shown search last ran, and on how many indexed photos.
+    last_run: (Instant, usize),
+    /// The line after the last result.
+    pub end_line: String,
+    /// Thumbnails pending, as last told to the engine.
+    busy_sent: usize,
+
+    pub dialog: Option<Dialog>,
+    /// The card or library banner was closed (the status bar keeps the way
+    /// back).
+    pub banner_hidden: bool,
+    /// The indexing steps, over the status bar.
+    pub steps: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum Msg {
+    Input(String),
+    Submit,
+    Clear,
+    /// A recent search from the list under the field.
+    Take(usize),
+    /// A search from the start page (a recent one, an example).
+    Run(String),
+    CloseList,
+    Back,
+    OpenDay,
+    Grid(GridEvent),
+    Built(u64, Option<Arc<Results>>),
+    /// Index the library… (opens the download dialog).
+    IndexLibrary,
+    /// Index the rest, after the first index stopped part-way.
+    IndexRest,
+    Dialog(DialogMsg),
+    /// The status bar's ×: stop indexing, or the download.
+    Stop,
+    Steps(bool),
+    TryCard,
+    TryAgain,
+    OpenPrefs,
+    HideBanner,
+}
+
+#[derive(Debug, Clone)]
+pub enum DialogMsg {
+    Download,
+    Cancel,
+    Close,
+    Sums,
+    Retry,
+    StopDownload,
+    /// Show the download under way (the page, the status bar).
+    Show,
+}
+
+impl Search {
+    pub fn new(bus: Bus, settings: &Settings) -> Search {
+        let link = Link::new(bus, settings.search_device, settings.search_index_exports);
+        let status = link.status();
+        Search {
+            link,
+            status,
+            downloads: Vec::new(),
+            query: String::new(),
+            completions: false,
+            hi: None,
+            from: View::Grid,
+            from_label: "Grid".into(),
+            seq: 0,
+            pending: None,
+            ran: None,
+            results: None,
+            error: None,
+            layout: Layout::default(),
+            stack_all: true,
+            flipped: HashSet::new(),
+            selection: HashSet::new(),
+            anchor: None,
+            collapsed: HashSet::new(),
+            scroll: 0.0,
+            scroll_seq: 0,
+            reveal: (0, None),
+            key: 0,
+            before: (Vec::new(), Vec::new()),
+            restack_seq: 0,
+            restack_focus: None,
+            thumbs: ThumbCache::new(OWNER_SEARCH, SEARCH_CACHE_BYTES),
+            thumb_size: 180.0,
+            last_run: (Instant::now(), 0),
+            end_line: String::new(),
+            busy_sent: 0,
+            dialog: None,
+            banner_hidden: false,
+            steps: false,
+        }
+    }
+
+    /// Results are on the page (possibly none found).
+    pub fn has_results(&self) -> bool {
+        self.ran.is_some() && self.results.is_some()
+    }
+
+    /// The focused result: the one last clicked or stepped to, while
+    /// selected, else a lone selected one.
+    pub fn focus(&self) -> Option<RecordId> {
+        let sel = &self.selection;
+        self.anchor.filter(|a| sel.contains(a)).or_else(|| if sel.len() == 1 { sel.iter().next().copied() } else { None })
+    }
+
+    /// Bursts are stacked (Shift+G's state on the page).
+    pub fn all_stacked(&self) -> bool {
+        self.stack_all
+    }
+
+    /// The focused result is in a burst (stacked or open).
+    pub fn focused_burst(&self) -> bool {
+        self.focus().is_some_and(|id| self.layout.frames_of(id).is_some())
+    }
+
+    /// A model download is under way.
+    pub fn downloading(&self) -> bool {
+        self.downloads.iter().any(|d| !d.state.is_final())
+    }
+
+    fn stacked(&self, key: u64) -> bool {
+        self.stack_all != self.flipped.contains(&key)
+    }
+
+    /// Photos found (frames inside stacks too).
+    pub fn photos(&self) -> usize {
+        self.results.as_ref().map_or(0, |r| r.found.len())
+    }
+
+    /// Lay the results out again (bursts stacked or opened, new results),
+    /// keeping the selection.  `animate` slides the tiles to their new
+    /// places, holding `focus` still (else the middle row).
+    fn relayout(&mut self, animate: bool, focus: Option<RecordId>) {
+        let Some(r) = self.results.clone() else {
+            self.layout = Layout::default();
+            return;
+        };
+        self.end_line = format!("That's everything that looks like “{}”.", r.words);
+        let new = res::layout(&r.found, "Best matches first", |k| self.stacked(k));
+        let old = std::mem::replace(&mut self.layout, new);
+        if animate {
+            self.before = (old.sections, old.runs);
+            self.restack_seq += 1;
+            self.restack_focus = focus.and_then(|a| Some((a, self.layout.tile_of(a)?)));
+        }
+        let (sel, anchor) = res::regather(&self.layout, &self.selection, self.anchor);
+        self.selection = sel;
+        self.anchor = anchor;
+        self.key = self.key.wrapping_add(1);
+    }
+}
+
+fn m(msg: Msg) -> Message {
+    Message::Search(msg)
+}
+
+/// The models search needs (phase 1: the search model).
+pub fn search_models() -> Vec<ModelId> {
+    crate::ml::models::search_models().iter().map(|m| m.id).collect()
+}
+
+// ── getting there and back ──────────────────────────────────────────────────
+
+/// Ctrl+F, the rail or the View menu: the page, its field focused with its
+/// text selected, so typing replaces the last query.
+pub fn open(app: &mut App) -> Task<Message> {
+    let t = if app.view != View::Search { app.switch_view(View::Search) } else { Task::none() };
+    Task::batch([t, focus_field()])
+}
+
+fn focus_field() -> Task<Message> {
+    iced::widget::operation::focus::<Message>(FIELD).chain(iced::widget::operation::select_all(FIELD))
+}
+
+fn unfocus_field() -> Task<Message> {
+    iced::advanced::widget::operate(iced::advanced::widget::operation::focusable::unfocus::<()>()).discard()
+}
+
+/// The view is switching to the page from `from` (see `App::switch_view`).
+pub fn arriving(app: &mut App, from: View) {
+    if from != View::Search {
+        app.search.from = from;
+        app.search.from_label = back_label(app, from);
+    }
+    app.search.completions = false;
+    app.calendar.want_index();
+}
+
+/// What the back button says: the place it returns to, as that place names
+/// itself ("Grid", "Jun 2024").
+fn back_label(app: &App, from: View) -> String {
+    match from {
+        View::Calendar => {
+            let c = &app.calendar;
+            match c.mode {
+                super::calendar::Mode::Year => c.year.to_string(),
+                _ => format!("{} {}", MONTH_ABBR[(c.month.clamp(1, 12) - 1) as usize], c.year),
+            }
+        }
+        _ => "Grid".into(),
+    }
+}
+
+pub fn back(app: &mut App) -> Task<Message> {
+    let to = app.search.from;
+    app.switch_view(if to == View::Search { View::Grid } else { to })
+}
+
+/// Open day ›: the selected photo's day in the calendar, with it selected.
+pub fn open_day(app: &mut App) -> Task<Message> {
+    let s = &app.search;
+    let Some((id, r)) = s.focus().zip(s.results.clone()) else { return Task::none() };
+    let (Some(day), Some(path)) = (r.day_of(id), r.coll.get(id).map(|x| x.path.clone())) else { return Task::none() };
+    let t = app.switch_view(View::Calendar);
+    app.calendar.open_from_search(day, path);
+    let status = app.calendar.status_text();
+    Task::batch([t, app.show_status(status, 0)])
+}
+
+// ── searching ───────────────────────────────────────────────────────────────
+
+/// Search for `words` and move to the results.
+fn run(app: &mut App, words: String) -> Task<Message> {
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    let s = &mut app.search;
+    s.query = words.clone();
+    s.completions = false;
+    s.hi = None;
+    if words.is_empty() {
+        s.ran = None;
+        s.results = None;
+        s.error = None;
+        s.pending = None;
+        s.layout = Layout::default();
+        s.selection.clear();
+        s.anchor = None;
+        return Task::none();
+    }
+    if s.status.indexed_shots == 0 {
+        return app.show_status("Nothing is indexed yet, so there is nothing to search.", 5000);
+    }
+    app.settings.remember_search(&words);
+    app.settings.save_in_background();
+    app.search.ran = Some(words.clone());
+    query(app, words, false);
+    unfocus_field()
+}
+
+/// Send the query; `refresh` runs the one shown again (indexing reached
+/// more photos, the closeness changed), keeping the place.
+fn query(app: &mut App, words: String, refresh: bool) {
+    let closeness = app.settings.closeness();
+    let s = &mut app.search;
+    s.seq += 1;
+    s.pending = Some((s.seq, refresh));
+    s.last_run = (Instant::now(), s.status.indexed_shots);
+    s.link.query(s.seq, &words, closeness);
+}
+
+/// Run the search shown again (the closeness changed, more is indexed).
+pub fn rerun(app: &mut App) {
+    if let Some(w) = app.search.ran.clone().filter(|_| app.search.results.is_some()) {
+        query(app, w, true);
+    }
+}
+
+/// A query's answer: build its records on a worker.
+pub fn on_results(app: &mut App, seq: u64, hits: Arc<Vec<Hit>>, error: Option<String>) -> Task<Message> {
+    if app.search.pending.map(|p| p.0) != Some(seq) {
+        return Task::none();
+    }
+    if let Some(e) = error {
+        let s = &mut app.search;
+        s.pending = None;
+        s.error = Some(e);
+        s.results = None;
+        s.layout = Layout::default();
+        return Task::none();
+    }
+    app.search.error = None;
+    let Some(index) = app.calendar.index.clone() else {
+        return Task::done(m(Msg::Built(seq, None)));
+    };
+    let words = app.search.ran.clone().unwrap_or_default();
+    let work = move || Arc::new(build(seq, words, &hits, &index));
+    Task::perform(super::preferences::on_worker("search-results", work), move |r| m(Msg::Built(seq, r)))
+}
+
+/// The records for `hits`, from the library index (on a worker).
+fn build(seq: u64, words: String, hits: &[Hit], index: &LibraryIndex) -> Results {
+    use std::collections::HashMap;
+    // Each day's files by path, made once per day the hits touch.
+    let mut days: HashMap<NaiveDate, HashMap<&Path, &FileEntry>> = HashMap::new();
+    for h in hits {
+        days.entry(h.day).or_insert_with(|| index.get(h.day).map(|d| d.files.iter().map(|f| (f.path.as_path(), f)).collect()).unwrap_or_default());
+    }
+    res::build(seq, words, hits, |d, p| days.get(&d).and_then(|m| m.get(p)).map(|e| (*e).clone()))
+}
+
+fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Message> {
+    let s = &mut app.search;
+    let Some((want, refresh)) = s.pending else { return Task::none() };
+    if want != seq {
+        return Task::none();
+    }
+    s.pending = None;
+    let Some(r) = built else { return Task::none() };
+    // Selection by file, so a refresh (new records) keeps it.
+    let old = s.results.take();
+    let path_of = |id: RecordId| old.as_ref().and_then(|o| o.coll.get(id)).map(|x| x.path.clone());
+    let kept: Vec<_> = s.selection.iter().filter_map(|&id| path_of(id)).collect();
+    let anchor = s.anchor.and_then(path_of);
+    s.results = Some(r.clone());
+    s.selection = kept.iter().filter_map(|p| r.coll.id_of(p)).collect();
+    s.anchor = anchor.and_then(|p| r.coll.id_of(&p));
+    if !refresh {
+        s.flipped.clear();
+        s.collapsed.clear();
+        s.selection.clear();
+        s.anchor = None;
+        s.scroll = 0.0;
+        s.scroll_seq += 1;
+        s.thumbs.clear_queue(&app.workers);
+    }
+    s.relayout(false, None);
+    // A new search selects its best match, ready for Space, Enter or Open day.
+    if !refresh {
+        if let Some(&first) = s.layout.tiles.first() {
+            s.selection = [first].into();
+            s.anchor = Some(first);
+        }
+    }
+    super::quicklook::follow(app)
+}
+
+// ── what the engine says ────────────────────────────────────────────────────
+
+pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
+    let old = std::mem::replace(&mut app.search.status, (*new).clone());
+    let st = &app.search.status;
+    let mut tasks = Vec::new();
+    if st.stopped.is_some() && old.stopped != st.stopped {
+        app.search.banner_hidden = false;
+    }
+    let st = &app.search.status;
+    if st.helper_restarts > old.helper_restarts {
+        tasks.push(app.show_status("The search helper stopped and was started again. Indexing carried on.", 6000));
+    }
+    let st = &app.search.status;
+    if matches!(old.stopped, Some(Stopped::Card(_))) && st.stopped.is_none() && st.device.chosen == Device::Gpu {
+        tasks.push(app.show_status("The graphics card passed its check. Indexing carries on.", 6000));
+    }
+    let st = &app.search.status;
+    if let (Some(p), None, None) = (&old.pass, &st.pass, &st.stopped) {
+        let text = match p.kind {
+            PassKind::NewExports => format!("Search has the {} new {}.", util::thousands(p.total as u64), if p.total == 1 { "photo" } else { "photos" }),
+            _ if st.indexed_shots >= st.library_shots => format!("Indexed {}. Search has the whole library.", util::plural(st.library_shots as u64, "photo")),
+            _ => format!("Indexed {} of {} photos.", util::thousands(st.indexed_shots as u64), util::thousands(st.library_shots as u64)),
+        };
+        app.search.steps = false;
+        tasks.push(app.show_status(text, 8000));
+        rerun(app);
+    } else {
+        // Searching while the first index runs: the results fill in.
+        let s = &app.search;
+        let grew = s.status.indexed_shots.saturating_sub(s.last_run.1);
+        let enough = grew * 50 >= s.status.library_shots.max(1);
+        if coverage(&s.status) == Coverage::Growing && app.view == View::Search && s.pending.is_none() && enough && s.last_run.0.elapsed() >= REFRESH_EVERY {
+            rerun(app);
+        }
+    }
+    Task::batch(tasks)
+}
+
+pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: DownloadState) -> Task<Message> {
+    let s = &mut app.search;
+    let failed = super::search_setup::failed(&state);
+    let d = Download { model, done, total, state };
+    match s.downloads.iter_mut().find(|x| x.model == model) {
+        Some(x) => *x = d,
+        None => s.downloads.push(d),
+    }
+    // A failure shows in the dialog, reopened if it was closed.
+    if failed {
+        s.dialog = Some(Dialog { stage: Stage::Progress, sums: false });
+    }
+    Task::none()
+}
+
+/// The library was read again: the engine looks for new photos.
+pub fn on_library(app: &mut App, index: Arc<LibraryIndex>) {
+    app.search.link.on_library(index);
+}
+
+/// Tell the engine how many thumbnails the views wait for: the pass steps
+/// back while any.  Called after each batch of background events; sends
+/// only a change.
+pub fn note_busy(app: &mut App) {
+    let pending = app.thumbs.pending() + app.calendar.thumbs.pending() + app.search.thumbs.pending();
+    if pending != app.search.busy_sent {
+        app.search.busy_sent = pending;
+        app.search.link.set_busy(pending);
+    }
+}
+
+// ── update ──────────────────────────────────────────────────────────────────
+
+pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
+    match msg {
+        Msg::Input(text) => {
+            let s = &mut app.search;
+            s.query = text;
+            s.completions = true;
+            s.hi = None;
+            Task::none()
+        }
+        Msg::Submit => {
+            let s = &app.search;
+            match s.hi.filter(|_| s.completions) {
+                Some(i) => take(app, i),
+                None => {
+                    let q = app.search.query.clone();
+                    run(app, q)
+                }
+            }
+        }
+        Msg::Take(i) => take(app, i),
+        Msg::Run(words) => run(app, words),
+        Msg::Clear => {
+            let t = run(app, String::new());
+            Task::batch([t, focus_field()])
+        }
+        Msg::CloseList => {
+            app.search.completions = false;
+            app.search.hi = None;
+            Task::none()
+        }
+        Msg::Back => back(app),
+        Msg::OpenDay => open_day(app),
+        Msg::Grid(ev) => on_grid(app, ev),
+        Msg::Built(seq, r) => on_built(app, seq, r),
+        Msg::IndexLibrary => {
+            app.search.dialog = Some(Dialog { stage: Stage::Ask, sums: false });
+            Task::none()
+        }
+        Msg::IndexRest => {
+            app.search.link.start_first_index(&search_models());
+            app.show_status("Indexing the rest of the library.", 5000)
+        }
+        Msg::Dialog(d) => super::search_setup::dialog_update(app, d),
+        Msg::Stop => {
+            let s = &app.search;
+            let downloading = s.downloading();
+            let text = if downloading {
+                "Stopped the download. Nothing was indexed.".to_string()
+            } else {
+                format!(
+                    "Stopped indexing at {} of {} photos. What was indexed is kept, and search works on it.",
+                    util::thousands(s.status.indexed_shots as u64),
+                    util::thousands(s.status.library_shots as u64)
+                )
+            };
+            if downloading {
+                s.link.cancel_downloads();
+            } else {
+                s.link.stop_indexing();
+            }
+            app.search.steps = false;
+            app.show_status(text, 0)
+        }
+        Msg::Steps(open) => {
+            app.search.steps = open;
+            Task::none()
+        }
+        Msg::TryCard => {
+            app.search.banner_hidden = false;
+            app.search.link.try_card_again();
+            Task::none()
+        }
+        Msg::TryAgain => {
+            app.search.link.try_card_again();
+            Task::none()
+        }
+        Msg::OpenPrefs => super::preferences::open_at(app, super::preferences::Control::SearchDevice(app.settings.search_device)),
+        Msg::HideBanner => {
+            app.search.banner_hidden = true;
+            Task::none()
+        }
+    }
+}
+
+fn take(app: &mut App, i: usize) -> Task<Message> {
+    let Some(words) = res::completions(&app.settings.search_recent, &app.search.query).get(i).map(|w| w.to_string()) else { return Task::none() };
+    run(app, words)
+}
+
+// ── the results grid ────────────────────────────────────────────────────────
+
+fn on_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
+    let s = &mut app.search;
+    s.completions = false;
+    match ev {
+        GridEvent::Click { id, modifiers } => {
+            if modifiers.control() {
+                if !s.selection.remove(&id) {
+                    s.selection.insert(id);
+                }
+            } else {
+                s.selection = [id].into();
+            }
+            s.anchor = Some(id);
+            Task::none()
+        }
+        GridEvent::Activate(id) => open_viewer(app, id),
+        GridEvent::ClearSelection => {
+            s.selection.clear();
+            Task::none()
+        }
+        GridEvent::ToggleBurst(id) => toggle_burst(app, id),
+        GridEvent::ToggleCollapse(d) => {
+            if !s.collapsed.remove(&d) {
+                s.collapsed.insert(d);
+            }
+            Task::none()
+        }
+        GridEvent::Chip(_) | GridEvent::SelectDone => Task::none(),
+        GridEvent::ZoomStep(step) => {
+            s.thumb_size = (((s.thumb_size + step as f32 * super::ZOOM_STEP) / super::ZOOM_STEP).floor() * super::ZOOM_STEP).clamp(grid::MIN_SIZE, grid::MAX_SIZE);
+            Task::none()
+        }
+        GridEvent::PinchTo(size) => {
+            s.thumb_size = size.clamp(grid::MIN_SIZE, grid::MAX_SIZE);
+            Task::none()
+        }
+        GridEvent::Thumbs { visible, nearby, settle } => {
+            let Some(r) = s.results.clone() else { return Task::none() };
+            if settle {
+                s.thumbs.clear_queue(&app.workers);
+            }
+            for (ids, prio) in [(visible, PRIORITY_VISIBLE), (nearby, PRIORITY_PREFETCH)] {
+                for id in ids {
+                    if let Some(rec) = r.coll.get(id) {
+                        s.thumbs.request(&app.workers, rec, prio);
+                    }
+                }
+            }
+            Task::none()
+        }
+        GridEvent::Scrolled(y) => {
+            s.scroll = y;
+            Task::none()
+        }
+    }
+}
+
+/// The viewer on a result (read-only, like a library day), stepping
+/// through every frame in the results' order; a stack opens on its cover.
+pub fn open_viewer(app: &mut App, id: RecordId) -> Task<Message> {
+    let s = &mut app.search;
+    let Some(r) = s.results.clone() else { return Task::none() };
+    s.completions = false;
+    let items = s.layout.visible.clone();
+    let index = items.iter().position(|&x| x == id).unwrap_or(0);
+    super::viewer::open(app, super::viewer::Source::Library(r.coll.clone()), items, index, true)
+}
+
+/// G or a burst's tab: stack the burst of `id`, or open it.
+pub fn toggle_burst(app: &mut App, id: RecordId) -> Task<Message> {
+    let s = &mut app.search;
+    let Some(g) = s.layout.group_of(id) else { return Task::none() };
+    let Some(key) = s.layout.keys[g].filter(|_| s.layout.groups[g].len() > 1) else {
+        let name = s.results.as_ref().and_then(|r| r.coll.get(id)).map(|r| r.stem()).unwrap_or_default();
+        return app.show_status(format!("{name} isn't part of a burst."), 4000);
+    };
+    if !s.flipped.remove(&key) {
+        s.flipped.insert(key);
+    }
+    s.relayout(true, Some(id));
+    super::quicklook::follow(app)
+}
+
+/// G on the page: the focused result's burst.
+pub fn toggle_focused(app: &mut App) -> Task<Message> {
+    match app.search.focus() {
+        Some(id) => toggle_burst(app, id),
+        None => app.show_status("Select a photo to stack its burst.", 4000),
+    }
+}
+
+/// Shift+G on the page: every burst stacked, or every frame shown (for
+/// these results; the grid's saved choice stays as it is).
+pub fn toggle_all(app: &mut App) -> Task<Message> {
+    let s = &mut app.search;
+    s.stack_all = !s.stack_all;
+    s.flipped.clear();
+    let anchor = s.focus();
+    s.relayout(true, anchor);
+    let n = s.layout.groups.iter().filter(|g| g.len() > 1).count();
+    let text = match (s.stack_all, n) {
+        (_, 0) => "No bursts in these results.".to_string(),
+        (true, n) => format!("{} stacked. G opens the selected one.", util::plural(n as u64, "burst")),
+        (false, _) => "Every frame of every burst shows.".to_string(),
+    };
+    let t = app.show_status(text, 4000);
+    Task::batch([t, super::quicklook::follow(app)])
+}
+
+/// Move the selection to `id` and bring it into view.
+pub fn select(app: &mut App, id: RecordId) {
+    let s = &mut app.search;
+    s.selection = [id].into();
+    s.anchor = Some(id);
+    s.reveal = (s.reveal.0 + 1, Some(id));
+}
+
+// ── keys ────────────────────────────────────────────────────────────────────
+
+/// Esc on the page (also when the field took it): it closes the list of
+/// recent searches, and never leaves the page.
+pub fn escape(app: &mut App) -> Task<Message> {
+    app.search.completions = false;
+    app.search.hi = None;
+    Task::none()
+}
+
+/// Keys on the page that no command took.
+pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Message> {
+    if mods.control() || mods.alt() {
+        return Task::none();
+    }
+    if app.search.completions {
+        let n = res::completions(&app.settings.search_recent, &app.search.query).len();
+        let s = &mut app.search;
+        match key {
+            Key::Named(Named::ArrowDown) if n > 0 => {
+                s.hi = Some(s.hi.map_or(0, |h| (h + 1) % n));
+                return Task::none();
+            }
+            Key::Named(Named::ArrowUp) if n > 0 => {
+                s.hi = Some(s.hi.map_or(n - 1, |h| (h + n - 1) % n));
+                return Task::none();
+            }
+            Key::Named(Named::Tab | Named::Enter) => {
+                return match s.hi {
+                    Some(i) => take(app, i),
+                    None => {
+                        let q = s.query.clone();
+                        run(app, q)
+                    }
+                };
+            }
+            Key::Named(Named::Escape) => return escape(app),
+            _ => {}
+        }
+    }
+    match key {
+        Key::Named(Named::Escape) => escape(app),
+        Key::Named(Named::ArrowLeft | Named::ArrowRight) => {
+            let forward = *key == Key::Named(Named::ArrowRight);
+            if let Some(next) = res::step(&app.search.layout.tiles, app.search.anchor, forward) {
+                select(app, next);
+            }
+            Task::none()
+        }
+        Key::Named(Named::Enter) => match app.search.focus() {
+            Some(id) => open_viewer(app, id),
+            None => Task::none(),
+        },
+        _ => Task::none(),
+    }
+}
+
+// ── view ────────────────────────────────────────────────────────────────────
+
+/// What the page's body shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    NoLibrary,
+    Reading,
+    /// The card is chosen and there is none to use, before any index.
+    NoCard,
+    /// The invitation to the first index, with its costs.
+    NotIndexed,
+    /// The model is downloading, or the first photos are being indexed.
+    Preparing,
+    Start,
+    Searching,
+    Failed,
+    NoResults,
+    Results,
+}
+
+pub fn page(app: &App) -> Page {
+    let s = &app.search;
+    if app.library.is_none() {
+        return Page::NoLibrary;
+    }
+    if app.calendar.index.is_none() {
+        return Page::Reading;
+    }
+    let st = &s.status;
+    if st.indexed_shots == 0 {
+        if s.downloading() || st.pass.is_some() {
+            return Page::Preparing;
+        }
+        let no_card = st.device.chosen == Device::Gpu && matches!(st.stopped, Some(Stopped::Card(CardFailure::NoCard)));
+        return if no_card { Page::NoCard } else { Page::NotIndexed };
+    }
+    match (&s.ran, &s.results, &s.error) {
+        (None, _, _) => Page::Start,
+        (Some(_), _, Some(_)) => Page::Failed,
+        (Some(_), None, None) => Page::Searching,
+        (Some(_), Some(r), None) if r.found.is_empty() => Page::NoResults,
+        _ => Page::Results,
+    }
+}
+
+pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
+    let s = &app.search;
+    let mut col = column![header(app), kit::hairline()].width(Length::Fill).height(Length::Fill);
+    let p = page(app);
+    if matches!(p, Page::Results | Page::NoResults) && coverage(&s.status) != Coverage::Whole {
+        col = col.push(partial_strip(app));
+    }
+    let body: Element<'_, Message> = match p {
+        Page::NoLibrary => message_page(
+            Glyph::Library,
+            "Choose your library folder",
+            "Search finds photos in the library, the folder Export files them into by date.".into(),
+            Some(("Choose library folder…", Message::PickFolder(super::FolderTarget::Library))),
+            None,
+        ),
+        Page::Reading => message_page(Glyph::Search, "Reading the library…", String::new(), None, None),
+        Page::NoCard => no_card_page(app),
+        Page::NotIndexed => invitation(app),
+        Page::Preparing => preparing(app),
+        Page::Start => start_page(app),
+        Page::Searching => container(Space::new()).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into(),
+        Page::Failed => message_page(
+            Glyph::Warning,
+            "Search couldn't run",
+            s.error.clone().unwrap_or_default(),
+            Some(("Try again", m(Msg::Submit))),
+            None,
+        ),
+        Page::NoResults => no_results(app),
+        Page::Results => results_grid(app, keyboard_ok),
+    };
+    col = col.push(body);
+    // The list's layer is always there (empty when closed): the page's
+    // widget tree keeps its shape, so the field keeps its focus.
+    let list: Element<'_, Message> =
+        if s.completions && !matches!(p, Page::NoLibrary | Page::Reading) { completions_layer(app) } else { Space::new().into() };
+    stack![col, list].width(Length::Fill).height(Length::Fill).into()
+}
+
+/// The field's width: wide, but leaving room for the back button, the
+/// count and Open day.
+fn field_width(app: &App) -> f32 {
+    (app.window_size_width() - RAIL_W - 380.0).clamp(260.0, 560.0)
+}
+
+fn back_width(app: &App) -> f32 {
+    t::S3 + 16.0 + t::S2 + paint::text_width(&app.search.from_label, t::T_BODY, paint::MEDIUM) + t::S3
+}
+
+fn header(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let place = if s.from == View::Calendar { "calendar".to_string() } else { s.from_label.to_lowercase() };
+    let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, s.from_label.clone(), t::INK2, style::secondary(), Some(m(Msg::Back))), format!("Back to the {place}"), true);
+    let mut r = row![back, Space::new().width(t::S2), field(app)].align_y(Alignment::Center);
+    let p = page(app);
+    let caption = if s.pending.is_some_and(|p| !p.1) || p == Page::Searching {
+        "Searching…".to_string()
+    } else if matches!(p, Page::Results) {
+        let n = s.photos();
+        match coverage(&s.status) {
+            Coverage::Whole => format!("{}, best match first", util::plural(n as u64, "photo")),
+            _ => format!("{} so far, best match first", util::plural(n as u64, "photo")),
+        }
+    } else {
+        String::new()
+    };
+    r = r.push(container(kit::caption(caption)).padding(Padding { left: t::S3, ..Padding::ZERO }));
+    r = r.push(Space::new().width(Length::Fill));
+    if p == Page::Results {
+        let day = s.focus().and_then(|id| s.results.as_ref()?.day_of(id));
+        let tone = if day.is_some() { t::INK } else { t::INK4 };
+        let label = row![text("Open day").size(t::T_BODY).font(paint::MEDIUM), icons::view(Glyph::ChevronRight, 15.0, tone)].spacing(t::S1).align_y(Alignment::Center);
+        let b = button(container(label).center_y(Length::Fill))
+            .height(t::CONTROL_H)
+            .padding(Padding { left: t::S4, right: t::S2, top: 0.0, bottom: 0.0 })
+            .style(style::secondary().style())
+            .on_press_maybe(day.map(|_| m(Msg::OpenDay)));
+        let hint = match day {
+            Some(d) => format!("Show {} in the calendar, with this photo selected", long_date(d)),
+            None => "Select a photo to open its day".into(),
+        };
+        r = r.push(tip(b, hint, true));
+    }
+    container(r.padding(Padding::from([0.0, t::S3]))).height(HEADER_H).center_y(HEADER_H).width(Length::Fill).style(style::fill(t::MOUNT)).into()
+}
+
+pub fn long_date(d: NaiveDate) -> String {
+    format!("{}, {} {}, {}", d.format("%A"), MONTH_NAME[d.month0() as usize], d.day(), d.year())
+}
+
+/// The field: the query in title type, a magnifier before it, and × to
+/// clear it (or the key that comes back to it, while empty).
+fn field(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let w = field_width(app);
+    let input = text_input("Search the library", &s.query)
+        .id(FIELD)
+        .on_input(|v| m(Msg::Input(v)))
+        .on_submit(m(Msg::Submit))
+        .size(t::T_TITLE)
+        .font(paint::MEDIUM)
+        .padding(Padding { top: 7.0, bottom: 7.0, left: 36.0, right: 40.0 })
+        .width(w)
+        .style(field_style);
+    let end: Element<'_, Message> = if s.query.is_empty() {
+        container(text("Ctrl+F").size(11).font(paint::MEDIUM).color(t::INK3))
+            .padding(Padding::from([0.0, 5.0]))
+            .style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, 4.0), ..Default::default() })
+            .into()
+    } else {
+        let x = button(container(icons::view(Glyph::Close, 14.0, t::INK3)).center(Length::Fill))
+            .width(24)
+            .height(24)
+            .padding(0)
+            .style(style::ghost().radius(4.0).style())
+            .on_press(m(Msg::Clear));
+        tip(x, "Clear the search", true)
+    };
+    let over = row![icons::view(Glyph::Search, 18.0, t::INK3), Space::new().width(Length::Fill), end]
+        .align_y(Alignment::Center)
+        .padding(Padding { left: 11.0, right: 6.0, top: 0.0, bottom: 0.0 })
+        .width(w)
+        .height(FIELD_H);
+    stack![container(input).height(FIELD_H).center_y(FIELD_H), over].into()
+}
+
+fn field_style(_t: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    let hovered = matches!(status, text_input::Status::Hovered | text_input::Status::Focused { is_hovered: true });
+    let edge = if focused {
+        t::SIGNAL
+    } else if hovered {
+        t::INK3
+    } else {
+        t::LINE_HI
+    };
+    text_input::Style {
+        background: Background::Color(t::DEEP),
+        border: style::border(edge, 1.0, t::R_CONTROL),
+        icon: t::INK3,
+        placeholder: t::INK3,
+        value: t::INK,
+        selection: alpha(t::SIGNAL, 0.35),
+    }
+}
+
+/// The recent searches under the field while typing; a click elsewhere on
+/// the page closes them.
+fn completions_layer(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let rows = res::completions(&app.settings.search_recent, &s.query);
+    let w = field_width(app);
+    let mut list = column![].spacing(2);
+    if rows.is_empty() {
+        let typed = s.query.trim();
+        let line = if typed.is_empty() { "Type what you're looking for, then press Enter.".to_string() } else { format!("Press Enter to search for “{typed}”") };
+        list = list.push(container(text(line).size(t::T_SMALL).color(t::INK3)).padding(Padding::from([t::S2, 10.0])));
+    } else {
+        list = list.push(container(kit::heading("Recent searches")).padding(Padding { top: t::S2, bottom: 3.0, left: 10.0, right: 10.0 }));
+        let typed = s.query.trim().to_lowercase();
+        for (i, words) in rows.iter().enumerate() {
+            let hot = s.hi == Some(i);
+            let line = row![icons::view(Glyph::Clock, 15.0, t::INK3), highlighted(words, &typed)].spacing(10).align_y(Alignment::Center);
+            list = list.push(
+                button(line)
+                    .padding(Padding::from([5.0, 10.0]))
+                    .width(Length::Fill)
+                    .style(move |_t, status| {
+                        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+                        button::Style {
+                            background: (hot || hover).then_some(Background::Color(t::RAISED)),
+                            text_color: t::INK,
+                            border: Border { radius: t::R_CONTROL.into(), ..Border::default() },
+                            ..button::Style::default()
+                        }
+                    })
+                    .on_press(m(Msg::Take(i))),
+            );
+        }
+    }
+    let panel = crate::ui::motion::Appear::new(container(list).width(w).padding(t::S1).style(style::floating())).rise(-4.0);
+    let x = t::S3 + back_width(app) + t::S2;
+    let catcher = column![
+        Space::new().height(HEADER_H),
+        opaque(mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill)).on_press(m(Msg::CloseList))),
+    ];
+    stack![catcher, pin(opaque(panel)).position(Point::new(x, HEADER_H / 2.0 + FIELD_H / 2.0 + 4.0)).width(Length::Fill).height(Length::Fill)].into()
+}
+
+/// A recent search with the words typed so far in a heavier weight.
+fn highlighted<'a>(words: &'a str, typed: &str) -> Element<'a, Message> {
+    let lower = words.to_lowercase();
+    let at = if typed.is_empty() {
+        None
+    } else if lower.starts_with(typed) {
+        Some(0)
+    } else {
+        lower.find(&format!(" {typed}")).map(|i| i + 1)
+    };
+    match at {
+        // Offsets of the lower-case match line up for ASCII words only.
+        Some(i) if words.is_ascii() => {
+            let (a, rest) = words.split_at(i);
+            let (b, c) = rest.split_at(typed.len().min(rest.len()));
+            row![
+                text(a).size(t::T_BODY).color(t::INK),
+                text(b).size(t::T_BODY).font(paint::SEMIBOLD).color(t::INK),
+                text(c).size(t::T_BODY).color(t::INK),
+            ]
+            .into()
+        }
+        _ => text(words).size(t::T_BODY).color(t::INK).into(),
+    }
+}
+
+/// Over the results while search sees part of the library.
+fn partial_strip(app: &App) -> Element<'_, Message> {
+    let st = &app.search.status;
+    let n = util::thousands(st.indexed_shots as u64);
+    let mut r = row![icons::view(Glyph::Clock, 15.0, t::INK3)].spacing(t::S2).align_y(Alignment::Center);
+    match coverage(st) {
+        Coverage::Stopped => {
+            r = r.push(
+                text(format!("Searching the {n} of {} photos indexed. Indexing is stopped; the rest is searched once it carries on.", util::thousands(st.library_shots as u64)))
+                    .size(t::T_SMALL)
+                    .color(t::INK2)
+                    .width(Length::Fill),
+            );
+            if matches!(st.stopped, Some(Stopped::Cancelled)) {
+                r = r.push(button(text("Index the rest").size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([2.0, 6.0])).style(style::link().style()).on_press(m(Msg::IndexRest)));
+            }
+        }
+        _ => {
+            r = r.push(text(format!("Searching the {n} photos indexed so far, newest first. Results fill in as indexing reaches older days.")).size(t::T_SMALL).color(t::INK2));
+        }
+    }
+    column![container(r.padding(Padding::from([t::S2, t::S3]))).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into()
+}
+
+fn results_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
+    let s = &app.search;
+    let Some(r) = s.results.as_ref() else { return Space::new().into() };
+    let footer = (coverage(&s.status) == Coverage::Whole).then_some((s.end_line.as_str(), "Preferences ▸ Search sets how close a match must be."));
+    let data = GridData {
+        sections: &s.layout.sections,
+        coll: &r.coll,
+        thumbs: &s.thumbs,
+        selection: &s.selection,
+        collapsed: &s.collapsed,
+        select_mode: false,
+        scale_factor: app.scale_factor,
+        show_names: true,
+        bursts: &s.layout.runs,
+        moments: &[],
+        hints: None,
+        restack: Some(Restack { seq: s.restack_seq, sections: &s.before.0, bursts: &s.before.1, focus: s.restack_focus }),
+        label: CellLabel::Date,
+        footer,
+    };
+    Grid::new(data, s.thumb_size, |e| m(Msg::Grid(e)))
+        .keyboard(keyboard_ok && !s.completions && app.quicklook.is_none())
+        .initial_scroll(s.scroll)
+        .scroll_seq(s.scroll_seq)
+        .layout_key(s.key)
+        .reveal(s.reveal.0, s.reveal.1)
+        .into()
+}
+
+// ── the pages ───────────────────────────────────────────────────────────────
+
+/// A section heading on the photos' grey, as the grid draws a day's.
+fn photo_heading<'a>(label: &'a str, note: &'a str) -> Element<'a, Message> {
+    let mut r = row![text(label).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK)].spacing(10).align_y(Alignment::Center);
+    if !note.is_empty() {
+        r = r.push(text(note).size(t::T_SMALL).color(t::PHOTO_INK3));
+    }
+    r = r.push(container(Space::new().width(Length::Fill).height(1)).width(Length::Fill).style(style::fill(t::PHOTO_LINE)));
+    container(r).height(grid::HEADER_H).center_y(grid::HEADER_H).padding(Padding::from([0.0, 16.0])).width(Length::Fill).into()
+}
+
+/// A recent search to click on the photos' grey.
+fn word_button<'a>(words: &str) -> Element<'a, Message> {
+    button(text(words.to_string()).size(14).font(paint::MEDIUM))
+        .padding(Padding::from([2.0, 0.0]))
+        .style(|_t, status| {
+            let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style { text_color: if hot { t::SIGNAL_HI } else { t::PHOTO_INK }, ..button::Style::default() }
+        })
+        .on_press(m(Msg::Run(words.to_string())))
+        .into()
+}
+
+/// An example search, as a key cap on the photos' grey, and what it shows.
+fn example<'a>(words: &'a str, about: &'a str) -> Element<'a, Message> {
+    let chip = button(text(words).size(t::T_SMALL).font(paint::MEDIUM))
+        .padding(Padding::from([2.0, 7.0]))
+        .style(|_t, status| {
+            let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(Background::Color(if hot { t::PHOTO_TRAY_HI } else { t::PHOTO_RAISED })),
+                text_color: t::PHOTO_INK,
+                border: style::border(t::PHOTO_LINE, 1.0, 4.0),
+                ..button::Style::default()
+            }
+        })
+        .on_press(m(Msg::Run(words.to_string())));
+    row![container(chip).width(170), text(about).size(t::T_BODY).color(t::PHOTO_INK2)].align_y(Alignment::Center).into()
+}
+
+/// Nothing typed: the last searches, and how to search.
+fn start_page(app: &App) -> Element<'_, Message> {
+    let recent = &app.settings.search_recent;
+    let mut col = column![].padding(Padding { top: t::S1, bottom: t::S5, left: 0.0, right: 0.0 });
+    if !recent.is_empty() {
+        col = col.push(photo_heading("Recent searches", "The last 10. Forget them in Preferences ▸ Search."));
+        let mut words = row![].spacing(18);
+        for w in recent {
+            words = words.push(word_button(w));
+        }
+        col = col.push(container(words.wrap().vertical_spacing(4)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 }).max_width(1000));
+    }
+    col = col.push(photo_heading("Ways to search", ""));
+    let examples = column![
+        example("red car at night", "Photos that look like the words, best match first"),
+        example("fireworks", "One word is enough"),
+        example("people dancing", "What a photo shows, not its file or folder name"),
+    ]
+    .spacing(10)
+    .padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
+    col = col.push(examples);
+    col = col.push(
+        container(text("Results are read-only, like the calendar's days: Open day › takes you to a photo's day.").size(t::T_SMALL).color(t::PHOTO_INK3))
+            .padding(Padding::from([0.0, 16.0])),
+    );
+    container(scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::fill(t::PHOTO_GROUND))
+        .into()
+}
+
+fn no_results(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let words = s.results.as_ref().map(|r| r.words.clone()).unwrap_or_default();
+    let (title, body) = if coverage(&s.status) != Coverage::Whole {
+        (
+            format!("Nothing in the {} photos indexed so far looks like “{words}”", util::thousands(s.status.indexed_shots as u64)),
+            "Results fill in as indexing reaches older days. Or try another word.".to_string(),
+        )
+    } else {
+        (
+            format!("Nothing in the library looks like “{words}”"),
+            "Try another word, or fewer words. Search goes by what a photo shows, not by file names or folder names.".to_string(),
+        )
+    };
+    let col = column![
+        Space::new().height(Length::FillPortion(2)),
+        text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK).align_x(iced::alignment::Horizontal::Center),
+        text(body).size(t::T_BODY).color(t::PHOTO_INK2).align_x(iced::alignment::Horizontal::Center),
+        Space::new().height(Length::FillPortion(5)),
+    ]
+    .spacing(t::S2)
+    .align_x(Alignment::Center)
+    .max_width(480);
+    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
+}
+
+/// A page that explains itself on the chrome's ground: a glyph, a title,
+/// what to know, and up to two buttons.
+fn message_page<'a>(glyph: Glyph, title: &'a str, body: String, primary: Option<(&'a str, Message)>, secondary: Option<(&'a str, Message)>) -> Element<'a, Message> {
+    let mut col = column![].spacing(t::S2).align_x(Alignment::Center).max_width(480);
+    col = col.push(Space::new().height(Length::FillPortion(3)));
+    col = col.push(icons::view(glyph, 48.0, t::INK4));
+    col = col.push(Space::new().height(t::S2));
+    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK).align_x(iced::alignment::Horizontal::Center));
+    if !body.is_empty() {
+        col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
+    }
+    let mut buttons = row![].spacing(t::S2);
+    if let Some((label, msg)) = primary {
+        buttons = buttons.push(kit::btn(label, style::primary(), Some(msg)));
+    }
+    if let Some((label, msg)) = secondary {
+        buttons = buttons.push(kit::btn(label, style::secondary(), Some(msg)));
+    }
+    col = col.push(Space::new().height(t::S2));
+    col = col.push(buttons);
+    col = col.push(Space::new().height(Length::FillPortion(4)));
+    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).style(style::fill(t::GROUND)).into()
+}
+
+/// The graphics card is chosen and there is none to use: nothing can be
+/// indexed until the processor is chosen.
+fn no_card_page(app: &App) -> Element<'_, Message> {
+    let shots = app.search.status.library_shots;
+    let cpu = estimate::describe_seconds(estimate::seconds(shots, Device::Cpu));
+    message_page(
+        Glyph::GraphicsCard,
+        "There's no graphics card Photo Pipeline can use",
+        format!("So nothing is indexed. To index on the processor instead ({cpu} for this library), choose it in Preferences ▸ Search."),
+        Some(("Open Preferences", m(Msg::OpenPrefs))),
+        Some(("Look for the card again", m(Msg::TryCard))),
+    )
+}
+
+/// One fact of the invitation: what, and a quieter line under it.
+fn fact<'a>(k: &'a str, v: String, sub: Option<&'a str>) -> Element<'a, Message> {
+    let mut words = column![text(v).size(t::T_BODY).color(t::INK)].spacing(2).width(Length::Fill);
+    if let Some(sub) = sub {
+        words = words.push(text(sub).size(t::T_SMALL).color(t::INK3));
+    }
+    row![text(k).size(t::T_SMALL).color(t::INK3).width(88), words].spacing(t::S3).padding(Padding::from([10.0, 14.0])).into()
+}
+
+/// Before the first index: what search does, what indexing costs, and the
+/// way to start it.
+fn invitation(app: &App) -> Element<'_, Message> {
+    let st = &app.search.status;
+    let costs = super::search_setup::costs(app);
+    let mut facts: Vec<Element<'_, Message>> = vec![
+        fact("Reads", format!("Each photo's preview once: {}", costs.read), None),
+        fact(
+            "Takes",
+            costs.takes.clone(),
+            Some("Search works on the newest days within a minute. You can keep culling, and stop it from the status bar. Preferences ▸ Search chooses the graphics card or the processor."),
+        ),
+    ];
+    if !st.models_installed {
+        facts.push(fact("Downloads", format!("The search model, once: {}", costs.download), None));
+    }
+    facts.push(fact("Keeps", format!("{}, on this computer, readable only by you. Nothing about your photos is sent anywhere.", super::search_setup::capital(&costs.kept)), None));
+    let mut group = column![];
+    for (i, f) in facts.into_iter().enumerate() {
+        if i > 0 {
+            group = group.push(kit::hairline());
+        }
+        group = group.push(f);
+    }
+    let action = row![
+        kit::btn("Index the library…", style::primary(), Some(m(Msg::IndexLibrary))),
+        kit::caption(format!("{} in the library", util::plural(st.library_shots as u64, "photo"))),
+    ]
+    .spacing(t::S3)
+    .align_y(Alignment::Center);
+    explained(
+        "Search the library by what's in your photos",
+        "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns.",
+        Some(container(group).width(Length::Fill).style(style::group()).into()),
+        "After this, each export is added on its own, in the background.",
+        action.into(),
+    )
+}
+
+/// Downloading the model, or indexing the first photos: what is happening
+/// and when search works.
+fn preparing(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let (line, action): (String, Element<'_, Message>) = if s.downloading() {
+        let (done, total) = s.downloads.iter().fold((0, 0), |(a, b), d| (a + d.done, b + d.total));
+        (
+            format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total)),
+            kit::btn("Show the download", style::secondary(), Some(m(Msg::Dialog(DialogMsg::Show)))).into(),
+        )
+    } else {
+        ("Indexing has started, newest days first. Search works on them within a minute.".to_string(), Space::new().into())
+    };
+    explained(
+        "Getting search ready",
+        "You can keep culling meanwhile: the status bar shows how far it has got, with × to stop.",
+        None,
+        &line,
+        action,
+    )
+}
+
+/// The invitation's layout: a title with the magnifier, what to know,
+/// optional facts, a quieter line and the action.
+fn explained<'a>(title: &'a str, about: &'a str, facts: Option<Element<'a, Message>>, note: &str, action: Element<'a, Message>) -> Element<'a, Message> {
+    let mut col = column![
+        row![icons::view(Glyph::Search, 26.0, t::INK), text(title).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
+        text(about).size(t::T_BODY).color(t::INK2),
+    ]
+    .spacing(14)
+    .max_width(600);
+    if let Some(f) = facts {
+        col = col.push(f);
+    }
+    col = col.push(text(note.to_string()).size(t::T_SMALL).color(t::INK3));
+    col = col.push(action);
+    container(scrollable(container(col).center_x(Length::Fill).padding(Padding { top: 40.0, bottom: t::S5, left: t::S5, right: t::S5 })).style(style::scroll))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::fill(t::GROUND))
+        .into()
+}
+
+/// One line for the test driver.
+pub fn debug_state(app: &App) -> String {
+    let s = &app.search;
+    let name = |id: RecordId| s.results.as_ref().and_then(|r| r.coll.get(id)).map(|r| r.stem()).unwrap_or_else(|| "?".into());
+    // Tiles and their marks side by side (looking each up would be quadratic).
+    let runs = s.layout.runs.first().map(Vec::as_slice).unwrap_or(&[]);
+    let stacked: Vec<(RecordId, RunMark)> = s.layout.tiles.iter().zip(runs).filter_map(|(&id, m)| m.filter(|m| m.stacked).map(|m| (id, m))).collect();
+    let stacks: Vec<String> = stacked.iter().take(6).map(|&(id, m)| format!("{}x{}", name(id), m.total)).collect();
+    let open = s.layout.runs.first().map_or(0, |r| r.iter().flatten().filter(|m| !m.stacked && m.first).count());
+    let st = &s.status;
+    let mut sel: Vec<String> = s.selection.iter().map(|&id| name(id)).collect();
+    sel.sort();
+    format!(
+        "view={:?} page={:?} query={:?} ran={:?} pending={:?} error={:?} photos={} tiles={} stacks={} {:?} open_bursts={} selection={:?} anchor={:?} completions={} hi={:?} recent={:?} from={:?}/{:?} coverage={:?} status=[models={} indexed={}/{} asked={} pass={:?} device={:?} stopped={:?} waiting={} restarts={} exports={}] downloads={:?} dialog={:?} banner_hidden={} steps={} closeness={:.2} scroll={} fake={}",
+        app.view,
+        page(app),
+        s.query,
+        s.ran,
+        s.pending,
+        s.error,
+        s.photos(),
+        s.layout.tiles.len(),
+        stacked.len(),
+        stacks,
+        open,
+        sel,
+        s.anchor.map(name),
+        s.completions,
+        s.hi,
+        app.settings.search_recent,
+        s.from,
+        s.from_label,
+        coverage(st),
+        st.models_installed,
+        st.indexed_shots,
+        st.library_shots,
+        st.first_index_asked,
+        st.pass,
+        st.device,
+        st.stopped,
+        st.waiting,
+        st.helper_restarts,
+        st.index_exports,
+        s.downloads.iter().map(|d| format!("{:?}:{}/{}:{:?}", d.model, d.done, d.total, d.state)).collect::<Vec<_>>(),
+        s.dialog.as_ref().map(|d| (d.stage, d.sums)),
+        s.banner_hidden,
+        s.steps,
+        app.settings.closeness(),
+        s.scroll,
+        s.link.is_fake(),
+    )
+}

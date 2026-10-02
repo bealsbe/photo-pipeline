@@ -1635,6 +1635,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+Shift+S", "Sort into RAW and JPG folders"),
             ("Ctrl+2", "Grid view"),
             ("Ctrl+3", "Library calendar"),
+            ("Ctrl+F", "Search the library"),
             ("Ctrl+Z", "Undo marks, crops, Sort or a move to the Trash"),
             ("Ctrl+Shift+Z  or  Ctrl+Y", "Redo"),
             ("Ctrl+\\", "Show or hide the menu labels"),
@@ -1650,6 +1651,19 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("G  or  click its tab", "Stack the selected photo's burst, or show all its frames"),
             ("Shift+G", "Stack all bursts, or show every frame"),
             ("?", "This list"),
+        ],
+    ),
+    (
+        "Search",
+        &[
+            ("Ctrl+F", "Go to the search field, its text selected"),
+            ("↑  ↓  then  Enter  or  Tab", "Take a recent search"),
+            ("Enter", "Search, and move to the results"),
+            ("Esc", "Close the list of recent searches (the page stays)"),
+            ("←  →", "Previous and next result"),
+            ("Space", "Quick look at the selected result"),
+            ("Enter  or  double-click", "Open it in the viewer (read-only)"),
+            ("G  /  Shift+G", "Show a burst's frames, or stack it again; every burst"),
         ],
     ),
     (

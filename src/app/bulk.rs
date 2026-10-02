@@ -106,7 +106,7 @@ pub fn open(app: &mut App, action: Action) -> Task<Message> {
     if let Err(why) = ready(app) {
         return app.show_status(why, 6000);
     }
-    if app.view == View::Calendar {
+    if app.view.is_library() {
         return Task::none();
     }
     if action == Action::KeepThis {

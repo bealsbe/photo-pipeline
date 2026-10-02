@@ -66,6 +66,8 @@ pub struct Shown {
     pub pruned: bool,
     pub marked: bool,
     pub crop: Option<Crop>,
+    /// A library photo (search results): no P or M to offer.
+    pub read_only: bool,
 }
 
 impl Shown {
@@ -394,6 +396,7 @@ fn draw_marks(r: &mut Renderer, s: &Shown, ir: Rectangle, k: f32, now: Instant, 
 }
 
 const HINTS: &[(&str, &str)] = &[("←  →", "Browse"), ("P", "Prune"), ("M", "Keep"), ("Enter", "Open"), ("Space", "Close")];
+const READ_ONLY_HINTS: &[(&str, &str)] = &[("←  →", "Browse"), ("Enter", "Open"), ("Space", "Close")];
 
 /// Name, file types, place in the grid, capture time and marks on the left;
 /// the keys on the right, while there is room.
@@ -447,16 +450,17 @@ fn draw_caption(r: &mut Renderer, s: &Shown, b: Rectangle, k: f32) {
     }
 
     // The keys, right-aligned, if they fit after the facts.
-    let pieces: Vec<(f32, f32)> = HINTS
+    let hints = if s.read_only { READ_ONLY_HINTS } else { HINTS };
+    let pieces: Vec<(f32, f32)> = hints
         .iter()
         .map(|(key, what)| (paint::text_width(key, t::T_SMALL, paint::SEMIBOLD), paint::text_width(what, t::T_SMALL, paint::REGULAR)))
         .collect();
-    let total: f32 = pieces.iter().map(|(a, b)| a + 6.0 + b).sum::<f32>() + t::S4 * (HINTS.len() as f32 - 1.0);
+    let total: f32 = pieces.iter().map(|(a, b)| a + 6.0 + b).sum::<f32>() + t::S4 * (hints.len() as f32 - 1.0);
     let mut hx = right - total;
     if hx < x + t::S5 {
         return;
     }
-    for ((key, what), (kw, ww)) in HINTS.iter().zip(pieces) {
+    for ((key, what), (kw, ww)) in hints.iter().zip(pieces) {
         paint::text(r, key, rect(hx, strip.y, kw, strip.height), t::T_SMALL, paint::SEMIBOLD, ink(t::PHOTO_INK2), HAlign::Left, b);
         hx += kw + 6.0;
         paint::text(r, what, rect(hx, strip.y, ww, strip.height), t::T_SMALL, paint::REGULAR, ink(t::PHOTO_INK3), HAlign::Left, b);

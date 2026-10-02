@@ -88,7 +88,6 @@ pub struct Settings {
 }
 
 /// How many recent searches are kept.
-#[allow(dead_code)] // used by the search page (the UI round)
 pub const RECENT_SEARCHES: usize = 10;
 
 impl Default for Settings {
@@ -137,7 +136,6 @@ impl Default for Settings {
     }
 }
 
-#[allow(dead_code)] // used by the search page (the UI round)
 impl Settings {
     /// Note a query just run: it moves to the front of the recent list
     /// (once, however often it is run), and the list keeps its last

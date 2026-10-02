@@ -593,18 +593,18 @@ fn target(app: &App) -> Option<RecordId> {
     };
     match app.view {
         View::Grid => pick(app.grid.anchor, &app.grid.selection),
-        View::Calendar => None,
+        View::Calendar | View::Search => None,
     }
 }
 
 /// The command is available: the selected photo is in a burst.
 pub fn can_open(app: &App) -> bool {
-    app.view != View::Calendar && target(app).is_some_and(|id| app.bursts.of(id).is_some())
+    !app.view.is_library() && target(app).is_some_and(|id| app.bursts.of(id).is_some())
 }
 
 /// B: the viewer, on the selected photo's burst sheet.
 pub fn open_from_main(app: &mut App) -> Task<Message> {
-    if app.view == View::Calendar {
+    if app.view.is_library() {
         return Task::none();
     }
     let Some(id) = target(app) else {
