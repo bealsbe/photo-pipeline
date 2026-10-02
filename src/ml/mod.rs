@@ -20,6 +20,7 @@
 
 pub mod client;
 pub mod download;
+pub mod gpu;
 pub mod models;
 pub mod prep;
 pub mod worker;

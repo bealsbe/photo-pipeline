@@ -419,6 +419,13 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 - **The helper process.**  Models run in `photo-pipeline --ml-worker`, the
   same binary started by the app, at low priority, exiting after a few idle
   minutes.  A driver fault takes the helper down, not the app.
+- **Which card.**  The helper lists the Vulkan adapters itself and takes a
+  discrete card first, else an integrated one; a software adapter
+  (llvmpipe, SwiftShader) is never used, since that would be processor work
+  in disguise, and counts as no card.  The choice is pinned through Mesa's
+  device-select layer so the runtime can't wander to another device, and
+  the status names the adapter actually used.  `PP_GPU=<part of a name>`
+  picks a particular hardware adapter for testing (no setting for it yet).
 - **Keys survive renames.**  A shot is identified by a digest of its file's
   size and first 64 KB, so Sort, export and copies keep its vector; a
   cropped JPG re-encoded by a Move export is indexed again.

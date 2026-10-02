@@ -64,7 +64,8 @@ cargo test --release  # unit tests; must pass with zero warnings
   (`--ml-worker`), never in the app; the device is the user's Preferences
   choice and **a failing card stops the work and is reported, never
   worked around** (no fallback to the CPU; `search::engine` tests hold
-  this).  Models are pinned by SHA-256 in `ml/models.rs`, downloaded to
+  this).  The helper picks the adapter itself (`ml/gpu.rs`: discrete,
+  else integrated, never a software one) and reports its real name.  Models are pinned by SHA-256 in `ml/models.rs`, downloaded to
   the cache and checked before use; never commit a model file.  The index
   lives in `~/.cache/photo_pipeline/search/`, never in the library, and
   nothing is written to photos or sidecars.  Keys are content digests

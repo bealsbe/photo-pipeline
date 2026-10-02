@@ -3280,6 +3280,7 @@ dependencies = [
  "wayland-backend",
  "wayland-client",
  "wayland-protocols-plasma",
+ "wgpu",
  "zbus",
 ]
 
