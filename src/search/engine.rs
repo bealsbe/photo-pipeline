@@ -16,6 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::time::{Duration, Instant};
 
 use chrono::{NaiveDate, NaiveDateTime};
 use crossbeam_channel::{Receiver, Sender};
@@ -131,6 +132,8 @@ impl Engine {
                     vocab: None,
                     vocab_tried: false,
                     tags: Tags::default(),
+                    things_dirty: false,
+                    things_sent: None,
                 }
                 .run()
             })
@@ -310,9 +313,15 @@ struct Worker {
     vocab_tried: bool,
     /// The hidden tags of the index's rows.
     tags: Tags,
+    /// *Things* changed since it was last sent (held back while a pass
+    /// runs, so the start page isn't rebuilt several times a second).
+    things_dirty: bool,
+    things_sent: Option<Instant>,
 }
 
 const TEXT_CACHE: usize = 64;
+/// While a pass runs, *Things* is sent at most this often.
+const THINGS_EVERY: Duration = Duration::from_secs(2);
 
 impl Worker {
     fn run(mut self) {
@@ -479,6 +488,7 @@ impl Worker {
             let _ = ix.save_paths();
         }
         self.refresh_tags();
+        self.flush_things();
         self.update(|s| s.pass = None);
     }
 
@@ -515,7 +525,7 @@ impl Worker {
         if ix.is_empty() {
             if !self.tags.is_empty() {
                 self.tags = Tags::default();
-                self.publish_things();
+                self.publish_things(true);
             }
             return;
         }
@@ -542,12 +552,20 @@ impl Worker {
         let (Some(ix), Some(vocab)) = (&self.index, &self.vocab) else { return };
         let _t = crate::profile::span("search", "tags");
         if self.tags.sync(&ix.vectors, ix.generation, vocab) {
-            self.publish_things();
+            self.publish_things(false);
         }
     }
 
-    /// Derive *Things* from the tags and send it.
-    fn publish_things(&self) {
+    /// Derive *Things* from the tags and send it; unless `now`, a running
+    /// pass holds it back to once in [`THINGS_EVERY`] (the rest is sent
+    /// when the pass ends, by [`flush_things`](Self::flush_things)).
+    fn publish_things(&mut self, now: bool) {
+        if !now && self.pass.is_some() && self.things_sent.is_some_and(|t| t.elapsed() < THINGS_EVERY) {
+            self.things_dirty = true;
+            return;
+        }
+        self.things_dirty = false;
+        self.things_sent = Some(Instant::now());
         let things = match &self.index {
             Some(ix) if !self.tags.is_empty() => {
                 let live: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
@@ -559,6 +577,13 @@ impl Worker {
         let things = Arc::new(things);
         *self.shared.things.lock() = things.clone();
         let _ = self.bus.unbounded_send(BgEvent::SearchThings(things));
+    }
+
+    /// Send what a pass held back.
+    fn flush_things(&mut self) {
+        if self.things_dirty {
+            self.publish_things(true);
+        }
     }
 
     fn refresh_counts(&self) {
@@ -714,6 +739,7 @@ impl Worker {
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
             self.pass = None;
+            self.flush_things();
             if let Some(ix) = &mut self.index {
                 let _ = ix.save_paths();
             }
@@ -845,7 +871,7 @@ impl Worker {
         }
         // The prompts: the words, each exclusion, and "fursuit" for the
         // contrast on a real animal's query.
-        let mut prompts = vec![if parsed.exact { parsed.words.clone() } else { query::prompt(&parsed.words) }];
+        let mut prompts = vec![if parsed.exact { parsed.words.clone() } else { query::prompt(&vocab::for_prompt(&parsed.words)) }];
         prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
         if animal.is_some() {
             prompts.push(query::prompt("fursuit"));

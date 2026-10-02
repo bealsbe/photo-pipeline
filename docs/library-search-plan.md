@@ -1711,6 +1711,31 @@ plain English rules.
 - Dates filter on the day the calendar files the shot under; the
   completions' months and years come from the calendar's days (the page
   computes them; `parse::date_completions` is there if wanted).
+- A vocabulary word's plural is sent to the model as its singular
+  (`vocab::for_prompt`): *Things* inserts the plural, and "a photo of a
+  cameras." tops at a match probability of 0.035 on the sample against
+  0.21 for "a photo of a camera.".  Other words go as typed.
+- *Things* is sent at most every 2 s while a pass runs, and once more
+  when it ends.
+
+### Measured (`eval::library_queries`, the phase 0 sample as a scratch library)
+
+1 779 previews in three made-up days, indexed on the card in 14.5 s
+(1 764 rows: the sample's duplicates share a content key).  At the
+default closeness: **"dog" 1 hit (the real dog, tagged first) and 50
+fursuits left out**; "fox" 1 hit and 207 left out; "cat" 2 and 7;
+"bird" 3 and 3; "fireworks" 24 hits, 19 tagged first ("fireworks
+-crowd" the same 24: no crowd among them); "camera" 5 hits, 3 tagged
+first; "camera 2025" 5, "camera 2026" 0; "stuffed animal" 793 hits with
+the 7 real plush toys first; "fursuit" 1 511 hits, 1 491 tagged first;
+"@Someone" nothing, "@Someone camera" the 5 cameras; "2025" alone
+nothing.  Things (38): stages 25, fireworks 19, concerts 18, parties 16,
+stuffed animals 7, dance floors 6, mountains 5, televisions 5, castles
+4, cameras 3, …  Queries answer in 7–9 ms with the texts cached (two or
+three prompts scored), ~40 ms with the text tower.  On a 238-shot
+scratch library of five archive days (symlinks, read only): 6.7 s to
+index, Things of mountains 42, stuffed animals 10, forests 9, lakes 9,
+televisions 4, …
 
 ### API (the page's contract)
 

@@ -367,6 +367,24 @@ pub fn words_in(text: &str) -> Vec<usize> {
     out
 }
 
+/// The query's words for the prompt: a vocabulary word's plural becomes
+/// its singular ("cameras" → "camera", so the Things list's word, which
+/// is the plural, asks the model the question it answers best: measured
+/// on the sample, "a photo of a cameras." tops at a match probability of
+/// 0.035 against 0.21 for the singular).  Other words stay as typed.
+pub fn for_prompt(text: &str) -> String {
+    text.split_whitespace()
+        .map(|tok| {
+            let lower = tok.to_lowercase();
+            match VOCABULARY.iter().find(|w| w.plural == lower && w.plural != w.word) {
+                Some(w) => w.word.to_string(),
+                None => tok.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The query names fursuits on purpose.
 pub fn names_fursuits(text: &str) -> bool {
     let raw: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
@@ -432,6 +450,11 @@ mod tests {
         assert_eq!(find("Fireworks").map(|i| VOCABULARY[i].word), Some("fireworks"));
         assert_eq!(find("people").map(|i| VOCABULARY[i].word), Some("person"));
         assert_eq!(find("xylophone"), None);
+        assert_eq!(for_prompt("Cameras"), "camera");
+        assert_eq!(for_prompt("red cars at night"), "red car at night");
+        assert_eq!(for_prompt("two dogs on beaches"), "two dog on beach");
+        assert_eq!(for_prompt("glasses and food"), "glasses and food", "a word that is its own plural stays");
+        assert_eq!(for_prompt("zebras crossing"), "zebra crossing");
     }
 
     /// Kinds never mix: the *Things* kinds are objects and scenes only,
