@@ -1143,15 +1143,14 @@ impl App {
         self.save_export_marks()
     }
 
-    /// With To review, Marked or Pruned showing, a photo leaves the view as
-    /// soon as its mark no longer fits (pruned or marked; unmarked;
-    /// un-pruned).  Note where the single selected photo sat, so the
-    /// selection can move on to the photo that takes its place and the pile
-    /// can be worked through with P and M alone.
+    /// A photo can leave the view as soon as its mark changes: under To
+    /// review, Marked or Pruned when it no longer fits, and under All when
+    /// it is pruned with Show pruned photos off.  Note where the single
+    /// selected photo sat, so the selection can move on to the photo that
+    /// takes its place and the pile can be worked through with P and M
+    /// alone.  (When the photo stays, its selection does too, and
+    /// `keep_review_place` does nothing.)
     fn review_place(&self) -> Option<usize> {
-        if self.filter.show() == Show::All {
-            return None;
-        }
         match self.view {
             View::Grid if !self.grid.select_mode && self.grid.selection.len() == 1 => {
                 let id = self.grid.selection.iter().next()?;

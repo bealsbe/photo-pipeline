@@ -535,7 +535,18 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 .map(|r| format!("{}{}{}", r.stem(), if r.is_pruned { " P" } else { "" }, if r.is_marked { " M" } else { "" }))
                 .collect();
             let unpruned = ids.iter().filter(|&&id| app.coll.get(id).is_some_and(|r| !r.is_pruned)).count();
-            eprintln!("[shown] view={:?} show={:?} n={} not_pruned={unpruned} {:?}", app.view, app.filter.show(), names.len(), names.iter().take(40).collect::<Vec<_>>());
+            let selection = match app.view {
+                super::View::List => &app.list.selection,
+                _ => &app.grid.selection,
+            };
+            let selected: Vec<String> = selection.iter().filter_map(|&id| app.coll.get(id)).map(|r| r.stem()).collect();
+            eprintln!(
+                "[shown] view={:?} show={:?} n={} not_pruned={unpruned} selected={selected:?} {:?}",
+                app.view,
+                app.filter.show(),
+                names.len(),
+                names.iter().take(40).collect::<Vec<_>>()
+            );
             Task::none()
         }
         "progress" => {

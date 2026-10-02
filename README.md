@@ -145,7 +145,8 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   one is selected, so P and M alone work through the pile.  Pruned shows
   every pruned photo, whatever Preferences ▸ *Show pruned photos* says; that
   setting (off at first) decides whether All and Marked keep pruned photos,
-  crossed out, or drop them as you prune.
+  crossed out, or drop them as you prune (and when one drops out, the next
+  is selected there too).
 - **Quick look.** In the grid, Space shows the selected photo large over the
   grid without opening the viewer.  Arrow keys (or A/D) step through the
   photos and the grid's selection follows; P and M mark the photo shown; Enter
