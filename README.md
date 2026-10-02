@@ -74,7 +74,8 @@ src/app/               the application: state, update, views
   viewer.rs            the image viewer window (crop tool, EXIF panel)
   calendar.rs          library calendar state and views
   search.rs            the search page: field, start page, results, Open day
-  search_results.rs    results from hits (no I/O), burst stacks, recent searches
+  search_results.rs    results from hits (no I/O), burst stacks, the fursuits' list,
+                       completions, recent searches
   search_setup.rs      the download dialog, indexing in the status bar, banners
   search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
@@ -358,11 +359,29 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   its back button names where it returns ("‹ Grid", "‹ Jul 2026").  Ctrl+F
   brings it back with the field ready to type into (its text selected).  Esc
   closes the list under the field and never leaves the page.
-- **The field.**  While you type, it offers your recent searches (the last
-  10) that have a word starting with what you typed; ↑ ↓ choose one, Enter
-  or Tab takes it, Enter alone searches what you typed and moves to the
-  results.  With nothing typed, the page shows the recent searches and a
-  few ways to search.  Preferences ▸ Search ▸ *Forget them* clears them.
+- **The field.**  While you type, a list under it offers *Things* search
+  found in your photos (with how many photos show each), *Dates* (months
+  and years with photos, with how many days), and your recent searches
+  (the last 10) that have a word starting with what you typed.  ↑ ↓ choose
+  one; Enter or Tab takes it (Tab with none chosen takes the first): a
+  thing or a date goes into the field in place of the word you were
+  typing, ready for the next, and a recent search runs.  Enter alone
+  searches what you typed and moves to the results.  The list's footer
+  shows the syntax: `-word` and dates.  Preferences ▸ Search ▸ *Forget
+  them* clears the recent searches.
+- **Words, `-word` and dates.**  Type what the photos show (*red car at
+  night*).  `-crowd` leaves a word out: photos must look more like the
+  rest than like it.  `2024`, `jun 2024` or `apr–jun 2024` keeps to those
+  dates.  A strip over the results says quietly what was applied besides
+  the words ("Only Jun 2024", "Leaving out crowd"), so you can see why
+  they look as they do.  Names (`@name`) come later, with people,
+  fursuits and pets: one in the query is left out and the strip says so,
+  and a query with nothing but a name (or only dates) searches nothing
+  and the page says why.
+- **The start page** (nothing searched): your recent searches, *Things in
+  your photos* (the objects and scenes search found most, with their
+  counts; a click searches one; never people, fursuits or pets), and a few
+  ways to search.
 - **Results, best first.**  One list in the grid of a library day, on the
   same grey, with each photo's date under it (hover for the date and time
   to the second, and where the file is).  A burst is one stacked tile at
@@ -371,6 +390,14 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   move, Space is quick look, Enter or a double-click opens the viewer.
   Results are read-only, like the calendar's days: P, M and U do nothing
   here.
+- **Animal words.**  Here, "dog" also looks like the canine fursuits, so a
+  search for a real animal (dog, cat, fox, bird…) leaves fursuits out:
+  a quiet line at the end says how many ("26 fursuits that look like dogs
+  are left out") with *Show fursuits too*.  Shown, they are a list of their
+  own after the real animals, "Fursuits that look like dogs", never mixed
+  into theirs; *Hide fursuits* on its heading puts them away again.  The
+  viewer steps through one list at a time.  "dog fursuit" or "fursuits"
+  asks for suits.
 - **Open day ›** shows the selected photo's day in the calendar with the
   photo selected; that page's back button reads "‹ Search" (as does Esc)
   and returns to the same results.
@@ -589,9 +616,13 @@ These are deliberate:
   Use scratch copies of photos and a throwaway `HOME` for anything that
   writes.  `PP_SEARCH_FAKE=1` (or `=indexed`, to start indexed) puts a
   stand-in in the search engine's place: made-up hits from the library
-  index, downloads and indexing on a timer, and every failure the page
-  shows on request (`search fake …`).  It downloads, reads and writes
-  nothing.
+  index (with the query's dates and `-word`s applied, and a share of an
+  animal word's hits handed back as fursuits left out), made-up Things,
+  downloads and indexing on a timer, and every failure the page shows on
+  request (`search fake …`).  It downloads, reads and writes nothing.
+  `search complete`, `search things` and `search fursuits show|hide`
+  drive and print the completions, the start page's Things and the
+  fursuits' list.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

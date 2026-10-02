@@ -317,9 +317,8 @@ impl Search {
             self.layout = Layout::default();
             return;
         };
-        let words = r.understood.words.trim();
-        self.end_line = match r.understood.dates.filter(|_| words.is_empty()) {
-            Some(d) => format!("That's everything from {}.", d.label()),
+        self.end_line = match r.understood.dates {
+            Some(d) => format!("That's everything from {} that looks like “{}”.", d.label(), r.looks_like()),
             None => format!("That's everything that looks like “{}”.", r.looks_like()),
         };
         self.left_out_line = if r.fursuits.is_empty() { String::new() } else { res::fursuits_left_out(r.fursuits.len(), r.animal.as_deref()) };
@@ -890,8 +889,8 @@ pub fn select(app: &mut App, id: RecordId) {
 
 // ── keys ────────────────────────────────────────────────────────────────────
 
-/// Esc on the page (also when the field took it): it closes the list of
-/// recent searches, and never leaves the page.
+/// Esc on the page (also when the field took it): it closes the
+/// completions, and never leaves the page.
 pub fn escape(app: &mut App) -> Task<Message> {
     app.search.completions = false;
     app.search.hi = None;
@@ -1369,7 +1368,9 @@ fn photo_heading<'a>(label: &'a str, note: &'a str) -> Element<'a, Message> {
 fn word_button<'a>(words: &str, count: Option<usize>) -> Element<'a, Message> {
     let mut label = row![text(words.to_string()).size(14).font(paint::MEDIUM)].spacing(5).align_y(iced::alignment::Vertical::Bottom);
     if let Some(n) = count {
-        label = label.push(text(util::thousands(n as u64)).size(t::T_SMALL).color(t::PHOTO_INK3));
+        // Lifted a pixel, so the smaller figures share the word's baseline.
+        let figures = text(util::thousands(n as u64)).size(t::T_SMALL).color(t::PHOTO_INK3);
+        label = label.push(container(figures).padding(Padding { bottom: 1.0, ..Padding::ZERO }));
     }
     button(label)
         .padding(Padding::from([2.0, 0.0]))
@@ -1624,6 +1625,36 @@ fn explained<'a>(title: &'a str, about: &'a str, facts: Option<Element<'a, Messa
         .height(Length::Fill)
         .style(style::fill(t::GROUND))
         .into()
+}
+
+/// What the completions offer, for the test driver: each pick under its
+/// heading, the chosen one marked.
+pub fn debug_offer(app: &App) -> String {
+    let s = &app.search;
+    let o = &s.offer;
+    let picks: Vec<String> = o
+        .picks
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let mark = if s.hi == Some(i) { "*" } else { "" };
+            match p {
+                Pick::Thing { word, photos, minus } => format!("{mark}{}: {}{word} ({photos} photos)", p.group(), if *minus { "-" } else { "" }),
+                Pick::Date { label, text, days, replace } => format!("{mark}{}: {label} → {text:?} ({days} days, replaces {replace})", p.group()),
+                Pick::Recent(r) => format!("{mark}{}: {r}", p.group()),
+            }
+        })
+        .collect();
+    format!("open={} query={:?} stem={:?} names_later={} picks={picks:?}", s.completions, s.query, o.stem, o.names_later)
+}
+
+/// The start page's Things, for the test driver, and what the engine sent
+/// that is never offered (people, fursuits, animals).
+pub fn debug_things(app: &App) -> String {
+    let all = &app.search.things;
+    let shown: Vec<String> = res::offered(all).take(START_THINGS).map(|t| format!("{} {}", t.word, t.photos)).collect();
+    let kept_out: Vec<String> = all.iter().filter(|t| t.kind.is_subject()).map(|t| format!("{} ({:?})", t.word, t.kind)).collect();
+    format!("sent={} shown={shown:?} kept_out={kept_out:?}", all.len())
 }
 
 /// One line for the test driver.

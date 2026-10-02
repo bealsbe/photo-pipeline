@@ -2767,4 +2767,58 @@ mod tests {
         raw.pair_stem = Some("a".into());
         assert_eq!(Kind::of(&raw), Kind::Pair);
     }
+
+    #[test]
+    fn the_end_notes_link_and_a_headings_link_are_where_they_are_drawn() {
+        // A day of 10 and a second list of 4 after it, with a link on the
+        // second's heading only (search results: "Hide fursuits").
+        let mut sections = day(&(0..10).collect::<Vec<_>>(), 10);
+        sections.push(Section { date: NaiveDate::MAX, label: "Fursuits".into(), ids: (10..14).collect(), photos: 4 });
+        let (coll, thumbs, none, collapsed) = (Collection::new(), ThumbCache::new(crate::imaging::thumbs::OWNER_MAIN, 1 << 20), HashSet::new(), HashSet::new());
+        let links = [(NaiveDate::MAX, "Hide fursuits")];
+        let mut data = GridData {
+            sections: &sections,
+            coll: &coll,
+            thumbs: &thumbs,
+            selection: &none,
+            collapsed: &collapsed,
+            select_mode: false,
+            scale_factor: 1.0,
+            show_names: true,
+            bursts: &[],
+            moments: &[],
+            hints: None,
+            restack: None,
+            label: CellLabel::Date,
+            footer: Some(Footer { note: Some(("12 fursuits are left out.", "Show fursuits too")), end: Some(("That's everything.", "A quieter line.")) }),
+            links: &links,
+        };
+        let width = 1000.0;
+        let m = Metrics::new(&sections, width, 180.0, LABEL_H, &|_| 1.0).with_footer(footer_h(&data));
+        let st = State::new(180.0, true);
+        let bounds = rect(0.0, 0.0, width, m.total + 100.0);
+        // The note and its link read as one centred line, under the last
+        // photo and inside the content.
+        let (note, link) = footer_note_rects(&m, &data, width).expect("a note");
+        assert!(note.x + note.width < link.x);
+        assert!(((note.x + link.x + link.width) / 2.0 - (width - SCROLLBAR_W) / 2.0).abs() < 1.0);
+        let last_row = m.tops[1].0 + HEADER_H + grid_height(4, m.cols, m.cell.height);
+        assert!(note.y >= last_row && link.y + link.height <= m.total);
+        assert_eq!(hit(&st, &m, data, bounds, link.center()), Hover::FooterLink);
+        assert_eq!(hit(&st, &m, data, bounds, note.center()), Hover::None, "the note's words aren't the link");
+        // Only the heading with a link has one, at its right end.
+        assert!(section_link_rect(&m, &data, 0).is_none());
+        let r = section_link_rect(&m, &data, 1).expect("a link");
+        let hr = m.header_rect(1);
+        assert!(hr.contains(r.center()) && r.x > hr.x + hr.width / 2.0);
+        assert_eq!(hit(&st, &m, data, bounds, r.center()), Hover::SectionLink(1));
+        assert_eq!(hit(&st, &m, data, bounds, Point::new(hr.x + 30.0, hr.center_y())), Hover::Header(1), "the rest of the heading still folds it");
+        // Without a note there is no link, and the note's room goes.
+        let with_note = footer_h(&data);
+        data.footer = Some(Footer { note: None, end: Some(("That's everything.", "A quieter line.")) });
+        assert!(footer_note_rects(&m, &data, width).is_none());
+        assert!(footer_h(&data) < with_note);
+        data.footer = None;
+        assert_eq!(footer_h(&data), 0.0);
+    }
 }
