@@ -260,11 +260,27 @@ pub mod tests {
             Fake { device, calls: AtomicUsize::new(0), fail_paths_containing: None, card_fails_after: None, restart_once: AtomicBool::new(false), texts: parking_lot::Mutex::new(Vec::new()) }
         }
 
+        /// A unit vector from the path's bytes (64-d, pseudo-random), so
+        /// different files get different vectors and a query for a file's
+        /// own path finds it.
         pub fn vector_for(path: &Path) -> Vec<f32> {
-            let mut v: Vec<f32> = (0..8).map(|i| ((path.as_os_str().len() * (i + 3)) % 17) as f32 - 8.0).collect();
+            let mut h = crate::model::binfile::fnv1a(path.as_os_str().as_encoded_bytes());
+            let mut v: Vec<f32> = (0..64)
+                .map(|_| {
+                    h ^= h << 13;
+                    h ^= h >> 7;
+                    h ^= h << 17;
+                    ((h % 2001) as f32 / 1000.0) - 1.0
+                })
+                .collect();
             let n = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
             v.iter_mut().for_each(|x| *x /= n);
             v
+        }
+
+        /// The frame number in a `NNNN.JPG` name, for fake capture times.
+        fn frame(path: &Path) -> i64 {
+            crate::util::stem(path).chars().filter(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)
         }
     }
 
@@ -292,15 +308,29 @@ pub mod tests {
                         result: if bad {
                             Err(FileError { message: "can't be read".into(), errno: Some(libc::EIO) })
                         } else {
-                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: None, meta: ShotMeta::default(), accidental: false, vector: Fake::vector_for(p) })
+                            // Frames 200 ms apart on one camera: a burst, as
+                            // the grid would find it.
+                            let n = Fake::frame(p);
+                            let base = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap().and_hms_opt(14, 30, 0).unwrap();
+                            let capture = base + chrono::Duration::milliseconds(n * 200);
+                            let meta = ShotMeta { subsec_ms: Some(((n * 200) % 1000) as u16), sequence: None, focus: None, camera: 7 };
+                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: Some(capture), meta, accidental: false, vector: Fake::vector_for(p) })
                         },
                     }
                 })
                 .collect())
         }
+        /// A text's vector is the vector of the path it names (the query
+        /// prompt's wrapping stripped), so tests can ask for one photo.
         fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
             self.texts.lock().extend(texts.iter().cloned());
-            Ok(texts.iter().map(|t| Fake::vector_for(Path::new(t))).collect())
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let inner = t.strip_prefix("a photo of a ").and_then(|s| s.strip_suffix('.')).unwrap_or(t);
+                    Fake::vector_for(Path::new(inner))
+                })
+                .collect())
         }
     }
 
@@ -349,7 +379,7 @@ pub mod tests {
     fn a_restart_on_the_processor_repeats_the_batch_and_a_cancel_stops() {
         let day = NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
         let jobs: Vec<Job> = (0..10).map(|n| job(n, day)).collect();
-        let mut fake = Fake::new(Device::Cpu);
+        let fake = Fake::new(Device::Cpu);
         fake.restart_once.store(true, Ordering::Relaxed);
         let (batches, fin) = run(Request { run: 1, kind: PassKind::NewExports, root: "/".into(), jobs: jobs.clone(), total: 10 }, &fake);
         assert!(fin.complete && fin.embedded == 10);

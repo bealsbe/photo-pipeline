@@ -118,9 +118,11 @@ pub enum StartError {
     Other(String),
 }
 
-/// Makes an [`Embedder`] for a device: the real helper in the app, a
-/// double in tests.  The engine calls it with the chosen device only.
-pub type EmbedderFactory = Box<dyn Fn(Device) -> Result<Arc<dyn Embedder>, StartError> + Send>;
+/// Makes an [`Embedder`]: the real helper in the app, a double in tests.
+/// `(device, text_only)`: the engine asks for image work on the chosen
+/// device only; with `text_only` the embedder runs the text tower alone,
+/// on the processor, whatever the device (queries after a card failure).
+pub type EmbedderFactory = Box<dyn Fn(Device, bool) -> Result<Arc<dyn Embedder>, StartError> + Send>;
 
 /// A running helper process.
 struct Process {
@@ -274,11 +276,28 @@ impl Client {
                 return Err(StartError::Card(f));
             }
         }
-        let (proc, reply) = Process::spawn(device, false)?;
+        Client::spawn(device, false)
+    }
+
+    /// A helper for queries only: the text tower on the processor, no
+    /// image work, nothing on the card.
+    pub fn start_text_only() -> Result<Client, StartError> {
+        Client::spawn(Device::Cpu, true)
+    }
+
+    fn spawn(device: Device, text_only: bool) -> Result<Client, StartError> {
+        let (proc, reply) = Process::spawn(device, text_only)?;
         match reply {
             Reply::Ready { name, self_check, .. } => Ok(Client {
                 device,
-                inner: Mutex::new(Inner { proc: Some(proc), card_failed: None, crashes: 0, since_crash: 0, name, self_check }),
+                inner: Mutex::new(Inner {
+                    proc: Some(proc),
+                    card_failed: if text_only { Some(CardFailure::Failed("this helper runs queries only".into())) } else { None },
+                    crashes: 0,
+                    since_crash: 0,
+                    name,
+                    self_check,
+                }),
                 next_id: AtomicU64::new(1),
             }),
             Reply::CardFailed(f) => Err(StartError::Card(f)),
@@ -289,7 +308,10 @@ impl Client {
 
     /// The factory the app uses.
     pub fn factory() -> EmbedderFactory {
-        Box::new(|device| Client::start(device).map(|c| Arc::new(c) as Arc<dyn Embedder>))
+        Box::new(|device, text_only| {
+            let c = if text_only { Client::start_text_only() } else { Client::start(device) };
+            c.map(|c| Arc::new(c) as Arc<dyn Embedder>)
+        })
     }
 
     /// Make sure a helper is running for `req`'s kind of work, applying

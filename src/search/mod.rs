@@ -69,6 +69,9 @@ pub enum Stopped {
     Card(CardFailure),
     /// The library stopped answering; indexing carries on when it is back.
     LibraryAway { share: String, message: String },
+    /// The helper couldn't be started or broke (a model file missing or
+    /// damaged, the binary not runnable), in plain words.
+    Helper { message: String },
     /// The user pressed ×.
     Cancelled,
 }

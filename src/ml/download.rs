@@ -56,6 +56,11 @@ pub struct DownloadHandle {
 }
 
 impl DownloadHandle {
+    /// A handle over a flag the caller's own thread watches.
+    pub fn from_flag(cancel: Arc<AtomicBool>) -> DownloadHandle {
+        DownloadHandle { cancel }
+    }
+
     /// Stop after the current chunk; partial files are removed and each
     /// model still pending reports [`DownloadState::Cancelled`].
     pub fn cancel(&self) {
