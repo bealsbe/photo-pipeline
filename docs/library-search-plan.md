@@ -515,6 +515,11 @@ moves them back or rejects them.  Saved on a worker with
 
 ## 7. Search and subjects in the app
 
+*§7a, after this section, records the interface design made once the
+first decisions in §13 were taken.  Where the two differ, §7a wins:
+search has a page of its own, and people, characters and pets are three
+separate kinds.*
+
 ### 7.1 Design direction
 
 The new pages are library pages, so they wear the calendar's chrome and
@@ -693,6 +698,587 @@ with **Find people and characters**.
   characters*, the minimum group size.
 - **Storage** (§10): the search index; people and characters, with
   *Forget all…*; downloaded models.
+
+---
+
+## 7a. Interface design
+
+*Designed after the first decisions were taken.  The screens were built
+as interactive mockups in the app's own tokens (Barlow, Catppuccin
+chrome, neutral `PHOTO_*` greys, made-up data and grey placeholder
+photos) and reviewed separately.  This section records them in words and
+wireframes.*
+
+### 7a.1 What the design follows
+
+Decisions from §13 as taken, some changed from the recommendations:
+
+- **Order** (1): search, then people, then characters, then pets, each
+  usable on its own.  Pets are a phase of their own after characters.
+- **Search has a page of its own** (6 (b)): a side-rail entry and Ctrl+F,
+  not a field in the calendar header.
+- **Library only** (14 (a)): results are read-only, like the calendar's
+  days.
+- **Indexing** (5 (b)): the first full index starts only when asked;
+  after that each export is indexed in the background, with a line in the
+  status bar and no dialog.
+- **Search model** (2 (b)): SigLIP2, about 750 MB, the same for everyone.
+- **Hidden tags** (8 (b)): completions, ranking and a *Things* list only.
+- **Graphics card** (3 (b)): used after a self-check against the CPU,
+  with a switch in Preferences.  If it fails (the self-check, no usable
+  card, a driver crash), heavy work pauses and a notice offers *Continue
+  on the CPU* (slower, lowest priority) or *Not now*.  Searching what is
+  indexed keeps working.
+- **Helper process** (4 (b)): if it dies, the app says so and carries on.
+- **Faces are found during the first index, on by default** (9, now
+  (b)), with a switch to turn it off and *Forget all*.
+- **The face model is the user's choice** (10), asked in the download
+  dialog: AuraFace (pre-selected), SFace, or InsightFace, whose
+  non-commercial research licence is stated in plain words and which is
+  downloaded from its publisher.  Changing it later finds faces again.
+- **Characters** (11 (a), scanned automatically): heads are found during
+  indexing, on fursuit photos only and on the GPU only (about 1.4 h the
+  first time, then about 7 minutes per new event day).  The user names a
+  character from one group and confirms suggestions with Y and N.
+- **Pets** (12): their own kind, scan, groups and page, **never combined
+  with fursuits or people**.  A search for an animal word leaves fursuits
+  out by default, with a quiet *Show fursuits too*; "dog fursuit" or
+  "fursuit" finds suits on purpose.
+
+### 7a.2 Principles
+
+- **Search is a place.**  A page of its own, like List, Grid and the
+  calendar: it keeps its query while you work elsewhere, and its back
+  button names where it returns.  (Decision 6; the rail is how this app
+  moves between places.)
+- **Results look like days.**  The calendar's read-only day grid, so
+  quick look, the viewer, the RAW+JPG tag and one result per pair work
+  as they do there.  No new grid, and nothing new to learn.
+- **Words before widgets.**  One field.  The syntax (`-word`, `@name`,
+  dates) is taught by the completions and their footer, not by filter
+  panels.
+- **Hidden means hidden.**  No tags or badges on photos; the vocabulary
+  shows only as completions and the *Things* list.
+- **Ask once, then stay quiet.**  One dialog before the first index lists
+  every download, size, licence and the time it takes.  After that,
+  indexing is a status-bar line.  A failure pauses the work and says why
+  in the app's existing banner.
+- **Three kinds, never mixed.**  People, characters and pets each have
+  their own page, groups, suggestions and completions heading.
+- **Reviewing feels like culling** (the one memorable screen).  One
+  suggestion at a time, large, with Y and N where P and M would be,
+  stamped and advanced the way marks are.
+- **Strangers stay out of sight.**  Faces are on by default, so nothing is
+  named for you, groups under the minimum fold away, unnamed groups are
+  never offered as completions, and everything found can be forgotten in
+  one place.
+
+### 7a.3 Getting there and back
+
+- **Rail and menu.**  One new command, `Cmd::Search` ("Search the
+  library", Ctrl+F, a magnifier glyph), placed in `SIDE` under *Library
+  calendar* and in the View menu after it, so the KDE global menu and the
+  shortcuts dialog follow.  It is the only new rail entry: people,
+  characters and pets live inside Search (open question 1).
+- **Ctrl+F** from anywhere in the main window opens the page with the
+  field focused and its text selected, so typing replaces the last query.
+- **Back.**  The header's first button names where it returns ("‹ Grid",
+  "‹ Jun 2024"), like the day page's "‹ Jul 2026".  Esc does the same once
+  completions are closed.  P, M and the rail's marking commands do
+  nothing on the search page, as on the calendar's days.
+- **Open day.**  Each day heading in the results ends with *Open day ›*:
+  the calendar's page for that day with the photo selected.  Its back
+  button then reads "‹ Search" and returns to the same results and
+  scroll position.
+
+### 7a.4 The search page
+
+**Header** (60 px, `MOUNT`): the back button, a larger field (36 px, the
+query in `T_TITLE` medium: the query is the page's title), the count,
+and the order switch.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Grid │ ⌕ cameras                      × │ 46 photos over 11 days  Date│Best│
+├──────────────────────────────────────────────────────────────────────────────┤
+```
+
+**Start page** (nothing typed): what can be found, on `PHOTO_GROUND`.
+
+```
+│ Recent searches ─────────────────────────────────────────────── Forget them  │
+│   fireworks   @Character 1   dog   cameras jun 2024                          │
+│ People ─────────────────────────────────────────────────────── All people ›  │
+│   ( )  ( )  ( 4 )                       named first, then "groups to name"   │
+│ Characters ─────────────────────────────────────────────── All characters ›  │
+│   ▢   ▢   ▢   [ 5 ]                                                          │
+│ Pets ─────────────────────────────────────────────────────────── All pets ›  │
+│   ▢   [ 2 ]                                                                  │
+│ Things in your photos ───────────────────────────────────────────────────────│
+│   fursuits 412   people 380   cameras 96   fireworks 24   food 21   …        │
+│ Ways to search ──────────────────────────────────────────────────────────────│
+│   red car at night    photos that look like the words                        │
+│   fireworks -crowd    leave a word out                                       │
+│   @Character 1        a person, character or pet you named                   │
+│   fireworks 2024      only those dates (jun 2024, apr–jun 2024)              │
+```
+
+Each kind's row appears with its phase; a word or a crop starts a search.
+
+**Completions** (the Hints menu's floating list: rows with a title, a
+detail and a count, and a footer):
+
+```
+           ┌──────────────────────────────────────────────────────┐
+           │ ⌕ f                                                  │
+           ├──────────────────────────────────────────────────────┤
+           │ Things                                               │
+           │  ⌕  fursuits                              412 photos │
+           │  ⌕  fireworks                              24 photos │
+           │  ⌕  food                                   21 photos │
+           │ Dates                                                │
+           │  ▦  February 2024                1 day with photos   │
+           ├──────────────────────────────────────────────────────┤
+           │ -word leaves a word out    @ finds a person,         │
+           │                              character or pet        │
+           └──────────────────────────────────────────────────────┘
+```
+
+- Empty field: recent searches.  `@`: named subjects only, under
+  *People*, *Characters* and *Pets* headings, never one list; unnamed
+  groups are never offered.  `-`: things to leave out.
+- ↑ ↓ choose; Enter or Tab takes the choice; Enter with none chosen
+  searches what was typed.  A name becomes a chip in the field (with its
+  crop), so names with spaces stay whole; Backspace in an empty field
+  removes the last chip.
+
+**Results** (`ui::grid::Grid` with day `Section`s, newest day first):
+
+```
+│ ⌄ Tuesday, December 31, 2024   1 photo ────────────────────────── Open day › │
+│   ▢                                                                          │
+│ ⌄ Saturday, October 26, 2024   5 photos ───────────────────────── Open day › │
+│   ▢ ▢ ▢ ▢ ▢                                                                  │
+│                  5 more photos look a little like "cameras".                 │
+│                           [ Show weaker matches ]                            │
+```
+
+- **Best first** is one section, "Best matches first", in score order;
+  the choice is remembered.
+- **Cut-off** as in §7.3; *Show weaker matches* lowers it one step and
+  says how many the step adds.  At the end: "That's everything that
+  looks like …".
+- **Animal words.**  Fursuits are left out by default; a quiet line at
+  the end of the results says how many, with *Show fursuits too*.  Shown,
+  they get a section of their own after the real animals ("Fursuits that
+  look like dogs, kept apart from the real dogs", with *Hide fursuits*),
+  never mixed into the days.  This replaces §7.3's *Leave out fursuits*
+  strip.
+- **Nothing found:** "Nothing in the library looks like "zebra".  Try
+  another word, or fewer words.  Search goes by what a photo shows, not
+  by file names or folder names."
+- Keys as on a day page: ← → move, Space quick look (read-only: no P, M
+  or U), Enter opens the viewer read-only, Esc goes back.
+
+### 7a.5 Indexing, as the user sees it
+
+**Not indexed yet.**  The search page's body invites the first index and
+says what it costs, in the "Not analysed yet" pattern of the Hints menu:
+
+```
+│        ⌕  Search the library by what's in your photos                        │
+│        Type what you're looking for … In the same pass it finds faces, so    │
+│        you can name people and search for them.                              │
+│        ┌──────────────────────────────────────────────────────────────┐      │
+│        │ Reads      Each photo's preview once: about 20 GB from the   │      │
+│        │            library on the share                              │      │
+│        │ Takes      About 10 minutes with the graphics card, up to an │      │
+│        │            hour on the processor (search: 7 or 45; faces: 3  │      │
+│        │            more or 15).  Search works within a minute.       │      │
+│        │ Downloads  Search 750 MB, faces 37–261 MB (you choose)       │      │
+│        │ Keeps      About 110 MB, on this computer, only you can read │      │
+│        └──────────────────────────────────────────────────────────────┘      │
+│        After this, each export is added on its own.  Faces are never named   │
+│        for you; finding them can be turned off in Preferences.               │
+│        [ Index the library… ]                                                │
+```
+
+**The first index.**  The activity line runs along the top of the
+content, and the status bar shows progress with ×, as Analyse does.
+Clicking the progress opens the steps:
+
+```
+                ┌──────────────────────────────────────────────────────┐
+                │ Indexing the library                                 │
+                │ ⌕ Search and faces                         ▓▓▓▓░░░░  │
+                │   18,200 of 56,710 photos, newest first.             │
+                │   About 6 minutes left.                              │
+                │ ⊡ Fursuit heads                            ░░░░░░░░  │
+                │   Next, on the 42,180 photos with fursuits.          │
+                │   About 1 h 25 min with the graphics card.           │
+                ├──────────────────────────────────────────────────────┤
+                │ Search works on whatever is done.  Fursuit heads are │
+                │ found only with the graphics card.                   │
+                └──────────────────────────────────────────────────────┘
+ Indexing: search and faces 18,200 of 56,710 ▓▓░░ ×                (status bar)
+```
+
+Searching while it runs shows results so far, under a strip: "Searching
+the 18,200 photos indexed so far, newest first.  Results fill in as
+indexing reaches older days."  New days fade in as they arrive.
+
+**After an export** (quiet): no dialog and no activity line, only the
+status bar: "Exported 412 photos to the library." then "Adding them to
+search 120 of 412", "Finding fursuit heads in them 80 of 310", and
+finally "Search has the 412 new photos."
+
+**The library stops answering:** the analysis banner's pattern
+(`WARN` strip): "Indexing stopped: the library on nas stopped answering.
+18,200 of 56,710 photos were indexed and are kept, and search works on
+those.  Indexing carries on from there when the library is back."
+*Try again*, ×.
+
+**The graphics card stops working.**  A banner under the folder bar, in
+whichever view is open (like the network banner), since indexing runs
+while the user culls:
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ▣ Indexing paused: the graphics card stopped responding                      │
+│   Its driver stopped the search helper.  Search still works on the 18,200    │
+│   photos indexed so far.  Indexing can carry on with the processor instead:  │
+│   slower (about 35 minutes left), and it gives way to anything else you do.  │
+│                                         [ Continue on the CPU ]   Not now    │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- *Self-check failed:* "the graphics card gave wrong answers … the
+  results didn't match, so the card isn't used."
+- *No usable card:* "Indexing is waiting: there's no graphics card it can
+  use … up to an hour for this library."
+- *During the head scan:* heads are GPU-only, so the offer is *Try the
+  card again* or *Not now* ("on the processor it would take about 15
+  hours"; open question 9).  Search and faces are unaffected.
+- *Not now* leaves the work paused; the status bar keeps "Indexing
+  paused" with the same offer as a link.
+- *The helper stops for another reason:* it is restarted and the status
+  bar says "The search helper stopped and was started again.  Indexing
+  carried on."  No banner.
+
+### 7a.6 People, characters and pets
+
+- **Three kinds, three pages.**  One page per kind, switched by
+  *People | Characters | Pets* tabs in its header and reached from the
+  kind's row on the search start page.  A page shows one kind only, so a
+  merge, a move or a suggestion can never cross kinds; completions list
+  each kind under its own heading.
+- **Shapes:** people are round crops of the face; characters and pets
+  rounded squares, so ears and horns fit.  Crops sit on `PHOTO_MOUNT`;
+  the kind is told by the page and the shape, never by colour.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Search │ Characters                     People│Characters│Pets    ☐ Select │
+│          │ 3 named, 5 groups to name                                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ Named  3 ────────────────────────────────────────────────────────────────────│
+│   ┌──────┐     ┌──────┐     ┌──────┐                                         │
+│   └──────┘     └──────┘     └──────┘                                         │
+│  Character 1  Character 2  Character 3                                       │
+│   96 photos    54 photos    31 photos                                        │
+│ Groups to name  5, largest first ────────────────────────────────────────────│
+│   ┌──────┐     ┌──────┐   …                                                  │
+│  Name this    Name this                                                      │
+│  character    character                                                      │
+│ › Smaller groups 230     › Hidden 1                                          │
+```
+
+- **Right after the first index** the People page holds only groups to
+  name (none named yet) and *Smaller groups*; the Characters page shows
+  the head scan's progress, with groups appearing as they are found.
+- **A subject's page is a search for it**: the subject is a chip in the
+  field (words added narrow it), and a band under the header holds the
+  subject.
+
+```
+│ ‹ Characters │ ⌕ [▢ Character 1 ×] Add words      │ 96 photos      Date│Best │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ▢ Character 1 ✎         Photos│Heads   Find more  [Review 24 suggestions Y] ⋯│
+│   96 photos over 3 days.  24 more photos may show this character.            │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ⌄ Saturday, October 26, 2024   22 photos ──────────────────────── Open day › │
+```
+
+- **Naming.**  An unnamed group opens with "Name this character" focused
+  in the band.  Typing a name that already exists offers *Merge into
+  Character 1* first and *Name it "…"* second; Enter takes the highlighted
+  one.  *Check this group (Y)* reviews the group's own members ("Same
+  character as this group?") before or after naming.  F2 or a click on
+  the name renames.
+- **Merging.**  Ctrl+click or S picks several; a strip says "2 selected"
+  with *Merge…*, *Hide* and ×.  The dialog asks which name to keep (the
+  named one by default) and says Ctrl+Z undoes it.
+- **Splitting.**  *Photos | Heads* (or *Faces*) shows every crop by day;
+  picked crops go *Move to…* another subject of the same kind or a new
+  one, or *Not Character 1*, which also stops them being suggested.
+- **Hiding** takes a subject off its page and out of completions; its
+  photos still come up when searched by name.  The status bar says so
+  with *Undo*; *Hidden* lists them with *Show*.
+- **⋯** holds *Merge into…*, *Change the cover*, *Show where* (outlines
+  the subject on each photo), *Hide* and *Forget this character…*.
+- **Pets** (phase 5): the same page pattern.  Animals are found only on
+  photos the index marks as animals and not as fursuits.  Until the
+  phase ships, the Pets tab says "Pets are coming later" and that search
+  finds animals by word meanwhile.
+
+### 7a.7 "Same character?": the review
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ‹ Character 1 │ Same character?          ▓▓▓░░░░░░  Auto-advance ●   [Done]  │
+│               │ 7 of 24 suggestions. 5 added, 1 not.                         │
+├──────────────────────────────────────────────────────────────────────────────┤
+│  Character 1, from          ┌────────────────┐       In the photo            │
+│  96 photos                  │                │       ┌───────────────────┐   │
+│  ┌────────┐                 │  the suggested │       │    ┌────┐         │   │
+│  │ cover  │                 │  crop, 300 px  │       │    │box │         │   │
+│  └────────┘                 │                │       │    └────┘         │   │
+│  ▫ ▫ ▫   ▫ ▫ ▫              └────────────────┘       └───────────────────┘   │
+│                           [ ✓ Yes  Y ] [ ✕ No  N ]   20240608_1609_2755      │
+│                   A burst of 4 frames: the answer covers them all.           │
+├──────────────────────────────────────────────────────────────────────────────┤
+│ ▫✓ ▫✓ ▫✓ ▫✕ ▫✓ ▫✓ [▫] ▫ ▫ ▫ ▫ ▫ ▫ ▫ ▫ ▫ ▫ ▫                                  │
+│ Answers go to Character 1 at once.    Y Yes  N No  ← → Step  Enter  Esc Done │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- Left: what the subject looks like (its cover and confirmed crops).
+  Centre: the suggestion, large.  Right: the whole photo with the head's
+  box outlined (light line, dark halo; never the accent, which means
+  selection).
+- **Y** adds it, **N** records "not this character" so it is never offered
+  again.  The answer is stamped as marks are: a green check on the
+  crop's corner (`KEEP`), or a grease-pencil cross with the crop dimmed
+  (`REJECT`).  Buttons use `style::toggle` in those tones.
+- With *Advance after marking* on (the same setting, shown as
+  *Auto-advance*), it moves on after the same short beat; ← → (or A D)
+  step; Enter opens the photo in the viewer; Ctrl+Z takes the last
+  answer back; Esc stops and the status bar says "Added 5 photos to
+  Character 1.  1 photo won't be suggested again."
+- The strip along the bottom is the viewer's filmstrip pattern: answered
+  suggestions carry their stamp, the current one the accent frame; click
+  to go back to one.
+- **One suggestion per burst**; its answer covers every frame (open
+  question 6).
+- **The end:** "All 24 answered.  18 photos added to Character 1.  6
+  won't be suggested again."  *Find more* (strict, a few at a time) and
+  *Back to Character 1*.
+- The same screen serves people ("Same person?") and, later, pets.
+
+### 7a.8 First run and the download dialog
+
+**Pointing search out once** (open question 2): (a) quiet: the rail, the
+View menu, Ctrl+F, and the page explains itself; (b) a dot on the rail's
+magnifier until it is first opened; (c) a one-time tip beside the rail
+("New: search the library … Got it"); (d) a status-bar line after the
+next export ("Exported 412 photos.  Set up search to find photos by what
+they show").
+
+**The download dialog** opens from *Index the library…*:
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ Download the models and index the library?                         │
+│ Search and face finding run on this computer, with models          │
+│ downloaded once from their publishers.  Nothing about your photos  │
+│ is sent anywhere.                                                  │
+│ Search  Always used.                                               │
+│ │ SigLIP 2, base size                                       750 MB │
+│ │ Finds photos by what they show.                                  │
+│ │ Licence: Apache-2.0, free for any use.  From Google.             │
+│ ☑ Find people's faces   Pick the model:                            │
+│ │ ◉ AuraFace  Recommended                                   261 MB │
+│ │   The most accurate in tests.  Slowest: about 3 minutes with the │
+│ │   graphics card, 15 on the processor.  Apache-2.0.               │
+│ │ ○ SFace                                                    37 MB │
+│ │   The smallest and fastest.  Mixes people up more often.         │
+│ │   Apache-2.0.                                                    │
+│ │ ○ InsightFace                                       about 190 MB │
+│ │   What Immich uses.  Licence: non-commercial research only, so   │
+│ │   not for any commercial use.  From InsightFace.                 │
+│ ☑ Find fursuit characters   Graphics card only.                    │
+│ │ OWLv2 and DINOv2                                          950 MB │
+│ │   About 1.4 hours for this library, then 7 minutes a new day.    │
+│ Downloads  1.96 GB in all, once                                    │
+│ Reads      About 20 GB from the library on the share               │
+│ Takes      About 10 minutes with the graphics card, up to an hour  │
+│            on the processor, then about 1.4 hours for heads        │
+│ Each file is checked against its SHA-256 before it's used, and     │
+│ deleted if it doesn't match.        Show sources and checksums     │
+│                         [ Cancel ]  [ Download 1.96 GB and index ] │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+- Search is fixed; faces and fursuit heads are on, each with a box to
+  turn it off; totals and times update with each choice.  InsightFace is
+  never pre-selected, and its licence line is in `WARN`.
+- *Show sources and checksums* lists each file's source and SHA-256.
+- The face download includes YuNet (0.2 MB, MIT) for AuraFace and SFace;
+  InsightFace brings its own detector.  InsightFace's size and speed
+  are estimates to confirm in phase 0.
+- **Downloading:** one row per model with a bar, then "Checked".
+  Indexing starts as soon as the search model is in place; the dialog
+  can be closed and downloads carry on, with progress in the status bar.
+- **A checksum mismatch:** "The face model didn't match its checksum.
+  AuraFace downloaded, but it isn't the file Photo Pipeline expects, so it
+  was deleted and nothing was installed …  Search and fursuit heads are
+  fine; indexing goes ahead without faces."  Expected and received
+  digests; *Not now*, *Try again*.
+- **Offline:** "Couldn't reach the model's publisher.  Nothing was
+  downloaded or indexed.  Try again when you're online."
+
+### 7a.9 Preferences
+
+New sections in the existing Preferences window, in its card-and-row
+pattern:
+
+- **Search:** *Index new exports* (on); *Use the graphics card* (on),
+  with the last self-check's result ("Checked against the processor:
+  same results") and *Check again*; *Search model* (SigLIP 2, shown as
+  fixed); *Recent searches* with *Forget them*.
+- **People:** *Find people's faces* (on).  Turning it off offers, inline:
+  "No new faces will be looked for.  Forget the 8,412 faces already
+  found, and the 2 names you gave?"  *Keep them* / *Forget them*.  *Face
+  model* with *Change…* (the same chooser, saying how long finding faces
+  again takes and that names are kept).  *Smallest group to show*: 3, 5
+  or 10 photos.
+- **Characters:** *Find fursuit characters* (on; graphics card only).
+- **Pets:** *Find pets*, "Coming later" until phase 5.
+- **Storage**, new rows: *Search index* (92 MB, 56,710 photos;
+  *Rebuild…*, *Clear…*); *People, characters and pets* ("not a cache: it
+  asks first"; *Forget all…*); *Downloaded models* (1.96 GB; *Open*,
+  *Delete…*).  Each action confirms in the window, with what it costs:
+  "Rebuild the search index?  Every photo in the library is read again:
+  about 20 GB, about 7 minutes with the graphics card.  Search keeps
+  using the current index until the new one is ready."
+
+### 7a.10 New keys
+
+| Key | Where | Does |
+|---|---|---|
+| Ctrl+F | Main window, anywhere | Opens Search, field focused, its text selected |
+| ↑ ↓, Enter, Tab | Search field | Choose and take a completion; Enter alone searches |
+| Backspace | Empty search field | Removes the last name chip |
+| Esc | Search page | Closes completions, else goes back where you came from |
+| ← →, Space, Enter | Results | As on a day page: move, quick look, viewer (read-only) |
+| F2 | A kind's page; a subject's page | Name or rename |
+| S, Ctrl+click | A kind's page | Pick several, to merge or hide |
+| Y | A subject's page | Start reviewing its suggestions |
+| Y, N | Review | Yes, same; no, not this one |
+| ← → (A, D), Enter, Esc | Review | Step, open the photo, stop |
+| Ctrl+Z | Review | Take the last answer back |
+
+Checked against `src/app/commands.rs` and the view key handlers:
+
+- **Ctrl+F** is free: `Cmd::from_key` binds no Ctrl+F.  Plain F (fit)
+  belongs to the viewer and compare, in their own window, and is not
+  touched.
+- **Y and N** are unbound without modifiers everywhere.  Ctrl+Y stays
+  Redo; the review checks for no modifier.
+- **F2** is unbound.
+- **S** is the existing *Select mode* command (today disabled only in
+  the calendar view), enabled on the kinds' pages with its usual meaning.
+- Arrows, A and D, Space, Enter and Esc keep the meanings they have in
+  quick look and the viewer.
+- §7.4's Ctrl+4 for a Subjects view is dropped: the kinds live inside
+  Search.  No new single-letter command is added to `Cmd`.
+
+### 7a.11 What it reuses
+
+| Existing piece | Reused for | Change needed |
+|---|---|---|
+| `ui::grid::Grid` with day `Section`s | Results; a subject's photos | Best first needs a section without a date (`Section` is keyed by `NaiveDate`): a label-only section or a sentinel date |
+| The calendar's day page | *Open day* | Its back button learns a "Search" origin |
+| Quick look, read-only viewer (`read_only`) | Space and Enter on results | None beyond the read-only path the calendar uses |
+| Hints menu (`hints_ui.rs`): floating rows with title, detail, count and a footer | Completions; the indexing steps; the "Not indexed yet" invitation (its "Not analysed yet" body) | A row variant with a crop for names |
+| Analysis progress in the status bar, with × | Indexing progress | Clickable, to open the steps |
+| The analysis and network banners (`WARN` strip) | Library away; the graphics-card notice | None |
+| The duplicates strip (`copies_bar`) | "2 selected" strips for merge, hide and heads | None |
+| The bulk-action confirmation (`bulk.rs`): count, the photos, why | Merge (crops and counts), Forget all, Rebuild, Clear | None |
+| `commands.rs` `SIDE` and `MENUS` | `Cmd::Search` | One entry; the global menu and shortcuts follow |
+| `kit::segmented`, `kit::btn`, `kit::tip`, `style::input`, `style::toggle` | Date│Best, People│Characters│Pets, buttons, the field, Yes and No | A 36 px field size |
+| Viewer filmstrip (`ui::filmstrip`) and the keep check and grease-pencil cross | The review's strip and stamps | Square crops instead of thumbnails |
+| *Advance after marking* (`viewer_advance.rs`) and `ui::stamp` | The review's advance and its beat | None |
+| `undo.rs` | Answers, merges, hides, names | A subjects entry kind; it outlives a folder change |
+| Preferences Storage rows (`preferences_storage.rs`) | Search index, people, models | Three rows, measured on the worker |
+
+New pieces: `ui/subject_tile.rs` (§5.1: crop, name, count in a mount;
+round or rounded square) and glyphs drawn in `ui/icons.rs` with the same
+stroke: *Search* (magnifier), *Head* (a character's head), *Merge*,
+*Split*, *Hide* (eye crossed out) and *Graphics card*.
+
+### 7a.12 States
+
+| State | Where | What the user sees |
+|---|---|---|
+| Nothing typed | Search page | The start page (§7a.4) |
+| No completion | Completions | "Press Enter to search for "…"" |
+| No name matches `@…` | Completions | "No one by that name yet" |
+| Nothing found | Results | "Nothing in the library looks like "…"" with what to try |
+| Weaker matches left | End of results | "N more photos look a little like …" and *Show weaker matches* |
+| Animal word | End of results | "N fursuits that look like dogs are left out" and *Show fursuits too* |
+| Not indexed | Search page | The invitation with its costs |
+| First index running | Status bar, steps, strip on results | Progress with ×; results so far |
+| After an export | Status bar only | Quiet progress, then "Search has the N new photos" |
+| Library away | Banner | Kept, paused, *Try again* |
+| Graphics card failed | Banner in any view | Why, *Continue on the CPU* or *Not now* (heads: *Try the card again*) |
+| Helper restarted | Status bar | One line; work carries on |
+| Download mismatch, offline | Dialog | Which file, what still works, *Try again* |
+| Faces off | People page | "Finding faces is off.  Turn it on in Preferences." |
+| Heads still scanning | Characters page | The scan's progress; groups as found |
+| Pets before phase 5 | Pets page | "Pets are coming later" |
+
+### 7a.13 Open UI questions
+
+Each says what the mockups do now; the recommendation is the mockups'
+choice.
+
+1. **Where do people, characters and pets live?**  (a) Inside Search: a
+   row each on the start page and a page each with kind tabs; (b) a
+   side-rail entry of their own with the same tabs; (c) both.
+   *Recommendation: (a).*  Search is where photos are found; one new rail
+   entry; the rows show what can be searched for.
+2. **How is search pointed out the first time?**  (a) Quietly; (b) a dot
+   on the rail's magnifier until first opened; (c) a one-time tip beside
+   the rail; (d) a status-bar line after the next export.
+   *Recommendation: (b).*  Visible, silent, gone after one look.
+3. **Where do fursuits go after *Show fursuits too*?**  (a) A section of
+   their own after the real animals; (b) mixed into the days.
+   *Recommendation: (a)*: pets and fursuits never share a list.
+4. **How are results loosened?**  (a) *Show weaker matches* at the end,
+   one step at a time; (b) a Stricter–Looser slider in the header.
+   *Recommendation: (a).*
+5. **How does a name sit in the query?**  (a) A chip, typed with `@`;
+   (b) plain `@name` text.  *Recommendation: (a)*: names with spaces stay
+   whole and the chip shows whose photos these are.
+6. **Does one answer cover a burst?**  (a) Yes, one suggestion per burst;
+   (b) one answer per frame.  *Recommendation: (a)*: a burst nearly
+   always shows one pose; a frame that differs can be moved out later.
+7. **How do Yes and No look?**  (a) The keep and prune colours, check and
+   cross; (b) neutral, the accent only on the current suggestion.
+   *Recommendation: (a)*: it reads like culling.
+8. **What does Esc do on the search page?**  (a) Closes completions,
+   else goes back and keeps the query; (b) clears the query first.
+   *Recommendation: (a)*, as on the calendar's day pages.
+9. **What does the head scan do when the graphics card fails?**  (a)
+   Waits for the card: *Try the card again* or *Not now*; (b) offers the
+   CPU anyway ("about 15 hours").  *Recommendation: (a).*
+10. **What is the fursuit kind called?**  (a) Characters; (b) Fursuits.
+    *Recommendation: (a)*: the suit is the costume, the character is who
+    you search for.
+11. **Are recent searches kept?**  (a) The last 10, shown when the field
+    is empty, with *Forget them* in Preferences; (b) none.
+    *Recommendation: (a).*
 
 ---
 
