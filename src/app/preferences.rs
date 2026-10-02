@@ -1027,8 +1027,10 @@ fn models_row(app: &App) -> Element<'_, Message> {
 
 // ── search ──────────────────────────────────────────────────────────────────
 
+/// At the default, judged where the knob sits (the values span a
+/// thousandfold, so a fixed tolerance on the value would be meaningless).
 fn at_default(v: f32) -> bool {
-    (v - CLOSENESS_DEFAULT).abs() < 0.01
+    (closeness_to_track(v) - 0.5).abs() < 0.005
 }
 
 /// One arrow key's step along the slider's track: ten from the middle to
@@ -1036,27 +1038,32 @@ fn at_default(v: f32) -> bool {
 const TRACK_STEP: f32 = 0.05;
 
 /// Where a closeness sits on the slider's track, 0 (closer, the left end)
-/// to 1 (looser, the right end).  The track is in two halves: the left one
-/// covers `CLOSENESS_DEFAULT..=CLOSENESS_MAX`, the right one
-/// `CLOSENESS_MIN..=CLOSENESS_DEFAULT`, so the default is always the
-/// middle, whatever the (provisional) range.
+/// to 1 (looser).  The closeness is a floor on the model's match
+/// probability and spans a thousandfold, so each half of the track is
+/// logarithmic: the left half covers `CLOSENESS_DEFAULT..=CLOSENESS_MAX`,
+/// the right `CLOSENESS_MIN..=CLOSENESS_DEFAULT`, and the default sits in
+/// the middle whatever the range.
 pub(super) fn closeness_to_track(v: f32) -> f32 {
-    let v = v.clamp(CLOSENESS_MIN, CLOSENESS_MAX);
-    if v >= CLOSENESS_DEFAULT {
-        0.5 * (CLOSENESS_MAX - v) / (CLOSENESS_MAX - CLOSENESS_DEFAULT)
-    } else {
-        0.5 + 0.5 * (CLOSENESS_DEFAULT - v) / (CLOSENESS_DEFAULT - CLOSENESS_MIN)
-    }
+    let v = if v.is_finite() { v.clamp(CLOSENESS_MIN, CLOSENESS_MAX) } else { CLOSENESS_DEFAULT };
+    let (min, def, max, l) = (CLOSENESS_MIN.ln(), CLOSENESS_DEFAULT.ln(), CLOSENESS_MAX.ln(), v.ln());
+    if v >= CLOSENESS_DEFAULT { 0.5 * (max - l) / (max - def) } else { 0.5 + 0.5 * (def - l) / (def - min) }
 }
 
 /// The closeness at a place on the track (the inverse of
-/// `closeness_to_track`).
+/// `closeness_to_track`); the middle is exactly the default.
 pub(super) fn track_to_closeness(p: f32) -> f32 {
     let p = p.clamp(0.0, 1.0);
-    if p <= 0.5 {
-        CLOSENESS_MAX - (CLOSENESS_MAX - CLOSENESS_DEFAULT) * (p / 0.5)
+    let (min, def, max) = (CLOSENESS_MIN.ln(), CLOSENESS_DEFAULT.ln(), CLOSENESS_MAX.ln());
+    if (p - 0.5).abs() < 1e-6 {
+        CLOSENESS_DEFAULT
+    } else if p == 0.0 {
+        CLOSENESS_MAX
+    } else if p == 1.0 {
+        CLOSENESS_MIN
+    } else if p < 0.5 {
+        (max - (max - def) * (p / 0.5)).exp()
     } else {
-        CLOSENESS_DEFAULT - (CLOSENESS_DEFAULT - CLOSENESS_MIN) * ((p - 0.5) / 0.5)
+        (def - (def - min) * ((p - 0.5) / 0.5)).exp()
     }
 }
 
@@ -1519,15 +1526,22 @@ mod tests {
         assert_eq!(track_to_closeness(0.0), CLOSENESS_MAX);
         assert_eq!(track_to_closeness(0.5), CLOSENESS_DEFAULT);
         assert_eq!(track_to_closeness(1.0), CLOSENESS_MIN);
-        // Each half is linear in its own range, and the two are inverses.
-        assert!((track_to_closeness(0.25) - (CLOSENESS_MAX + CLOSENESS_DEFAULT) / 2.0).abs() < 1e-5);
-        assert!((track_to_closeness(0.75) - (CLOSENESS_DEFAULT + CLOSENESS_MIN) / 2.0).abs() < 1e-5);
+        // Each half is logarithmic in its own range (a quarter of the way is
+        // the geometric mean), and the two are inverses.
+        let rel = |a: f32, b: f32| ((a - b) / b).abs();
+        assert!(rel(track_to_closeness(0.25), (CLOSENESS_MAX * CLOSENESS_DEFAULT).sqrt()) < 1e-4);
+        assert!(rel(track_to_closeness(0.75), (CLOSENESS_DEFAULT * CLOSENESS_MIN).sqrt()) < 1e-4);
         for i in 0..=40 {
             let p = i as f32 / 40.0;
-            assert!((closeness_to_track(track_to_closeness(p)) - p).abs() < 1e-5, "{p}");
-            let v = CLOSENESS_MIN + (CLOSENESS_MAX - CLOSENESS_MIN) * p;
-            assert!((track_to_closeness(closeness_to_track(v)) - v).abs() < 1e-5, "{v}");
+            assert!((closeness_to_track(track_to_closeness(p)) - p).abs() < 1e-4, "{p}");
+            let v = (CLOSENESS_MIN.ln() + (CLOSENESS_MAX.ln() - CLOSENESS_MIN.ln()) * p).exp();
+            assert!(rel(track_to_closeness(closeness_to_track(v)), v) < 1e-4, "{v}");
         }
+        // "At the default" is judged on the track: a tenth of the way to
+        // either end is not the default, however small the value.
+        assert!(at_default(CLOSENESS_DEFAULT));
+        assert!(!at_default(track_to_closeness(0.45)) && !at_default(track_to_closeness(0.55)));
+        assert!(!at_default(CLOSENESS_MIN) && !at_default(CLOSENESS_MAX));
         // Monotonic: further right is looser (a lower closeness).
         assert!(track_to_closeness(0.3) > track_to_closeness(0.5) && track_to_closeness(0.5) > track_to_closeness(0.7));
         // Out of range clamps to the ends.

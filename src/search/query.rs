@@ -93,6 +93,7 @@ pub const SIGMOID_SCALE: f32 = 112.901_18;
 pub const SIGMOID_BIAS: f32 = -16.771_803;
 
 /// The model's own probability that a shot matches the query.
+#[cfg(test)]
 pub fn match_probability(cosine: f32) -> f32 {
     1.0 / (1.0 + (-(SIGMOID_SCALE * cosine + SIGMOID_BIAS)).exp())
 }
