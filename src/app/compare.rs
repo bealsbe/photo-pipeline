@@ -139,18 +139,11 @@ impl Compare {
 
 // ── opening and leaving ─────────────────────────────────────────────────────
 
-/// The photos selected in the grid or list, in display order.  A RAW+JPG
-/// pair counts once, as its JPG (what the grid shows).
+/// The photos selected in the grid, in display order.  A RAW+JPG pair
+/// counts once, as its JPG (what the grid shows).
 fn selected(app: &App) -> Vec<RecordId> {
     match app.view {
         View::Grid => app.derived.visible.iter().copied().filter(|id| app.grid.selection.contains(id)).collect(),
-        View::List => app
-            .derived
-            .list_rows
-            .iter()
-            .filter(|r| app.list.selection.contains(&r.primary()))
-            .map(|r| r.jpg.unwrap_or(r.primary()))
-            .collect(),
         View::Calendar => Vec::new(),
     }
 }
@@ -159,7 +152,6 @@ fn selected(app: &App) -> Vec<RecordId> {
 pub fn can_open(app: &App) -> bool {
     let n = match app.view {
         View::Grid => app.grid.selection.len(),
-        View::List => app.list.selection.len(),
         View::Calendar => 0,
     };
     (2..=MAX_PANES).contains(&n)

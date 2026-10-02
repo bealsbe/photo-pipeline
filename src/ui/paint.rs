@@ -315,25 +315,6 @@ pub fn elide_start_with(content: &str, fits: impl Fn(&str) -> bool) -> String {
     }
 }
 
-/// Qt's `ElideRight`.
-pub fn elide_right(content: &str, size: f32, font: Font, max_width: f32) -> String {
-    if text_width(content, size, font) <= max_width {
-        return content.to_string();
-    }
-    let chars: Vec<char> = content.chars().collect();
-    let (mut lo, mut hi) = (0usize, chars.len());
-    while lo < hi {
-        let mid = (lo + hi).div_ceil(2);
-        let s: String = chars[..mid].iter().chain(std::iter::once(&'…')).collect();
-        if text_width(&s, size, font) <= max_width {
-            lo = mid;
-        } else {
-            hi = mid - 1;
-        }
-    }
-    chars[..lo].iter().chain(std::iter::once(&'…')).collect()
-}
-
 /// Rectangle helpers.
 pub fn rect(x: f32, y: f32, w: f32, h: f32) -> Rectangle {
     Rectangle::new(Point::new(x, y), Size::new(w.max(0.0), h.max(0.0)))

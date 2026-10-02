@@ -74,9 +74,9 @@ src/app/               the application: state, update, views
   kit.rs, style.rs     shared view pieces and widget styles
   global_menu.rs       the KDE global menu (dbusmenu + KWin appmenu)
   testing.rs           PP_SCRIPT test driver (see below)
-src/ui/                custom widgets: grid, list, image stage, burst
-                       sheet, calendar stage, side menu, icons, symbols,
-                       hint plates (the analysis' marks on photos)
+src/ui/                custom widgets: grid, image stage, burst sheet,
+                       calendar stage, side menu, icons, symbols, hint
+                       plates (the analysis' marks on photos)
   theme.rs             the design tokens: colours, type, spacing, motion
   motion.rs, tags.rs   entrance animation, activity bar, file-type tags
 src/model/             records, collection & pairing, filters, crops,
@@ -96,7 +96,7 @@ scripts/               check-private.sh (see "Testing")
 
 ## Look
 
-The chrome (bars, menus, panels, dialogs, the list and the calendar) uses
+The chrome (bars, menus, panels, dialogs and the calendar) uses
 the Catppuccin Mocha palette of the KDE desktop it was built on, with its
 purple accent.  Everything around a photo being reviewed stays true neutral
 grey: the grid's background and mounts, and the viewer's stage.  A tinted
@@ -137,8 +137,8 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 - **Culling progress.** The status bar shows how far through the folder you
   are, for example "212 of 740 shots reviewed", with a thin bar.  A shot is
   reviewed once it's pruned or marked, and a RAW+JPG pair counts once.  The
-  filter bar's **All · To review · Marked · Pruned** choice narrows the grid
-  and the list: To review to the shots still to review (Ctrl+U, or click the
+  filter bar's **All · To review · Marked · Pruned** choice narrows the
+  grid: To review to the shots still to review (Ctrl+U, or click the
   progress), Marked to those marked for export, Pruned to those marked to
   prune.  A photo leaves as soon as its mark no longer fits (under To review,
   once you prune or mark it; under Pruned, once P un-prunes it) and the next
@@ -190,7 +190,7 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   **1** at 100 % on each frame's own AF point, `,` and `.` changing the
   outlined photo's frame, and Esc back to the burst.  Stepping past either
   end of a burst, or PgUp / PgDn, goes on to the photo or burst before or
-  after it.  **B** in the grid, the list or quick look opens the viewer on
+  after it.  **B** in the grid or quick look opens the viewer on
   the selected photo's burst.  Preferences ▸ *Show a burst's frames first*
   turns the arrival view off (the viewer then steps frame by frame, and B
   still shows them all).
@@ -369,6 +369,11 @@ These are deliberate:
 - **The look** is new (see above), including sentence-case labels and clearer
   wording in the dialogs.
 - **KDE global menu** support (see above); the Python app had none.
+- **No list view.**  The grid is the one way to see a working folder (Grid
+  is still Ctrl+2 and the calendar Ctrl+3; Ctrl+1 does nothing).  Hovering
+  a photo gives what the list's columns did: both file names, sizes and
+  the modified date.  Settings that last showed the list, saved here or
+  imported from the Python app, open in the grid.
 - **New culling tools** (see "Working through a shoot"): culling progress and
   the To review and Pruned filters, quick look, compare, the viewer's
   filmstrip and auto-advance, undo/redo, the combined RAW+JPG tag, bursts,
@@ -393,7 +398,6 @@ These are deliberate:
   new size goes in `PixelX/YDimension` instead.
 - **Python bugs fixed:**
   - File sizes use real division (Python printed "7.0 MB" for 7.5 MB).
-  - List rows pair files by folder and stem, not by stem alone.
   - Moved records leave the working grid after a Move export.
 - **Sort and Trash** run in the background instead of freezing the window.
 - **Selection:**

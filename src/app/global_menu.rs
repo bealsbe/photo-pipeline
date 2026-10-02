@@ -229,7 +229,6 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::EditCopy => "edit-copy",
         Cmd::Review => "user-trash",
         Cmd::Sort => "view-sort",
-        Cmd::ListView => "view-list-details",
         Cmd::GridView => "view-list-icons",
         Cmd::CalendarView => "view-calendar",
         Cmd::SelectMode => "edit-select",

@@ -20,8 +20,8 @@
 //! order from one shutter press (`model::bursts`), so a filter that hides
 //! some frames shows the rest, and the frames are numbered in their burst.
 //! With "Show a burst's frames first" off, arriving shows the frame as
-//! before; B (in the grid, the list, quick look or the viewer) still opens
-//! the sheet.  Library photos have no bursts.
+//! before; B (in the grid, quick look or the viewer) still opens the
+//! sheet.  Library photos have no bursts.
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -583,7 +583,7 @@ pub fn on_key(app: &mut App, key: &Key, c: Option<&str>) -> Option<Task<Message>
 // ── B in the main window ────────────────────────────────────────────────────
 
 /// The photo B opens the burst of: the one quick look shows, else the
-/// grid's or list's selected photo (the keyboard anchor of several).
+/// grid's selected photo (the keyboard anchor of several).
 fn target(app: &App) -> Option<RecordId> {
     if let Some(q) = &app.quicklook {
         return Some(q.id);
@@ -593,7 +593,6 @@ fn target(app: &App) -> Option<RecordId> {
     };
     match app.view {
         View::Grid => pick(app.grid.anchor, &app.grid.selection),
-        View::List => pick(app.list.current.or(app.list.anchor), &app.list.selection),
         View::Calendar => None,
     }
 }

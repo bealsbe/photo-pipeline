@@ -3,7 +3,7 @@
 //! What can be undone:
 //!
 //! * **Prune and export marks, and crops**, however they were made: P / M
-//!   in the grid or list (one photo, a selection, Ctrl+A), the viewer's
+//!   in the grid (one photo, a selection, Ctrl+A), the viewer's
 //!   buttons and keys, Review's "Unmark all" and Export's "Clear all marks".
 //! * **Sort.**  Undo moves the files back out of RAW/ and JPG/ on a worker
 //!   (then removes those folders if they are left empty); redo sorts them

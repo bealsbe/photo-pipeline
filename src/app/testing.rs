@@ -46,7 +46,6 @@
 //! vpos                        # print where the viewer window is (X11)
 //! vdump                       # print the viewer's state and its settings
 //! click 3 [ctrl|shift]        # grid click on the 4th tile (a stack is one)
-//! lclick 3                    # list click on the 4th row
 //! activate 0                  # open the viewer on a grid tile
 //! aspect 1:1                  # pick a crop ratio in the viewer
 //! filter marked|all|date|date-from|date-close   # (all: the Reset button)
@@ -55,7 +54,7 @@
 //! filter pruned               # Preferences ▸ Show pruned photos, on or off
 //!                             # (the filter bar's old Show pruned chip)
 //! progress                    # print review progress and the filter
-//! shown                       # print the grid's tiles (list's rows), marks
+//! shown                       # print the grid's tiles and marks
 //! dlg export-go               # press a dialog button (see `dialog_msg`)
 //! gridscroll 20000 3000       # scroll the grid to y=20000 px over 3 s
 //! zoom 240                    # set the grid's thumbnail size
@@ -174,7 +173,6 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         }
         "cmd" => {
             let c = match arg.as_str() {
-                "ListView" => Some(Cmd::ListView),
                 "GridView" => Some(Cmd::GridView),
                 "CalendarView" => Some(Cmd::CalendarView),
                 "SelectMode" => Some(Cmd::SelectMode),
@@ -237,10 +235,6 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let ev = crate::ui::compare_stage::CompareEvent::Focus(arg.parse().unwrap_or(0));
             app.update(Message::Compare(super::compare::Msg::Stage(ev)))
         }
-        "lclick" => match app.derived.list_rows.get(arg.parse().unwrap_or(0)).map(|r| r.primary()) {
-            Some(id) => app.update(Message::List(crate::ui::list::ListEvent::Click { id, modifiers: Modifiers::empty() })),
-            None => Task::none(),
-        },
         "sheet" => {
             use crate::ui::image_stage::{SheetEvent, StageEvent};
             let mut a = arg.split_whitespace();
@@ -488,12 +482,11 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         }
         "dump" => {
             eprintln!(
-                "[dump] folder={:?} records={} sections={} visible={} rows={} status={:?} thumbs={} scanning={} view={:?} win={:?}",
+                "[dump] folder={:?} records={} sections={} visible={} status={:?} thumbs={} scanning={} view={:?} win={:?}",
                 app.folder,
                 app.coll.len(),
                 app.derived.sections.len(),
                 app.derived.visible.len(),
-                app.derived.list_rows.len(),
                 app.status.text,
                 app.thumbs.len(),
                 app.scanning,
@@ -524,22 +517,15 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             Task::none()
         }
         "shown" => {
-            // The grid's tiles (or the list's rows) with their marks.
-            let ids: Vec<crate::model::collection::RecordId> = match app.view {
-                super::View::List => app.derived.list_rows.iter().map(|r| r.primary()).collect(),
-                _ => app.derived.tiles.clone(),
-            };
+            // The grid's tiles with their marks.
+            let ids = &app.derived.tiles;
             let names: Vec<String> = ids
                 .iter()
                 .filter_map(|&id| app.coll.get(id))
                 .map(|r| format!("{}{}{}", r.stem(), if r.is_pruned { " P" } else { "" }, if r.is_marked { " M" } else { "" }))
                 .collect();
             let unpruned = ids.iter().filter(|&&id| app.coll.get(id).is_some_and(|r| !r.is_pruned)).count();
-            let selection = match app.view {
-                super::View::List => &app.list.selection,
-                _ => &app.grid.selection,
-            };
-            let selected: Vec<String> = selection.iter().filter_map(|&id| app.coll.get(id)).map(|r| r.stem()).collect();
+            let selected: Vec<String> = app.grid.selection.iter().filter_map(|&id| app.coll.get(id)).map(|r| r.stem()).collect();
             eprintln!(
                 "[shown] view={:?} show={:?} n={} not_pruned={unpruned} selected={selected:?} {:?}",
                 app.view,

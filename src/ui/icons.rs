@@ -28,7 +28,6 @@ pub enum Glyph {
     Trash,
     /// Sort into RAW / JPG subfolders.
     Sort,
-    List,
     Grid,
     Calendar,
     /// Select mode.
@@ -318,12 +317,6 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.line(&[(17.0, 4.0), (20.0, 7.0), (17.0, 10.0)]);
             p.line(&[(17.0, 14.0), (20.0, 17.0), (17.0, 20.0)]);
         }
-        List => {
-            for y in [7.0, 12.0, 17.0] {
-                p.dot(5.0, y, 1.3);
-                p.line(&[(9.0, y), (20.0, y)]);
-            }
-        }
         Grid => {
             for (x, y) in [(4.0, 4.0), (13.5, 4.0), (4.0, 13.5), (13.5, 13.5)] {
                 p.rrect(x, y, 6.5, 6.5, 1.5);
@@ -543,7 +536,7 @@ mod tests {
     fn every_glyph_draws_something() {
         use Glyph::*;
         for g in [
-            Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, List, Grid, Calendar, Select, Keep, Prune,
+            Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
             Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy,
