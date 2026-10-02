@@ -135,7 +135,8 @@ pub enum Msg {
     ClearConfirmed,
     ConfirmCancel,
     Cleared(Cache, Option<(Cleared, Usage)>),
-    /// The closeness slider moved (its position: closer to the left).
+    /// The closeness slider moved (its place on the track, 0 closer to 1
+    /// looser; see `closeness_to_track`).
     Closeness(f32),
     /// The slider was let go: save, and search again.
     ClosenessDone,
@@ -379,8 +380,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if was_counting { recount(app) } else { Task::none() }
         }
         Msg::Closeness(position) => {
-            // The slider runs from closer (left) to looser (right).
-            app.settings.search_closeness = (CLOSENESS_MIN + CLOSENESS_MAX - position).clamp(CLOSENESS_MIN, CLOSENESS_MAX);
+            app.settings.search_closeness = track_to_closeness(position);
             Task::none()
         }
         Msg::ClosenessDone => closeness_changed(app),
@@ -626,11 +626,12 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
     }
     if let Key::Named(dir @ (Named::ArrowLeft | Named::ArrowRight | Named::ArrowDown | Named::ArrowUp)) = &key {
         if app.prefs.focus == Some(Control::Closeness) {
-            // ← closer, → looser, as the slider runs.
+            // ← closer, → looser, as the slider runs: a step along its
+            // track, so the default is reached from either end.
             let looser = matches!(*dir, Named::ArrowRight | Named::ArrowUp);
-            let v = app.settings.closeness() + if looser { -0.25 } else { 0.25 };
+            let p = closeness_to_track(app.settings.closeness()) + if looser { TRACK_STEP } else { -TRACK_STEP };
             app.prefs.ring = true;
-            return set_closeness(app, v);
+            return set_closeness(app, track_to_closeness(p));
         }
     }
     match &key {
@@ -1027,7 +1028,36 @@ fn models_row(app: &App) -> Element<'_, Message> {
 // ── search ──────────────────────────────────────────────────────────────────
 
 fn at_default(v: f32) -> bool {
-    (v - CLOSENESS_DEFAULT).abs() < 0.05
+    (v - CLOSENESS_DEFAULT).abs() < 0.01
+}
+
+/// One arrow key's step along the slider's track: ten from the middle to
+/// either end.
+const TRACK_STEP: f32 = 0.05;
+
+/// Where a closeness sits on the slider's track, 0 (closer, the left end)
+/// to 1 (looser, the right end).  The track is in two halves: the left one
+/// covers `CLOSENESS_DEFAULT..=CLOSENESS_MAX`, the right one
+/// `CLOSENESS_MIN..=CLOSENESS_DEFAULT`, so the default is always the
+/// middle, whatever the (provisional) range.
+pub(super) fn closeness_to_track(v: f32) -> f32 {
+    let v = v.clamp(CLOSENESS_MIN, CLOSENESS_MAX);
+    if v >= CLOSENESS_DEFAULT {
+        0.5 * (CLOSENESS_MAX - v) / (CLOSENESS_MAX - CLOSENESS_DEFAULT)
+    } else {
+        0.5 + 0.5 * (CLOSENESS_DEFAULT - v) / (CLOSENESS_DEFAULT - CLOSENESS_MIN)
+    }
+}
+
+/// The closeness at a place on the track (the inverse of
+/// `closeness_to_track`).
+pub(super) fn track_to_closeness(p: f32) -> f32 {
+    let p = p.clamp(0.0, 1.0);
+    if p <= 0.5 {
+        CLOSENESS_MAX - (CLOSENESS_MAX - CLOSENESS_DEFAULT) * (p / 0.5)
+    } else {
+        CLOSENESS_DEFAULT - (CLOSENESS_DEFAULT - CLOSENESS_MIN) * ((p - 0.5) / 0.5)
+    }
 }
 
 /// What the closeness means, in words.
@@ -1066,12 +1096,14 @@ fn search_section(app: &App) -> Element<'_, Message> {
         let check = focusable(
             p,
             Control::CheckCard,
+            // No side padding: wrapped onto its own line, the link sits
+            // flush with the words above it.
             iced::widget::button(text("Check again").size(t::T_SMALL).font(paint::MEDIUM))
-                .padding(Padding::from([1.0, 4.0]))
+                .padding(Padding::from([1.0, 0.0]))
                 .style(style::link().style())
                 .on_press(m(Msg::Press(Control::CheckCard))),
         );
-        about_device = about_device.push(row![text(line).size(t::T_SMALL).color(tone), check].spacing(t::S1).align_y(Alignment::Center).wrap());
+        about_device = about_device.push(row![text(line).size(t::T_SMALL).color(tone), check].spacing(t::S2).align_y(Alignment::Center).wrap());
     } else {
         let all = estimate::describe_seconds(estimate::seconds(shots, Device::Cpu));
         let day = estimate::describe_seconds(estimate::seconds(5_000, Device::Cpu));
@@ -1084,11 +1116,11 @@ fn search_section(app: &App) -> Element<'_, Message> {
     let segment = |d: Device| -> Element<'_, Message> { focusable(p, Control::SearchDevice(d), kit::segment(d.label(), s.search_device == d, None, m(Msg::Press(Control::SearchDevice(d))))) };
     let device_control = kit::segmented(vec![segment(Device::Gpu), segment(Device::Cpu)]);
 
-    // How close matches must be: closer to the left, looser to the right.
+    // How close matches must be: closer to the left, looser to the right,
+    // the default in the middle.
     let v = s.closeness();
-    let position = CLOSENESS_MIN + CLOSENESS_MAX - v;
-    let slider = slider(CLOSENESS_MIN..=CLOSENESS_MAX, position, |x| m(Msg::Closeness(x)))
-        .step(0.05_f32)
+    let slider = slider(0.0..=1.0_f32, closeness_to_track(v), |x| m(Msg::Closeness(x)))
+        .step(0.01_f32)
         .on_release(m(Msg::ClosenessDone))
         .width(160)
         .style(style::zoom_slider(true));
@@ -1476,6 +1508,35 @@ mod tests {
         assert_eq!(reveal_offset(600.0, 2000.0, 500.0, 10.0, 30.0), Some(0.0));
         // Near the foot: the rest of the page comes into view.
         assert_eq!(reveal_offset(600.0, 2000.0, 0.0, 1900.0, 30.0), Some(1400.0));
+    }
+
+    #[test]
+    fn the_closeness_slider_has_the_default_in_the_middle() {
+        // The ends and the middle, whatever the provisional range.
+        assert_eq!(closeness_to_track(CLOSENESS_MAX), 0.0, "closer is the left end");
+        assert_eq!(closeness_to_track(CLOSENESS_DEFAULT), 0.5, "the reset puts the knob in the middle");
+        assert_eq!(closeness_to_track(CLOSENESS_MIN), 1.0, "looser is the right end");
+        assert_eq!(track_to_closeness(0.0), CLOSENESS_MAX);
+        assert_eq!(track_to_closeness(0.5), CLOSENESS_DEFAULT);
+        assert_eq!(track_to_closeness(1.0), CLOSENESS_MIN);
+        // Each half is linear in its own range, and the two are inverses.
+        assert!((track_to_closeness(0.25) - (CLOSENESS_MAX + CLOSENESS_DEFAULT) / 2.0).abs() < 1e-5);
+        assert!((track_to_closeness(0.75) - (CLOSENESS_DEFAULT + CLOSENESS_MIN) / 2.0).abs() < 1e-5);
+        for i in 0..=40 {
+            let p = i as f32 / 40.0;
+            assert!((closeness_to_track(track_to_closeness(p)) - p).abs() < 1e-5, "{p}");
+            let v = CLOSENESS_MIN + (CLOSENESS_MAX - CLOSENESS_MIN) * p;
+            assert!((track_to_closeness(closeness_to_track(v)) - v).abs() < 1e-5, "{v}");
+        }
+        // Monotonic: further right is looser (a lower closeness).
+        assert!(track_to_closeness(0.3) > track_to_closeness(0.5) && track_to_closeness(0.5) > track_to_closeness(0.7));
+        // Out of range clamps to the ends.
+        assert_eq!(track_to_closeness(-1.0), CLOSENESS_MAX);
+        assert_eq!(track_to_closeness(2.0), CLOSENESS_MIN);
+        assert_eq!(closeness_to_track(CLOSENESS_MAX + 5.0), 0.0);
+        assert_eq!(closeness_to_track(CLOSENESS_MIN - 5.0), 1.0);
+        // Ten arrow presses walk from the middle to either end.
+        assert!((0.5 - 10.0 * TRACK_STEP).abs() < 1e-6);
     }
 
     #[test]
