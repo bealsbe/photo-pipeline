@@ -676,7 +676,7 @@ fn to_review(coll: &Collection, id: RecordId) -> bool {
 
 /// Why a frame looks accidental (from its measurements alone; see
 /// [`clear_accidents_in_context`] for the frames around it).
-fn accident(f: &Features) -> Option<Accident> {
+pub(crate) fn accident(f: &Features) -> Option<Accident> {
     let found = accident_by_levels(f)?;
     // A lit subject against the dark is a photo (perhaps a soft one).
     if found != Accident::Blank && f.p50() <= LOWKEY_P50 && lit_region(f) {

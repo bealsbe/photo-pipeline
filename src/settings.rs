@@ -373,9 +373,18 @@ mod tests {
         assert!(!s.search_recent.iter().any(|q| q == "query 0" || q == "query 1"));
         s.forget_searches();
         assert!(s.search_recent.is_empty());
-        // Older settings files, and odd values, read safely.
-        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).expect("parses");
+        // A settings file from before search: its own values stay, the
+        // search fields take their defaults.
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200, "library_folder": "/mnt/nas/lib", "viewer_advance": true, "stack_bursts": true}"#).expect("parses");
+        assert_eq!((old.thumb_size, old.library_folder.as_str(), old.viewer_advance, old.stack_bursts), (200, "/mnt/nas/lib", true, true));
         assert_eq!(old.search_device, crate::ml::Device::Gpu);
+        assert!(old.search_index_exports && old.search_recent.is_empty());
+        assert_eq!(old.closeness(), crate::search::CLOSENESS_DEFAULT);
+        // The Python app's QSettings import has none of them either.
+        let py = Settings::from_qsettings("[General]\nlibrary_folder=/mnt/nas/lib\nview_index=2\n");
+        assert_eq!((py.library_folder.as_str(), py.view_index), ("/mnt/nas/lib", 2));
+        assert_eq!(py.search_device, crate::ml::Device::Gpu);
+        assert!(py.search_index_exports && py.search_recent.is_empty());
         let odd = Settings { search_closeness: 99.0, ..Settings::default() };
         assert_eq!(odd.closeness(), crate::search::CLOSENESS_MAX);
         let text = serde_json::to_string(&Settings { search_device: crate::ml::Device::Cpu, ..Settings::default() }).unwrap();

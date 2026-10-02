@@ -4,9 +4,13 @@
 //!
 //! Phase 1 lists search alone: SigLIP2 ViT-B/16 at 256 px, the checkpoint
 //! the feasibility study measured, as the ONNX export Hugging Face's
-//! `onnx-community` maintains for transformers.js (fp16 weights: 751 MB
-//! for both towers, against 1.5 GB in fp32).  Face and fursuit models join
-//! in their phases.
+//! `onnx-community` maintains for transformers.js.  The image tower is the
+//! fp32 file (372 MB): measured here, the fp16 one gives wrong answers on
+//! WebGPU (cosine 0.61 against the processor; the self-check refuses it)
+//! and runs ten times slower on the processor.  The text tower is fp16
+//! (565 MB against 1 130 MB): its answers equal fp32's (cosine 1.000) and
+//! a query takes ~50 ms on the processor against ~30.  Face and fursuit
+//! models join in their phases.
 //!
 //! Files are kept in `~/.cache/photo_pipeline/models/<model id>/`: they
 //! are re-downloadable, so a cache, shown and cleared in Preferences ▸
@@ -84,14 +88,15 @@ impl ModelInfo {
 
 const SIGLIP2_BASE: &str = "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/";
 
-/// The search model's files: the image tower, the text tower (both fp16),
-/// and the Gemma tokenizer (`tokenizers` JSON).  Pinned on 2026-10-01.
+/// The search model's files: the image tower (fp32), the text tower
+/// (fp16), and the Gemma tokenizer (`tokenizers` JSON).  Pinned on
+/// 2026-10-01.
 pub const SIGLIP2_FILES: &[ModelFile] = &[
     ModelFile {
-        file: "vision_model_fp16.onnx",
-        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model_fp16.onnx",
-        sha256: "fe9ad8020a6d3d98d394c9be8f07064066135fc2f87ec11692de0b677c0ac4db",
-        bytes: 186_131_676,
+        file: "vision_model.onnx",
+        url: "https://huggingface.co/onnx-community/siglip2-base-patch16-256-ONNX/resolve/main/onnx/vision_model.onnx",
+        sha256: "f5cb16728a704703f05516ded628397e11dbca4de2eb5db04b0c0bcee988aa7a",
+        bytes: 371_992_072,
     },
     ModelFile {
         file: "text_model_fp16.onnx",
@@ -184,9 +189,9 @@ mod tests {
             }
             assert!(!m.licence.is_empty() && !m.licence_plain.is_empty() && !m.publisher.is_empty());
         }
-        // The plan's number: about 750 MB for search in fp16.
+        // About 970 MB for search: the fp32 image tower, the fp16 text tower.
         let search_mb = info(ModelId::Siglip2).bytes() / 1_000_000;
-        assert!((700..800).contains(&search_mb), "{search_mb} MB");
+        assert!((900..1_050).contains(&search_mb), "{search_mb} MB");
         assert_eq!(bytes_for(&[ModelId::Siglip2]), info(ModelId::Siglip2).bytes());
         assert_eq!(serde_json::to_string(&ModelId::Siglip2).unwrap(), "\"siglip2\"");
     }
