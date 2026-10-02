@@ -378,6 +378,20 @@ digests kept).  Two checks follow:
   nearest neighbours measured 26–32 bits away, real frames' mostly 8–18; a
   run of lens-cap frames can't clear itself.
 
+- **One tone means one surface.**  A frame "almost one tone" by its levels
+  whose sharpest area is at least 8 and 12× its median tile has a subject in
+  focus against softer surroundings, and is a photo however narrow its
+  tones: dim red flowers at dusk measured 17×, against a wall's 7.2× and the
+  dark cloth's 2.1×.  Only for this rule: in a black frame the "sharpest"
+  tiles are noise over a median near zero.
+
+Checked again on six evening-heavy library days (about 9,200 shots, read
+only): 24 frames cleared, every one a real photo (dance floors under UV
+light, a ground firework on dark pavement, indoor portraits cleared by their
+look-alike neighbours); still flagged, lens caps and black frames, a blurred
+close-up of an arm and two completely blurred party shots.  The wall and the
+cloth stay flagged.
+
 Counts (files): the night shoot 64 → 10 accidental (lens caps, the cloth, a
 shot of the floor, and one completely motion-blurred costume in daylight,
 which brightness can't tell from the floor shot), the event-day samples

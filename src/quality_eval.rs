@@ -236,7 +236,7 @@ fn eval() {
 
     if let Ok(out) = std::env::var("PP_EVAL_CSV") {
         let mut f = std::fs::File::create(&out).unwrap();
-        writeln!(f, "name,ms,burst,moment,pruned,marked,orient,global,local,score,rel,soft,accidental,sharpest,rank,focus,entropy,p1,p50,p99,phash,tiles,ctiles").unwrap();
+        writeln!(f, "name,ms,burst,moment,pruned,marked,orient,global,local,score,rel,soft,accidental,sharpest,rank,focus,entropy,p1,p50,p99,phash,tiles,ctiles,by_levels,lit").unwrap();
         for (id, r) in coll.iter_ids() {
             if hints.rep(id) != Some(id) {
                 continue;
@@ -245,7 +245,7 @@ fn eval() {
             let ms = r.capture_time.map_or(0, |c| c.and_utc().timestamp_millis() + r.shot.subsec_ms.unwrap_or(0) as i64);
             writeln!(
                 f,
-                "{},{ms},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{},{},{},{:016x},{},{}",
+                "{},{ms},{},{},{},{},{},{:.3},{:.3},{:.3},{:.3},{},{},{},{},{:.3},{:.3},{},{},{},{:016x},{},{},{},{}",
                 r.filename(),
                 bursts.of(id).map_or(-1, |b| b as i64),
                 hints.moment_of(id).map_or(-1, |m| m as i64),
@@ -268,6 +268,8 @@ fn eval() {
                 ft.phash,
                 ft.tiles.iter().map(|&t| format!("{:.1}", crate::imaging::quality::tile_value(t))).collect::<Vec<_>>().join(" "),
                 ft.clipped.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
+                crate::model::hints::accident_by_levels(ft).map_or(String::new(), |a| a.label().replace(',', ";")),
+                crate::model::hints::lit_tiles(ft),
             )
             .unwrap();
         }

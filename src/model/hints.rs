@@ -106,6 +106,15 @@ pub const LIT_RATIO: f32 = 3.0;
 /// measured 26–32 bits away; real frames' mostly 8–18.
 pub const CONTEXT_MS: i64 = 5000;
 pub const CONTEXT_FRAMES: usize = 3;
+/// "Almost one tone" means one surface: a wall, a cloth, the inside of a
+/// bag, evenly soft or evenly textured.  A frame whose sharpest area is at
+/// least [`FOCUS_LOCAL`] and [`FOCUS_SPREAD`] times its median tile has a
+/// subject focused on against softer surroundings, and is a photo, however
+/// narrow its tones (dim flowers at dusk measured 17×; the wall 7.2×, the
+/// dark cloth 2.1×).  Not used for the black and dark rules, where the
+/// sharpest tiles of an empty frame are noise over a median near zero.
+pub const FOCUS_SPREAD: f32 = 12.0;
+pub const FOCUS_LOCAL: f32 = 8.0;
 
 /// Why a frame looks out of focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -673,12 +682,25 @@ fn accident(f: &Features) -> Option<Accident> {
     if found != Accident::Blank && f.p50() <= LOWKEY_P50 && lit_region(f) {
         return None;
     }
+    // Narrow tones but a subject in focus: a dim photo, not one surface.
+    if found == Accident::Flat && subject_in_focus(f) {
+        return None;
+    }
     Some(found)
+}
+
+/// Part of the frame is in focus and the rest isn't ([`FOCUS_SPREAD`]).
+pub(crate) fn subject_in_focus(f: &Features) -> bool {
+    let mut tiles = f.tiles;
+    tiles.sort_unstable();
+    let median = quality::tile_value(tiles[TILES / 2]);
+    let local = f.local();
+    local >= FOCUS_LOCAL && local >= FOCUS_SPREAD * median.max(0.01)
 }
 
 /// Tiles of a lit region: bright enough in themselves, and well above the
 /// frame's darkest tenth.
-fn lit_tiles(f: &Features) -> usize {
+pub(crate) fn lit_tiles(f: &Features) -> usize {
     let mut sorted = f.luma;
     sorted.sort_unstable();
     let dark = sorted[TILES / 10] as f32 + 2.0;
@@ -689,8 +711,9 @@ fn lit_region(f: &Features) -> bool {
     lit_tiles(f) >= LIT_TILES
 }
 
-/// The frame's levels and sharpness alone.
-fn accident_by_levels(f: &Features) -> Option<Accident> {
+/// The frame's levels and sharpness alone (what was called accidental
+/// before lit regions and context were looked at).
+pub(crate) fn accident_by_levels(f: &Features) -> Option<Accident> {
     let local = f.local();
     if f.p99() <= BLACK_P99 && f.global < EMPTY_GLOBAL {
         Some(Accident::Black)
@@ -1079,6 +1102,24 @@ mod tests {
         // "almost white").
         let white = feats(&Img::from_fn(192, 128, |x, _| 245.0 + (x % 5) as f32));
         assert_eq!(accident(&white), Some(Accident::Blank));
+    }
+
+    #[test]
+    fn narrow_tones_with_a_subject_in_focus_are_a_photo() {
+        // Dim and low in contrast all over (flowers at dusk): one corner in
+        // focus, the rest soft.
+        // (Measures as a real one did: sharpest area ~12, median tile <1.)
+        let mut img = texture(192, 128, 5).blur(14).darker(0.12);
+        img.paste(&texture(192, 128, 7).blur(3).darker(0.08), 20, 20, 60, 50);
+        let dusk = feats(&img);
+        assert_eq!(accident_by_levels(&dusk), Some(Accident::Flat), "levels {:?} local {}", dusk.levels, dusk.local());
+        assert!(subject_in_focus(&dusk));
+        assert_eq!(accident(&dusk), None);
+        // The same tones evenly soft (a wall): one surface, an accident.
+        let wall = feats(&texture(192, 128, 5).blur(8).darker(0.15));
+        assert_eq!(accident_by_levels(&wall), Some(Accident::Flat));
+        assert!(!subject_in_focus(&wall));
+        assert_eq!(accident(&wall), Some(Accident::Flat));
     }
 
     #[test]
