@@ -45,7 +45,7 @@ The user's answers to the questions the UI pass raised.
 | 2 | Shortcuts for Analyse and the bulk actions | **None for now.** | Menus, the side rail and the Hints menu only. |
 | 3 | Where a burst's sheet opens | **On the frame you came from**, the sharpest marked with its ring. | As built. |
 | 4 | Hints in the list view | **Not now.** | As built (grid, quick look, viewer, sheet, compare). |
-| 5 | What the Duplicates filter shows | **Both copies**, the one kept and the ones suggested for pruning. | As built ("Possible problems" lists only the copies). |
+| 5 | What the Duplicates filter shows | **Only the extra copies** (changed later on 2026-10-01: showing both was no help), with *Prune these copies…* above them — one click, one confirmation, one undo step. | The copy to keep of each is never shown as a duplicate. |
 | 6 | "Almost black" on night shoots: sharp, underexposed shots called accidents | **Fix now**: an almost black frame must be empty too, by the dark rule's whole-frame measure. | The black rule: p99 ≤ 24 and the whole frame < 1.25.  See "The black rule needs nothing anywhere" below. |
 | 7 | "Almost one tone" on night shoots | **Later**: a study of its own. | Nothing yet; see "Open: one tone on night shoots" below. |
 

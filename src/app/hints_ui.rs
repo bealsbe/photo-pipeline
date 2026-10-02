@@ -86,7 +86,7 @@ fn filter_about(f: HintFilter) -> &'static str {
         HintFilter::Problems => "Out of focus, accidental, or a copy",
         HintFilter::Soft => "Nothing sharp, or much softer than its burst",
         HintFilter::Accidental => "Almost black, white or one tone",
-        HintFilter::Duplicates => "Files in the folder twice, both copies",
+        HintFilter::Duplicates => "Extra copies of files in the folder twice",
         HintFilter::Sharpest => "The sharpest frame of every burst",
     }
 }
@@ -470,6 +470,33 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
         .padding(Padding { top: t::S2, bottom: t::S2, left: 12.0, right: 4.0 });
     let strip = container(content).width(Length::Fill).style(style::fill(alpha(t::WARN, 0.09)));
     Some(column![strip, container(Space::new().width(Length::Fill).height(1)).style(style::fill(alpha(t::WARN, 0.35)))].into())
+}
+
+/// Under the filter bar while the duplicates filter is on: how many extra
+/// copies are shown (the one to keep of each is not), and one button that
+/// prunes them all after the usual confirmation.
+pub fn copies_bar(app: &App) -> Option<Element<'_, Message>> {
+    let n = app.derived.copies_to_prune;
+    if app.filter.hint != Some(HintFilter::Duplicates) || n == 0 || app.view == super::View::Calendar {
+        return None;
+    }
+    let count = util::thousands(n as u64);
+    let words = text(format!(
+        "{} extra {}. The copy to keep of each isn't shown and stays as it is.",
+        count,
+        if n == 1 { "copy" } else { "copies" }
+    ))
+    .size(t::T_SMALL)
+    .color(t::INK2)
+    .width(Length::Fill);
+    let label = if n == 1 { "Prune this copy…".to_string() } else { format!("Prune these {count} copies…") };
+    let prune = kit::btn(label, style::danger(), Some(Message::Cmd(super::commands::Cmd::PruneCopies)));
+    let content = row![icons::view(Glyph::HintCopy, 14.0, t::WARN), words, prune]
+        .spacing(t::S3)
+        .align_y(Alignment::Center)
+        .padding(Padding { top: t::S1, bottom: t::S1, left: 12.0, right: t::S2 });
+    let strip = container(content).width(Length::Fill).style(style::fill(alpha(t::WARN, 0.06)));
+    Some(column![strip, container(Space::new().width(Length::Fill).height(1)).style(style::fill(alpha(t::WARN, 0.25)))].into())
 }
 
 #[cfg(test)]

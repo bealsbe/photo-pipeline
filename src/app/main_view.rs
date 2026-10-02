@@ -58,6 +58,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if app.view != View::Calendar {
         col = col.push(filter_bar(app));
     }
+    if let Some(b) = hints_ui::copies_bar(app) {
+        col = col.push(b);
+    }
     let content: Element<'_, Message> = match app.view {
         View::Grid | View::List if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
         View::Grid | View::List if pile_done(app) => pile_done_page(app),

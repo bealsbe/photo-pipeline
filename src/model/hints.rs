@@ -172,7 +172,8 @@ pub enum HintFilter {
     Problems,
     Soft,
     Accidental,
-    /// Every file with a copy: the one to keep and the copies.
+    /// The copies the duplicate rule suggests pruning; the one to keep of
+    /// each is left out.
     Duplicates,
     Sharpest,
 }
@@ -191,7 +192,7 @@ impl HintFilter {
             HintFilter::Problems => hint.is_some_and(ShotHint::problem) || h.suggested_copy(id),
             HintFilter::Soft => hint.is_some_and(ShotHint::soft_only),
             HintFilter::Accidental => hint.is_some_and(|x| x.accidental.is_some()),
-            HintFilter::Duplicates => h.duplicate_of(id).is_some(),
+            HintFilter::Duplicates => h.suggested_copy(id),
             HintFilter::Sharpest => hint.is_some_and(|x| x.sharpest),
         }
     }
@@ -1271,7 +1272,8 @@ mod tests {
         assert_eq!(pass(HintFilter::Soft), vec!["a2.ARW", "a2.JPG"]);
         assert_eq!(pass(HintFilter::Accidental), vec!["black.JPG"]);
         assert_eq!(pass(HintFilter::Problems), vec!["a2.ARW", "a2.JPG", "black.JPG", "c (1).JPG"]);
-        assert_eq!(pass(HintFilter::Duplicates), vec!["c (1).JPG", "c.JPG"]);
+        // Only the copy to prune: the one to keep isn't a duplicate to show.
+        assert_eq!(pass(HintFilter::Duplicates), vec!["c (1).JPG"]);
         assert_eq!(pass(HintFilter::Sharpest), vec!["a1.ARW", "a1.JPG"]);
         // Not measured yet: no hint at all.
         assert!(HintFilter::ALL.iter().all(|f| !f.accepts(&h, s.id("/s/new.JPG"))));

@@ -324,6 +324,9 @@ pub struct Derived {
     /// Shots shown (before the hints filter) with each hint, by
     /// `HintFilter::index`.
     pub hint_counts: [usize; 5],
+    /// With the duplicates filter on: how many shown copies Prune duplicate
+    /// copies would prune (those still to review).
+    pub copies_to_prune: usize,
 }
 
 pub struct GridUi {
@@ -523,6 +526,7 @@ impl App {
                 progress: filter::Progress::default(),
                 moment_links: Vec::new(),
                 hint_counts: [0; 5],
+                copies_to_prune: 0,
             },
             grid: GridUi {
                 selection: HashSet::new(),
@@ -729,6 +733,10 @@ impl App {
         self.build_tiles();
         self.derived.accepted = accepted;
         self.derived.visible = self.derived.days.iter().flat_map(|s| s.ids.iter().copied()).collect();
+        self.derived.copies_to_prune = match self.filter.hint {
+            Some(HintFilter::Duplicates) => self.quality.hints.prune_duplicates(&self.coll, &self.derived.visible).prune.len(),
+            _ => 0,
+        };
         self.derived.list_rows = list_rows;
         self.derived.list_accepted = self.derived.list_rows.iter().map(|r| r.members().count()).sum();
         // Pairs form when the scan completes; counting shots before then

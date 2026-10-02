@@ -218,8 +218,10 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   - **The Hints filter** on the filter bar (the Hints control, with how
     many possible problems there are) shows only photos with a hint:
     possible problems (out of focus, accidental, or a copy), out of focus,
-    accidental, duplicates (both copies), or the sharpest of each burst,
-    each with its count.  It works with All · To review · Marked: *To
+    accidental, duplicates (only the extra copies: the copy to keep of
+    each isn't shown), or the sharpest of each burst, each with its count.
+    With Duplicates on, a strip under the filter bar offers *Prune these
+    copies…*, which prunes every extra copy shown after one confirmation.  It works with All · To review · Marked: *To
     review* and *Possible problems* make a quick pile to go through with
     P.  View ▸ *Show only possible problems* turns that one on and off.
     Before a folder is analysed, the Hints menu says what analysing does
