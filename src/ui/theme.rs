@@ -1,7 +1,7 @@
 //! Design tokens: every colour, size, spacing and timing value the
 //! interface uses.
 //!
-//! Two palettes.  The chrome (bars, menus, panels, dialogs, the list and the
+//! Two palettes.  The chrome (bars, menus, panels, dialogs and the
 //! calendar) follows the desktop's Catppuccin Mocha scheme and its purple
 //! accent.  Everything around a photo being reviewed (the grid's background
 //! and mounts, the viewer's stage) stays true neutral grey: a tinted
@@ -25,7 +25,7 @@ pub const fn alpha(c: Color, alpha: f32) -> Color {
 
 // ── chrome surfaces (Catppuccin Mocha) ──────────────────────────────────────
 
-/// Content areas that hold no photos: the list, the calendar pages (base).
+/// Content areas that hold no photos: the calendar pages (base).
 pub const GROUND: Color = hex(0x1e1e2e);
 /// Bars and panels: menu bar, folder and filter bars, side rail (mantle).
 pub const MOUNT: Color = hex(0x181825);

@@ -38,13 +38,12 @@ use crate::imaging::loader::Loader;
 use crate::imaging::thumbs::{self, OWNER_CALENDAR, OWNER_MAIN, ThumbCache, ThumbWorkers};
 use crate::model::bursts::{Bursts, RunMark, Stacking};
 use crate::model::collection::{Collection, RecordId};
-use crate::model::filter::{self, FilterState, ListRow, SortKey};
+use crate::model::filter::{self, FilterState, SortKey};
 use crate::model::hints::{self, HintFilter, Hints};
 use crate::model::sidecar;
 use crate::scan::{self, ScanHandle};
 use crate::settings::Settings;
 use crate::ui::grid::{GridEvent, MAX_SIZE, MIN_SIZE, Section};
-use crate::ui::list::ListEvent;
 use crate::util;
 use commands::Cmd;
 
@@ -72,23 +71,23 @@ pub fn window_settings() -> window::Settings {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum View {
-    List,
     Grid,
     Calendar,
 }
 
 impl View {
+    /// The saved `view_index`, numbered as the Python app numbers its views
+    /// (0 was its list view, gone here).
     fn index(self) -> u32 {
         match self {
-            View::List => 0,
             View::Grid => 1,
             View::Calendar => 2,
         }
     }
 
+    /// A saved list view (0), or anything unknown, opens the grid.
     fn from_index(i: u32) -> View {
         match i {
-            0 => View::List,
             2 => View::Calendar,
             _ => View::Grid,
         }
@@ -237,7 +236,6 @@ pub enum Message {
     FolderPicked(FolderTarget, Option<PathBuf>),
     Filter(FilterMsg),
     Grid(GridEvent),
-    List(ListEvent),
     Calendar(calendar::Msg),
     Viewer(viewer::Msg),
     QuickLook(quicklook::Msg),
@@ -278,7 +276,6 @@ impl Message {
             Message::FolderBarCollapse | Message::PickFolder(_) | Message::FolderPicked(..) => "Folder",
             Message::Filter(_) => "Filter",
             Message::Grid(_) => "Grid",
-            Message::List(_) => "List",
             Message::Calendar(_) => "Calendar",
             Message::Viewer(_) => "Viewer",
             Message::QuickLook(_) => "QuickLook",
@@ -327,8 +324,6 @@ pub struct Derived {
     pub before_runs: Vec<Vec<Option<RunMark>>>,
     pub restack_focus: Option<(RecordId, RecordId)>,
     pub accepted: usize,
-    pub list_rows: Vec<ListRow>,
-    pub list_accepted: usize,
     pub key: u64,
     /// Culling progress over the whole working folder, ignoring filters.
     pub progress: filter::Progress,
@@ -352,13 +347,6 @@ pub struct GridUi {
     pub scroll_seq: u64,
     /// Bumped when bursts are stacked or opened (the grid animates it).
     pub restack_seq: u64,
-}
-
-pub struct ListUi {
-    pub selection: HashSet<RecordId>,
-    pub anchor: Option<RecordId>,
-    pub current: Option<RecordId>,
-    pub scroll: f32,
 }
 
 pub struct App {
@@ -400,7 +388,6 @@ pub struct App {
     pub thumb_size: f32,
     pub derived: Derived,
     pub grid: GridUi,
-    pub list: ListUi,
 
     pub side_expanded: bool,
     pub folder_bar_visible: bool,
@@ -535,8 +522,6 @@ impl App {
                 before_runs: Vec::new(),
                 restack_focus: None,
                 accepted: 0,
-                list_rows: Vec::new(),
-                list_accepted: 0,
                 key: 0,
                 progress: filter::Progress::default(),
                 moment_links: Vec::new(),
@@ -552,7 +537,6 @@ impl App {
                 scroll_seq: 0,
                 restack_seq: 0,
             },
-            list: ListUi { selection: HashSet::new(), anchor: None, current: None, scroll: 0.0 },
             side_expanded: false,
             menu: None,
             menu_hover: None,
@@ -699,10 +683,7 @@ impl App {
             return;
         }
         let total = self.coll.len();
-        let shown = match self.view {
-            View::List => self.derived.list_accepted,
-            _ => self.derived.accepted,
-        };
+        let shown = self.derived.accepted;
         let text = if shown != total {
             format!("Showing {shown} of {total} files (filter active)")
         } else {
@@ -730,7 +711,6 @@ impl App {
         quality::refresh(self);
         let sorted = filter::visible_sorted(&self.coll, &state);
         let mut visible = filter::dedup_pairs(&sorted, &self.coll);
-        let mut list_rows = filter::list_rows(&self.coll, &state);
         let mut accepted = sorted.len();
         self.derived.hint_counts = hint_counts(&self.quality.hints, &self.coll, &visible);
         if let Some(f) = self.filter.hint {
@@ -738,7 +718,6 @@ impl App {
             let has = |id: RecordId| shot_has(h, coll, f, id);
             visible.retain(|&id| has(id));
             accepted = sorted.iter().filter(|&&id| has(id)).count();
-            list_rows.retain(|row| row.members().any(has));
         }
         let groups = filter::group_by_date(&visible, &self.coll, &state);
         self.derived.days = groups
@@ -752,15 +731,11 @@ impl App {
             Some(HintFilter::Duplicates) => self.quality.hints.prune_duplicates(&self.coll, &self.derived.visible).prune.len(),
             _ => 0,
         };
-        self.derived.list_rows = list_rows;
-        self.derived.list_accepted = self.derived.list_rows.iter().map(|r| r.members().count()).sum();
         // Pairs form when the scan completes; counting shots before then
         // would count every file.
         self.derived.progress = if self.scanning { filter::Progress::default() } else { filter::progress(&self.coll) };
         self.derived.key = self.derived.key.wrapping_add(1);
         self.keep_grid_selection();
-        let on_list: HashSet<RecordId> = self.derived.list_rows.iter().map(|r| r.primary()).collect();
-        self.list.selection.retain(|id| on_list.contains(id));
         self.last_refresh = Instant::now();
     }
 
@@ -924,10 +899,6 @@ impl App {
         self.grid.anchor = None;
         self.grid.scroll = 0.0;
         self.grid.scroll_seq += 1;
-        self.list.selection.clear();
-        self.list.anchor = None;
-        self.list.current = None;
-        self.list.scroll = 0.0;
         self.refresh_views();
         self.scan_seq += 1;
         self.scan_started = Instant::now();
@@ -1156,10 +1127,6 @@ impl App {
                 let id = self.grid.selection.iter().next()?;
                 self.derived.tiles.iter().position(|x| x == id)
             }
-            View::List if self.list.selection.len() == 1 => {
-                let id = self.list.selection.iter().next()?;
-                self.derived.list_rows.iter().position(|r| r.primary() == *id)
-            }
             _ => None,
         }
     }
@@ -1171,13 +1138,6 @@ impl App {
                 if let Some(&id) = self.derived.tiles.get(i).or(self.derived.tiles.last()) {
                     self.grid.selection.insert(id);
                     self.grid.anchor = Some(id);
-                }
-            }
-            View::List if self.list.selection.is_empty() => {
-                if let Some(id) = self.derived.list_rows.get(i).or(self.derived.list_rows.last()).map(|r| r.primary()) {
-                    self.list.selection.insert(id);
-                    self.list.anchor = Some(id);
-                    self.list.current = Some(id);
                 }
             }
             _ => {}
@@ -1212,13 +1172,6 @@ impl App {
     fn toggle_flag_selected(&mut self, prune: bool) -> Task<Message> {
         let mut hint = Task::none();
         let ids: Vec<RecordId> = match self.view {
-            View::List => self
-                .derived
-                .list_rows
-                .iter()
-                .filter(|r| self.list.selection.contains(&r.primary()))
-                .flat_map(|r| r.members())
-                .collect(),
             // A stacked burst can't be marked at all: only photos you can
             // see on their own are.
             View::Grid => {
@@ -1298,32 +1251,6 @@ impl App {
         }
     }
 
-    fn list_click(&mut self, id: RecordId, mods: keyboard::Modifiers) {
-        let rows: Vec<RecordId> = self.derived.list_rows.iter().map(|r| r.primary()).collect();
-        if mods.control() {
-            if !self.list.selection.remove(&id) {
-                self.list.selection.insert(id);
-            }
-            self.list.anchor = Some(id);
-        } else if mods.shift() {
-            match self.list.anchor.and_then(|a| rows.iter().position(|&x| x == a)) {
-                Some(a) => {
-                    let b = rows.iter().position(|&x| x == id).unwrap_or(a);
-                    let (lo, hi) = (a.min(b), a.max(b));
-                    self.list.selection = rows[lo..=hi].iter().copied().collect();
-                }
-                None => {
-                    self.list.selection = [id].into();
-                    self.list.anchor = Some(id);
-                }
-            }
-        } else {
-            self.list.selection = [id].into();
-            self.list.anchor = Some(id);
-        }
-        self.list.current = Some(id);
-    }
-
     pub fn set_select_mode(&mut self, on: bool) {
         self.grid.select_mode = on;
         if !on {
@@ -1333,16 +1260,10 @@ impl App {
 
     // ── viewer ──────────────────────────────────────────────────────────
 
-    /// Open the viewer on `id`, stepping through the grid's (or list's)
-    /// order, landing on a burst's frame as `land` says.
+    /// Open the viewer on `id`, stepping through the grid's order, landing
+    /// on a burst's frame as `land` says.
     pub(super) fn open_viewer_working(&mut self, id: RecordId, land: viewer_burst::Land) -> Task<Message> {
-        let items = match self.view {
-            View::List => filter::visible_sorted(&self.coll, &self.filter.state())
-                .into_iter()
-                .filter(|x| self.derived.list_rows.iter().any(|r| r.primary() == *x))
-                .collect::<Vec<_>>(),
-            _ => self.derived.visible.clone(),
-        };
+        let items = self.derived.visible.clone();
         let index = items.iter().position(|&x| x == id).unwrap_or(0);
         viewer::open_as(self, viewer::Source::Working, items, index, false, land)
     }
@@ -1447,7 +1368,6 @@ impl App {
         match self.view {
             View::Calendar => calendar::on_key(self, &key, mods),
             View::Grid => self.grid_key(&key, mods),
-            View::List => self.list_key(&key, mods),
         }
     }
 
@@ -1489,15 +1409,6 @@ impl App {
                 }
                 Task::none()
             }
-            _ => Task::none(),
-        }
-    }
-
-    fn list_key(&mut self, key: &Key, mods: keyboard::Modifiers) -> Task<Message> {
-        match key {
-            Key::Character(c) if !mods.control() && c.as_str().eq_ignore_ascii_case("p") => self.toggle_flag_selected(true),
-            Key::Named(Named::Delete) => self.toggle_flag_selected(true),
-            Key::Character(c) if !mods.control() && c.as_str().eq_ignore_ascii_case("m") => self.toggle_flag_selected(false),
             _ => Task::none(),
         }
     }
@@ -1683,7 +1594,6 @@ impl App {
             Message::FolderPicked(target, path) => self.folder_picked(target, path),
             Message::Filter(m) => self.on_filter(m),
             Message::Grid(ev) => self.on_grid(ev),
-            Message::List(ev) => self.on_list(ev),
             Message::Calendar(m) => calendar::update(self, m),
             Message::Viewer(m) => viewer::update(self, m),
             Message::QuickLook(m) => quicklook::update(self, m),
@@ -1750,7 +1660,6 @@ impl App {
             Cmd::EditCopy => dialogs::open_edit_copy(self),
             Cmd::Review => dialogs::open_review(self),
             Cmd::Sort => dialogs::open_sort(self),
-            Cmd::ListView => self.switch_view(View::List),
             Cmd::GridView => self.switch_view(View::Grid),
             Cmd::CalendarView => self.switch_view(View::Calendar),
             Cmd::QuickLook => quicklook::toggle(self),
@@ -2062,24 +1971,6 @@ impl App {
         }
     }
 
-    fn on_list(&mut self, ev: ListEvent) -> Task<Message> {
-        match ev {
-            ListEvent::Click { id, modifiers } => {
-                self.list_click(id, modifiers);
-                Task::none()
-            }
-            ListEvent::Activate(id) => self.open_viewer_working(id, viewer_burst::Land::Auto),
-            ListEvent::SelectAll => {
-                self.list.selection = self.derived.list_rows.iter().map(|r| r.primary()).collect();
-                Task::none()
-            }
-            ListEvent::Scrolled(y) => {
-                self.list.scroll = y;
-                Task::none()
-            }
-        }
-    }
-
     fn on_bg(&mut self, events: Vec<BgEvent>) -> Task<Message> {
         let mut tasks = Vec::new();
         for ev in events {
@@ -2200,7 +2091,6 @@ impl App {
         for id in &ids {
             self.coll.remove(*id);
             self.grid.selection.remove(id);
-            self.list.selection.remove(id);
         }
         quicklook::on_removed(self, &ids);
         // A surviving half is no longer part of a pair.

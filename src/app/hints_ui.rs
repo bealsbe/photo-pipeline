@@ -398,11 +398,7 @@ fn point<'a>(g: Glyph, words: &'a str) -> Element<'a, Message> {
 
 /// The hints filter is on and nothing passes it.
 pub fn filtered_empty(app: &App) -> bool {
-    let empty = match app.view {
-        super::View::List => app.derived.list_rows.is_empty(),
-        _ => app.derived.visible.is_empty(),
-    };
-    app.filter.hint.is_some() && empty && !app.scanning && !app.coll.is_empty()
+    app.filter.hint.is_some() && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
 }
 
 /// Say why the grid is empty, and how to see photos again.

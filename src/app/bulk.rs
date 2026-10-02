@@ -136,13 +136,12 @@ fn filtered(app: &App) -> bool {
     f.date_on || f.marked_only || f.to_review || f.pruned_only || f.hint.is_some()
 }
 
-/// *Keep this, prune the rest* on the grid's (or quick look's, or the
-/// list's) selected photo: its burst as the grid shows it.
+/// *Keep this, prune the rest* on the grid's (or quick look's) selected
+/// photo: its burst as the grid shows it.
 fn open_keep_main(app: &mut App, window: window::Id) -> Task<Message> {
     let target = match (&app.quicklook, app.view) {
         (Some(q), _) => Some(q.id),
         (None, View::Grid) => app.grid_focus(),
-        (None, View::List) => app.list.current.filter(|c| app.list.selection.contains(c)),
         _ => None,
     };
     let Some(id) = target else {
@@ -151,7 +150,7 @@ fn open_keep_main(app: &mut App, window: window::Id) -> Task<Message> {
     if app.view == View::Grid && app.quicklook.is_none() && app.is_stack(id) {
         return app.show_status("A stacked burst can't be marked. Open it (B or Enter) and choose the frame to keep there.", 6000);
     }
-    // The shot's own record as the grid shows it (a list row's JPG).
+    // The shot's own record as the grid shows it (a pair's JPG).
     let id = app.coll.find_pair(id).filter(|&p| app.derived.visible.contains(&p)).unwrap_or(id);
     let of: Vec<Option<u32>> = app.derived.visible.iter().map(|&v| app.bursts.of(v)).collect();
     let at = app.derived.visible.iter().position(|&v| v == id);

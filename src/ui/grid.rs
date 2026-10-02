@@ -2544,8 +2544,5 @@ mod tests {
         assert_eq!(Kind::of(&rec("/s/A.JPG", 1, 0)), Kind::Jpg);
         raw.pair_stem = Some("a".into());
         assert_eq!(Kind::of(&raw), Kind::Pair);
-        assert_eq!(Kind::from_halves(true, true), Some(Kind::Pair));
-        assert_eq!(Kind::from_halves(false, true), Some(Kind::Jpg));
-        assert_eq!(Kind::from_halves(false, false), None);
     }
 }
