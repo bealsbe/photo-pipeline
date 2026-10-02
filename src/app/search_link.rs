@@ -30,7 +30,7 @@ use crate::ml::{CardFailure, Device, DeviceStatus, SelfCheck};
 use crate::model::library_index::{self, LibraryIndex};
 use crate::model::record::FileType;
 use crate::search::index::Key;
-use crate::search::{Engine, Hit, PassKind, PassProgress, Status, Stopped};
+use crate::search::{Engine, Hit, PassKind, PassProgress, Status, Stopped, Thing, vocab};
 use crate::util;
 
 pub enum Link {
@@ -51,6 +51,16 @@ impl Link {
         match self {
             Link::Engine(e) => e.status(),
             Link::Fake(f) => f.state.lock().status.clone(),
+        }
+    }
+
+    /// *Things in your photos* as last derived (`BgEvent::SearchThings`
+    /// carries each change).
+    #[allow(dead_code, reason = "phase 2 API: the search page's round calls it")]
+    pub fn things(&self) -> Arc<Vec<Thing>> {
+        match self {
+            Link::Engine(e) => e.things(),
+            Link::Fake(f) => f.state.lock().things.clone(),
         }
     }
 
@@ -200,6 +210,8 @@ struct FakeState {
     /// Hold a running pass where it is (screenshots).
     paused: bool,
     index: Option<Arc<LibraryIndex>>,
+    /// Made-up Things, once something is indexed.
+    things: Arc<Vec<Thing>>,
     /// The ticker thread is running.
     ticking: bool,
     /// Indexed in full once the library's size is known.
@@ -245,7 +257,7 @@ impl Fake {
                 status.stopped = Some(Stopped::Card(f));
             }
         }
-        let state = FakeState { status, downloads: Vec::new(), fail_next: None, paused: false, index: None, ticking: false, start_indexed: indexed };
+        let state = FakeState { status, downloads: Vec::new(), fail_next: None, paused: false, index: None, things: Arc::new(Vec::new()), ticking: false, start_indexed: indexed };
         let fake = Fake { bus, state: Arc::new(Mutex::new(state)) };
         fake.publish(&fake.state.lock());
         fake
@@ -253,6 +265,27 @@ impl Fake {
 
     fn publish(&self, s: &FakeState) {
         let _ = self.bus.unbounded_send(BgEvent::SearchStatus(Arc::new(s.status.clone())));
+    }
+
+    /// Made-up Things for the start page: the vocabulary's objects and
+    /// scenes with counts from a hash of each word, scaled to what is
+    /// indexed; sent whenever the indexed count changes.
+    fn publish_things(&self, s: &mut FakeState) {
+        let indexed = s.status.indexed_shots;
+        let mut things: Vec<Thing> = vocab::things()
+            .filter_map(|(_, w)| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                w.word.hash(&mut h);
+                let share = (h.finish() % 1000) as f64 / 1000.0;
+                let photos = ((share.powi(4) * 0.12 * indexed as f64).round() as usize).min(indexed);
+                (photos > 0).then(|| Thing { word: w.plural.to_string(), photos, kind: w.kind })
+            })
+            .collect();
+        things.sort_by(|a, b| b.photos.cmp(&a.photos).then_with(|| a.word.cmp(&b.word)));
+        if things != *s.things {
+            s.things = Arc::new(things);
+            let _ = self.bus.unbounded_send(BgEvent::SearchThings(s.things.clone()));
+        }
     }
 
     fn publish_downloads(&self, s: &FakeState) {
@@ -268,6 +301,7 @@ impl Fake {
         f(&mut s);
         self.publish(&s);
         self.publish_downloads(&s);
+        self.publish_things(&mut s);
         self.keep_ticking(&mut s);
     }
 
@@ -292,6 +326,7 @@ impl Fake {
             step(&mut s);
             self.publish(&s);
             self.publish_downloads(&s);
+            self.publish_things(&mut s);
         }
     }
 
@@ -428,8 +463,32 @@ impl Fake {
         std::thread::Builder::new()
             .name("search-fake-query".into())
             .spawn(move || {
-                let hits = index.map(|ix| made_up_hits(&ix, &words, closeness, indexed)).unwrap_or_default();
-                let _ = bus.unbounded_send(BgEvent::SearchResults { seq, hits: Arc::new(hits), indexed, error: None });
+                let parsed = crate::search::parse(&words);
+                let animal = vocab::animal_in(&parsed.words).map(|w| w.word.to_string());
+                let mut hits = index.map(|ix| made_up_hits(&ix, &parsed.words, closeness, indexed)).unwrap_or_default();
+                if parsed.is_empty() {
+                    hits.clear();
+                }
+                if let Some(d) = parsed.dates {
+                    hits.retain(|h| d.contains(h.day));
+                }
+                // The fursuit contrast: every third hit of an animal query
+                // is a fursuit left out.
+                let mut fursuits = Vec::new();
+                if animal.is_some() {
+                    let (f, h): (Vec<(usize, Hit)>, Vec<(usize, Hit)>) = hits.into_iter().enumerate().partition(|(i, _)| i % 3 == 2);
+                    fursuits = f.into_iter().map(|(_, h)| h).collect();
+                    hits = h.into_iter().map(|(_, h)| h).collect();
+                }
+                let _ = bus.unbounded_send(BgEvent::SearchResults {
+                    seq,
+                    hits: Arc::new(hits),
+                    indexed,
+                    error: None,
+                    understood: Arc::new(parsed),
+                    fursuits: Arc::new(fursuits),
+                    animal,
+                });
             })
             .ok();
     }
@@ -544,7 +603,7 @@ fn made_up_hits(index: &LibraryIndex, words: &str, closeness: f32, indexed: usiz
             if everything || score > 1.0 - share {
                 let capture = when + Span::milliseconds(num.unwrap_or(0) as i64 % 1000 * 3);
                 let id = hash(&|h| (&stem, date).hash(h)).to_bits();
-                hits.push(Hit { id, key: Key([0; 16]), score: score as f32, day: *date, capture, burst: Some(next_burst), jpg, raw });
+                hits.push(Hit { id, key: Key([0; 16]), score: score as f32, tagged: own > 0.8, day: *date, capture, burst: Some(next_burst), jpg, raw });
             }
         }
     }

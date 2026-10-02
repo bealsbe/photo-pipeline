@@ -11,8 +11,12 @@
 //! - [`pass`]: the indexing pass (the first full index when asked, then
 //!   new exports on their own), cancellable, yielding to thumbnails.
 //! - [`query`]: text → vector, scoring, the closeness cut-off, hits.
-//! - [`vocab`]: words search treats specially (animal words, phase 2's
-//!   tags later).
+//! - [`parse`]: the query syntax (quotes, `-word`, dates, `@name`), pure.
+//! - [`vocab`]: the vocabulary: generic words with a kind (object, scene,
+//!   person, fursuit, animal), their plural and the animal words fursuits
+//!   are taken for.
+//! - [`tags`]: hidden tags derived from the stored vectors against the
+//!   vocabulary; *Things* and the ranking boost come from them.
 //! - [`estimate`]: the numbers the invitation and the dialog quote.
 //!
 //! Search is library only (decision 14).  The index and the models live in
@@ -24,15 +28,19 @@ pub mod estimate;
 #[cfg(test)]
 mod eval;
 pub mod index;
+pub mod parse;
 pub mod pass;
 pub mod query;
+pub mod tags;
 pub mod vocab;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 
 pub use engine::{Engine, Storage};
+pub use parse::{Parsed, parse};
 pub use query::{CLOSENESS_DEFAULT, CLOSENESS_MAX, CLOSENESS_MIN, Hit};
+pub use vocab::Kind;
 
 use crate::ml::{CardFailure, DeviceStatus};
 
@@ -98,6 +106,37 @@ pub struct Status {
     pub helper_restarts: u32,
     /// Preferences ▸ *Index new exports*.
     pub index_exports: bool,
+}
+
+/// One entry of *Things in your photos*: a vocabulary word with how many
+/// indexed photos carry it as a hidden tag.  The engine's list holds
+/// objects and scenes only (people, fursuits and pets never appear; they
+/// get pages of their own), most photos first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Thing {
+    /// The word as the list shows it and a query writes it: the plural
+    /// ("cameras", "fireworks", "food").
+    pub word: String,
+    pub photos: usize,
+    /// Never a subject kind in the engine's list; a second guard for the
+    /// views.
+    pub kind: Kind,
+}
+
+/// The Things offered while `typed` is in the field: those whose word
+/// (singular or plural) starts with the last word typed, in the list's
+/// order.  Pure, for the UI thread; nothing for an empty field.
+#[allow(dead_code, reason = "phase 2 API: the search page's round calls it")]
+pub fn complete_things(things: &[Thing], typed: &str) -> Vec<Thing> {
+    let Some(last) = typed.split_whitespace().last().map(str::to_lowercase) else { return Vec::new() };
+    things
+        .iter()
+        .filter(|t| {
+            let w = t.word.to_lowercase();
+            w.starts_with(&last) || vocab::find(&t.word).is_some_and(|i| vocab::word(i).word.starts_with(&last))
+        })
+        .cloned()
+        .collect()
 }
 
 impl Status {

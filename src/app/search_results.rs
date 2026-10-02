@@ -322,6 +322,7 @@ mod tests {
             id: 0,
             key: crate::search::index::Key([0; 16]),
             score,
+            tagged: false,
             day: day(),
             capture: when(1, 250),
             burst: None,

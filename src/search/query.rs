@@ -47,6 +47,10 @@ pub struct Hit {
     pub key: Key,
     /// Cosine similarity of the shot to the query.
     pub score: f32,
+    /// Carries every vocabulary word the query names as a hidden tag, so
+    /// it is ranked ahead of the rest (plan §7.2).  For ordering and
+    /// tests only: tags are never shown on a photo.
+    pub tagged: bool,
     pub day: NaiveDate,
     /// With sub-seconds where the camera recorded them; the file's
     /// modified time when it has no capture time.

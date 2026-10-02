@@ -2141,7 +2141,8 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error } => tasks.push(search::on_results(self, seq, hits, error)),
+                BgEvent::SearchResults { seq, hits, error, .. } => tasks.push(search::on_results(self, seq, hits, error)),
+                BgEvent::SearchThings(_) => {}
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }
