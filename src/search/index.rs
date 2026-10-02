@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use super::query::{f16_to_f32, f32_to_f16};
 use crate::ml::models::{self, ModelId, ModelInfo};
-use crate::model::binfile::{Reader, Writer, fnv1a};
+use crate::model::binfile::{Reader, Writer};
 use crate::model::record::{FileType, MTime, ShotMeta};
 use crate::ops::fsutil;
 
@@ -143,11 +143,6 @@ impl PathMap {
     /// The key for `rel` if the map holds it unchanged.
     pub fn key_for(&self, rel: &Path, size: u64, mtime: &MTime) -> Option<Key> {
         self.entries.get(rel).filter(|e| e.holds_for(size, mtime)).map(|e| e.key)
-    }
-
-    /// Every relative path mapped to `key`.
-    pub fn paths_of(&self, key: &Key) -> Vec<&Path> {
-        self.entries.iter().filter(|(_, e)| e.key == *key).map(|(p, _)| p.as_path()).collect()
     }
 
     fn encode(&self) -> Vec<u8> {
@@ -390,11 +385,6 @@ impl Index {
         ix
     }
 
-    /// The index the app uses for `root`.
-    pub fn open(root: &Path) -> Option<Index> {
-        Some(Index::load(root, &dir_for(root)?, models::info(ModelId::Siglip2)))
-    }
-
     /// Add embedded shots: rows with new keys are appended to the vectors
     /// file; every path is mapped.  Returns how many rows were added.
     pub fn add(&mut self, rows: Vec<(PathBuf, PathEntry, Record, Vec<f32>)>) -> io::Result<usize> {
@@ -420,13 +410,6 @@ impl Index {
         f.write_all(&framed(&Vectors::block(&new_rows)))?;
         f.sync_data()?;
         Ok(self.vectors.push(&new_rows))
-    }
-
-    /// Map a path to a key the vectors already hold (a renamed or copied
-    /// file).
-    pub fn map(&mut self, rel: PathBuf, entry: PathEntry) {
-        self.paths.entries.insert(rel, entry);
-        self.paths_dirty = true;
     }
 
     /// Note that the first index was asked for.
@@ -494,6 +477,7 @@ impl Index {
     }
 
     /// Bytes the files take.
+    #[cfg(test)]
     pub fn bytes(&self) -> u64 {
         [Self::vectors_file(&self.dir, self.model), Self::paths_file(&self.dir)].iter().filter_map(|p| fs::metadata(p).ok()).map(|m| m.len()).sum()
     }
@@ -680,7 +664,7 @@ pub mod tests {
         }
         fs::write(&file, forged).unwrap();
         assert_eq!(Index::load(root, &d, model).len(), 0);
-        assert_eq!(fnv1a(b""), 0xcbf29ce484222325);
+        assert_eq!(crate::model::binfile::fnv1a(b""), 0xcbf29ce484222325);
         let _ = fs::remove_dir_all(&d);
     }
 }

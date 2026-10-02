@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use chrono::NaiveDate;
 
 use super::index::{Key, PathMap, Vectors};
-use super::{PassKind, Stopped};
+use super::Stopped;
 use crate::ml::client::{Embedder, Embedding, HelperError};
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, MTime};
@@ -83,8 +83,6 @@ pub fn rel_path(root: &Path, path: &Path) -> PathBuf {
 }
 
 pub struct Request {
-    pub run: u64,
-    pub kind: PassKind,
     pub root: PathBuf,
     pub jobs: Vec<Job>,
     /// Shots in the library, for the progress line.
@@ -231,12 +229,6 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
     fin
 }
 
-/// Keys the vectors already hold among a batch's results: their rows need
-/// no writing, only the path map.
-pub fn known_keys(vectors: &Vectors, batch: &Batch) -> Vec<Key> {
-    batch.embedded.iter().filter(|(_, e)| vectors.contains(&e.key)).map(|(_, e)| e.key).collect()
-}
-
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -285,11 +277,8 @@ pub mod tests {
     }
 
     impl Embedder for Fake {
-        fn device(&self) -> Device {
-            self.device
-        }
         fn device_report(&self) -> (Option<String>, SelfCheck) {
-            (Some("Fake card".into()), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
+            (Some(format!("Fake {}", self.device.label())), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
         }
         fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<ImageResult>, HelperError> {
             let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
@@ -351,7 +340,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..70).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.fail_paths_containing = Some("0007".into());
-        let (batches, fin) = run(Request { run: 1, kind: PassKind::FirstIndex, root: "/".into(), jobs, total: 70 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 70 }, &fake);
         assert!(fin.complete && fin.stopped.is_none(), "{fin:?}");
         assert_eq!((fin.embedded, fin.failed), (69, 1));
         assert_eq!(fake.calls.load(Ordering::Relaxed), 3, "32 + 32 + 6");
@@ -367,7 +356,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..100).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.card_fails_after = Some(1);
-        let (batches, fin) = run(Request { run: 1, kind: PassKind::FirstIndex, root: "/".into(), jobs, total: 100 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 100 }, &fake);
         assert!(!fin.complete);
         assert_eq!(fin.stopped, Some(Stopped::Card(CardFailure::Crashed)));
         assert_eq!(fin.embedded, 32, "what was done is kept");
@@ -381,11 +370,11 @@ pub mod tests {
         let jobs: Vec<Job> = (0..10).map(|n| job(n, day)).collect();
         let fake = Fake::new(Device::Cpu);
         fake.restart_once.store(true, Ordering::Relaxed);
-        let (batches, fin) = run(Request { run: 1, kind: PassKind::NewExports, root: "/".into(), jobs: jobs.clone(), total: 10 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs: jobs.clone(), total: 10 }, &fake);
         assert!(fin.complete && fin.embedded == 10);
         assert!(batches.iter().any(|b| b.restarted));
         let cancel = AtomicBool::new(true);
-        let fin = execute(Request { run: 2, kind: PassKind::NewExports, root: "/".into(), jobs, total: 10 }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
+        let fin = execute(Request { root: "/".into(), jobs, total: 10 }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
         assert_eq!(fin.stopped, Some(Stopped::Cancelled));
         assert_eq!(fin.embedded, 0);
     }

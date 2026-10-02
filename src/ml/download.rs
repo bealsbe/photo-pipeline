@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::models::{self, ModelFile, ModelId};
-use crate::bus::{BgEvent, Bus};
+use crate::bus::BgEvent;
 use crate::ops::fsutil;
 
 /// Progress is reported at most this often per file.
@@ -69,20 +69,10 @@ impl DownloadHandle {
 }
 
 /// Download every model in `ids` that isn't installed, one after another,
-/// reporting progress on `bus`.  Files already in place report `Checked`
-/// at once.  Returns a handle to cancel with.
-pub fn start(ids: Vec<ModelId>, bus: Bus) -> DownloadHandle {
-    let cancel = Arc::new(AtomicBool::new(false));
-    let c = cancel.clone();
-    std::thread::Builder::new()
-        .name("model-download".into())
-        .spawn(move || execute(&ids, &c, &mut |ev| drop(bus.unbounded_send(ev))))
-        .expect("spawn model-download");
-    DownloadHandle { cancel }
-}
-
-/// The downloads themselves, on the calling thread.  `emit` gets each
-/// progress event.  Returns the ids that ended `Checked`.
+/// on the calling thread (the engine runs it on a thread of its own and
+/// watches a [`DownloadHandle`]'s flag).  `emit` gets each progress event;
+/// files already in place report `Checked` at once.  Returns the ids that
+/// ended `Checked`.
 pub fn execute(ids: &[ModelId], cancel: &AtomicBool, emit: &mut dyn FnMut(BgEvent)) -> Vec<ModelId> {
     let mut ok = Vec::new();
     for (i, &id) in ids.iter().enumerate() {

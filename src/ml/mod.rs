@@ -18,9 +18,9 @@
 //! way, stops the work and is reported ([`CardFailure`]); nothing here ever
 //! moves work to the processor on its own.
 
-// The app calls into this once the search page lands (the UI round); until
-// then the public API is unused and the dead-code lint would drown real
-// warnings.  Remove when `app` holds a `search::Engine`.
+// Until the search page constructs a `search::Engine` (the UI branch), the
+// backend is unused in this crate and every item would warn.  The UI branch
+// removes this line; nothing else in the module needs it.
 #![allow(dead_code, unused_imports)]
 
 pub mod client;

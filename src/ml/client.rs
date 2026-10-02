@@ -97,8 +97,6 @@ pub enum HelperError {
 /// Shared between the pass and the engine's queries, so the methods take
 /// `&self`.
 pub trait Embedder: Send + Sync {
-    /// The device this embedder runs image work on.
-    fn device(&self) -> Device;
     /// The adapter's name and the self-check, once known.
     fn device_report(&self) -> (Option<String>, SelfCheck);
     /// Embed a batch of photos (a pair's JPG, else the file).
@@ -322,8 +320,8 @@ impl Client {
                 }),
                 next_id: AtomicU64::new(1),
             }),
-            Reply::CardFailed(f) => Err(StartError::Card(f)),
-            Reply::Failed(why) => Err(StartError::Other(why)),
+            Reply::CardFailed { failure } => Err(StartError::Card(failure)),
+            Reply::Failed { message } => Err(StartError::Other(message)),
             other => Err(StartError::Other(format!("unexpected first reply from the search helper: {other:?}"))),
         }
     }
@@ -385,11 +383,11 @@ impl Client {
                     }
                     inner.proc = Some(proc);
                 }
-                Ok((_, Reply::CardFailed(f))) => {
+                Ok((_, Reply::CardFailed { failure: f })) => {
                     inner.card_failed = Some(f.clone());
                     return Err(HelperError::Card(f));
                 }
-                Ok((_, Reply::Failed(why))) => return Err(HelperError::Broken(why)),
+                Ok((_, Reply::Failed { message })) => return Err(HelperError::Broken(message)),
                 Ok((_, other)) => return Err(HelperError::Broken(format!("unexpected reply {other:?}"))),
                 Err(StartError::Card(f)) => {
                     inner.card_failed = Some(f.clone());
@@ -452,10 +450,6 @@ impl Client {
 }
 
 impl Embedder for Client {
-    fn device(&self) -> Device {
-        self.device
-    }
-
     fn device_report(&self) -> (Option<String>, SelfCheck) {
         let inner = self.inner.lock();
         (inner.name.clone(), inner.self_check.clone())

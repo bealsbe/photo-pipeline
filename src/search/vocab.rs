@@ -4,6 +4,10 @@
 //! fursuits out by default (the contrast, phase 2 builds the section).
 //! Generic words only: nothing personal lives here.
 
+// Phase 2 (the fursuit section) reads these; until then only the phase 0
+// harness does.
+#![allow(dead_code)]
+
 /// Real animals that fursuits are taken for.  Lower case, singular; a
 /// query word matches with or without a plural "s".
 pub const ANIMAL_WORDS: &[&str] = &[

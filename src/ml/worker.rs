@@ -70,9 +70,9 @@ pub enum Reply {
     /// Models loaded; on the card, the self-check passed.
     Ready { device: Device, name: Option<String>, self_check: SelfCheck, dim: usize },
     /// The card was asked for and can't be used; the helper exits.
-    CardFailed(CardFailure),
+    CardFailed { failure: CardFailure },
     /// The models couldn't be loaded (missing, damaged); the helper exits.
-    Failed(String),
+    Failed { message: String },
     Images { id: u64, results: Vec<ImageResult> },
     Texts { id: u64, vectors: Vec<Vec<f32>> },
     /// A request that couldn't be served (asked a text-only helper for
@@ -97,23 +97,23 @@ pub fn main(args: &[String]) -> i32 {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let Some(dir) = dir else {
-        send(&mut out, &Reply::Failed("no home folder for the models".into()));
+        send(&mut out, &Reply::Failed { message: "no home folder for the models".into() });
         return 1;
     };
     let fake = if device == Device::Gpu && !text_only { super::fake_card_failure() } else { None };
     if let Some(f) = fake {
-        send(&mut out, &Reply::CardFailed(f));
+        send(&mut out, &Reply::CardFailed { failure: f });
         return 2;
     }
     let loaded = Models::load(&dir, device, text_only);
     let models = match loaded {
         Ok(m) => m,
         Err(Load::Card(f)) => {
-            send(&mut out, &Reply::CardFailed(f));
+            send(&mut out, &Reply::CardFailed { failure: f });
             return 2;
         }
         Err(Load::Other(why)) => {
-            send(&mut out, &Reply::Failed(why));
+            send(&mut out, &Reply::Failed { message: why });
             return 1;
         }
     };
@@ -556,6 +556,20 @@ mod tests {
         let line = serde_json::to_string(&rep).unwrap();
         assert!(line.starts_with(r#"{"reply":"ready""#));
         assert_eq!(serde_json::from_str::<Reply>(&line).unwrap(), rep);
+        // Every reply the helper can give serialises (internally tagged
+        // enums refuse newtype variants, which once silenced the failures).
+        for rep in [
+            Reply::CardFailed { failure: CardFailure::NoCard },
+            Reply::CardFailed { failure: CardFailure::SelfCheckFailed { cosine: 0.5, max_diff: 0.2 } },
+            Reply::CardFailed { failure: CardFailure::Failed("x".into()) },
+            Reply::Failed { message: "no models".into() },
+            Reply::Error { id: 3, message: "m".into() },
+            Reply::Idle,
+            Reply::Texts { id: 1, vectors: vec![vec![0.5, 0.5]] },
+        ] {
+            let line = serde_json::to_string(&rep).unwrap_or_else(|e| panic!("{rep:?}: {e}"));
+            assert_eq!(serde_json::from_str::<Reply>(&line).unwrap(), rep);
+        }
     }
 
     #[test]

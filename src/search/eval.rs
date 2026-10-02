@@ -90,7 +90,7 @@ fn vectors(previews: &[PathBuf], root: &Path, out: &Path, client: &dyn Fn() -> C
     if !todo.is_empty() {
         let c = client();
         let (name, check) = c.device_report();
-        eprintln!("embedding {} previews on {} ({name:?}, self-check {check:?})", todo.len(), c.device().label());
+        eprintln!("embedding {} previews ({name:?}, self-check {check:?})", todo.len());
         let t = Instant::now();
         let mut failed = 0;
         for chunk in todo.chunks(64) {

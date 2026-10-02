@@ -95,11 +95,6 @@ impl Engine {
         Engine::with_config(bus, device, index_exports, Config::real())
     }
 
-    /// Start the engine with another way of making embedders (tests).
-    pub fn with_factory(bus: Bus, device: Device, index_exports: bool, factory: EmbedderFactory) -> Engine {
-        Engine::with_config(bus, device, index_exports, Config { factory, ..Config::real() })
-    }
-
     /// Start the engine on a configuration (tests).
     pub fn with_config(bus: Bus, device: Device, index_exports: bool, config: Config) -> Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
@@ -130,7 +125,6 @@ impl Engine {
                     first_index_pending: false,
                     resolver: None,
                     text_cache: HashMap::new(),
-                    run: 0,
                 }
                 .run()
             })
@@ -250,7 +244,6 @@ fn dir_bytes(dir: &Path) -> u64 {
 /// A running pass, as the worker holds it.
 struct Running {
     handle: pass::Handle,
-    run: u64,
     kind: PassKind,
     batches: Receiver<pass::Batch>,
 }
@@ -295,7 +288,6 @@ struct Worker {
     resolver: Option<Resolver>,
     /// Query texts encoded this session (bounded).
     text_cache: HashMap<String, Vec<f32>>,
-    run: u64,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -610,14 +602,12 @@ impl Worker {
             return;
         }
         let Some(embedder) = self.image_embedder() else { return };
-        self.run += 1;
-        let run = self.run;
         let (tx, rx) = crossbeam_channel::unbounded::<pass::Batch>();
         let total = plan.total;
         let already = plan.unchanged;
-        let req = pass::Request { run, kind, root: lib.root.clone(), jobs: plan.jobs, total };
+        let req = pass::Request { root: lib.root.clone(), jobs: plan.jobs, total };
         let handle = pass::start(req, embedder, already, move |b| drop(tx.send(b)));
-        self.pass = Some(Running { handle, run, kind, batches: rx });
+        self.pass = Some(Running { handle, kind, batches: rx });
         self.update(|s| {
             s.pass = Some(PassProgress { kind, done: already, total, oldest_day: None });
             s.stopped = None;
@@ -631,8 +621,7 @@ impl Worker {
         if batch.restarted {
             self.update(|s| s.helper_restarts += 1);
         }
-        let (kind, run) = (p.kind, p.run);
-        let _ = run;
+        let kind = p.kind;
         self.absorb(&batch);
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
@@ -832,9 +821,6 @@ impl Worker {
     }
 }
 
-/// Jobs are the pass's; re-exported for the bench.
-pub type PassJob = Job;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -856,7 +842,8 @@ mod tests {
     #[test]
     fn the_status_starts_from_the_saved_preferences_and_a_query_answers() {
         let (bus, _rx) = crate::bus::channel();
-        let e = Engine::with_factory(bus, Device::Cpu, false, Box::new(|_, _| Err(StartError::Other("no".into()))));
+        let config = Config { factory: Box::new(|_, _| Err(StartError::Other("no".into()))), models_ready: Box::new(|| false), index_dir: None };
+        let e = Engine::with_config(bus, Device::Cpu, false, config);
         let s = e.status();
         assert_eq!(s.device.chosen, Device::Cpu);
         assert!(!s.index_exports && s.not_indexed());
@@ -975,7 +962,7 @@ mod tests {
         e.start_first_index(&[ModelId::Siglip2]);
         let s = wait_for(&e, "the first index", |s| s.indexed_shots == 12 && s.pass.is_none());
         assert!(s.stopped.is_none());
-        assert_eq!(s.device.name.as_deref(), Some("Fake card"));
+        assert_eq!(s.device.name.as_deref(), Some("Fake Graphics card"));
         assert!(matches!(s.device.self_check, SelfCheck::Passed { .. }));
         // A query for one photo's own vector finds it first, with its day,
         // its file and its burst (all twelve frames are one press).

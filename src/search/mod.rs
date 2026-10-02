@@ -19,7 +19,10 @@
 //! the user's cache, never in the library; nothing is written to photos
 //! or sidecars.
 
-// See src/ml/mod.rs: unused until the search page lands.
+
+// Until the search page constructs the `Engine` (the UI branch), the whole
+// backend is unused in this crate and every item would warn.  The UI
+// branch removes this line; nothing else in the module needs it.
 #![allow(dead_code, unused_imports)]
 
 pub mod engine;
