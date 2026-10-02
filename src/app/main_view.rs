@@ -14,7 +14,6 @@ use crate::model::filter::{FilterState, SortKey};
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
 use crate::ui::grid::{Grid, GridData, Restack};
 use crate::ui::icons::{self, Glyph};
-use crate::ui::list::{List, ListData};
 use crate::ui::motion::{ActivityBar, Appear};
 use crate::ui::paint;
 use crate::ui::side_menu::{Entry, Item, RAIL_W, SideMenu};
@@ -62,9 +61,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         col = col.push(b);
     }
     let content: Element<'_, Message> = match app.view {
-        View::Grid | View::List if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
-        View::Grid | View::List if pile_done(app) => pile_done_page(app),
-        View::Grid | View::List if none_shown(app) => none_shown_page(app),
+        View::Grid if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
+        View::Grid if pile_done(app) => pile_done_page(app),
+        View::Grid if none_shown(app) => none_shown_page(app),
         View::Grid => {
             let data = GridData {
                 sections: &app.derived.sections,
@@ -91,15 +90,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .scroll_seq(app.grid.scroll_seq)
                 .layout_key(app.derived.key)
                 .into()
-        }
-        View::List => {
-            let data = ListData {
-                rows: &app.derived.list_rows,
-                coll: &app.coll,
-                selection: &app.list.selection,
-                current: app.list.current,
-            };
-            List::new(data, Message::List).keyboard(keyboard_ok && !app.side_expanded).initial_scroll(app.list.scroll).into()
         }
         View::Calendar => calendar::view(app, keyboard_ok),
     };
@@ -198,7 +188,6 @@ fn menu_catcher<'a>() -> Element<'a, Message> {
 
 pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
     match cmd {
-        Cmd::ListView => Some(app.view == View::List),
         Cmd::GridView => Some(app.view == View::Grid),
         Cmd::CalendarView => Some(app.view == View::Calendar),
         Cmd::FolderBar => Some(app.folder_bar_visible),
@@ -773,11 +762,7 @@ fn status_bar(app: &App) -> Element<'_, Message> {
 
 /// "To review" is showing and nothing is left in it.
 fn pile_done(app: &App) -> bool {
-    let empty = match app.view {
-        View::List => app.derived.list_rows.is_empty(),
-        _ => app.derived.visible.is_empty(),
-    };
-    app.filter.to_review && empty && !app.scanning && !app.coll.is_empty()
+    app.filter.to_review && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
 }
 
 /// The end of the pile: say so, rather than show an empty grid.
@@ -804,11 +789,7 @@ fn pile_done_page(app: &App) -> Element<'_, Message> {
 
 /// Marked or Pruned is showing and nothing is in it.
 fn none_shown(app: &App) -> bool {
-    let empty = match app.view {
-        View::List => app.derived.list_rows.is_empty(),
-        _ => app.derived.visible.is_empty(),
-    };
-    matches!(app.filter.show(), Show::Marked | Show::Pruned) && empty && !app.scanning && !app.coll.is_empty()
+    matches!(app.filter.show(), Show::Marked | Show::Pruned) && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
 }
 
 /// Nothing is marked, or pruned: say how photos get here.

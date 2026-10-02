@@ -1633,7 +1633,6 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+E", "Export to the library"),
             ("Ctrl+Shift+E", "Copy marked RAWs to a folder for editing"),
             ("Ctrl+Shift+S", "Sort into RAW and JPG folders"),
-            ("Ctrl+1", "List view"),
             ("Ctrl+2", "Grid view"),
             ("Ctrl+3", "Library calendar"),
             ("Ctrl+Z", "Undo marks, crops, Sort or a move to the Trash"),

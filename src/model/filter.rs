@@ -1,9 +1,9 @@
-//! Filter + sort state shared by the list and grid views, and the pipeline
-//! that turns the collection into what each view shows.
+//! Filter + sort state for the grid, and the pipeline that turns the
+//! collection into what it shows.
 //!
 //! As in the Python app, ordering is a plain stable sort of the source
-//! records and filtering only removes rows — the grid's grouping and the
-//! list's pair rows are built on top.
+//! records and filtering only removes rows — the grid's grouping by day
+//! and one tile per RAW+JPG pair are built on top.
 
 use std::cmp::Ordering;
 
@@ -271,63 +271,6 @@ pub fn group_by_date(ids: &[RecordId], coll: &Collection, state: &FilterState) -
     groups
 }
 
-/// One row of the list view: a pair, or a single file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ListRow {
-    pub raw: Option<RecordId>,
-    pub jpg: Option<RecordId>,
-}
-
-impl ListRow {
-    /// The RAW when there is one — what the row sorts and filters on.
-    pub fn primary(&self) -> RecordId {
-        self.raw.or(self.jpg).expect("list row has a record")
-    }
-
-    pub fn is_paired(&self) -> bool {
-        self.raw.is_some() && self.jpg.is_some()
-    }
-
-    pub fn members(&self) -> impl Iterator<Item = RecordId> {
-        self.raw.into_iter().chain(self.jpg)
-    }
-}
-
-/// Consolidate pairs into single rows, then sort and filter on each row's
-/// primary record.
-pub fn list_rows(coll: &Collection, state: &FilterState) -> Vec<ListRow> {
-    let mut rows: Vec<ListRow> = Vec::with_capacity(coll.len());
-    let mut pair_row: std::collections::HashMap<(std::path::PathBuf, String), usize> = Default::default();
-    for (id, r) in coll.iter_ids() {
-        match &r.pair_stem {
-            Some(stem) => {
-                let key = (canonical_parent(&r.path), stem.clone());
-                let idx = *pair_row.entry(key).or_insert_with(|| {
-                    rows.push(ListRow { raw: None, jpg: None });
-                    rows.len() - 1
-                });
-                match r.file_type {
-                    FileType::Raw => rows[idx].raw = Some(id),
-                    FileType::Jpg => rows[idx].jpg = Some(id),
-                }
-            }
-            None => rows.push(match r.file_type {
-                FileType::Raw => ListRow { raw: Some(id), jpg: None },
-                FileType::Jpg => ListRow { raw: None, jpg: Some(id) },
-            }),
-        }
-    }
-    rows.sort_by(|a, b| {
-        let (Some(ra), Some(rb)) = (coll.get(a.primary()), coll.get(b.primary())) else {
-            return Ordering::Equal;
-        };
-        let o = compare(state.sort_key, ra, rb);
-        if state.sort_asc { o } else { o.reverse() }
-    });
-    rows.retain(|row| coll.get(row.primary()).is_some_and(|r| state.accept(r)));
-    rows
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,10 +345,6 @@ mod tests {
             // One tile per shot: the pair as its JPG, and the lone JPG.
             let shown = dedup_pairs(&visible_sorted(&c, &st), &c);
             assert_eq!(shown, [jpg1, jpg3]);
-            // The list folds the pair into one row too.
-            let rows = list_rows(&c, &st);
-            assert_eq!(rows.len(), 2);
-            assert!(rows.iter().any(|r| r.is_paired() && r.raw == Some(raw1)));
         }
         // Un-pruning a shot takes it out at once.
         set(&mut c, &[raw1, jpg1], |r| r.is_pruned = false);
@@ -551,7 +490,7 @@ mod tests {
 
     #[test]
     fn to_review_combines_with_date_and_type_filters() {
-        let (mut c, [_, _, raw2, jpg2, jpg3, raw4]) = shoot();
+        let (mut c, [_, jpg1, raw2, jpg2, jpg3, raw4]) = shoot();
         set(&mut c, &[raw2, jpg2], |r| r.is_marked = true);
         let day2 = NaiveDate::from_ymd_opt(2025, 3, 2);
         // Day 2 holds the lone JPG and the lone RAW, both unreviewed.
@@ -572,11 +511,10 @@ mod tests {
         assert_eq!(tiles(&c, &raws), 2);
         set(&mut c, &[raw4], |r| r.is_pruned = true);
         assert_eq!(tiles(&c, &raws), 1);
-        // The list's rows filter the same way: one row per shot.
-        let rows = list_rows(&c, &FilterState::default().only_to_review());
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|r| r.is_paired()));
-        assert!(rows.iter().any(|r| r.jpg == Some(jpg3)));
+        // One tile per shot still to review: the pair as its JPG, and the
+        // lone JPG.
+        let all_days = FilterState::default().only_to_review();
+        assert_eq!(dedup_pairs(&visible_sorted(&c, &all_days), &c), [jpg1, jpg3]);
         // Marked only and to review can't both hold.
         let both = FilterState { show_unmarked: false, ..FilterState::default() }.only_to_review();
         assert_eq!(tiles(&c, &both), 0);

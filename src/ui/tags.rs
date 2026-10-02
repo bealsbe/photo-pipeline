@@ -51,16 +51,6 @@ impl Kind {
             FileType::Jpg => Kind::Jpg,
         }
     }
-
-    /// From the halves a list row holds.
-    pub fn from_halves(raw: bool, jpg: bool) -> Option<Kind> {
-        match (raw, jpg) {
-            (true, true) => Some(Kind::Pair),
-            (true, false) => Some(Kind::Raw),
-            (false, true) => Some(Kind::Jpg),
-            (false, false) => None,
-        }
-    }
 }
 
 /// A label's measured width (cached: labels are a handful of constants).
