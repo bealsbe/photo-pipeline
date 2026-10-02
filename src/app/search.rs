@@ -925,10 +925,12 @@ fn header(app: &App) -> Element<'_, Message> {
     let caption = if s.pending.is_some_and(|p| !p.1) || p == Page::Searching {
         "Searching…".to_string()
     } else if matches!(p, Page::Results) {
+        // The count alone: the list's heading already says "Best matches
+        // first".
         let n = s.photos();
         match coverage(&s.status) {
-            Coverage::Whole => format!("{}, best match first", util::plural(n as u64, "photo")),
-            _ => format!("{} so far, best match first", util::plural(n as u64, "photo")),
+            Coverage::Whole => util::plural(n as u64, "photo"),
+            _ => format!("{} so far", util::plural(n as u64, "photo")),
         }
     } else {
         String::new()

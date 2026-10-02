@@ -864,9 +864,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         }
         "confirm" => app.update(Message::Prefs(Msg::ClearConfirmed)),
         "closeness" => {
-            // As the slider sets it: its position runs closer to looser.
+            // As the slider sets it: by its place on the track.
             let v: f32 = rest.parse().unwrap_or(crate::search::CLOSENESS_DEFAULT);
-            let t = app.update(Message::Prefs(Msg::Closeness(crate::search::CLOSENESS_MIN + crate::search::CLOSENESS_MAX - v)));
+            let t = app.update(Message::Prefs(Msg::Closeness(super::preferences::closeness_to_track(v))));
             Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
