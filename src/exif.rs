@@ -754,11 +754,14 @@ mod tests {
     /// when the MPF index lies further in (a real A7 V JPEG, as is and with
     /// 40 KB of comment segments put in front of its metadata, which moves
     /// the index past the first read; MPF offsets are relative to the index
-    /// itself, so the preview moves with it).
+    /// itself, so the preview moves with it).  The JPEG comes from
+    /// `PP_FIXTURE_DIR` ([`fixture_mpf_jpeg`]), so the test runs only when
+    /// asked for, and then fails without one.
     #[test]
+    #[ignore = "needs PP_FIXTURE_DIR (see README, Testing)"]
     fn previews_are_found_whatever_the_index_offset() {
-        let src = Path::new("/tmp/scratch/fixture/shoot1/20260724_0108_0001.JPG");
-        let Ok(data) = std::fs::read(src) else { return };
+        let src = fixture_mpf_jpeg();
+        let data = std::fs::read(&src).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
         let dir = std::env::temp_dir().join(format!("pp-exif-preview-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let mut padded = data[..2].to_vec();
@@ -772,10 +775,11 @@ mod tests {
         std::fs::write(&b, &padded).unwrap();
         let (pa, ha) = jpeg_preview_bytes(&a, 1000).expect("a preview");
         let (pb, hb) = jpeg_preview_bytes(&b, 1000).expect("a preview further in");
-        assert_eq!(pa, pb);
-        assert!(pa.len() > 100_000 && pa.starts_with(&[0xFF, 0xD8]));
-        assert_eq!(ha.len(), PREVIEW_HEAD, "the index was in the first read");
-        assert_eq!(hb.len(), HEADER_BYTES, "read on to find it");
+        let name = src.display();
+        assert_eq!(pa, pb, "{name}");
+        assert!(pa.len() > 100_000 && pa.starts_with(&[0xFF, 0xD8]), "{name}");
+        assert_eq!(ha.len(), PREVIEW_HEAD, "{name}: the index was in the first read");
+        assert_eq!(hb.len(), HEADER_BYTES, "{name}: read on to find it");
         assert_eq!(orientation_from_jpeg_head(&ha), orientation_from_jpeg_head(&hb));
         assert!(preview_index_settled(&ha) && !preview_index_settled(&hb[..PREVIEW_HEAD]));
         let _ = std::fs::remove_dir_all(&dir);
@@ -793,3 +797,20 @@ mod tests {
     }
 }
 
+/// For the tests that read real files: the first JPEG in `PP_FIXTURE_DIR`
+/// with an MPF preview (as an A7 V writes).  Panics, saying what's missing,
+/// without one.
+#[cfg(test)]
+pub fn fixture_mpf_jpeg() -> std::path::PathBuf {
+    let jpegs = crate::util::fixture_files(crate::model::record::FileType::Jpg);
+    let has_mpf = |p: &Path| {
+        let head = File::open(p).ok().and_then(|mut f| read_head(&mut f, HEADER_BYTES)).unwrap_or_default();
+        mpf_preview_span(&head).is_some()
+    };
+    jpegs.iter().find(|p| has_mpf(p)).cloned().unwrap_or_else(|| {
+        panic!(
+            "PP_FIXTURE_DIR has no JPEG with an MPF preview ({} JPEGs looked at): add an A7 V JPEG (see README, Testing)",
+            jpegs.len()
+        )
+    })
+}

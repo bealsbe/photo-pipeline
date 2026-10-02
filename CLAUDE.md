@@ -44,11 +44,19 @@ cargo test --release  # unit tests; must pass with zero warnings
   Wayland logo.
 - **iced quirks:** within a layer, images draw above quads — overlays on
   images need `renderer.with_layer`; nested layers aren't clipped by parents.
+- **Placeholders, not this machine:** tests and docs use `192.0.2.x`
+  (RFC 5737), `example.com`, `/mnt/nas`, `/home/me` and made-up file
+  names — never paths, addresses, file names or terminal output copied from
+  the user's machine.  New `testdata/` headers follow `testdata/README.md`.
+  Run `scripts/check-private.sh` before pushing; it fails on what it finds.
 
 ## Testing safely
 
-- Never write to `/mnt/nas` (the user's real archive).  Read-only scans are
-  fine.  Test file operations on scratch copies with a throwaway `HOME`.
+- Never write to the user's real photo archive.  Its location is in
+  `CLAUDE.local.md` (untracked, on the user's machine); if that file is
+  missing, ask before writing anywhere outside a scratch folder.  Read-only
+  scans are fine.  Test file operations on scratch copies with a throwaway
+  `HOME`.
 - Headless UI: `kwin_wayland --virtual --socket pp-test --width 1600
   --height 1000 &`, then run with `WAYLAND_DISPLAY=pp-test PP_SCRIPT=<file>`
   (commands at the top of `src/app/testing.rs`; `shot main <png>` takes

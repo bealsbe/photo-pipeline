@@ -86,6 +86,8 @@ vendor/LibRaw          LibRaw 0.22.2, the version rawpy uses
 assets/fonts           Barlow, with tabular figures built in (see its README)
 assets/icons           the app icon (SVG, and PNGs from 16 to 256 px)
 assets/*.desktop.in    the desktop entry install.sh fills in and installs
+testdata/              camera header excerpts for the unit tests (see its README)
+scripts/               check-private.sh (see "Testing")
 ```
 
 ## Look
@@ -337,7 +339,22 @@ These are deliberate:
 
 ## Testing
 
-- **Unit tests:** `cargo test --release`.
+- **Unit tests:** `cargo test --release`.  They need no photos: the header
+  bytes they parse are in `testdata/` (see its README).
+- **Tests on real camera files** are ignored unless asked for.  Point
+  `PP_FIXTURE_DIR` at a small folder of camera files and run:
+
+  ```sh
+  PP_FIXTURE_DIR=<folder> cargo test --release -- --ignored \
+      previews_are_found_whatever_the_index_offset loads_embedded_previews
+  ```
+
+  The folder should hold an A7 V JPEG (its MPF preview is what's tested),
+  plus one RAW of each family the app reads: an A7 V ARW, an older Sony ARW
+  (A7R II) and a Canon CR2.  Every RAW in it must give an embedded preview
+  of 1000–2400 px.  The files are only read, so symlinks to originals are
+  fine.  Asked for without the variable, or with a folder lacking an MPF
+  JPEG or any RAW, the tests fail and say what's missing.
 - **Speed comparison:**
   `PP_BENCH_DIR=<folder> cargo test --release -- --ignored --nocapture --exact bench::bench`
   runs the scan, thumbnail and viewer paths.  Set `PP_BENCH_SCAN_ONLY=1` for
@@ -361,3 +378,19 @@ These are deliberate:
   `--features profiler` also samples the CPU in-process when
   `PP_PROFILE_OUT=<file>` is set and writes folded stacks — no perf
   permissions needed.  Normal builds don't include the sampler.
+- **Privacy check:** `scripts/check-private.sh` scans the tracked files for
+  things that belong to one machine rather than the project: private
+  (RFC 1918) addresses, home and `/mnt` paths other than the placeholders
+  the tests use, agent scratch paths, e-mail addresses other than
+  `example.*` and `noreply`, non-zero file IDs (XMP document IDs, EXIF
+  ImageUniqueID) in `testdata/`, photos or screenshots outside `assets/`,
+  and tracked `*.local.md` notes.  It prints `file:line` for each hit and
+  exits non-zero.  Run it before pushing (`--cached` checks what is
+  staged), or make it a pre-commit hook, which checks the staged files:
+
+  ```sh
+  ln -s ../../scripts/check-private.sh .git/hooks/pre-commit
+  ```
+
+  Tests and docs use placeholders instead: `192.0.2.x` (RFC 5737),
+  `example.com`, `/mnt/nas`, `/home/me`.

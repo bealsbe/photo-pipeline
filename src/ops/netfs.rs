@@ -8,7 +8,7 @@
 //! up after a timeout.  Call it from a worker, never the UI thread.
 //!
 //! The mount table (`/proc/self/mountinfo`) and `/etc/fstab` name the share
-//! (`//nas/share`) and still say where it would be when it isn't mounted.
+//! (`//nas/photos`) and still say where it would be when it isn't mounted.
 //! Reading them never waits on the share itself.
 
 use std::io;
@@ -21,7 +21,7 @@ use std::time::Duration;
 pub struct Share {
     /// "SMB", "NFS", "SSHFS"…
     pub kind: &'static str,
-    /// What is mounted, e.g. `//nas/share` or `nas:/export/photos`.
+    /// What is mounted, e.g. `//nas/photos` or `nas:/export/photos`.
     pub source: String,
     pub mount_point: PathBuf,
     /// Mounted now.  `false` when only fstab or an idle automount names it.
@@ -447,9 +447,9 @@ mod tests {
     }
 
     const MOUNTINFO: &str = "\
-22 1 0:21 / / rw,relatime shared:1 - btrfs /dev/nvme0n1p3 rw,ssd
+22 1 0:21 / / rw,relatime shared:1 - btrfs /dev/sda2 rw,ssd
 41 22 0:41 / /mnt/nas rw,relatime shared:22 - autofs systemd-1 rw,fd=80,pgrp=1,timeout=600,direct
-745 41 0:90 / /mnt/nas rw,relatime shared:661 - cifs //192.0.2.10/nas rw,vers=3.0,soft
+745 41 0:90 / /mnt/nas rw,relatime shared:661 - cifs //192.0.2.10/photos rw,vers=3.0,soft
 50 22 0:50 / /home/me/My\\040Server rw,nosuid shared:30 - fuse.sshfs me@host:/srv rw,user_id=1000
 51 22 0:51 / /mnt/usb rw shared:31 - fuseblk /dev/sdb1 rw
 ";
@@ -457,7 +457,7 @@ mod tests {
     const FSTAB: &str = "\
 # comment
 UUID=84d7 /  btrfs defaults 0 0
-//192.0.2.10/nas  /mnt/nas  cifs  credentials=/etc/x,_netdev,x-systemd.automount  0 0
+//192.0.2.10/photos  /mnt/nas  cifs  credentials=/etc/x,_netdev,x-systemd.automount  0 0
 nas:/export/photos /mnt/photos nfs defaults 0 0
 ";
 
@@ -469,10 +469,10 @@ nas:/export/photos /mnt/photos nfs defaults 0 0
         assert_eq!(fstab.len(), 3);
 
         // Mounted: the cifs mount on top of its automount point wins.
-        let s = share_from_tables(&mi, &fstab, Path::new("/mnt/nas/Photography/2026")).unwrap();
-        assert_eq!((s.kind, s.source.as_str(), s.mounted), ("SMB", "//192.0.2.10/nas", true));
+        let s = share_from_tables(&mi, &fstab, Path::new("/mnt/nas/photos/2026")).unwrap();
+        assert_eq!((s.kind, s.source.as_str(), s.mounted), ("SMB", "//192.0.2.10/photos", true));
         assert_eq!(s.mount_point, PathBuf::from("/mnt/nas"));
-        assert_eq!(s.name(), "//192.0.2.10/nas");
+        assert_eq!(s.name(), "//192.0.2.10/photos");
 
         // Escaped spaces, FUSE subtype.
         let s = share_from_tables(&mi, &fstab, Path::new("/home/me/My Server/pics")).unwrap();
@@ -486,7 +486,7 @@ nas:/export/photos /mnt/photos nfs defaults 0 0
 
         // Automount idle (only autofs mounted): fstab says what it is.
         let idle: Vec<Mount> = mi.iter().filter(|m| m.fstype != "cifs").cloned().collect();
-        let s = share_from_tables(&idle, &fstab, Path::new("/mnt/nas/Photography")).unwrap();
+        let s = share_from_tables(&idle, &fstab, Path::new("/mnt/nas/photos")).unwrap();
         assert_eq!((s.kind, s.mounted), ("SMB", false));
         // Not mounted at all: a plain folder on / where the share goes.
         let s = share_from_tables(&mi, &fstab, Path::new("/mnt/photos/2025")).unwrap();

@@ -8,12 +8,12 @@
 //!   sharing all of those with another are read at all: their first 64 KB
 //!   (EXIF, with the shutter count), then, where those match, 64 KB from
 //!   the middle and the end (`analysis` reads; the grouping is here).  On
-//!   the 19-Sep day 9 224 of 9 547 RAWs and 40 of 9 536 JPGs share their
-//!   size with another file, but no two of those JPGs share a capture.
-//!   Whole files are not compared: on a day exported twice (23-May-2026)
-//!   every file has a copy of its size, and comparing them whole would read
-//!   340 GB from the share instead of 2.6 GB.  A RAW and its JPG are never
-//!   duplicates: different types never share a bucket.
+//!   shoot A of the image-quality plan, 9 224 of 9 547 RAWs and 40 of
+//!   9 536 JPGs share their size with another file, but no two of those
+//!   JPGs share a capture.  Whole files are not compared: on its day D (a
+//!   day exported twice) every file has a copy of its size, and comparing
+//!   them whole would read 340 GB from the share instead of 2.6 GB.  A RAW
+//!   and its JPG are never duplicates: different types never share a bucket.
 //! - **Same capture**: one frame under two files that differ in bytes (a
 //!   re-saved or re-tagged JPG): the same camera, capture time to the
 //!   millisecond and press sequence number, of one type, and pHashes at

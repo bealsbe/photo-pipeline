@@ -2,9 +2,20 @@
 
 *Investigation only: nothing in the app was changed. Written 2026-09-30.
 Experiments ran in a scratch folder (since deleted; see the appendix) and only
-read from `/mnt/nas`.*
+read from the photo archive.*
 
 ---
+
+**Evaluation shoots.**  The measurements below come from the user's own
+shoots, named once here:
+
+- **Shoot A:** an event day, Sony A7 V, heavy 8 fps continuous shooting
+  (9 547 RAWs, 9 536 JPGs).  The 320-JPG sample in §4 is from it.
+- **Shoot B:** another event day, A7 V, culled (prune and keep marks); its
+  101MSDCF and 102MSDCF card folders were sampled for tuning.
+- **Shoot C:** a later shoot, culled.
+- **Day D:** a day exported into the library twice, so every file has an
+  identical copy.
 
 ## Decisions (2026-09-30)
 
@@ -28,7 +39,7 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 
 - **Metadata** (`exif::read_shot`, cached in capture cache v2): SubSec,
   Sony `SequenceNumber` and `FocusLocation`, and a make+model hash.  Checked
-  against `exiftool` on 596 headers from the 19-Sep day (0 differences, 15
+  against `exiftool` on 596 headers from shoot A (0 differences, 15
   portrait frames among them).  `FocusLocation` is in **sensor**
   orientation (portrait frames still say `7008 4672 x y`), so it is rotated
   by IFD0 Orientation; 11 frames that day had `0 0 0 2566` (no AF point).
@@ -87,7 +98,7 @@ highlight (≥ 250) count for nothing, and tiles with more than 0.8 % of
 them are left out of the *local* sharpness (`Features::local`: mean of the
 three sharpest remaining tiles).  Without that, bokeh discs and lights made
 frames shot inside the minimum focus distance look as sharp as good night
-shots (19-Sep 13:50).  Also: the whole-frame value, the AF-point window
+shots (shoot A, 13:50).  Also: the whole-frame value, the AF-point window
 (sharpest quarter of a window ⅛ of the long edge, kept for display, not
 used in decisions: it ranked kept frames no better), luma percentiles,
 entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
@@ -96,13 +107,13 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
 
 - *Score* = √(whole frame × local).  Within a press it put a frame the user
   kept first in 59 % of 93 presses with kept and unkept frames (chance
-  31 %), and in the top two in 82 % (AnthroSocal 101/102MSDCF samples,
-  20-Sep).  While tuning on the 74 AnthroSocal bursts: this 62 %, the
+  31 %), and in the top two in 82 % (shoot B's 101/102MSDCF
+  samples).  While tuning on those 74 bursts: this 62 %, the
   whole frame alone 58 %, local alone 55 %, the AF window 50 %.
 - *Sharpest* and *relative softness* are judged **per press**, not per
   moment: across presses the subject moves or fills the frame and the score
   moves as much as focus does (19:42 frames 8368/8370 came out at 0.2 of
-  8388, whose rim-lit fur against a blue light was the sharpest area; their
+  8388, whose rim-lit fine texture against a blue light was the sharpest area; their
   faces were no softer).  Per moment, the sharpest was kept in 54 %.
 - *Looks out of focus*: `local` < 15 (nothing sharp), **or** score ≤ 0.35
   of the best frame of its press that looks like it (pHash ≤ 16) while
@@ -114,7 +125,7 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
 - *Moments*: consecutive presses (singles included) of one folder and
   camera merge when the next starts ≤ 2 s after the last ends and any of the
   last three / first three frames are ≤ 16 pHash bits apart.  On the
-  19-Sep sample 131 presses (73 bursts) became 56 moments of 2+ frames, 8 of
+  shoot A sample 131 presses (73 bursts) became 56 moments of 2+ frames, 8 of
   them merged from several presses.  Checked by eye, 19 of the 20 joins
   were the same scene (one joined two subjects walking through the same
   hall); the 13 near misses at 17–22 bits were 6 same scene, 7 not, so 16
@@ -133,23 +144,23 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
   ids; nothing is marked.
 
 **On real data** (1 888 frames: three samples copied read-only from the NAS,
-1 087, and the culled 20-Sep and 26-Sep days read in place, 801): 23
+1 087, and the culled shoots B and C read in place, 801): 23
 frames flagged, 14 of them in folders with marks.  By eye all
 are motion-blurred, missed focus, someone walking in front of the lens, or
 lens-cap / blank frames; the borderline one is 2037_9384 (0.35, a little
-soft).  Against the user's marks: of the 14, 2 were kept (26-Sep 0073 and 0183, both visibly motion-blurred, kept
-anyway); none of the 3 shots pruned on 20-Sep is flagged (they are sharp
+soft).  Against the user's marks: of the 14, 2 were kept (shoot C 0073 and 0183, both visibly motion-blurred, kept
+anyway); none of the 3 shots pruned in shoot B is flagged (they are sharp
 group shots, pruned for other reasons).  Recall is deliberately modest:
 whole presses that are soft together (13:50 7745/7746/7751) are not flagged
 beyond their absolute values.  Contact sheets:
-`/tmp/scratch/agents/quality/flagged_*.jpg` (scratch).
+`<scratch>/agents/quality/flagged_*.jpg` (since deleted).
 
-**Duplicates found.**  20-Jun-2026 and 22-Feb-2026 were exported twice like
-23-May (every file has an identical copy: 396 and 156 groups); a stat-only
-look at 2026 suggests 19 more days are (every JPG shares its size with
-another: 20/21/24/27-Feb, 01/08/14-Mar, 11/18-Apr, 14/21/22/24/25/31-May,
-01/26/27-Jun, 04-Jul).  On days shot without copies, many RAWs share a
-size (9 224 of 9 547 on 19-Sep) but never a capture, so nothing is read.
+**Duplicates found.**  Two more days were exported twice like
+day D (every file has an identical copy: 396 and 156 groups); a stat-only
+look at one year of the library suggests 19 more days are (on each, every
+JPG shares its size with another).
+On days shot without copies, many RAWs share a
+size (9 224 of 9 547 in shoot A) but never a capture, so nothing is read.
 
 **Costs.**  Per shot: ~0.33–0.45 MB read (the preview's first read is now
 128 KB, not 256 KB: `exif::jpeg_preview_bytes`, which the thumbnails and the
@@ -157,7 +168,7 @@ viewer use too), 1.9 ms luma decode + 1.35 ms measuring.  Local (4
 threads): 1.1 ms/shot wall → 5 000 shots ≈ 5.5 s.  NAS: 5.7–6.4 ms/shot
 wall at 72–97 MB/s, bandwidth-bound → 5 000 shots ≈ 30 s cold.  A rerun
 reads only the cache file (55 shots: 0.3 ms).  The identical-file check on an exported-twice day:
-192 KB per file at ~56 MB/s (22-Feb: 312 files, 1.1 s).  Working the hints
+192 KB per file at ~56 MB/s (one such day: 312 files, 1.1 s).  Working the hints
 out on the UI thread: 14 ms at 10 000 files (debounced to ≤ 2/s while
 results stream in).
 
@@ -198,7 +209,7 @@ experiment and adjust them in use.
 
 **Go, but don't use cleanvision itself.** Re-implement the ideas in Rust, with
 changes for photography. cleanvision's checks were tuned for ML training sets.
-On a real 320-frame sample from the user's 19-Sep-2026 shoot (Sony ILCE-7M5,
+On a real 320-frame sample from the user's shoot A (Sony ILCE-7M5,
 8 fps bursts), its defaults flagged **0 blurry, 0 low-information and
 0 duplicate frames**. It found only **5 near-duplicate pairs**. The sample has
 91 shutter presses, 67 of them multi-frame, and at least 7 frames that are
@@ -344,7 +355,7 @@ our own cache version.
 
 ### 4.1 Sample
 
-- 320 JPGs, read-only, from `…/19-Sep-2026/JPG`, a convention day with heavy
+- 320 JPGs, read-only, from shoot A's `JPG/` folder, an event day with heavy
   continuous shooting. Five windows: 10:42 (120 frames of non-stop 8 fps
   bursts), 13:50, 15:12–15:13, 19:42 (evening, low light), plus scattered
   singles.
@@ -408,7 +419,7 @@ our own cache version.
 ### 4.5 Sharpness on the preview luma (1616×1080)
 
 - **Global Laplacian variance** ranges from 1.1 to 232 across the sample, a
-  200× spread driven mostly by content (fur versus floor, background blur, ISO).
+  200× spread driven mostly by content (fine texture versus floor, background blur, ISO).
   A global absolute threshold won't work.
 - **Max tile energy** (8×6 grid, mean squared Laplacian per tile): an absolute
   cut-off of 20 flagged **7 frames, and all 7 are genuinely bad**:
@@ -754,7 +765,7 @@ codebase.
 
 | Phase | Content | Effort |
 |---|---|---|
-| **0. Labels + harness** | Scratch copies of 3–4 shoots (~800 frames): this 19-Sep sample, an indoor/night event, an f/1.4 portrait session, something static. The user labels them **in the app itself** on the copies: P = soft/accidental, M = best of each burst. The sidecars *are* the labels. Plus an ignored test `quality::eval` that prints precision/recall and top-1/top-2 agreement. | 1 d + ~1 h of the user's labelling |
+| **0. Labels + harness** | Scratch copies of 3–4 shoots (~800 frames): this shoot A sample, an indoor/night event, an f/1.4 portrait session, something static. The user labels them **in the app itself** on the copies: P = soft/accidental, M = best of each burst. The sidecars *are* the labels. Plus an ignored test `quality::eval` that prints precision/recall and top-1/top-2 agreement. | 1 d + ~1 h of the user's labelling |
 | **1. Bursts from metadata + Review burst** | `read_shot_meta` (SubSec + Sony maker note) into capture cache v2; `model/bursts.rs` presses (time + sequence); grid bracket + count chip; **B → Review burst** with strip and AF-point zoom. No pixel analysis yet. | 2.5–3 d |
 | **2. Analysis pass** | Luma decode mode; `imaging/quality.rs`; `analysis.rs` + `BgEvent`s + quality cache; hint plates; *sharpest in burst* suggestion; *looks out of focus* and *accidental* (thresholds from Phase 0); byte-identical duplicates; Hints filter; status/progress. | 3–4 d |
 | **3. Polish** | Stack bursts (G); pHash "moments" merging presses; same-capture duplicates + which copy to suggest pruning; *Keep this, prune the rest* + `Kind::Batch` undo; quick look/viewer/list hints; bench + scripted UI tests. | 2–3 d |
@@ -784,7 +795,7 @@ Ask the user whether they've actually hit duplicates (§10).
   - `quality_cache.rs`: round-trip, damage rejection, and validity on
     size/mtime, as in `capture_cache.rs` tests; a Sort keeps entries valid.
   - `exif.rs`: maker-note parsing on saved header fixtures (copy 2–3 heads from
-    `/tmp/scratch/agents/cleanvision/sample/head/` into test data; ~128 KB
+    `<scratch>/agents/cleanvision/sample/head/` into test data; ~128 KB
     each), with truncated and corrupt variants.
 - **Labelled evaluation (Phase 0 set):**
   - "Looks out of focus" targets **precision ≥ 90 %**, because false flags erode
@@ -795,7 +806,7 @@ Ask the user whether they've actually hit duplicates (§10).
   - Thresholds are tuned per camera model. Unknown models get relative-only
     hints.
 - **Fixture integration:**
-  - Use a scratch copy of `/tmp/scratch/fixture/shoot1` with a
+  - Use a scratch copy of the fixture shoot (`PP_FIXTURE_DIR`) with a
     byte-identical copy (`cp`), a renamed copy, and a re-saved JPG.
   - Expected result: tier-1 duplicates, tier-2 duplicates, and the pair never
     flagged.
@@ -859,10 +870,10 @@ Ask the user whether they've actually hit duplicates (§10).
 
 ## Appendix — scratch artefacts (no longer available)
 
-These lived under `/tmp/scratch/agents/cleanvision/` and were deleted in a
+These lived under `<scratch>/agents/cleanvision/` and were deleted in a
 cleanup on 2026-09-30, so the numbers above can't be re-run from them.  The
 list records what was used.  Rebuilding them means re-extracting previews
-read-only from the 19-Sep-2026 day and re-running the steps described in §4.
+read-only from shoot A and re-running the steps described in §4.
 
 | Path | What it is |
 |---|---|
