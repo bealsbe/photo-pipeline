@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,6 +124,24 @@ pub enum StartError {
 /// on the processor, whatever the device (queries after a card failure).
 pub type EmbedderFactory = Box<dyn Fn(Device, bool) -> Result<Arc<dyn Embedder>, StartError> + Send>;
 
+/// The binary to start as the helper: the app itself.  `PP_HELPER_EXE`
+/// overrides it; a test binary (in `target/<profile>/deps/`) uses the app
+/// binary beside its folder, since a test harness doesn't know the flag.
+fn helper_exe() -> std::io::Result<PathBuf> {
+    if let Some(p) = std::env::var_os("PP_HELPER_EXE") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe = std::env::current_exe()?;
+    if exe.parent().and_then(|d| d.file_name()).is_some_and(|n| n == "deps") {
+        if let Some(app) = exe.parent().and_then(Path::parent).map(|d| d.join("photo-pipeline")) {
+            if app.is_file() {
+                return Ok(app);
+            }
+        }
+    }
+    Ok(exe)
+}
+
 /// A running helper process.
 struct Process {
     child: Child,
@@ -139,7 +157,7 @@ struct Process {
 impl Process {
     /// Start `photo-pipeline --ml-worker` and wait for its first reply.
     fn spawn(device: Device, text_only: bool) -> Result<(Process, Reply), StartError> {
-        let exe = std::env::current_exe().map_err(|e| StartError::Other(format!("can't find the app's own binary: {e}")))?;
+        let exe = helper_exe().map_err(|e| StartError::Other(format!("can't find the app's own binary: {e}")))?;
         let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
         let mut cmd = Command::new(&exe);
         cmd.arg(worker::FLAG).arg("--device").arg(if device == Device::Gpu { "gpu" } else { "cpu" });
@@ -149,8 +167,12 @@ impl Process {
         if let Some(models) = std::env::var_os("PP_MODEL_DIR") {
             cmd.arg("--models").arg(models);
         }
-        // libwebgpu_dawn.so sits beside the binary (ort's copy-dylibs).
-        let mut ld: Vec<PathBuf> = vec![dir];
+        // libwebgpu_dawn.so sits beside the binary (ort's copy-dylibs); a
+        // test binary lives one level down, in deps/.
+        let mut ld: Vec<PathBuf> = vec![dir.clone()];
+        if let Some(up) = dir.parent() {
+            ld.push(up.to_path_buf());
+        }
         if let Some(old) = std::env::var_os("LD_LIBRARY_PATH") {
             ld.extend(std::env::split_paths(&old));
         }

@@ -24,6 +24,8 @@
 
 pub mod engine;
 pub mod estimate;
+#[cfg(test)]
+mod eval;
 pub mod index;
 pub mod pass;
 pub mod query;

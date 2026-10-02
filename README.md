@@ -53,6 +53,13 @@ window rules that matched the app before need the new id.)
   file per analysed folder: sharpness, exposure and hashes per shot, and the
   duplicate check's digests, so analysing again reads only changed files.
   Safe to delete.
+- **Search index (Rust only):** `~/.cache/photo_pipeline/search/<library>/`:
+  one vector per shot of the library (f16) with its content key and
+  capture info, and the path map that tells which files are already
+  indexed.  Safe to delete (search then needs the library indexed again).
+- **Downloaded models (Rust only):** `~/.cache/photo_pipeline/models/`, the
+  search model's files, checked against pinned SHA-256s (see "Models").
+  Safe to delete (they are downloaded again when asked).
 - **Settings:** on first run, the Python app's QSettings
   (`~/.config/PhotoPipeline/PhotoPipeline.conf`) are imported.  After that,
   settings live in `~/.config/photo-pipeline/settings.json`.
@@ -84,6 +91,10 @@ src/model/             records, collection & pairing, filters, crops,
 src/ops/               file operations: export, sort, trash, edit copy,
                        crop export, and fsutil (the safe-write primitives)
 src/imaging/           JPEG/RAW decoding, thumbnails, viewer loader
+src/ml/                the search model: registry, download, the helper
+                       process (--ml-worker), its client, preview preparation
+src/search/            library search: the engine the app holds, the index
+                       files, the indexing pass, queries, estimates
 src/exif.rs            container metadata without decoding pixels
 native/                C shims over LibRaw and libjpeg-turbo
 vendor/LibRaw          LibRaw 0.22.2, the version rawpy uses
@@ -328,6 +339,55 @@ The first time a library is opened, or after F5, it's still read in full,
 about 3 s here.  Opening a working folder reads capture times with the same
 reader, so it gains the read-ahead fix too.
 
+## Library search
+
+Search finds photos in the library by what they show ("camera", "fireworks",
+"red car at night"): one vector per shot from a joint image–text model,
+compared with the words' vector, best first.  The design and the measurements
+behind it are in `docs/library-search-plan.md`; the backend lives in `src/ml`
+and `src/search`.
+
+- **The first index is asked for**, from the search page; after that each
+  export is added on its own (Preferences ▸ Search ▸ *Index new exports*).
+  Indexing reads each shot's embedded preview once (about 0.35 MB a shot),
+  newest days first, in the background, stepping back while the grid waits
+  for thumbnails; × stops it and what is done is kept.
+- **Where models run** is Preferences ▸ Search ▸ *Run models on*: the
+  graphics card (the default; WebGPU over Vulkan, used only after a
+  self-check against the processor on fixed inputs agrees) or the
+  processor.  If the card is chosen and fails (no usable card, the
+  self-check, a driver crash), indexing stops and a banner says what
+  failed.  **Nothing is ever moved to the processor by itself**; choose it
+  in Preferences if you want it.  Searching what is already indexed keeps
+  working either way: the text side always runs on the processor.
+- **The helper process.**  Models run in `photo-pipeline --ml-worker`, the
+  same binary started by the app, at low priority, exiting after a few idle
+  minutes.  A driver fault takes the helper down, not the app.
+- **Keys survive renames.**  A shot is identified by a digest of its file's
+  size and first 64 KB, so Sort, export and copies keep its vector; a
+  cropped JPG re-encoded by a Move export is indexed again.
+- **Nothing is written into the library**, no sidecar, no XMP; the index and
+  the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
+  and clears them).  Queries read no photos.
+
+### Models
+
+Downloaded once, after a dialog that names each file, its size and licence;
+every file is checked against its SHA-256 before use and deleted if it
+doesn't match (`src/ml/models.rs` holds the pins).  Phase 1 uses one model:
+
+| Model | Files | Size | Licence | Source |
+|---|---|---|---|---|
+| SigLIP 2 ViT-B/16, 256 px (Google) | image tower (fp32), text tower (fp16), tokenizer | 971 MB | Apache-2.0 | Hugging Face `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js export of `google/siglip2-base-patch16-256` |
+
+The image tower is the fp32 file on purpose: the fp16 export gives wrong
+answers on WebGPU (the self-check refuses it) and is ten times slower on the
+processor.  The fp16 text tower's answers equal fp32's.
+
+ONNX Runtime comes through the `ort` crate (pinned release candidate); the
+first build downloads it (~120 MB) into `~/.cache/ort.pyke.io` and puts
+`libwebgpu_dawn.so` beside the binary.
+
 ## File safety
 
 Every write goes to a temporary file (`<name>.~tmp`), is flushed to disk
@@ -437,6 +497,17 @@ These are deliberate:
   slow or remote folders.  `bench::bench_index` times the library calendar:
   a full read, a check, the saved index and opening days.  It never writes
   to the library; it saves the library's index cache, as the app would.
+- **Search:** the engine, the pass, the index files, downloads and the
+  device rule are unit-tested with a fake helper (no models, no photos).
+  Tests that need the models are ignored and take `PP_MODEL_DIR=<folder
+  with the SigLIP2 files>`; the phase 0 harness (`src/search/eval.rs`) also
+  takes `PP_EVAL_PREVIEWS` and `PP_EVAL_OUT`, and `PP_EVAL_LABELS` to score
+  hand labels.  `bench::bench_search_index` indexes a library through the
+  real helper (`PP_BENCH_LIBRARY`, `PP_MODEL_DIR`, `PP_BENCH_DEVICE`) into a
+  temporary folder and times queries.  `PP_ML_FAKE_CARD=no-card|self-check|crash`
+  makes the graphics card fail without touching a device, for UI tests of
+  the banner.  Never point these at the real cache: downloads go wherever
+  `HOME` says, so use a throwaway one.
 - **Scripted UI:** `PP_SCRIPT=<file>` drives the app with commands such as
   `open`, `key`, `click`, `dlg`, `calday` and `shot`; see
   `src/app/testing.rs` for the full list.  To run it headless:

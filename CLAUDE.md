@@ -53,6 +53,18 @@ cargo test --release  # unit tests; must pass with zero warnings
   Wayland logo.
 - **iced quirks:** within a layer, images draw above quads — overlays on
   images need `renderer.with_layer`; nested layers aren't clipped by parents.
+- **Library search (`src/ml`, `src/search`;** plan in
+  `docs/library-search-plan.md`): models run only in the helper process
+  (`--ml-worker`), never in the app; the device is the user's Preferences
+  choice and **a failing card stops the work and is reported, never
+  worked around** (no fallback to the CPU; `search::engine` tests hold
+  this).  Models are pinned by SHA-256 in `ml/models.rs`, downloaded to
+  the cache and checked before use; never commit a model file.  The index
+  lives in `~/.cache/photo_pipeline/search/`, never in the library, and
+  nothing is written to photos or sidecars.  Keys are content digests
+  (size + first 64 KB), not paths.  Tests needing models are ignored
+  behind `PP_MODEL_DIR`; nothing in `cargo test` may touch the real cache
+  or download anything (inject `Config { models_ready, index_dir }`).
 - **Placeholders, not this machine:** tests and docs use `192.0.2.x`
   (RFC 5737), `example.com`, `/mnt/nas`, `/home/me` and made-up file
   names — never paths, addresses, file names or terminal output copied from
@@ -75,3 +87,7 @@ cargo test --release  # unit tests; must pass with zero warnings
   cache left by an earlier run.
 - With a fake `HOME`, also set `CARGO_HOME=~/.cargo` for cargo, or it
   re-downloads crates.
+- Search needs the model files (971 MB) in the fake home's
+  `.cache/photo_pipeline/models/siglip2-b16-256/`, or `PP_MODEL_DIR`;
+  `libwebgpu_dawn.so` beside the binary must be on `LD_LIBRARY_PATH` to
+  run the helper by hand.  `PP_ML_FAKE_CARD` fakes a card failure.
