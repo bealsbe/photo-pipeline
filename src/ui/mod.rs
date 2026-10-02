@@ -3,6 +3,7 @@ pub mod calendar_stage;
 pub mod compare_stage;
 pub mod filmstrip;
 pub mod grid;
+pub mod hint_plate;
 pub mod icons;
 pub mod image_stage;
 pub mod list;

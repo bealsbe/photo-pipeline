@@ -1099,6 +1099,8 @@ fn paint_day(cal: &Calendar, r: &mut paint::Renderer, bounds: Rectangle, date: N
         scale_factor: sf,
         show_names: names,
         bursts: &[],
+        moments: &[],
+        hints: None,
         restack: None,
     };
     let open = |d: NaiveDate| if cal.day_collapsed.contains(&d) { 0.0 } else { 1.0 };
@@ -1122,6 +1124,8 @@ fn day_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         scale_factor: app.scale_factor,
         show_names: app.show_names,
         bursts: &[],
+        moments: &[],
+        hints: None,
         restack: None,
     };
     Grid::new(gd, cal.day_thumb, |e| Message::Calendar(Msg::Grid(e)))

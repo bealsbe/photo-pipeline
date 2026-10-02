@@ -24,6 +24,20 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 | 8 | Library calendar | **Neither:** no calendar hints, and no "already in library" warning in Export for now. | Drop the library-calendar phase and the Export check. |
 | 9 | Older bodies | **Best effort.**  Use the fallbacks (whole-second times plus file order, sharpest area instead of the focus point). | No dedicated tuning for the A7R II or the Canon T6. |
 
+## Decisions (2026-10-01)
+
+The user's answers to the questions the UI pass raised.
+
+| # | Question | Decision | What it changes |
+|---|---|---|---|
+| 1 | "Accidental" on night shoots: dim, soft photos of real subjects were called dark accidents | **Stricter threshold** (option c): keep the dark rule, but a frame must be darker and emptier to be an accident.  One that no longer qualifies is simply not accidental; it goes through the out-of-focus rule like any other frame, and isn't relabelled. | The dark rule: median ≤ 6 (was 12), sharpest area < 12 as before, and the whole frame < 1.25 (new).  See "The dark rule, tightened" below. |
+| 2 | Shortcuts for Analyse and the bulk actions | **None for now.** | Menus, the side rail and the Hints menu only. |
+| 3 | Where a burst's sheet opens | **On the frame you came from**, the sharpest marked with its ring. | As built. |
+| 4 | Hints in the list view | **Not now.** | As built (grid, quick look, viewer, sheet, compare). |
+| 5 | What the Duplicates filter shows | **Both copies**, the one kept and the ones suggested for pruning. | As built ("Possible problems" lists only the copies). |
+| 6 | "Almost black" on night shoots: sharp, underexposed shots called accidents | **Fix now**: an almost black frame must be empty too, by the dark rule's whole-frame measure. | The black rule: p99 ≤ 24 and the whole frame < 1.25.  See "The black rule needs nothing anywhere" below. |
+| 7 | "Almost one tone" on night shoots | **Later**: a study of its own. | Nothing yet; see "Open: one tone on night shoots" below. |
+
 ### Phase 1 as built (2026-09-30)
 
 - **Metadata** (`exif::read_shot`, cached in capture cache v2): SubSec,
@@ -65,7 +79,7 @@ plan, the change is noted here; the sections below are otherwise unchanged.
 ### Phase 2 engine as built (2026-09-30)
 
 The non-UI half of phase 2: measurements, decisions, cache and the pass.
-Nothing is drawn and no command exists yet (see "What the UI pass needs").
+Its interface came next: see "Phase 2 UI as built" below.
 
 **Modules.**
 
@@ -108,9 +122,13 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
   of the best frame of its press that looks like it (pHash ≤ 16) while
   `local` < 60.  Good night shots start at local 21; the 13:50
   minimum-focus-distance frames are 5–10.
-- *Accidental*: p99 ≤ 24 (black); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
-  local < 15 (one tone: wall, sleeve); median ≤ 12 with local < 12 (dark,
-  nothing sharp; good night shots keep 60+ at a median of 4); local < 5.
+- *Accidental*: p99 ≤ 24 with the whole frame < 1.25 (black, empty:
+  2026-10-01); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
+  local < 15 (one tone: wall, sleeve); median ≤ 6 with local < 12 and the
+  whole frame (`Features::global`) < 1.25 (dark, nothing sharp, nothing
+  anywhere: tightened 2026-10-01, see "The dark rule, tightened"); local
+  < 5 (featureless).  A dim frame (median ≤ 12, local < 12) that misses
+  the dark rule is a dim photo: not accidental, and not featureless.
 - *Moments*: consecutive presses (singles included) of one folder and
   camera merge when the next starts ≤ 2 s after the last ends and any of the
   last three / first three frames are ≤ 16 pHash bits apart.  On the
@@ -187,6 +205,153 @@ full-resolution AF crop (phase 4).  The pass doesn't follow the network
 banner's pause/resume itself.  Same-capture copies need both files
 measured, so a RAW-only copy of a paired RAW is found only when
 byte-identical.
+
+### Phase 2 UI as built (2026-10-01)
+
+The engine above now has its interface.  Everything in "What the UI pass
+needs to do" is built; where it differs, it says so here.
+
+| File | What it holds |
+|---|---|
+| `app/hints_ui.rs` | The filter bar's Hints control and its menu (the hints filter with counts; before an analysis, what it does and an estimate), the status bar's progress slot with Stop, the summary when a pass ends ("Show them"), the "analysing stopped" banner, the page for an empty hints filter. |
+| `ui/hint_plate.rs` | The plate (glyph, colour, place), the short phrase ("Sharpest of 8"), the reasons for tooltips and dialogs, by lookup only. |
+| `app/bulk.rs` | The four bulk actions, their confirmation dialog (counts, thumbnails, reasons; in the window asked from), applying them as one undo step. |
+| `app/undo.rs` | `undo::batch` and `Kind::Batch`: several fields' mark changes as one step. |
+| `model/hints.rs` | `Plate`, `HintFilter`, `moment_links`, `joined_moment`, `coverage`, `copies`. |
+| `model/duplicates.rs` | `why`: which test of `keeper` decided, in words. |
+
+**Choices made.**
+
+- *Analyse this folder* is `Cmd::Analyse` (Prune menu, side rail, the
+  Hints menu); no shortcut.  Opening a folder runs `start_cached`, so an
+  analysed folder shows its hints at once without reading a photo; the
+  status bar announces only passes the user started.
+- *Plates*: bottom-left of the photo, one per photo (accidental, then
+  soft, then a copy, then sharpest), a dark disc with a light outline
+  glyph: a crisp ring with a point (sharpest), the ring broken into six
+  dashes (soft), an empty frame in `WARN` (accidental), a frame over a
+  frame (copy).  Hidden on decided photos and on stacks.  The cell's
+  tooltip puts the reasons first.  A rank without a plate ("3rd sharpest
+  of 11") shows in quick look, the viewer and compare only.
+- *Moments* (decision 3): presses stay the strips; the presses of one
+  moment are spliced by a band a quarter of the photo's height across the
+  gutter between them (stubs where a row wraps).  Not drawn mid-slide.
+- *Sharpest*: the plate in the grid strip, a ring in the sheet's frame
+  number, and the stack's cover (already).  The sheet still opens on the
+  frame arrived at; C on it with nothing picked now compares the outlined
+  frame with the burst's two sharpest others (was: its neighbours).
+- *Hints filter*: Possible problems (soft, accidental or a suggested copy),
+  Out of focus (soft and not accidental), Accidental, Duplicates (every
+  file with a copy, kept ones too), Sharpest of each burst.  A pair passes
+  by either half.  Independent of All · To review · Marked; not saved.
+  View ▸ *Show only possible problems* toggles the first.
+- *Bulk actions*: scope is what the grid shows (`derived.visible`, frames
+  in stacks included); *Keep this* takes the burst as shown, or its whole
+  burst when the hints filter hides the rest.  The plan is checked again
+  when applied.  Decision 7b's rule picks the copy kept, and the dialog
+  says so.  *Keep this* clears a prune mark on the frame kept.
+- *Network trouble*: the banner names the share (or "the folder"), how
+  many shots were checked and kept, and offers Analyse again.  The pass
+  still doesn't pause for the network banner itself.
+
+**Checked** (scratch copies, a throwaway `HOME`, headless KWin): an
+event day (369 shots: 5 soft, 79 sharpest, 6 joined moments) and a night
+shoot exported to the library twice (6,598 shots, 13,196 files: 3,299
+copies, 428 soft, 218 accidental before the dark rule was tightened).  A
+pass on the night shoot stopped by renaming its folder mid-pass at 3,045
+shots; Analyse again measured the other 3,553 and took 3,045 from the
+cache.  Scrolling its grid end to end in 8 s, with hints and without:
+draw 0.07 / 0.08 ms a frame, the same frame gaps.  Opening it with its
+cache: two derives of ~20 ms on the UI thread (the engine's; see Known
+gaps).
+
+**Open.**  The derive at 13 k files costs 20–40 ms on the UI thread when
+results arrive; the pass still doesn't pause for the network banner.
+
+### The dark rule, tightened (2026-10-01)
+
+Decision 1 of 2026-10-01.  On the night shoot the old dark rule (median
+≤ 12, sharpest area < 12) called 150 files (75 captures) accidents.  By
+eye, every one is a dim, soft photo of a real subject on a dance floor:
+nothing like a lens cap.  The dark accidents to keep were found in two
+other shoots: a dark costume swept past the lens at close range, one in
+each.
+
+**What tells them apart.**  Median and sharpest area overlap: the
+accidents sit at medians 3 and 5 and sharpest areas 9.3 and 4.4, inside
+the dim photos' 2–11 and 2.6–11.7.  The whole frame's sharpness
+(`Features::global`) doesn't: a dim photo keeps detail somewhere (eyes,
+lights, the noise of a high ISO), 1.02–8.5 with a median of 1.95, while
+the accidents measure 0.99 and 1.11.  In 2,758 frames of eight other
+shoots, only accidents measure below 1.3.
+
+**The rule.**  A dark accident is now: median ≤ 6, sharpest area < 12,
+whole frame < 1.25.  A dim frame (median ≤ 12, sharpest area < 12) that
+misses it is not accidental and, explicitly, not "featureless" either (it
+would otherwise fall through to that rule).  Its softness is judged as
+for any frame: with nothing sharp (< 15) it shows as out of focus.
+
+| Shoot | Dark rule, files (captures) | All accidental, files (captures) |
+|---|---|---|
+| Night shoot, exported twice | 150 (75) → 4 (2) | 218 (109) → 72 (36) |
+| Event day | 0 → 0 | 0 → 0 |
+| Tuning sample S1 | 1 → 1 | 1 → 1 |
+| Tuning samples S2, S3 | 0 → 0, 1 → 1 | 0 → 0, 2 → 2 |
+| Four more library days | 0 → 0 | 2 → 2 |
+
+Both dark accidents stay flagged; no true accident was lost.  Two dim
+photos stay flagged (whole frame 1.19 and 1.20, medians 4 and 3).  The
+engine's soft count doesn't change (those frames were soft already); the
+hints now show them as out of focus rather than accidental (night shoot,
+Out of focus: 428 → 574 files).
+
+### The black rule needs nothing anywhere (2026-10-01)
+
+Decision 6 of 2026-10-01.  The black rule (99th percentile ≤ 24) also
+caught 4 captures (8 files) on the night shoot that are sharp,
+underexposed shots of a DJ booth: a whole-frame sharpness of 5.94–9.98
+(sharpest area 88–145), between frames of the same scene with its lights
+blown.  The black frames themselves (a lens cap, twice on the night
+shoot and once elsewhere) measure 0.13–0.15.
+
+**The rule.**  Almost black is now p99 ≤ 24 *and* the whole frame below
+1.25: the same "nothing anywhere" cut-off as the dark rule, one constant
+(`EMPTY_GLOBAL`).  It sits 8× above the black frames and 4.75× below the
+nearest DJ-booth shot, near the geometric middle of the gap (0.94), and
+no accident from either rule measures between 1.11 and 1.25.
+
+**Each frame the black rule caught, after:**
+
+| Frame | Whole frame | Sharpest area | After | Why that's right |
+|---|---|---|---|---|
+| Lens cap ×2 (night) | 0.13, 0.15 | 0.3 | black | Empty: a true accident. |
+| Lens cap (elsewhere) | 0.13 | 0.4 | black | The same. |
+| DJ booth ×4 (night) | 5.94–9.98 | 88–145 | not accidental | A real, sharp photo; it isn't soft either. |
+| Dark cloth up close (night) | 2.59 | 5.2 | one tone | Near black with a faint weave all over, right after a run of DJ shots: an accident.  Not empty, so the black rule lets it go, and the next rule (span 12 ≤ 40, nothing sharp) catches it. |
+
+| Shoot | Black rule, files (captures) | All accidental, files (captures) |
+|---|---|---|
+| Night shoot, exported twice | 14 (7) → 4 (2) | 72 (36) → 64 (32) |
+| Event day | 0 → 0 | 0 → 0 |
+| Tuning samples S1, S2, S3 | 0 → 0 | 1 → 1, 0 → 0, 2 → 2 |
+| Four more library days | 1 → 1 | 2 → 2 |
+
+No true accident was lost (the cloth changes label, not status).  Before
+both changes the night shoot had 218 accidental files (109 captures);
+now 64 (32).
+
+### Open: one tone on night shoots (2026-10-01)
+
+Decision 7 of 2026-10-01: a later study.  The one-tone rule (p99 − p1 ≤ 40
+with a sharpest area below 15) calls all 21 of its captures on the night
+shoot accidents (42 files), and every one is a dim photo of dancers: a
+luma span of 27–40 at medians 4–10, sharpest areas 4.9–14.2.  The
+whole-frame test that settled the black and dark rules doesn't separate
+them: they measure 1.17–2.73, and the one-tone accident found elsewhere (a
+wall) 1.56, and the dark cloth above, now one tone too, 2.59.  *Nothing in
+focus anywhere* has 2 dim subjects among its 6 night captures as well.
+Until then, these show as accidental in the hints, and *Prune accidental
+frames…* lists them with their thumbnails before marking anything.
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling

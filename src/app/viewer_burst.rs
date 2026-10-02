@@ -168,9 +168,11 @@ pub fn sheet_move(run: &Range<usize>, len: usize, cols: usize, at: usize, mv: Mo
 }
 
 /// The frames to compare from the sheet: the picked ones (with the outlined
-/// one if a single other is picked), else the outlined frame and its
-/// neighbours.  `Err` holds how many are picked when that is too many.
-pub fn compare_set(frames: &[RecordId], outline: usize, picked: &HashSet<RecordId>) -> Result<(Vec<RecordId>, usize), usize> {
+/// one if a single other is picked), else the outlined frame and, once the
+/// burst is analysed, its sharpest others (`ranked`: the frames by
+/// sharpness, best first), else its neighbours; in shooting order.  `Err`
+/// holds how many are picked when that is too many.
+pub fn compare_set(frames: &[RecordId], outline: usize, picked: &HashSet<RecordId>, ranked: &[RecordId]) -> Result<(Vec<RecordId>, usize), usize> {
     let out = frames.get(outline).copied();
     let chosen: Vec<RecordId> = frames.iter().copied().filter(|id| picked.contains(id) || (picked.len() == 1 && Some(*id) == out)).collect();
     if chosen.len() > MAX_PANES {
@@ -181,6 +183,14 @@ pub fn compare_set(frames: &[RecordId], outline: usize, picked: &HashSet<RecordI
         return Ok((chosen, focus));
     }
     let n = NEIGHBOURHOOD.min(frames.len());
+    if let Some(o) = out {
+        let best: Vec<RecordId> = ranked.iter().copied().filter(|&id| id != o && frames.contains(&id)).take(n - 1).collect();
+        if best.len() + 1 == n {
+            let chosen: Vec<RecordId> = frames.iter().copied().filter(|id| *id == o || best.contains(id)).collect();
+            let focus = chosen.iter().position(|&x| x == o).unwrap_or(0);
+            return Ok((chosen, focus));
+        }
+    }
     let start = outline.saturating_sub(1).min(frames.len() - n);
     Ok((frames[start..start + n].to_vec(), outline - start))
 }
@@ -289,6 +299,7 @@ pub fn sheet(app: &App, v: &Viewer) -> Option<Sheet> {
                 picked: v.sheet.picked.contains(&id),
                 wanted,
                 thumb,
+                hint: app.quality.hints.plate(id).filter(|_| r.is_some_and(|r| !r.is_pruned && !r.is_marked)),
             }
         })
         .collect();
@@ -474,7 +485,10 @@ pub fn compare(app: &mut App) -> Task<Message> {
     let Some(v) = app.viewer.as_ref() else { return Task::none() };
     let Some(run) = run(v) else { return Task::none() };
     let frames = v.items[run.clone()].to_vec();
-    match compare_set(&frames, v.index - run.start, &v.sheet.picked) {
+    // Measured frames by sharpness (none before an analysis).
+    let ranked: Vec<RecordId> = frames.iter().copied().filter(|&id| app.quality.hints.get(id).is_some()).collect();
+    let ranked = app.quality.hints.ranked(&ranked);
+    match compare_set(&frames, v.index - run.start, &v.sheet.picked, &ranked) {
         Ok((shown, focus)) => super::compare::open_frames(app, frames, shown, focus),
         Err(n) => {
             if let Some(v) = app.viewer.as_mut() {
@@ -726,20 +740,37 @@ mod tests {
     fn compare_takes_the_picks_or_the_neighbourhood() {
         let frames: Vec<RecordId> = (1..=8).collect();
         let none = HashSet::new();
-        // Nothing picked: the outlined frame between its neighbours.
-        assert_eq!(compare_set(&frames, 4, &none), Ok((vec![4, 5, 6], 1)));
-        assert_eq!(compare_set(&frames, 0, &none), Ok((vec![1, 2, 3], 0)));
-        assert_eq!(compare_set(&frames, 7, &none), Ok((vec![6, 7, 8], 2)));
-        assert_eq!(compare_set(&frames[..2], 1, &none), Ok((vec![1, 2], 1)));
+        // Nothing picked, not analysed: the outlined frame between its
+        // neighbours.
+        assert_eq!(compare_set(&frames, 4, &none, &[]), Ok((vec![4, 5, 6], 1)));
+        assert_eq!(compare_set(&frames, 0, &none, &[]), Ok((vec![1, 2, 3], 0)));
+        assert_eq!(compare_set(&frames, 7, &none, &[]), Ok((vec![6, 7, 8], 2)));
+        assert_eq!(compare_set(&frames[..2], 1, &none, &[]), Ok((vec![1, 2], 1)));
         // Picks, in shooting order, the outline's pane focused if picked.
         let picked: HashSet<RecordId> = [7, 2, 5].into_iter().collect();
-        assert_eq!(compare_set(&frames, 4, &picked), Ok((vec![2, 5, 7], 1)));
-        assert_eq!(compare_set(&frames, 0, &picked), Ok((vec![2, 5, 7], 0)));
+        assert_eq!(compare_set(&frames, 4, &picked, &[]), Ok((vec![2, 5, 7], 1)));
+        assert_eq!(compare_set(&frames, 0, &picked, &[8, 7]), Ok((vec![2, 5, 7], 0)), "picks win over the sharpest");
         // One pick: it and the outlined frame.
         let one: HashSet<RecordId> = [3].into_iter().collect();
-        assert_eq!(compare_set(&frames, 6, &one), Ok((vec![3, 7], 1)));
+        assert_eq!(compare_set(&frames, 6, &one, &[]), Ok((vec![3, 7], 1)));
         // Too many.
         let lots: HashSet<RecordId> = (1..=6).collect();
-        assert_eq!(compare_set(&frames, 0, &lots), Err(6));
+        assert_eq!(compare_set(&frames, 0, &lots, &[]), Err(6));
+    }
+
+    #[test]
+    fn once_analysed_compare_suggests_the_sharpest_frames() {
+        let frames: Vec<RecordId> = (1..=8).collect();
+        let none = HashSet::new();
+        // Sharpest first: 6, 2, 7, …  The outlined frame 4 with the two
+        // sharpest, in shooting order, the outline focused.
+        let ranked = [6, 2, 7, 1, 3, 4, 5, 8];
+        assert_eq!(compare_set(&frames, 3, &none, &ranked), Ok((vec![2, 4, 6], 1)));
+        // On the sharpest itself: it and the next two.
+        assert_eq!(compare_set(&frames, 5, &none, &ranked), Ok((vec![2, 6, 7], 1)));
+        // Too few frames measured: the neighbours, as before.
+        assert_eq!(compare_set(&frames, 3, &none, &[6]), Ok((vec![3, 4, 5], 1)));
+        // Ranked frames from outside the burst don't count.
+        assert_eq!(compare_set(&frames[..3], 0, &none, &[9, 3, 2]), Ok((vec![1, 2, 3], 0)));
     }
 }

@@ -22,6 +22,12 @@
 //! the frames under it showing below; its tab adds how many of them are
 //! kept and pruned.  Clicking a tab stacks or opens the burst, and the
 //! tiles slide to their new places.
+//!
+//! Once the folder is analysed, a photo with a hint wears one small plate
+//! on its lower left corner (`hint_plate`), and the bursts of one moment
+//! (presses of the same scene) are spliced together: a narrow band of
+//! strip across the gutter between them, so the strips still say where
+//! each press starts.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -130,6 +136,11 @@ pub struct GridData<'a> {
     pub show_names: bool,
     /// Burst strips and stacks, per section and tile (empty: none).
     pub bursts: &'a [Vec<Option<RunMark>>],
+    /// Per section and tile: spliced to the tile after it (the next press
+    /// of the same moment).  Empty: none.
+    pub moments: &'a [Vec<bool>],
+    /// The analysis' hints (plates and tooltips), once there are any.
+    pub hints: Option<&'a crate::model::hints::Hints>,
     /// The grid before bursts were last stacked or opened, to animate from.
     pub restack: Option<Restack<'a>>,
 }
@@ -193,6 +204,22 @@ fn strip_piece(cell: Rectangle, run: RunMark, col: usize, cols: usize) -> (Recta
     let left = if run.first { t::R_CELL } else { 0.0 };
     let right = if run.last { t::R_CELL } else { 0.0 };
     (rect(mount.x, mount.y, width, mount.height), left, right)
+}
+
+/// The splice from a tile (`cell`) to the next press of its moment: a band
+/// across the gutter after it, centred on the photo, a quarter of its
+/// height.  Where the row wraps (`wrap`: the x of the row's first column),
+/// a stub out into the gutter, and one in from the margin before the next
+/// row's first tile.
+fn splice(cell: Rectangle, ts: f32, wrap: Option<f32>) -> Vec<Rectangle> {
+    let mount = mount_rect(cell);
+    let h = (ts * 0.25).clamp(12.0, 44.0).round();
+    let y = (mount.y + PAD + ts / 2.0 - h / 2.0).round();
+    let right = mount.x + mount.width;
+    match wrap {
+        None => vec![rect(right, y, GAP, h)],
+        Some(x0) => vec![rect(right, y, GAP / 2.0, h), rect(x0 - GAP / 2.0, y + cell.height, GAP / 2.0, h)],
+    }
 }
 
 /// The count on a burst's tab: "11", or "5 of 11" when a filter hides
@@ -938,7 +965,17 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                 Hover::Cell(id) => {
                     if let Some(r) = self.data.coll.get(id) {
                         let pair = self.data.coll.find_pair(id).and_then(|p| self.data.coll.get(p));
-                        draw_tooltip(renderer, bounds, st.cursor, &tooltip_text(r, pair));
+                        let mut tip = tooltip_text(r, pair);
+                        // What the analysis says comes first: it is why a
+                        // plate is there.
+                        let stacked = run_of(&self.data, id).is_some_and(|m| m.stacked);
+                        if let Some(h) = self.data.hints.filter(|_| !stacked) {
+                            let lines = super::hint_plate::explain(h, self.data.coll, id);
+                            if !lines.is_empty() {
+                                tip = format!("{}\n\n{tip}", lines.join("\n"));
+                            }
+                        }
+                        draw_tooltip(renderer, bounds, st.cursor, &tip);
                     }
                 }
                 Hover::Tab(id) => {
@@ -1634,6 +1671,23 @@ fn paint_rows(r: &mut Renderer, data: &GridData<'_>, ps: &PaintState<'_>, m: &Me
                 }
             }
         }
+        // Presses of one moment, spliced across the gutters between them
+        // (once the tiles have landed, as the strips).
+        let links = data.moments.get(s).map(Vec::as_slice).unwrap_or(&[]);
+        if joined && !links.is_empty() {
+            for i in first..last.min(links.len()) {
+                if !links[i] {
+                    continue;
+                }
+                let (here, _) = place(i, sec.ids[i], None);
+                let cell = here[0].0;
+                let col = i % m.cols;
+                let wraps = col + 1 == m.cols;
+                for band in splice(cell, m.ts, wraps.then(|| cell.x - col as f32 * m.cell.width)) {
+                    paint::fill(r, band, paint::with_alpha(t::PHOTO_TRAY, op));
+                }
+            }
+        }
         for i in first..last {
             let id = sec.ids[i];
             let Some(rec) = data.coll.get(id) else { continue };
@@ -1655,6 +1709,16 @@ fn paint_rows(r: &mut Renderer, data: &GridData<'_>, ps: &PaintState<'_>, m: &Me
     r.with_layer(clip, |r| {
         for d in &drawn {
             paint_cell_marks(r, d.id, d.rec, data, m.ts, m.label_h, d.thumb, d.image, op * d.alpha, clip);
+            // A hint until the photo is decided; a stack shows none (its
+            // cover is its sharpest frame already).
+            let decided = d.rec.is_pruned || d.rec.is_marked;
+            let stacked = d.run.is_some_and(|r| r.stacked);
+            if let Some(plate) = data.hints.filter(|_| !decided && !stacked).and_then(|h| h.plate(d.id)) {
+                // On the photo, once it shows (not on a placeholder).
+                if data.thumbs.get(&d.rec.path).is_some_and(|th| th.ok) {
+                    super::hint_plate::paint_plate(r, d.image, m.ts, plate, op * d.alpha);
+                }
+            }
         }
     });
     // Burst tabs, over the selection outline.  They rise into the gutter
@@ -2210,6 +2274,32 @@ mod tests {
     }
 
     #[test]
+    fn a_moment_splice_crosses_the_gutter_at_the_photos_middle() {
+        let ids: Vec<RecordId> = (0..20).collect();
+        let sections = day(&ids, ids.len());
+        for ts in [MIN_SIZE, 180.0, MAX_SIZE] {
+            let m = Metrics::new(&sections, 1200.0, ts, LABEL_H, &|_| 1.0);
+            // Within a row: the whole gutter, from one mount to the next.
+            let (a, b) = (mount_rect(m.cell_rect(0, 0)), mount_rect(m.cell_rect(0, 1)));
+            let band = splice(m.cell_rect(0, 0), ts, None);
+            assert_eq!(band.len(), 1);
+            assert_eq!((band[0].x, band[0].x + band[0].width), (a.x + a.width, b.x), "ts {ts}");
+            let photo_mid = a.y + PAD + ts / 2.0;
+            assert!((band[0].center_y() - photo_mid).abs() <= 1.0 && band[0].height <= ts / 2.0, "ts {ts}: {band:?}");
+            // At a row's end: a stub into the gutter, and one before the
+            // next row's first mount, inside the margin.
+            let last = m.cols - 1;
+            let cell = m.cell_rect(0, last);
+            let stubs = splice(cell, ts, Some(cell.x - last as f32 * m.cell.width));
+            let next = mount_rect(m.cell_rect(0, m.cols));
+            assert_eq!(stubs.len(), 2);
+            assert!(stubs[0].x >= mount_rect(cell).x + mount_rect(cell).width && stubs[0].x + stubs[0].width <= cell.x + cell.width);
+            assert_eq!(stubs[1].x + stubs[1].width, next.x);
+            assert!(stubs[1].x >= 0.0 && (stubs[1].center_y() - (next.y + PAD + ts / 2.0)).abs() <= 1.0);
+        }
+    }
+
+    #[test]
     fn strips_never_leave_the_columns() {
         // Singles, a burst wrapping rows, 2-frame bursts side by side, a
         // very long burst, a stack: at many widths, sizes, names on and off.
@@ -2265,6 +2355,8 @@ mod tests {
             scale_factor: 1.0,
             show_names: true,
             bursts: &bursts,
+            moments: &[],
+            hints: None,
             restack: None,
         };
         // The header counts photos, frames in stacks too.
@@ -2341,6 +2433,8 @@ mod tests {
             scale_factor: 1.0,
             show_names: true,
             bursts: &after_runs,
+            moments: &[],
+            hints: None,
             restack: None,
         };
         let open = |_: NaiveDate| 1.0;

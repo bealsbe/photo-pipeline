@@ -44,17 +44,38 @@ pub const MOMENT_GAP_MS: i64 = 2000;
 /// three of the next) look alike: pHash within this.
 pub const MOMENT_HASH: u32 = 16;
 
-/// Accidental frames: almost black (a lens cap, a pocket) …
+/// Accidental frames: almost black (a lens cap, a pocket) with nothing
+/// anywhere: the 99th percentile at most this and the whole frame
+/// ([`Features::global`]) below [`EMPTY_GLOBAL`].  Black frames measure
+/// 0.13–0.15; a night shoot's sharp, underexposed shots of a DJ booth,
+/// which the percentile alone called black, 5.9–10 …
 pub const BLACK_P99: u8 = 24;
 /// … almost white (pointed at a light) …
 pub const BLANK_P1: u8 = 235;
 /// … nearly one tone (the 1st and 99th percentiles this close: a wall, a
 /// sleeve, the inside of a bag) with nothing sharp …
 pub const FLAT_SPAN: u8 = 40;
-/// … dark and with nothing sharp in it (night shots that worked keep
-/// detail: 60+ even at a median luma of 4) …
-pub const DARK_P50: u8 = 12;
+/// … very dark, with nothing sharp in it and nothing anywhere: the median
+/// luma at most [`DARK_P50`], the sharpest area below [`DARK_LOCAL`] and
+/// the whole frame ([`Features::global`]) below [`EMPTY_GLOBAL`] …
+///
+/// A dim frame (median at most [`DIM_P50`]) with nothing sharp that
+/// misses either of the other two is a dim photo, not an accident: it is
+/// judged for focus like any other frame ([`SOFT_LOCAL`]), and not as
+/// featureless below.  Set on a night shoot (3,299 captures): of 75 dim
+/// frames of real subjects the old rule (median 12, sharpest area 12)
+/// called accidents, 73 aren't now (their whole frame measures 1.02–8.5,
+/// a median of 1.95; the two left are at 1.19 and 1.20).  The dark
+/// accidents found (a costume swept past the lens, two shoots) measure
+/// 0.99 and 1.11 at medians of 5 and 3, and in 2,758 frames of eight
+/// other shoots only accidents measure below 1.3.
+pub const DARK_P50: u8 = 6;
 pub const DARK_LOCAL: f32 = 12.0;
+pub const DIM_P50: u8 = 12;
+/// "Nothing anywhere" for the black and the dark rules: the whole frame's
+/// sharpness below this.  Accidents measure 0.13–1.11; the real photos
+/// those rules used to catch, 1.02 and up (dim) and 5.9 and up (black).
+pub const EMPTY_GLOBAL: f32 = 1.25;
 /// … or nothing sharp anywhere at any exposure (a blurred wall).
 pub const FEATURELESS_LOCAL: f32 = 5.0;
 
@@ -122,6 +143,58 @@ impl ShotHint {
     pub fn problem(&self) -> bool {
         self.soft.is_some() || self.accidental.is_some()
     }
+
+    /// Looks out of focus and isn't an accident (an accidental frame is
+    /// soft too, but is shown and counted as accidental).
+    pub fn soft_only(&self) -> bool {
+        self.soft.is_some() && self.accidental.is_none()
+    }
+}
+
+/// The one hint a photo's plate shows in the grid (the most pressing, when
+/// several apply).  Suggestions only: the plate goes once the photo is
+/// pruned or marked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Plate {
+    Accidental,
+    Soft,
+    /// A copy the duplicate rule suggests pruning.
+    Copy,
+    /// The sharpest frame of its burst.
+    Sharpest,
+}
+
+/// The filter bar's hints choice: only photos with this hint.  A RAW+JPG
+/// pair passes when either half does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HintFilter {
+    /// Looks out of focus, accidental, or a copy suggested for pruning.
+    Problems,
+    Soft,
+    Accidental,
+    /// Every file with a copy: the one to keep and the copies.
+    Duplicates,
+    Sharpest,
+}
+
+impl HintFilter {
+    pub const ALL: [HintFilter; 5] = [HintFilter::Problems, HintFilter::Soft, HintFilter::Accidental, HintFilter::Duplicates, HintFilter::Sharpest];
+
+    pub fn index(self) -> usize {
+        HintFilter::ALL.iter().position(|&f| f == self).unwrap_or(0)
+    }
+
+    /// Does `id` (either half of a pair) have this hint?
+    pub fn accepts(self, h: &Hints, id: RecordId) -> bool {
+        let hint = h.get(id);
+        match self {
+            HintFilter::Problems => hint.is_some_and(ShotHint::problem) || h.suggested_copy(id),
+            HintFilter::Soft => hint.is_some_and(ShotHint::soft_only),
+            HintFilter::Accidental => hint.is_some_and(|x| x.accidental.is_some()),
+            HintFilter::Duplicates => h.duplicate_of(id).is_some(),
+            HintFilter::Sharpest => hint.is_some_and(|x| x.sharpest),
+        }
+    }
 }
 
 pub type MomentId = u32;
@@ -146,7 +219,11 @@ pub struct Summary {
     pub shots: usize,
     pub measured: usize,
     pub soft: usize,
+    /// Soft and not accidental (what the hints count as out of focus).
+    pub soft_only: usize,
     pub accidental: usize,
+    /// Bursts whose sharpest frame is known.
+    pub sharpest: usize,
     pub moments: usize,
     /// Moments of more than one press.
     pub merged: usize,
@@ -381,13 +458,52 @@ impl Hints {
         (g != NONE).then(|| (&self.duplicates[g as usize], prune))
     }
 
+    /// `id` is a copy the duplicate rule suggests pruning.
+    pub fn suggested_copy(&self, id: RecordId) -> bool {
+        self.duplicate_of(id).is_some_and(|(_, prune)| prune)
+    }
+
+    /// What `id`'s plate shows: accidental first, then soft, a copy, the
+    /// sharpest of its burst.  The caller hides it on decided photos.
+    pub fn plate(&self, id: RecordId) -> Option<Plate> {
+        let h = self.get(id);
+        if h.is_some_and(|h| h.accidental.is_some()) {
+            Some(Plate::Accidental)
+        } else if h.is_some_and(|h| h.soft.is_some()) {
+            Some(Plate::Soft)
+        } else if self.suggested_copy(id) {
+            Some(Plate::Copy)
+        } else if h.is_some_and(|h| h.sharpest) {
+            Some(Plate::Sharpest)
+        } else {
+            None
+        }
+    }
+
+    /// `id`'s moment, when it joins presses of one scene (two or more).
+    pub fn joined_moment(&self, id: RecordId) -> Option<MomentId> {
+        self.moment_of(id).filter(|&m| self.moments.get(m as usize).is_some_and(|m| m.presses.len() > 1))
+    }
+
+    /// Shots whose own file is a copy suggested for pruning.
+    pub fn copies(&self) -> usize {
+        self.reps.iter().filter(|&&r| self.suggested_copy(r)).count()
+    }
+
+    /// Shots measured and shots in all (how far an analysis got).
+    pub fn coverage(&self) -> (usize, usize) {
+        (self.hints.iter().flatten().count(), self.reps.len())
+    }
+
     pub fn summary(&self) -> Summary {
         let measured: Vec<&ShotHint> = self.hints.iter().flatten().collect();
         Summary {
             shots: self.reps.len(),
             measured: measured.len(),
             soft: measured.iter().filter(|h| h.soft.is_some()).count(),
+            soft_only: measured.iter().filter(|h| h.soft_only()).count(),
             accidental: measured.iter().filter(|h| h.accidental.is_some()).count(),
+            sharpest: measured.iter().filter(|h| h.sharpest).count(),
             moments: self.moments.len(),
             merged: self.moments.iter().filter(|m| m.presses.len() > 1).count(),
             duplicate_groups: self.duplicates.len(),
@@ -463,6 +579,24 @@ impl Hints {
     }
 }
 
+/// Where the grid splices one press to the next of the same moment: for
+/// each tile, whether it joins the tile after it.  `moment` gives a tile's
+/// moment when that joins several presses ([`Hints::joined_moment`]);
+/// frames of one strip are joined already and aren't spliced.
+pub fn moment_links(tiles: &[RecordId], runs: &[Option<super::bursts::RunMark>], moment: impl Fn(RecordId) -> Option<MomentId>) -> Vec<bool> {
+    let ms: Vec<Option<MomentId>> = tiles.iter().map(|&id| moment(id)).collect();
+    (0..tiles.len())
+        .map(|i| {
+            let Some(next) = ms.get(i + 1) else { return false };
+            let same_strip = match (runs.get(i).copied().flatten(), runs.get(i + 1).copied().flatten()) {
+                (Some(a), Some(b)) => a.burst == b.burst && !a.last,
+                _ => false,
+            };
+            ms[i].is_some() && ms[i] == *next && !same_strip
+        })
+        .collect()
+}
+
 /// Rank one press's frames, mark its sharpest, and flag frames far softer
 /// than the best frame of the press that looks like them.
 fn rank_press(hints: &mut [Option<ShotHint>], shots: &[Shot<'_>], press: &[usize], order: &dyn Fn(&[Option<ShotHint>], usize, usize) -> std::cmp::Ordering) {
@@ -503,14 +637,16 @@ fn to_review(coll: &Collection, id: RecordId) -> bool {
 
 fn accident(f: &Features) -> Option<Accident> {
     let local = f.local();
-    if f.p99() <= BLACK_P99 {
+    if f.p99() <= BLACK_P99 && f.global < EMPTY_GLOBAL {
         Some(Accident::Black)
     } else if f.p1() >= BLANK_P1 {
         Some(Accident::Blank)
     } else if f.p99().saturating_sub(f.p1()) <= FLAT_SPAN && local < SOFT_LOCAL {
         Some(Accident::Flat)
-    } else if f.p50() <= DARK_P50 && local < DARK_LOCAL {
-        Some(Accident::Dark)
+    } else if f.p50() <= DIM_P50 && local < DARK_LOCAL {
+        // Dim with nothing sharp: an accident only when darker still and
+        // empty all over; else a dim photo (perhaps soft, never featureless).
+        (f.p50() <= DARK_P50 && f.global < EMPTY_GLOBAL).then_some(Accident::Dark)
     } else if local < FEATURELESS_LOCAL {
         Some(Accident::Featureless)
     } else {
@@ -757,10 +893,74 @@ mod tests {
     }
 
     #[test]
+    fn almost_black_is_an_accident_only_with_nothing_anywhere() {
+        // A lens cap: under the black percentile and empty all over.
+        let cap = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
+        assert!(cap.p99() <= BLACK_P99 && cap.global < EMPTY_GLOBAL, "{} {}", cap.p99(), cap.global);
+        assert_eq!(accident(&cap), Some(Accident::Black));
+        // A sharp shot underexposed as far (a stage before its lights
+        // come up): just as black by its percentile, but full of edges.
+        let stage = feats(&texture(192, 128, 3).darker(0.08));
+        assert!(stage.p99() <= BLACK_P99 && stage.global >= EMPTY_GLOBAL, "{} {}", stage.p99(), stage.global);
+        assert_eq!(accident(&stage), None);
+        // Near black and soft, with a faint weave all over (a dark cloth
+        // up close): not empty, so not "almost black", but one tone with
+        // nothing sharp, which is still an accident.
+        let cloth = feats(&Img::from_fn(192, 128, |x, y| 3.0 + ((x + 2 * y) % 9 < 3) as u8 as f32 * 2.0).blur(1));
+        assert!(cloth.p99() <= BLACK_P99 && cloth.global >= EMPTY_GLOBAL && cloth.local() < SOFT_LOCAL, "{} {} {}", cloth.p99(), cloth.global, cloth.local());
+        assert_eq!(accident(&cloth), Some(Accident::Flat));
+    }
+
+    /// A dim scene, `dark` of full exposure, with a brighter subject in the
+    /// middle at `subject`, all blurred by `blur`, plus sensor noise.
+    fn dim(dark: f32, subject: f32, blur: usize, noise: f32) -> Features {
+        let mut img = texture(192, 128, 3).blur(blur).darker(dark);
+        img.paste(&texture(192, 128, 5).darker(subject), 70, 30, 130, 100);
+        feats(&img.blur(blur).noisy(noise, 9))
+    }
+
+    #[test]
+    fn a_dim_photo_of_a_real_subject_is_soft_not_an_accident() {
+        // The old rule (median 12, sharpest area 12) called all three dark
+        // accidents; a night shoot's dim, soft photos of people looked so.
+        let old = |f: &Features| f.p50() <= DIM_P50 && f.local() < DARK_LOCAL;
+        // Darker than DARK_P50, but the frame holds detail all over (the
+        // noise of a high ISO, edges): a dim photo.
+        let noisy = dim(0.04, 0.5, 6, 0.3);
+        assert!(old(&noisy) && noisy.p50() <= DARK_P50 && noisy.global >= EMPTY_GLOBAL, "{} {} {}", noisy.p50(), noisy.local(), noisy.global);
+        assert_eq!(accident(&noisy), None);
+        // Empty all over and with nothing sharp, but not that dark: a dim
+        // photo too, and not "featureless" either.
+        let murky = dim(0.06, 0.5, 12, 0.0);
+        assert!(old(&murky) && murky.p50() > DARK_P50 && murky.global < EMPTY_GLOBAL && murky.local() < FEATURELESS_LOCAL);
+        assert_eq!(accident(&murky), None);
+        // Darker still and empty all over: an accident.
+        let swept = dim(0.03, 0.5, 12, 0.0);
+        assert!(swept.p50() <= DARK_P50 && swept.global < EMPTY_GLOBAL);
+        assert_eq!(accident(&swept), Some(Accident::Dark));
+        // The two dim photos are judged for focus like any frame: nothing
+        // sharp, so out of focus (and not counted as accidental).
+        let s = Shoot::new(vec![
+            (rec("/s/noisy.JPG", 0, Some(0)), Some(noisy)),
+            (rec("/s/murky.JPG", 10_000, Some(0)), Some(murky)),
+            (rec("/s/swept.JPG", 20_000, Some(0)), Some(swept)),
+        ]);
+        let h = s.hints(&[]);
+        for n in ["noisy", "murky"] {
+            let x = h.get(s.id(&format!("/s/{n}.JPG"))).unwrap();
+            assert_eq!((x.accidental, x.soft), (None, Some(Soft::Absolute)), "{n}");
+            assert_eq!(h.plate(s.id(&format!("/s/{n}.JPG"))), Some(Plate::Soft));
+        }
+        assert_eq!(h.plate(s.id("/s/swept.JPG")), Some(Plate::Accidental));
+        assert_eq!((h.summary().accidental, h.summary().soft_only), (1, 2));
+    }
+
+    #[test]
     fn nothing_sharp_is_soft_anywhere_and_dark_featureless_frames_are_accidents() {
         let soft_single = feats(&texture(192, 128, 3).blur(9));
         assert!(soft_single.local() < SOFT_LOCAL);
-        let black = feats(&Img::from_fn(192, 128, |x, y| ((x + y) % 7) as f32));
+        // A lens cap: near black, only the sensor's noise in it.
+        let black = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
         let white = feats(&Img::from_fn(192, 128, |x, _| 245.0 + (x % 5) as f32));
         // A dim, even wall: a narrow span of tones, soft.
         let wall = feats(&texture(192, 128, 5).blur(8).darker(0.15));
@@ -1021,5 +1221,87 @@ mod tests {
         assert_eq!(h.moments().len(), 0);
         assert_eq!(h.get(a2), None);
         assert!(!h.get(s.id("/s/JPG/a1.JPG")).unwrap().sharpest);
+    }
+
+    #[test]
+    fn one_plate_per_photo_the_most_pressing_first() {
+        // A press with a sharp frame, a soft one and a black one; a single
+        // shot with an identical copy.
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 6))),
+            (rec("/s/a3.JPG", 200, Some(3)), Some(feats(&Img::from_fn(192, 128, |_, _| 3.0)))),
+            (rec("/s/a4.JPG", 300, Some(4)), Some(scene(1, 1))),
+            (rec("/s/b.JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/b copy.JPG", 9000, Some(0)), Some(scene(2, 0))),
+        ]);
+        let h = s.hints(&[vec![PathBuf::from("/s/b.JPG"), PathBuf::from("/s/b copy.JPG")]]);
+        let plate = |n: &str| h.plate(s.id(&format!("/s/{n}.JPG")));
+        assert_eq!(plate("a1"), Some(Plate::Sharpest));
+        assert_eq!(plate("a2"), Some(Plate::Soft));
+        // Black is soft too, but shows (and counts) as accidental.
+        assert_eq!(plate("a3"), Some(Plate::Accidental));
+        assert!(h.get(s.id("/s/a3.JPG")).unwrap().soft.is_some() && !h.get(s.id("/s/a3.JPG")).unwrap().soft_only());
+        assert_eq!(plate("a4"), None);
+        assert_eq!(plate("b copy"), Some(Plate::Copy));
+        assert_eq!(plate("b"), None, "the copy to keep has no plate");
+        let sum = h.summary();
+        assert_eq!((sum.soft, sum.soft_only, sum.accidental), (2, 1, 1));
+        assert_eq!(h.coverage(), (6, 6));
+    }
+
+    #[test]
+    fn the_hints_filter_takes_a_pair_by_either_half() {
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a1.ARW", 0, Some(1)), None),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 6))),
+            (rec("/s/a2.ARW", 100, Some(2)), None),
+            (rec("/s/black.JPG", 5000, Some(0)), Some(feats(&Img::from_fn(192, 128, |_, _| 3.0)))),
+            (rec("/s/c.JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/c (1).JPG", 9000, Some(0)), Some(scene(2, 0))),
+            (rec("/s/new.JPG", 20_000, Some(0)), None),
+        ]);
+        let h = s.hints(&[vec![PathBuf::from("/s/c.JPG"), PathBuf::from("/s/c (1).JPG")]]);
+        let pass = |f: HintFilter| -> Vec<String> {
+            let mut v: Vec<String> = s.coll.iter_ids().filter(|&(id, _)| f.accepts(&h, id)).map(|(_, r)| r.filename()).collect();
+            v.sort();
+            v
+        };
+        assert_eq!(pass(HintFilter::Soft), vec!["a2.ARW", "a2.JPG"]);
+        assert_eq!(pass(HintFilter::Accidental), vec!["black.JPG"]);
+        assert_eq!(pass(HintFilter::Problems), vec!["a2.ARW", "a2.JPG", "black.JPG", "c (1).JPG"]);
+        assert_eq!(pass(HintFilter::Duplicates), vec!["c (1).JPG", "c.JPG"]);
+        assert_eq!(pass(HintFilter::Sharpest), vec!["a1.ARW", "a1.JPG"]);
+        // Not measured yet: no hint at all.
+        assert!(HintFilter::ALL.iter().all(|f| !f.accepts(&h, s.id("/s/new.JPG"))));
+        assert_eq!(HintFilter::ALL.iter().map(|f| f.index()).collect::<Vec<_>>(), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn presses_of_one_moment_are_spliced_in_the_grid() {
+        use super::super::bursts::RunMark;
+        // Press a (2 frames) and single s make a moment; press c (2 frames)
+        // is a moment of its own; d is a single in none.
+        let s = Shoot::new(vec![
+            (rec("/s/a1.JPG", 0, Some(1)), Some(scene(1, 0))),
+            (rec("/s/a2.JPG", 100, Some(2)), Some(scene(1, 1))),
+            (rec("/s/s.JPG", 900, Some(0)), Some(scene(1, 0))),
+            (rec("/s/c1.JPG", 9000, Some(1)), Some(scene(3, 0))),
+            (rec("/s/c2.JPG", 9100, Some(2)), Some(scene(3, 0))),
+            (rec("/s/d.JPG", 20_000, Some(0)), Some(scene(4, 0))),
+        ]);
+        let h = s.hints(&[]);
+        let ids: Vec<RecordId> = ["a1", "a2", "s", "c1", "c2", "d"].iter().map(|n| s.id(&format!("/s/{n}.JPG"))).collect();
+        assert!(h.joined_moment(ids[0]).is_some() && h.joined_moment(ids[0]) == h.joined_moment(ids[2]));
+        assert_eq!(h.joined_moment(ids[3]), None, "one press is a burst, not a joined moment");
+        let (tiles, runs) = s.bursts.tiles(&ids, |_| false, |r| r[0], &s.coll);
+        // a1–a2 are one strip; a2 splices to s; nothing else.
+        assert_eq!(moment_links(&tiles, &runs, |id| h.joined_moment(id)), vec![false, true, false, false, false, false]);
+        // Stacked, press a is one tile, spliced to s.
+        let (tiles, runs) = s.bursts.tiles(&ids, |_| true, |r| r[0], &s.coll);
+        assert_eq!(tiles.len(), 4);
+        assert_eq!(moment_links(&tiles, &runs, |id| h.joined_moment(id)), vec![true, false, false, false]);
+        let _: Option<RunMark> = runs[0];
     }
 }

@@ -146,6 +146,59 @@ pub fn keeper(copies: &[&PhotoRecord]) -> usize {
     .unwrap_or(0)
 }
 
+/// Why the rule keeps one copy and suggests pruning another (the first
+/// test of [`keeper`] that tells them apart).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Why {
+    /// The pruned copy's name reads like a copy's.
+    CopyName,
+    /// Both are library exports; the pruned one was exported later.
+    LaterExport,
+    /// The pruned copy is the newer file.
+    Newer,
+    /// Nothing else differs: the name that sorts first is kept.
+    Name,
+}
+
+impl Why {
+    /// The reason, as the end of "Suggested for pruning: …".
+    pub fn words(self) -> &'static str {
+        match self {
+            Why::CopyName => "its name reads like a copy's",
+            Why::LaterExport => "it was exported to the library later",
+            Why::Newer => "it is the newer file",
+            Why::Name => "the two are alike in every other way",
+        }
+    }
+}
+
+/// Why `copy` rather than `keep` is suggested for pruning, among `group`
+/// (every copy, both of these included).
+pub fn why(group: &[&PhotoRecord], keep: &PhotoRecord, copy: &PhotoRecord) -> Why {
+    let stems: Vec<String> = group.iter().map(|r| r.stem()).collect();
+    let others = |r: &PhotoRecord| -> Vec<String> {
+        let own = r.stem();
+        let mut v: Vec<String> = stems.iter().filter(|s| **s != own).cloned().collect();
+        v.dedup();
+        v
+    };
+    let copy_like_rec = |r: &PhotoRecord| {
+        let o = others(r);
+        let refs: Vec<&str> = o.iter().map(String::as_str).collect();
+        copy_like(&r.stem(), &refs)
+    };
+    let all_exports = stems.iter().all(|s| export_number(s).is_some());
+    if copy_like_rec(copy) && !copy_like_rec(keep) {
+        Why::CopyName
+    } else if all_exports && export_number(&copy.stem()) != export_number(&keep.stem()) {
+        Why::LaterExport
+    } else if copy.modified.timestamp != keep.modified.timestamp {
+        Why::Newer
+    } else {
+        Why::Name
+    }
+}
+
 /// A group of copies, with the keeper chosen.
 pub fn group(coll: &Collection, kind: Kind, ids: &[RecordId]) -> Option<DuplicateGroup> {
     let recs: Vec<&PhotoRecord> = ids.iter().filter_map(|&id| coll.get(id)).collect();
@@ -228,6 +281,24 @@ mod tests {
         assert_eq!(kept(&[("b.JPG", 100), ("a.JPG", 100)]), "a.JPG");
         // An export and a camera name: no export rule; the older one.
         assert_eq!(kept(&[("20260523_0846_0001.JPG", 200), ("DSC01234.JPG", 100)]), "DSC01234.JPG");
+    }
+
+    #[test]
+    fn why_a_copy_is_suggested_follows_the_rule() {
+        let why_of = |names: &[(&str, i64)]| {
+            let recs: Vec<PhotoRecord> = names.iter().map(|(n, t)| rec(&format!("/s/{n}"), *t)).collect();
+            let refs: Vec<&PhotoRecord> = recs.iter().collect();
+            let k = keeper(&refs);
+            let other = (0..recs.len()).find(|&i| i != k).unwrap();
+            (recs[k].filename(), why(&refs, &recs[k], &recs[other]))
+        };
+        assert_eq!(why_of(&[("IMG_1 copy.JPG", 100), ("IMG_1.JPG", 200)]), ("IMG_1.JPG".into(), Why::CopyName));
+        assert_eq!(why_of(&[("20260523_0846_3356.JPG", 100), ("20260523_0846_0001.JPG", 200)]), ("20260523_0846_0001.JPG".into(), Why::LaterExport));
+        assert_eq!(why_of(&[("b.JPG", 200), ("a.JPG", 100)]), ("a.JPG".into(), Why::Newer));
+        assert_eq!(why_of(&[("b.JPG", 100), ("a.JPG", 100)]), ("a.JPG".into(), Why::Name));
+        // Both copy-like: the names don't decide it.
+        assert_eq!(why_of(&[("IMG_1 (2).JPG", 300), ("IMG_1 (1).JPG", 200)]).1, Why::Newer);
+        assert!(Why::CopyName.words().starts_with("its name"));
     }
 
     #[test]

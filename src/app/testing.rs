@@ -19,10 +19,23 @@
 //! bursts                      # print the working folder's bursts
 //! analyse [cached|cancel]     # start the quality analysis (or show the
 //!                             # cache only, or stop it)
+//! analyse-wait 30000          # wait (up to 30 s) for the pass to end
+//! scan-wait 60000             # wait (up to 60 s) for the folder's scan
 //! quality [all|plans]         # print its state, flagged frames, moments
 //!                             # and duplicates (all: every shot; plans:
 //!                             # what each bulk action would mark, keep-this
 //!                             # on the grid's selected photo)
+//! hints problems|soft|accidental|duplicates|sharpest|off
+//!                             # the filter bar's hints filter
+//! hintmenu open|close         # the Hints menu
+//! hintdump                    # print the hints filter, its counts, the
+//!                             # status line and the banner's state
+//! bulk soft|accidental|copies|keep   # a bulk action from the Prune menu
+//!                             # (opens its confirmation)
+//! vbulk keep                  # Keep this, prune the rest in the viewer
+//! bulk confirm|cancel         # answer it
+//! bulkdump                    # print the confirmation waiting, if any
+//! links                       # print the grid's moment splices
 //! tiles                       # print the grid's tiles, stacks and selection
 //! tab 3                       # click the burst tab on the 4th grid tile
 //! day 0                       # click the grid's 1st day header (collapse it)
@@ -180,6 +193,12 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "StackBurst" => Some(Cmd::StackBurst),
                 "StackBursts" => Some(Cmd::StackBursts),
                 "AdvanceAfterMark" => Some(Cmd::AdvanceAfterMark),
+                "Analyse" => Some(Cmd::Analyse),
+                "KeepThisPruneRest" => Some(Cmd::KeepThisPruneRest),
+                "PruneSoft" => Some(Cmd::PruneSoft),
+                "PruneAccidental" => Some(Cmd::PruneAccidental),
+                "PruneCopies" => Some(Cmd::PruneCopies),
+                "ProblemsOnly" => Some(Cmd::ProblemsOnly),
                 _ => None,
             };
             match c {
@@ -287,6 +306,97 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             }
             _ => super::quality::start(app),
         },
+        "scan-wait" => {
+            let left: u64 = arg.parse().unwrap_or(60_000);
+            if app.scanning && left > 0 {
+                app.script[i] = format!("scan-wait {}", left.saturating_sub(200));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
+            }
+            eprintln!("[analysis] scan done: scanning={} records={}", app.scanning, app.coll.len());
+            Task::none()
+        }
+        "analyse-wait" => {
+            // Poll until the pass ends (or the time is up).
+            let left: u64 = arg.parse().unwrap_or(30_000);
+            if app.quality.running() && left > 0 {
+                app.script[i] = format!("analyse-wait {}", left.saturating_sub(200));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
+            }
+            eprintln!("[analysis] ended: running={} last={:?}", app.quality.running(), app.quality.last.as_ref().map(|f| (f.complete, f.error.clone(), f.measured, f.cached)));
+            Task::none()
+        }
+        "hints" => {
+            use crate::model::hints::HintFilter;
+            let f = match arg.as_str() {
+                "problems" => Some(HintFilter::Problems),
+                "soft" => Some(HintFilter::Soft),
+                "accidental" => Some(HintFilter::Accidental),
+                "duplicates" => Some(HintFilter::Duplicates),
+                "sharpest" => Some(HintFilter::Sharpest),
+                _ => None,
+            };
+            app.update(Message::Filter(super::FilterMsg::Hint(f)))
+        }
+        "hintmenu" => app.update(Message::Hints(super::hints_ui::Msg::Menu(arg != "close"))),
+        "hintdump" => {
+            let q = &app.quality;
+            eprintln!(
+                "[hints] filter={:?} counts={:?} coverage={:?} analysing={} menu={} visible={} tiles={} status={:?} action={:?} banner={}",
+                app.filter.hint,
+                app.derived.hint_counts,
+                q.hints.coverage(),
+                q.analysing(),
+                q.menu,
+                app.derived.visible.len(),
+                app.derived.tiles.len(),
+                app.status.text,
+                app.status.action.as_ref().map(|a| a.0.clone()),
+                super::hints_ui::banner(app).is_some(),
+            );
+            Task::none()
+        }
+        "links" => {
+            let name = |id: crate::model::collection::RecordId| app.coll.get(id).map(|r| r.stem()).unwrap_or_default();
+            let mut pairs = Vec::new();
+            for (sec, links) in app.derived.sections.iter().zip(&app.derived.moment_links) {
+                for (k, &l) in links.iter().enumerate() {
+                    if l {
+                        pairs.push(format!("{}>{}", name(sec.ids[k]), name(sec.ids[k + 1])));
+                    }
+                }
+            }
+            eprintln!("[links] {} splices: {:?}", pairs.len(), pairs);
+            Task::none()
+        }
+        "bulk" | "vbulk" => {
+            use super::bulk::{Msg, open_keep_viewer};
+            match (cmd, arg.as_str()) {
+                ("vbulk", _) => open_keep_viewer(app),
+                (_, "confirm") => app.update(Message::Bulk(Msg::Confirm)),
+                (_, "cancel") => app.update(Message::Bulk(Msg::Cancel)),
+                (_, "soft") => app.update(Message::Cmd(Cmd::PruneSoft)),
+                (_, "accidental") => app.update(Message::Cmd(Cmd::PruneAccidental)),
+                (_, "copies") => app.update(Message::Cmd(Cmd::PruneCopies)),
+                (_, "keep") => app.update(Message::Cmd(Cmd::KeepThisPruneRest)),
+                _ => Task::none(),
+            }
+        }
+        "bulkdump" => {
+            let names = |ids: &[crate::model::collection::RecordId]| -> Vec<String> { ids.iter().filter_map(|&id| app.coll.get(id)).map(|r| r.filename()).collect() };
+            match &app.bulk {
+                Some(b) => eprintln!(
+                    "[bulk] {:?} in {} window: mark {:?} prune {:?} chosen {:?} scope {}",
+                    b.action,
+                    if Some(b.window) == app.main_id { "main" } else { "viewer" },
+                    names(&b.plan.mark),
+                    names(&b.plan.prune),
+                    b.chosen.map(|c| names(&[c])),
+                    b.scope
+                ),
+                None => eprintln!("[bulk] none waiting; status={:?}", app.status.text),
+            }
+            Task::none()
+        }
         "quality" if arg == "plans" => {
             quality_plans(app);
             Task::none()
@@ -653,6 +763,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "clear-thumbs" => Some(Control::Clear(Cache::Thumbs)),
         "clear-library" => Some(Control::Clear(Cache::Library)),
         "clear-capture" => Some(Control::Clear(Cache::CaptureTimes)),
+        "clear-quality" => Some(Control::Clear(Cache::Quality)),
         "close-button" => Some(Control::Close),
         _ => None,
     };

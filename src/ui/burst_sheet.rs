@@ -1,9 +1,10 @@
 //! The burst sheet: every frame of one burst laid out over the viewer's
 //! photo area, the largest tiles that fit, in shooting order, on the
 //! neutral backdrop.  Each tile wears its marks as the grid draws them, a
-//! small frame number, and (while frames are being picked to compare) the
-//! grid's select checkbox; the frame the viewer is on is outlined in the
-//! accent.
+//! small frame number (with the analysis' hint beside it: the burst's
+//! sharpest frame, or one that looks out of focus), and (while frames are
+//! being picked to compare) the grid's select checkbox; the frame the
+//! viewer is on is outlined in the accent.
 //!
 //! This module is geometry and drawing only.  The image stage owns the
 //! state (hover, the outline's slide, the zoom between a tile and the whole
@@ -58,6 +59,8 @@ pub struct Tile {
     pub picked: bool,
     /// No thumbnail, and none on its way: the stage asks for it.
     pub wanted: bool,
+    /// The analysis' hint, beside the frame number (none once decided).
+    pub hint: Option<crate::model::hints::Plate>,
 }
 
 /// What the stage shows of a burst.
@@ -295,10 +298,19 @@ pub fn paint_tile_marks(r: &mut Renderer, clip: Rectangle, tile: &Tile, photo: R
     let label = tile.number.to_string();
     let tw = paint::text_width(&label, t::T_SMALL, paint::MEDIUM).ceil();
     let h = 18.0;
-    let chip = rect(photo.x + 6.0, photo.y + photo.height - h - 6.0, (tw + 12.0).max(h), h);
+    // The hint's glyph follows the number in the same pill.
+    let g = 12.0;
+    let extra = if tile.hint.is_some() { g + 4.0 } else { 0.0 };
+    let chip = rect(photo.x + 6.0, photo.y + photo.height - h - 6.0, (tw + 12.0).max(h) + extra, h);
     paint::rounded(r, chip, h / 2.0, paint::with_alpha(t::alpha(Color::BLACK, 0.6), alpha));
     let text_clip = chip.intersection(&clip).unwrap_or_default();
-    paint::text(r, &label, chip, t::T_SMALL, paint::MEDIUM, paint::with_alpha(t::PHOTO_INK, alpha), HAlign::Center, text_clip);
+    let num = rect(chip.x, chip.y, chip.width - extra, h);
+    paint::text(r, &label, num, t::T_SMALL, paint::MEDIUM, paint::with_alpha(t::PHOTO_INK, alpha), HAlign::Center, text_clip);
+    if let Some(plate) = tile.hint {
+        let at = rect((num.x + num.width - 2.0).round(), (chip.center_y() - g / 2.0).round(), g, g);
+        let handle = super::icons::handle(super::hint_plate::glyph(plate), g, super::hint_plate::tone(plate));
+        r.draw_image(iced::advanced::image::Image::new(handle).filter_method(FilterMethod::Linear).opacity(alpha), at, text_clip);
+    }
 }
 
 #[cfg(test)]

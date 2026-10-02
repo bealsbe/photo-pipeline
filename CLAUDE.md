@@ -31,6 +31,15 @@ cargo test --release  # unit tests; must pass with zero warnings
   small; caches are bounded by bytes; per-frame work stays tiny (custom
   widgets request their own redraws).  `PP_PROFILE=1` reports slow updates,
   draws and frame gaps — check new features with it.
+- **Analysis and hints** (`app/quality.rs`, `app/hints_ui.rs`,
+  `ui/hint_plate.rs`, `app/bulk.rs`): a pass runs only when the user asks
+  (`quality::start`); opening a folder reads only its cache
+  (`start_cached`).  Hints are suggestions: hollow, neutral glyphs (`WARN`
+  only for accidents), hidden on pruned or marked photos and on stacks,
+  read by lookup in paint paths (`Hints::plate`).  A mark that comes from
+  a hint goes only through `bulk.rs`: a dialog listing the frames, a
+  recheck of what is still to review, and `undo::batch` so it is one undo
+  step.  Never mark from a hint any other way, and never mark a stack.
 - **Commands** live once in `src/app/commands.rs` (label, shortcut, icon, menu
   placement); a shortcut is bound exactly once.  The KDE global menu mirrors
   `MENUS`.
@@ -52,6 +61,9 @@ cargo test --release  # unit tests; must pass with zero warnings
 - Headless UI: `kwin_wayland --virtual --socket pp-test --width 1600
   --height 1000 &`, then run with `WAYLAND_DISPLAY=pp-test PP_SCRIPT=<file>`
   (commands at the top of `src/app/testing.rs`; `shot main <png>` takes
-  screenshots).  Kill the compositor by PID, never `pkill` by pattern.
+  screenshots; `scan-wait` / `analyse-wait` wait for a scan or a pass).
+  Kill the compositor by PID, never `pkill` by pattern.  A script that
+  needs hints analyses the folder itself (`cmd Analyse`): don't rely on a
+  cache left by an earlier run.
 - With a fake `HOME`, also set `CARGO_HOME=~/.cargo` for cargo, or it
   re-downloads crates.

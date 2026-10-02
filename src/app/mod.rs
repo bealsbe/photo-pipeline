@@ -2,11 +2,13 @@
 //! `MainWindow`).  Views live in `main_view`, `viewer` and `calendar`;
 //! modal dialogs in `dialogs`.
 
+pub mod bulk;
 pub mod calendar;
 pub mod commands;
 pub mod compare;
 pub mod dialogs;
 pub mod global_menu;
+pub mod hints_ui;
 pub mod kit;
 pub mod main_view;
 pub mod quicklook;
@@ -37,6 +39,7 @@ use crate::imaging::thumbs::{self, OWNER_CALENDAR, OWNER_MAIN, ThumbCache, Thumb
 use crate::model::bursts::{Bursts, RunMark, Stacking};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::filter::{self, FilterState, ListRow, SortKey};
+use crate::model::hints::{self, HintFilter, Hints};
 use crate::model::sidecar;
 use crate::scan::{self, ScanHandle};
 use crate::settings::Settings;
@@ -114,6 +117,9 @@ pub struct FilterUi {
     pub date_on: bool,
     pub date_from: NaiveDate,
     pub date_to: NaiveDate,
+    /// Only photos with this hint (once analysed).  Not saved: hints
+    /// belong to one folder's analysis.
+    pub hint: Option<HintFilter>,
 }
 
 impl FilterUi {
@@ -128,6 +134,7 @@ impl FilterUi {
             date_on: false,
             date_from: NaiveDate::from_ymd_opt(chrono::Datelike::year(&today), 1, 1).unwrap_or(today),
             date_to: today,
+            hint: None,
         }
     }
 
@@ -185,6 +192,8 @@ pub enum FilterMsg {
     ResetAll,
     Zoom(f32),
     Show(Show),
+    /// The hints filter (from the Hints menu), or none.
+    Hint(Option<HintFilter>),
 }
 
 #[derive(Debug, Clone)]
@@ -230,6 +239,10 @@ pub enum Message {
     UndoStep(u64),
     Net(network::Msg),
     Prefs(preferences::Msg),
+    /// The analysis: the Hints menu, stopping, the banner.
+    Hints(hints_ui::Msg),
+    /// A bulk action's confirmation.
+    Bulk(bulk::Msg),
 }
 
 impl Message {
@@ -265,6 +278,8 @@ impl Message {
             Message::UndoStep(_) => "UndoStep",
             Message::Net(_) => "Net",
             Message::Prefs(_) => "Prefs",
+            Message::Hints(_) => "Hints",
+            Message::Bulk(_) => "Bulk",
         }
     }
 }
@@ -303,6 +318,12 @@ pub struct Derived {
     pub key: u64,
     /// Culling progress over the whole working folder, ignoring filters.
     pub progress: filter::Progress,
+    /// Per section and tile (parallel to `sections`): spliced to the next
+    /// tile, the next press of the same moment.
+    pub moment_links: Vec<Vec<bool>>,
+    /// Shots shown (before the hints filter) with each hint, by
+    /// `HintFilter::index`.
+    pub hint_counts: [usize; 5],
 }
 
 pub struct GridUi {
@@ -374,6 +395,8 @@ pub struct App {
     pub date_popup: Option<DatePopup>,
     pub status: Status,
     pub modal: Option<dialogs::Modal>,
+    /// A bulk action waiting to be confirmed (in its own window).
+    pub bulk: Option<bulk::Confirm>,
     pub viewer: Option<viewer::Viewer>,
     /// Quick look over the grid (Space).
     pub quicklook: Option<quicklook::QuickLook>,
@@ -498,6 +521,8 @@ impl App {
                 list_accepted: 0,
                 key: 0,
                 progress: filter::Progress::default(),
+                moment_links: Vec::new(),
+                hint_counts: [0; 5],
             },
             grid: GridUi {
                 selection: HashSet::new(),
@@ -515,6 +540,7 @@ impl App {
             date_popup: None,
             status: Status { text: "Ready — open a folder to begin".into(), seq: 0, action: None },
             modal: None,
+            bulk: None,
             viewer: None,
             quicklook: None,
             compare: None,
@@ -608,7 +634,11 @@ impl App {
         if let Some(v) = &self.viewer {
             if v.id == id {
                 let _t = crate::profile::span("view", "viewer");
-                return network::in_window(self, viewer::view(self, v));
+                let body = network::in_window(self, viewer::view(self, v));
+                return match bulk::overlay(self, id) {
+                    Some(dialog) => iced::widget::stack![body, dialog].width(iced::Length::Fill).height(iced::Length::Fill).into(),
+                    None => body,
+                };
             }
         }
         if let Some(c) = self.compare.as_ref().filter(|c| c.id() == id) {
@@ -665,14 +695,8 @@ impl App {
     // ── derived views ───────────────────────────────────────────────────
 
     pub fn refresh_views(&mut self) {
+        let _t = crate::profile::span("refresh", "views");
         let state = self.filter.state();
-        let sorted = filter::visible_sorted(&self.coll, &state);
-        let visible = filter::dedup_pairs(&sorted, &self.coll);
-        let groups = filter::group_by_date(&visible, &self.coll, &state);
-        self.derived.days = groups
-            .into_iter()
-            .map(|g| Section { label: fmt_section_date(g.date), date: g.date, photos: g.ids.len(), ids: g.ids })
-            .collect();
         // Bursts change only when files come, go or pair up (not on marks);
         // they are found once the scan has paired the folder.
         if self.scanning {
@@ -682,12 +706,30 @@ impl App {
         } else if !self.bursts.is_current(&self.coll) {
             self.bursts = Bursts::find(&self.coll);
         }
-        // Hints first: a stack's cover is its sharpest frame once analysed.
+        // Hints first: the hints filter needs them, and a stack's cover is
+        // its sharpest frame once analysed.
         quality::refresh(self);
+        let sorted = filter::visible_sorted(&self.coll, &state);
+        let mut visible = filter::dedup_pairs(&sorted, &self.coll);
+        let mut list_rows = filter::list_rows(&self.coll, &state);
+        let mut accepted = sorted.len();
+        self.derived.hint_counts = hint_counts(&self.quality.hints, &self.coll, &visible);
+        if let Some(f) = self.filter.hint {
+            let (h, coll) = (&self.quality.hints, &self.coll);
+            let has = |id: RecordId| shot_has(h, coll, f, id);
+            visible.retain(|&id| has(id));
+            accepted = sorted.iter().filter(|&&id| has(id)).count();
+            list_rows.retain(|row| row.members().any(has));
+        }
+        let groups = filter::group_by_date(&visible, &self.coll, &state);
+        self.derived.days = groups
+            .into_iter()
+            .map(|g| Section { label: fmt_section_date(g.date), date: g.date, photos: g.ids.len(), ids: g.ids })
+            .collect();
         self.build_tiles();
-        self.derived.accepted = sorted.len();
+        self.derived.accepted = accepted;
         self.derived.visible = self.derived.days.iter().flat_map(|s| s.ids.iter().copied()).collect();
-        self.derived.list_rows = filter::list_rows(&self.coll, &state);
+        self.derived.list_rows = list_rows;
         self.derived.list_accepted = self.derived.list_rows.iter().map(|r| r.members().count()).sum();
         // Pairs form when the scan completes; counting shots before then
         // would count every file.
@@ -709,14 +751,19 @@ impl App {
         let stacked = |b| all != flipped.contains(&b);
         let mut sections = Vec::with_capacity(self.derived.days.len());
         let mut runs = Vec::with_capacity(self.derived.days.len());
+        let mut links = Vec::with_capacity(self.derived.days.len());
+        let h = &self.quality.hints;
         for day in &self.derived.days {
             let (ids, marks) = self.bursts.tiles(&day.ids, stacked, |run| self.quality.sharpest_of(run), &self.coll);
+            // Presses of one moment (once analysed) are spliced together.
+            links.push(if h.is_empty() { Vec::new() } else { hints::moment_links(&ids, &marks, |id| h.joined_moment(id)) });
             sections.push(Section { date: day.date, label: day.label.clone(), photos: day.photos, ids });
             runs.push(marks);
         }
         self.derived.tiles = sections.iter().flat_map(|s| s.ids.iter().copied()).collect();
         self.derived.sections = sections;
         self.derived.burst_runs = runs;
+        self.derived.moment_links = links;
     }
 
     /// The grid's selection once its tiles have changed: a photo folded
@@ -842,6 +889,9 @@ impl App {
         }
         self.folder = Some(path.clone());
         self.quicklook = None;
+        self.bulk = None;
+        // Hints belong to the folder analysed.
+        self.filter.hint = None;
         quality::on_folder_changed(self);
         self.stacking.forget();
         self.coll.clear();
@@ -890,7 +940,10 @@ impl App {
             0,
         );
         self.update_status_count();
-        t
+        // What an earlier analysis of this folder found, from the cache (no
+        // photo is read; analysing again is only ever on request).
+        let cached = quality::start_cached(self);
+        Task::batch([t, cached])
     }
 
     /// Apply the folder's sidecars.  Saves still waiting (or failing) win
@@ -1281,6 +1334,10 @@ impl App {
         if self.net.quit.is_some() && Some(id) != self.shortcuts {
             return network::on_key(self, &key);
         }
+        // A bulk action's question takes its window's keys.
+        if self.bulk.as_ref().is_some_and(|b| b.window == id) {
+            return bulk::on_key(self, &key);
+        }
         if let Some(v) = &self.viewer {
             if v.id == id {
                 if captured {
@@ -1315,6 +1372,13 @@ impl App {
         if self.date_popup.is_some() {
             if key == Key::Named(Named::Escape) {
                 self.date_popup = None;
+            }
+            return Task::none();
+        }
+        // The Hints menu, like the date picker, takes the keys while open.
+        if self.quality.menu {
+            if key == Key::Named(Named::Escape) {
+                self.quality.menu = false;
             }
             return Task::none();
         }
@@ -1541,6 +1605,9 @@ impl App {
                 if self.viewer.as_ref().is_some_and(|v| v.id == id) {
                     self.viewer = None;
                 }
+                if self.bulk.as_ref().is_some_and(|b| b.window == id) {
+                    self.bulk = None;
+                }
                 if self.compare.as_ref().is_some_and(|c| c.id() == id) {
                     compare::window_closed(self);
                 }
@@ -1609,6 +1676,8 @@ impl App {
             },
             Message::Net(m) => network::update(self, m),
             Message::Prefs(m) => preferences::update(self, m),
+            Message::Hints(m) => hints_ui::update(self, m),
+            Message::Bulk(m) => bulk::update(self, m),
         }
     }
 
@@ -1730,6 +1799,18 @@ impl App {
             Cmd::StackBursts => self.toggle_all_bursts(),
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
             Cmd::Preferences => preferences::open(self),
+            Cmd::Analyse => hints_ui::analyse(self),
+            Cmd::KeepThisPruneRest => bulk::open(self, bulk::Action::KeepThis),
+            Cmd::PruneSoft => bulk::open(self, bulk::Action::Soft),
+            Cmd::PruneAccidental => bulk::open(self, bulk::Action::Accidental),
+            Cmd::PruneCopies => bulk::open(self, bulk::Action::Copies),
+            Cmd::ProblemsOnly => {
+                if self.view == View::Calendar {
+                    return Task::none();
+                }
+                let f = if self.filter.hint == Some(HintFilter::Problems) { None } else { Some(HintFilter::Problems) };
+                self.on_filter(FilterMsg::Hint(f))
+            }
         }
     }
 
@@ -1795,6 +1876,8 @@ impl App {
     }
 
     fn on_filter(&mut self, m: FilterMsg) -> Task<Message> {
+        // A filter changed: the Hints menu has done its job.
+        self.quality.menu = false;
         match m {
             FilterMsg::TogglePruned => self.filter.show_pruned = !self.filter.show_pruned,
             FilterMsg::ToggleMarkedOnly => {
@@ -1806,6 +1889,12 @@ impl App {
                     return Task::none();
                 }
                 self.filter.set_show(show);
+            }
+            FilterMsg::Hint(f) => {
+                if self.filter.hint == f {
+                    return Task::none();
+                }
+                self.filter.hint = f;
             }
             FilterMsg::Sort(k) => {
                 if self.filter.sort_key == k {
@@ -1854,6 +1943,7 @@ impl App {
                 self.filter.marked_only = false;
                 self.filter.to_review = false;
                 self.filter.date_on = false;
+                self.filter.hint = None;
                 self.date_popup = None;
             }
             FilterMsg::Zoom(v) => {
@@ -2099,6 +2189,30 @@ impl App {
         self.bus.clone()
     }
 
+}
+
+/// Does shot `id` (either half of a pair) have hint `f`?
+fn shot_has(h: &Hints, coll: &Collection, f: HintFilter, id: RecordId) -> bool {
+    f.accepts(h, id) || coll.find_pair(id).is_some_and(|p| f.accepts(h, p))
+}
+
+/// How many of `shots` have each hint (by `HintFilter::index`).
+fn hint_counts(h: &Hints, coll: &Collection, shots: &[RecordId]) -> [usize; 5] {
+    let _t = crate::profile::span("refresh", "hint counts");
+    let mut n = [0; 5];
+    if h.is_empty() {
+        return n;
+    }
+    for &id in shots {
+        // The other half is looked up once, and only if needed (it costs
+        // a key built from the path).
+        let mut pair: Option<Option<RecordId>> = None;
+        for f in HintFilter::ALL {
+            let has = f.accepts(h, id) || pair.get_or_insert_with(|| coll.find_pair(id)).is_some_and(|p| f.accepts(h, p));
+            n[f.index()] += has as usize;
+        }
+    }
+    n
 }
 
 /// The tile an arrow key moves to in the grid's `tiles` from `anchor`: the
