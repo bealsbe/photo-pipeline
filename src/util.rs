@@ -237,6 +237,27 @@ pub fn canonical_parent(path: &Path) -> PathBuf {
     }
 }
 
+/// Real camera files for the ignored tests that read them: the photos of
+/// one type in `PP_FIXTURE_DIR`, sorted by name.  Panics, saying what to
+/// do, when the variable is unset or the folder can't be read, so a run
+/// that asks for those tests never passes without checking anything.  The
+/// files are only read.
+#[cfg(test)]
+pub fn fixture_files(file_type: crate::model::record::FileType) -> Vec<PathBuf> {
+    let dir = std::env::var_os("PP_FIXTURE_DIR")
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| panic!("PP_FIXTURE_DIR is not set: point it at a folder of camera files (see README, Testing)"));
+    let entries = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("PP_FIXTURE_DIR={}: can't read the folder: {e} (see README, Testing)", dir.display()));
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| Some(e.ok()?.path()))
+        .filter(|p| crate::model::record::FileType::from_path(p) == Some(file_type))
+        .collect();
+    files.sort();
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

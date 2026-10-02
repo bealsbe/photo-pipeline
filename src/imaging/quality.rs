@@ -14,7 +14,7 @@
 //! global score calls portraits blurry; the sharpest tiles are where the
 //! plane of focus is.  Tiles with blown highlights (lights, glints, bokeh
 //! discs) are set aside for that: a clipped disc has steep edges however
-//! far out of focus it is, and on a 19-Sep sample they made frames shot
+//! far out of focus it is, and on the quality plan's shoot A they made frames shot
 //! inside the lens's minimum focus distance look as sharp as good night
 //! shots.  [`Features::local`] averages the three sharpest remaining tiles.
 //!
@@ -828,19 +828,21 @@ pub mod tests {
         assert_eq!(reduction(800), 1);
     }
 
-    /// Real files: a JPEG's MPF preview and RAW previews (when the fixture
-    /// shoot is on this machine).
+    /// Real files from `PP_FIXTURE_DIR` (a small folder of camera files):
+    /// a JPEG's MPF preview, and every RAW's preview.  Runs only when asked
+    /// for, and then fails without a JPEG with an MPF preview or a RAW.
     #[test]
+    #[ignore = "needs PP_FIXTURE_DIR (see README, Testing)"]
     fn loads_embedded_previews() {
-        let dir = std::path::Path::new("/tmp/scratch/fixture/shoot1");
-        if !dir.is_dir() {
-            return;
-        }
-        let jpg = load(&dir.join("20260724_0108_0001.JPG"), FileType::Jpg).expect("JPEG preview");
-        assert_eq!((jpg.source, jpg.plane.channels), (Source::Mpf, 1));
-        assert!(jpg.plane.width.max(jpg.plane.height) >= 1000);
-        for raw in ["20260724_0108_0001.ARW", "20250705_1201_0012.ARW", "20180929_2311_0015.CR2"] {
-            let l = load(&dir.join(raw), FileType::Raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
+        let path = crate::exif::fixture_mpf_jpeg();
+        let jpg = load(&path, FileType::Jpg).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert_eq!((jpg.source, jpg.plane.channels), (Source::Mpf, 1), "{}", path.display());
+        assert!(jpg.plane.width.max(jpg.plane.height) >= 1000, "{}", path.display());
+        let raws = crate::util::fixture_files(FileType::Raw);
+        assert!(!raws.is_empty(), "PP_FIXTURE_DIR has no RAW files: add one of each kind the app reads (see README, Testing)");
+        for path in raws {
+            let raw = path.display();
+            let l = load(&path, FileType::Raw).unwrap_or_else(|e| panic!("{raw}: {e}"));
             assert_eq!(l.source, Source::RawPreview);
             assert!(l.plane.width.max(l.plane.height) >= 1000, "{raw}");
             assert!(l.plane.width.max(l.plane.height) <= 2400, "{raw}: {}x{}", l.plane.width, l.plane.height);

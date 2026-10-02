@@ -1,3 +1,5 @@
 /target/
 /.claude/worktrees/
 /.claude/settings.local.json
+# Local notes that name this machine's paths (CLAUDE.local.md and the like).
+*.local.md

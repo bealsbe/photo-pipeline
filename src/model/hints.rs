@@ -8,7 +8,7 @@
 //! for it (as in `Bursts`), and a hint applies to both halves.
 //!
 //! Thresholds are for the ~1616-px embedded preview and were set on an A7 V
-//! convention day (see `docs/image-quality-plan.md`, "Phase 2 engine as
+//! event day (see `docs/image-quality-plan.md`, "Phase 2 engine as
 //! built").  Other bodies use them too (decision 9: best effort).
 
 use std::collections::{HashMap, HashSet};
