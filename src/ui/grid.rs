@@ -113,6 +113,10 @@ pub enum GridEvent {
     /// A burst's tab was clicked (on this tile): stack it, or open it.
     ToggleBurst(RecordId),
     Chip(NaiveDate),
+    /// The link at the right of a section's header (`GridData::links`).
+    SectionLink(NaiveDate),
+    /// The link in the end note (`Footer::note`).
+    FooterLink,
     ZoomStep(i32),
     PinchTo(f32),
     /// Thumbnails wanted: `visible` on screen now, `nearby` one screen either
@@ -145,9 +149,22 @@ pub struct GridData<'a> {
     pub restack: Option<Restack<'a>>,
     /// What the strip under each photo says.
     pub label: CellLabel,
-    /// A line, and a quieter one, after the last photo (search results:
-    /// "That's everything that looks like …").
-    pub footer: Option<(&'a str, &'a str)>,
+    /// A note after the last photo (search results), when there is one.
+    pub footer: Option<Footer<'a>>,
+    /// A link at the right of a section's header, by the section's date
+    /// (search results: "Hide fursuits").  Empty: none.
+    pub links: &'a [(NaiveDate, &'a str)],
+}
+
+/// The end note after the last photo: a note with a link after it, then a
+/// line and a quieter one under it, each optional.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Footer<'a> {
+    /// "12 fursuits that look like dogs are left out." and its link
+    /// ("Show fursuits too").
+    pub note: Option<(&'a str, &'a str)>,
+    /// "That's everything that looks like …", and a quieter line.
+    pub end: Option<(&'a str, &'a str)>,
 }
 
 /// What the strip under each photo says: its file name (a working folder,
@@ -159,11 +176,56 @@ pub enum CellLabel {
     Date,
 }
 
-/// The end note's height, when there is one.
-const FOOTER_H: f32 = 76.0;
+// The end note: its top padding, a line's height, the gap between the
+// note and the end line, and the padding under it all.
+const FOOTER_TOP: f32 = 18.0;
+const FOOTER_LINE: f32 = 18.0;
+const FOOTER_GAP: f32 = 14.0;
+const FOOTER_BOTTOM: f32 = 22.0;
 
 fn footer_h(data: &GridData<'_>) -> f32 {
-    if data.footer.is_some() { FOOTER_H } else { 0.0 }
+    let Some(f) = data.footer else { return 0.0 };
+    let mut h = 0.0;
+    if f.note.is_some() {
+        h += FOOTER_LINE;
+    }
+    if let Some((_, quiet)) = f.end {
+        if f.note.is_some() {
+            h += FOOTER_GAP;
+        }
+        h += FOOTER_LINE + if quiet.is_empty() { 0.0 } else { FOOTER_LINE + 2.0 };
+    }
+    if h == 0.0 { 0.0 } else { FOOTER_TOP + h + FOOTER_BOTTOM }
+}
+
+/// Where the end note's link sits, in content coordinates (`width` is the
+/// grid's, the scrollbar included), with the note's own text before it:
+/// (the note's rect, the link's rect).  The two are centred as one line.
+fn footer_note_rects(m: &Metrics, data: &GridData<'_>, width: f32) -> Option<(Rectangle, Rectangle)> {
+    let (note, link) = data.footer?.note?;
+    let top = m.total - BOTTOM_MARGIN - footer_h(data) + FOOTER_TOP;
+    let gap = 5.0;
+    let nw = paint::text_width(note, t::T_SMALL, paint::REGULAR).ceil();
+    let lw = paint::text_width(link, t::T_SMALL, paint::MEDIUM).ceil();
+    let x = ((width - SCROLLBAR_W) - (nw + gap + lw)) / 2.0;
+    Some((rect(x, top, nw, FOOTER_LINE), rect(x + nw + gap, top, lw, FOOTER_LINE)))
+}
+
+/// The link at the right of `sec`'s header, if it has one.
+fn section_link<'a>(data: &GridData<'a>, sec: &Section) -> Option<&'a str> {
+    data.links.iter().find(|(d, _)| *d == sec.date).map(|&(_, label)| label)
+}
+
+/// Where a header's link sits, at its right end (`hr` the header's rect).
+fn header_link_rect(hr: Rectangle, label: &str) -> Rectangle {
+    let w = paint::text_width(label, t::T_SMALL, paint::MEDIUM).ceil() + 12.0;
+    rect(hr.x + hr.width - LEFT - w, hr.center_y() - 11.0, w, 22.0)
+}
+
+/// The link of section `s`'s header, in content coordinates.
+fn section_link_rect(m: &Metrics, data: &GridData<'_>, s: usize) -> Option<Rectangle> {
+    let label = section_link(data, data.sections.get(s)?)?;
+    Some(header_link_rect(m.header_rect(s), label))
 }
 
 /// What the grid looked like before bursts were stacked or opened.  A new
@@ -381,6 +443,10 @@ enum Hover {
     Cell(RecordId),
     Header(usize),
     Chip(usize),
+    /// The link at the right of a section's header.
+    SectionLink(usize),
+    /// The end note's link.
+    FooterLink,
     /// The tab of the burst whose first tile this is.
     Tab(RecordId),
     BarDone,
@@ -907,6 +973,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     }
                     Hover::BarDone => shell.publish((self.on)(GridEvent::SelectDone)),
                     Hover::Chip(s) => shell.publish((self.on)(GridEvent::Chip(data.sections[s].date))),
+                    Hover::SectionLink(s) => shell.publish((self.on)(GridEvent::SectionLink(data.sections[s].date))),
+                    Hover::FooterLink => shell.publish((self.on)(GridEvent::FooterLink)),
                     Hover::Header(s) => shell.publish((self.on)(GridEvent::ToggleCollapse(data.sections[s].date))),
                     Hover::Tab(id) => {
                         st.last_click = None;
@@ -974,7 +1042,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             return mouse::Interaction::None;
         }
         match st.hover {
-            Hover::Header(_) | Hover::Chip(_) | Hover::Tab(_) | Hover::BarDone => mouse::Interaction::Pointer,
+            Hover::Header(_) | Hover::Chip(_) | Hover::SectionLink(_) | Hover::FooterLink | Hover::Tab(_) | Hover::BarDone => mouse::Interaction::Pointer,
             _ => mouse::Interaction::Idle,
         }
     }
@@ -1361,9 +1429,15 @@ fn hit(st: &State, m: &Metrics, data: GridData<'_>, bounds: Rectangle, local: Po
     if let Some(id) = hit_tab(m, data, p) {
         return Hover::Tab(id);
     }
+    if footer_note_rects(m, &data, bounds.width).is_some_and(|(_, link)| link.contains(p)) {
+        return Hover::FooterLink;
+    }
     if let Some(s) = m.section_at(p.y) {
         let hr = m.header_rect(s);
         if hr.contains(p) {
+            if section_link_rect(m, &data, s).is_some_and(|r| r.contains(p)) {
+                return Hover::SectionLink(s);
+            }
             let chip = chip_rect(hr, &data.sections[s], data.selection);
             return if chip.contains(p) { Hover::Chip(s) } else { Hover::Header(s) };
         }
@@ -1611,14 +1685,11 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
             hr.y = origin_y + stop;
             paint_header(r, hr, sec, data, ps.hover, s, o < 0.5, op, bounds);
         }
-        if let Some((line, quiet)) = data.footer {
-            let top = origin_y + m.total - BOTTOM_MARGIN - FOOTER_H;
-            if top < bounds.y + bounds.height && top + FOOTER_H > bounds.y {
-                let w = bounds.width - SCROLLBAR_W;
-                paint::text(r, line, rect(bounds.x, top + 18.0, w, 18.0), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK3), HAlign::Center, bounds);
-                if !quiet.is_empty() {
-                    paint::text(r, quiet, rect(bounds.x, top + 38.0, w, 18.0), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK4), HAlign::Center, bounds);
-                }
+        if let Some(f) = data.footer {
+            let fh = footer_h(data);
+            let top = origin_y + m.total - BOTTOM_MARGIN - fh;
+            if top < bounds.y + bounds.height && top + fh > bounds.y {
+                paint_footer(r, bounds, origin_y, top, &m, data, f, ps.hover, op);
             }
         }
     });
@@ -1875,9 +1946,45 @@ fn paint_header(
     }
     paint::text(r, &label, chip, t::T_SMALL, paint::MEDIUM, c(fg), HAlign::Center, clip);
     let rule_x = chip.x + chip.width + 10.0;
-    let rule_end = hr.x + hr.width - LEFT;
+    let mut rule_end = hr.x + hr.width - LEFT;
+    // A link at the right end ("Hide fursuits"), quiet until hovered.
+    if let Some(link) = section_link(data, sec) {
+        let lr = header_link_rect(hr, link);
+        let hot = hover == Hover::SectionLink(s);
+        if hot {
+            paint::rounded(r, lr, 4.0, c(t::PHOTO_RAISED));
+        }
+        paint::text(r, link, lr, t::T_SMALL, paint::MEDIUM, c(if hot { t::PHOTO_INK } else { t::PHOTO_INK2 }), HAlign::Center, clip);
+        rule_end = lr.x - 10.0;
+    }
     if rule_x < rule_end {
         paint::hline(r, rule_x, rule_end, cy.round(), 1.0, c(t::PHOTO_LINE));
+    }
+}
+
+/// The end note: the note and its link, then the end line and a quieter one,
+/// centred under the last photo.  `top` is the note's top on screen.
+#[allow(clippy::too_many_arguments)]
+fn paint_footer(r: &mut Renderer, bounds: Rectangle, origin_y: f32, top: f32, m: &Metrics, data: &GridData<'_>, f: Footer<'_>, hover: Hover, op: f32) {
+    let c = |col: Color| paint::with_alpha(col, op);
+    let w = bounds.width - SCROLLBAR_W;
+    let mut y = top + FOOTER_TOP;
+    if let Some(((nr, lr), (note, link))) = footer_note_rects(m, data, bounds.width).zip(f.note) {
+        let at = |q: Rectangle| rect(bounds.x + q.x, origin_y + q.y, q.width + 2.0, q.height);
+        paint::text(r, note, at(nr), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK2), HAlign::Left, bounds);
+        let hot = hover == Hover::FooterLink;
+        let lr = at(lr);
+        paint::text(r, link, lr, t::T_SMALL, paint::MEDIUM, c(if hot { t::SIGNAL_HI } else { t::SIGNAL }), HAlign::Left, bounds);
+        if hot {
+            paint::hline(r, lr.x, lr.x + lr.width - 2.0, (lr.y + lr.height - 1.0).round(), 1.0, c(t::SIGNAL_HI));
+        }
+        y += FOOTER_LINE + FOOTER_GAP;
+    }
+    if let Some((line, quiet)) = f.end {
+        paint::text(r, line, rect(bounds.x, y, w, FOOTER_LINE), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK3), HAlign::Center, bounds);
+        if !quiet.is_empty() {
+            paint::text(r, quiet, rect(bounds.x, y + FOOTER_LINE + 2.0, w, FOOTER_LINE), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK4), HAlign::Center, bounds);
+        }
     }
 }
 
@@ -2467,6 +2574,7 @@ mod tests {
             restack: None,
             label: CellLabel::Name,
             footer: None,
+            links: &[],
         };
         // The header counts photos, frames in stacks too.
         assert_eq!(chip_label(&sections[0], &none).0, "16 photos");
@@ -2547,6 +2655,7 @@ mod tests {
             restack: None,
             label: CellLabel::Name,
             footer: None,
+            links: &[],
         };
         let open = |_: NaiveDate| 1.0;
         let width = 1000.0;

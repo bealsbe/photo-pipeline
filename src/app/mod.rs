@@ -2024,6 +2024,7 @@ impl App {
                 self.set_select_mode(false);
                 Task::none()
             }
+            GridEvent::SectionLink(_) | GridEvent::FooterLink => Task::none(),
         }
     }
 

@@ -89,6 +89,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 }),
                 label: crate::ui::grid::CellLabel::Name,
                 footer: None,
+                links: &[],
             };
             Grid::new(data, app.thumb_size, Message::Grid)
                 .keyboard(keyboard_ok && !app.side_expanded && app.quicklook.is_none())

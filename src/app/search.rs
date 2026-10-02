@@ -2,15 +2,26 @@
 //! the calendar.
 //!
 //! - **One field.**  The query is the page's title.  While typing, the
-//!   field offers recent searches (the last 10); ↑ ↓ choose, Enter or Tab
-//!   takes one, Enter alone searches what was typed and moves to the
-//!   results.  Esc closes the list and never leaves the page; the back
+//!   list under it offers things search found (objects and scenes, never
+//!   people, fursuits or animals), months and years with photos, and
+//!   recent searches; its footer teaches `-word` and dates.  ↑ ↓ choose,
+//!   Enter or Tab takes one (a thing or a date goes into the field, a
+//!   recent search runs), Enter alone searches what was typed and moves to
+//!   the results.  Esc closes the list and never leaves the page; the back
 //!   button and the rail do.
+//! - **The start page** (nothing searched): recent searches, *Things in
+//!   your photos* (a click searches one) and ways to search.
 //! - **Results best first**, in one list on the photos' grey: the grid of
 //!   a library day, read-only, with each photo's date under it (the date,
 //!   time and file name on hover).  A burst is one stacked tile at the
 //!   rank of its best frame, as in the grid: G or its tab opens it, Shift+G
-//!   every one.  ← → move, Space is quick look, Enter the viewer.
+//!   every one.  ← → move, Space is quick look, Enter the viewer.  A strip
+//!   says what was applied besides the words (dates, words left out, a
+//!   name it can't search yet).
+//! - **Animal words** (decision 12b): the fursuits the engine left out are
+//!   counted at the end, with *Show fursuits too*; shown, they are a list
+//!   of their own after the real animals, never mixed in, with *Hide
+//!   fursuits* on its heading.  The viewer steps through one list only.
 //! - **Open day ›** shows the selected photo's day in the calendar, with
 //!   the photo selected; its back button returns here, query and place
 //!   kept.
@@ -33,8 +44,9 @@ use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, ro
 use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task, Theme};
 
 use super::kit::{self, tip};
-use super::search_link::Link;
-use super::search_results::{self as res, Layout, Results};
+use super::search_link::api::{self, Thing};
+use super::search_link::{Extra, Link};
+use super::search_results::{self as res, Layout, Pick, Results};
 use super::style;
 use super::{App, Message, View};
 use crate::bus::Bus;
@@ -115,9 +127,17 @@ pub struct Search {
 
     /// What is in the field.
     pub query: String,
-    /// The recent searches list is open under the field.
+    /// The completions list is open under the field.
     pub completions: bool,
+    /// What it offers for the query (made on each keystroke, from memory).
+    pub offer: res::Offer,
     pub hi: Option<usize>,
+    /// The things search found, most photos first (all kinds: what is
+    /// offered is filtered by kind).
+    pub things: Arc<Vec<Thing>>,
+    /// Days with photos by month, for date completions, and the library
+    /// index they were counted from.
+    days: (usize, res::DayCounts),
     /// Where the back button returns, and what it says.
     pub from: View,
     pub from_label: String,
@@ -127,7 +147,12 @@ pub struct Search {
     pub pending: Option<(u64, bool)>,
     /// The words of the results shown (or on their way).
     pub ran: Option<String>,
+    /// What was searched is only a name, which phase 2 can't search: no
+    /// query ran.
+    pub names_only: bool,
     pub results: Option<Arc<Results>>,
+    /// The fursuits an animal word left out are shown, as their own list.
+    pub fursuits_shown: bool,
     /// Why the last query couldn't run.
     pub error: Option<String>,
     pub layout: Layout,
@@ -150,6 +175,8 @@ pub struct Search {
     last_run: (Instant, usize),
     /// The line after the last result.
     pub end_line: String,
+    /// "12 fursuits that look like dogs are left out.", while they are.
+    pub left_out_line: String,
     /// Thumbnails pending, as last told to the engine.
     busy_sent: usize,
 
@@ -166,7 +193,7 @@ pub enum Msg {
     Input(String),
     Submit,
     Clear,
-    /// A recent search from the list under the field.
+    /// A completion from the list under the field.
     Take(usize),
     /// A search from the start page (a recent one, an example).
     Run(String),
@@ -211,13 +238,18 @@ impl Search {
             downloads: Vec::new(),
             query: String::new(),
             completions: false,
+            offer: res::Offer::default(),
             hi: None,
+            things: Arc::new(Vec::new()),
+            days: (0, res::DayCounts::default()),
             from: View::Grid,
             from_label: "Grid".into(),
             seq: 0,
             pending: None,
             ran: None,
+            names_only: false,
             results: None,
+            fursuits_shown: false,
             error: None,
             layout: Layout::default(),
             stack_all: true,
@@ -236,6 +268,7 @@ impl Search {
             thumb_size: 180.0,
             last_run: (Instant::now(), 0),
             end_line: String::new(),
+            left_out_line: String::new(),
             busy_sent: 0,
             dialog: None,
             banner_hidden: false,
@@ -274,7 +307,8 @@ impl Search {
         self.stack_all != self.flipped.contains(&key)
     }
 
-    /// Photos found (frames inside stacks too).
+    /// Photos found (frames inside stacks too), the fursuits left out not
+    /// counted.
     pub fn photos(&self) -> usize {
         self.results.as_ref().map_or(0, |r| r.found.len())
     }
@@ -287,8 +321,13 @@ impl Search {
             self.layout = Layout::default();
             return;
         };
-        self.end_line = format!("That's everything that looks like “{}”.", r.words);
-        let new = res::layout(&r.found, "Best matches first", |k| self.stacked(k));
+        let words = r.understood.words.trim();
+        self.end_line = match r.understood.dates.filter(|_| words.is_empty()) {
+            Some(d) => format!("That's everything from {}.", d.label()),
+            None => format!("That's everything that looks like “{}”.", r.looks_like()),
+        };
+        self.left_out_line = if r.fursuits.is_empty() { String::new() } else { res::fursuits_left_out(r.fursuits.len(), r.animal.as_deref()) };
+        let new = res::layout(&res::parts(&r, self.fursuits_shown), |k| self.stacked(k));
         let old = std::mem::replace(&mut self.layout, new);
         if animate {
             self.before = (old.sections, old.runs);
@@ -378,6 +417,7 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     s.query = words.clone();
     s.completions = false;
     s.hi = None;
+    s.names_only = false;
     if words.is_empty() {
         s.ran = None;
         s.results = None;
@@ -390,6 +430,20 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     }
     if s.status.indexed_shots == 0 {
         return app.show_status("Nothing is indexed yet, so there is nothing to search.", 5000);
+    }
+    // Only a name: phase 2 can't search names, so nothing runs; the page
+    // says names come later.
+    let parsed = api::parse(&words);
+    if parsed.words.is_empty() && parsed.exclude.is_empty() && parsed.dates.is_none() && !parsed.names.is_empty() {
+        s.names_only = true;
+        s.ran = Some(words);
+        s.results = None;
+        s.error = None;
+        s.pending = None;
+        s.layout = Layout::default();
+        s.selection.clear();
+        s.anchor = None;
+        return unfocus_field();
     }
     app.settings.remember_search(&words);
     app.settings.save_in_background();
@@ -418,6 +472,8 @@ pub fn rerun(app: &mut App) {
 
 /// A query's answer: build its records on a worker.
 pub fn on_results(app: &mut App, seq: u64, hits: Arc<Vec<Hit>>, error: Option<String>) -> Task<Message> {
+    // The fursuits left out and what was understood came with the hits.
+    let extra = app.search.link.take_extra(seq).unwrap_or_default();
     if app.search.pending.map(|p| p.0) != Some(seq) {
         return Task::none();
     }
@@ -434,19 +490,21 @@ pub fn on_results(app: &mut App, seq: u64, hits: Arc<Vec<Hit>>, error: Option<St
         return Task::done(m(Msg::Built(seq, None)));
     };
     let words = app.search.ran.clone().unwrap_or_default();
-    let work = move || Arc::new(build(seq, words, &hits, &index));
+    let work = move || Arc::new(build(seq, words, &hits, extra, &index));
     Task::perform(super::preferences::on_worker("search-results", work), move |r| m(Msg::Built(seq, r)))
 }
 
-/// The records for `hits`, from the library index (on a worker).
-fn build(seq: u64, words: String, hits: &[Hit], index: &LibraryIndex) -> Results {
+/// The records for `hits` and the fursuits left out, from the library index
+/// (on a worker).
+fn build(seq: u64, words: String, hits: &[Hit], extra: Extra, index: &LibraryIndex) -> Results {
     use std::collections::HashMap;
     // Each day's files by path, made once per day the hits touch.
     let mut days: HashMap<NaiveDate, HashMap<&Path, &FileEntry>> = HashMap::new();
-    for h in hits {
+    for h in hits.iter().chain(extra.fursuits.iter()) {
         days.entry(h.day).or_insert_with(|| index.get(h.day).map(|d| d.files.iter().map(|f| (f.path.as_path(), f)).collect()).unwrap_or_default());
     }
-    res::build(seq, words, hits, |d, p| days.get(&d).and_then(|m| m.get(p)).map(|e| (*e).clone()))
+    let answer = res::Answer { fursuits: &extra.fursuits, animal: extra.animal.clone(), understood: (*extra.understood).clone() };
+    res::build(seq, words, hits, answer, |d, p| days.get(&d).and_then(|m| m.get(p)).map(|e| (*e).clone()))
 }
 
 fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Message> {
@@ -466,6 +524,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
     s.selection = kept.iter().filter_map(|p| r.coll.id_of(p)).collect();
     s.anchor = anchor.and_then(|p| r.coll.id_of(&p));
     if !refresh {
+        s.fursuits_shown = false;
         s.flipped.clear();
         s.collapsed.clear();
         s.selection.clear();
@@ -489,6 +548,10 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
+    // The things found grow with the index.
+    if old.indexed_shots != app.search.status.indexed_shots || app.search.things.is_empty() {
+        on_things(app, app.search.link.things());
+    }
     let st = &app.search.status;
     let mut tasks = Vec::new();
     if st.stopped.is_some() && old.stopped != st.stopped {
@@ -539,6 +602,34 @@ pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: 
     Task::none()
 }
 
+/// The things search found changed (the index grew, the vocabulary was
+/// worked out again).
+pub fn on_things(app: &mut App, things: Arc<Vec<Thing>>) {
+    if *things == *app.search.things {
+        return;
+    }
+    app.search.things = things;
+    if app.search.completions {
+        refresh_offer(app);
+    }
+}
+
+/// Work out what the list under the field offers for the query, from
+/// memory: the things found, the calendar's days, the recent searches.
+fn refresh_offer(app: &mut App) {
+    let s = &mut app.search;
+    if let Some(ix) = app.calendar.index.as_ref() {
+        let at = Arc::as_ptr(ix) as usize;
+        if s.days.0 != at {
+            s.days = (at, res::DayCounts::from_days(ix.days.keys()));
+        }
+    }
+    s.offer = res::offer(&s.query, &s.things, &s.days.1, &app.settings.search_recent);
+    if s.hi.is_some_and(|h| h >= s.offer.picks.len()) {
+        s.hi = None;
+    }
+}
+
 /// The library was read again: the engine looks for new photos.
 pub fn on_library(app: &mut App, index: Arc<LibraryIndex>) {
     app.search.link.on_library(index);
@@ -564,6 +655,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             s.query = text;
             s.completions = true;
             s.hi = None;
+            refresh_offer(app);
             Task::none()
         }
         Msg::Submit => {
@@ -641,9 +733,37 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     }
 }
 
+/// Take completion `i`: a recent search runs; a thing or a date goes into
+/// the field in place of the word being typed, ready for the next one.
 fn take(app: &mut App, i: usize) -> Task<Message> {
-    let Some(words) = res::completions(&app.settings.search_recent, &app.search.query).get(i).map(|w| w.to_string()) else { return Task::none() };
-    run(app, words)
+    let Some(pick) = app.search.offer.picks.get(i).cloned() else { return Task::none() };
+    if let Pick::Recent(words) = pick {
+        return run(app, words);
+    }
+    let s = &mut app.search;
+    s.query = res::apply(&s.query, &pick);
+    s.completions = true;
+    s.hi = None;
+    refresh_offer(app);
+    Task::batch([iced::widget::operation::focus::<Message>(FIELD), iced::widget::operation::move_cursor_to_end(FIELD)])
+}
+
+/// *Show fursuits too*, or *Hide fursuits*: the fursuits an animal word
+/// left out become a list of their own after the real animals, or go.
+fn show_fursuits(app: &mut App, on: bool) -> Task<Message> {
+    let s = &mut app.search;
+    if s.fursuits_shown == on || s.results.as_ref().is_none_or(|r| r.fursuits.is_empty()) {
+        return Task::none();
+    }
+    s.fursuits_shown = on;
+    let focus = s.focus();
+    s.relayout(false, focus);
+    // Shown, their list starts where the note was: bring it into view.
+    if on {
+        let first = s.layout.sections.get(1).and_then(|sec| sec.ids.first().copied());
+        s.reveal = (s.reveal.0 + 1, first);
+    }
+    super::quicklook::follow(app)
 }
 
 // ── the results grid ────────────────────────────────────────────────────────
@@ -676,6 +796,11 @@ fn on_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
             Task::none()
         }
         GridEvent::Chip(_) | GridEvent::SelectDone => Task::none(),
+        // *Hide fursuits* on their list's heading; *Show fursuits too* in
+        // the note under the results.
+        GridEvent::SectionLink(d) if d == res::FURSUITS_DAY => show_fursuits(app, false),
+        GridEvent::SectionLink(_) => Task::none(),
+        GridEvent::FooterLink => show_fursuits(app, true),
         GridEvent::ZoomStep(step) => {
             s.thumb_size = (((s.thumb_size + step as f32 * super::ZOOM_STEP) / super::ZOOM_STEP).floor() * super::ZOOM_STEP).clamp(grid::MIN_SIZE, grid::MAX_SIZE);
             Task::none()
@@ -706,12 +831,14 @@ fn on_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
 }
 
 /// The viewer on a result (read-only, like a library day), stepping
-/// through every frame in the results' order; a stack opens on its cover.
+/// through every frame of its list in the results' order (the fursuits'
+/// list and the real animals' are never stepped through together); a
+/// stack opens on its cover.
 pub fn open_viewer(app: &mut App, id: RecordId) -> Task<Message> {
     let s = &mut app.search;
     let Some(r) = s.results.clone() else { return Task::none() };
     s.completions = false;
-    let items = s.layout.visible.clone();
+    let items = s.layout.visible_with(id).to_vec();
     let index = items.iter().position(|&x| x == id).unwrap_or(0);
     super::viewer::open(app, super::viewer::Source::Library(r.coll.clone()), items, index, true)
 }
@@ -781,7 +908,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
         return Task::none();
     }
     if app.search.completions {
-        let n = res::completions(&app.settings.search_recent, &app.search.query).len();
+        let n = app.search.offer.picks.len();
         let s = &mut app.search;
         match key {
             Key::Named(Named::ArrowDown) if n > 0 => {
@@ -792,7 +919,14 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
                 s.hi = Some(s.hi.map_or(n - 1, |h| (h + n - 1) % n));
                 return Task::none();
             }
-            Key::Named(Named::Tab | Named::Enter) => {
+            // Tab completes: the chosen one, else the first.
+            Key::Named(Named::Tab) => {
+                return match s.hi.or((n > 0).then_some(0)) {
+                    Some(i) => take(app, i),
+                    None => Task::none(),
+                };
+            }
+            Key::Named(Named::Enter) => {
                 return match s.hi {
                     Some(i) => take(app, i),
                     None => {
@@ -836,6 +970,8 @@ pub enum Page {
     /// The model is downloading, or the first photos are being indexed.
     Preparing,
     Start,
+    /// Only a name was searched: names come later.
+    NamesLater,
     Searching,
     Failed,
     NoResults,
@@ -860,6 +996,7 @@ pub fn page(app: &App) -> Page {
     }
     match (&s.ran, &s.results, &s.error) {
         (None, _, _) => Page::Start,
+        (Some(_), _, _) if s.names_only => Page::NamesLater,
         (Some(_), _, Some(_)) => Page::Failed,
         (Some(_), None, None) => Page::Searching,
         (Some(_), Some(r), None) if r.found.is_empty() => Page::NoResults,
@@ -874,6 +1011,11 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     if matches!(p, Page::Results | Page::NoResults) && coverage(&s.status) != Coverage::Whole {
         col = col.push(partial_strip(app));
     }
+    if matches!(p, Page::Results | Page::NoResults) {
+        if let Some(strip) = understood_strip(app) {
+            col = col.push(strip);
+        }
+    }
     let body: Element<'_, Message> = match p {
         Page::NoLibrary => message_page(
             Glyph::Library,
@@ -887,6 +1029,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         Page::NotIndexed => invitation(app),
         Page::Preparing => preparing(app),
         Page::Start => start_page(app),
+        Page::NamesLater => names_later(app),
         Page::Searching => container(Space::new()).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into(),
         Page::Failed => message_page(
             Glyph::Warning,
@@ -1015,40 +1158,34 @@ fn field_style(_t: &Theme, status: text_input::Status) -> text_input::Style {
     }
 }
 
-/// The recent searches under the field while typing; a click elsewhere on
-/// the page closes them.
+/// The completions under the field while typing, in the Hints menu's
+/// floating list: rows under their headings, each a glyph, the words (what
+/// is typed set heavier) and a count, and a footer teaching the syntax.  A
+/// click elsewhere on the page closes it.
 fn completions_layer(app: &App) -> Element<'_, Message> {
     let s = &app.search;
-    let rows = res::completions(&app.settings.search_recent, &s.query);
+    let offer = &s.offer;
     let w = field_width(app);
     let mut list = column![].spacing(2);
-    if rows.is_empty() {
-        let typed = s.query.trim();
+    let typed = s.query.trim();
+    let quiet = |line: String| container(text(line).size(t::T_SMALL).color(t::INK3)).padding(Padding::from([t::S2, 10.0]));
+    if offer.names_later {
+        list = list.push(quiet("Searching by name comes later. For now, search by what a photo shows.".into()));
+    } else if offer.picks.is_empty() {
         let line = if typed.is_empty() { "Type what you're looking for, then press Enter.".to_string() } else { format!("Press Enter to search for “{typed}”") };
-        list = list.push(container(text(line).size(t::T_SMALL).color(t::INK3)).padding(Padding::from([t::S2, 10.0])));
-    } else {
-        list = list.push(container(kit::heading("Recent searches")).padding(Padding { top: t::S2, bottom: 3.0, left: 10.0, right: 10.0 }));
-        let typed = s.query.trim().to_lowercase();
-        for (i, words) in rows.iter().enumerate() {
-            let hot = s.hi == Some(i);
-            let line = row![icons::view(Glyph::Clock, 15.0, t::INK3), highlighted(words, &typed)].spacing(10).align_y(Alignment::Center);
-            list = list.push(
-                button(line)
-                    .padding(Padding::from([5.0, 10.0]))
-                    .width(Length::Fill)
-                    .style(move |_t, status| {
-                        let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
-                        button::Style {
-                            background: (hot || hover).then_some(Background::Color(t::RAISED)),
-                            text_color: t::INK,
-                            border: Border { radius: t::R_CONTROL.into(), ..Border::default() },
-                            ..button::Style::default()
-                        }
-                    })
-                    .on_press(m(Msg::Take(i))),
-            );
-        }
+        list = list.push(quiet(line));
     }
+    let mut group = "";
+    for (i, pick) in offer.picks.iter().enumerate() {
+        if pick.group() != group {
+            group = pick.group();
+            let top = if i == 0 { t::S2 } else { t::S3 };
+            list = list.push(container(kit::heading(group)).padding(Padding { top, bottom: 3.0, left: 10.0, right: 10.0 }));
+        }
+        list = list.push(completion_row(pick, i, s.hi == Some(i), &offer.stem, typed));
+    }
+    list = list.push(container(kit::hairline()).padding(Padding { top: t::S1, ..Padding::ZERO }));
+    list = list.push(syntax_footer());
     let panel = crate::ui::motion::Appear::new(container(list).width(w).padding(t::S1).style(style::floating())).rise(-4.0);
     let x = t::S3 + back_width(app) + t::S2;
     let catcher = column![
@@ -1058,8 +1195,55 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
     stack![catcher, pin(opaque(panel)).position(Point::new(x, HEADER_H / 2.0 + FIELD_H / 2.0 + 4.0)).width(Length::Fill).height(Length::Fill)].into()
 }
 
-/// A recent search with the words typed so far in a heavier weight.
-fn highlighted<'a>(words: &'a str, typed: &str) -> Element<'a, Message> {
+/// One completion: its glyph, its words with what is typed set heavier,
+/// and its count.  `stem` is the word being typed, `typed` the whole field
+/// (what a recent search matched).
+fn completion_row<'a>(pick: &Pick, i: usize, hot: bool, stem: &str, typed: &str) -> Element<'a, Message> {
+    let (glyph, words, count, mark): (Glyph, String, String, String) = match pick {
+        Pick::Thing { word, photos, minus: false } => (Glyph::Search, word.clone(), util::plural(*photos as u64, "photo"), stem.to_string()),
+        Pick::Thing { word, photos, minus: true } => (Glyph::LeaveOut, format!("-{word}"), util::plural(*photos as u64, "photo"), format!("-{stem}")),
+        Pick::Date { label, days, .. } => (Glyph::Calendar, label.clone(), format!("{} with photos", util::plural(*days as u64, "day")), stem.to_string()),
+        Pick::Recent(r) => (Glyph::Clock, r.clone(), String::new(), typed.to_lowercase()),
+    };
+    let mut line = row![icons::view(glyph, 15.0, t::INK3), container(highlighted(words, &mark)).width(Length::Fill)].spacing(10).align_y(Alignment::Center);
+    if !count.is_empty() {
+        line = line.push(text(count).size(t::T_SMALL).color(t::INK3));
+    }
+    button(line)
+        .padding(Padding::from([5.0, 10.0]))
+        .width(Length::Fill)
+        .style(move |_t, status| {
+            let hover = matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: (hot || hover).then_some(Background::Color(t::RAISED)),
+                text_color: t::INK,
+                border: Border { radius: t::R_CONTROL.into(), ..Border::default() },
+                ..button::Style::default()
+            }
+        })
+        .on_press(m(Msg::Take(i)))
+        .into()
+}
+
+/// The list's footer: the syntax, taught by example.
+fn syntax_footer<'a>() -> Element<'a, Message> {
+    let item = |cap: &'a str, about: &'a str| row![keycap(cap), text(about).size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center);
+    container(row![item("-word", "leaves a word out"), item("jun 2024", "only those dates")].spacing(t::S4).align_y(Alignment::Center))
+        .padding(Padding { top: t::S2, bottom: 6.0, left: 10.0, right: 10.0 })
+        .into()
+}
+
+/// Typed syntax shown as a key cap, on the chrome.
+fn keycap<'a>(s: &'a str) -> Element<'a, Message> {
+    container(text(s).size(11).font(paint::MEDIUM).color(t::INK))
+        .padding(Padding::from([1.0, 6.0]))
+        .style(|_| container::Style { background: Some(Background::Color(t::RAISED)), border: style::border(t::LINE_HI, 1.0, 4.0), ..Default::default() })
+        .into()
+}
+
+/// Words with the part matching `typed` (from the start of a word) in a
+/// heavier weight.
+fn highlighted<'a>(words: String, typed: &str) -> Element<'a, Message> {
     let lower = words.to_lowercase();
     let at = if typed.is_empty() {
         None
@@ -1074,9 +1258,9 @@ fn highlighted<'a>(words: &'a str, typed: &str) -> Element<'a, Message> {
             let (a, rest) = words.split_at(i);
             let (b, c) = rest.split_at(typed.len().min(rest.len()));
             row![
-                text(a).size(t::T_BODY).color(t::INK),
-                text(b).size(t::T_BODY).font(paint::SEMIBOLD).color(t::INK),
-                text(c).size(t::T_BODY).color(t::INK),
+                text(a.to_string()).size(t::T_BODY).color(t::INK),
+                text(b.to_string()).size(t::T_BODY).font(paint::SEMIBOLD).color(t::INK),
+                text(c.to_string()).size(t::T_BODY).color(t::INK),
             ]
             .into()
         }
@@ -1108,10 +1292,43 @@ fn partial_strip(app: &App) -> Element<'_, Message> {
     column![container(r.padding(Padding::from([t::S2, t::S3]))).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into()
 }
 
+/// Over the results, quietly, what was applied besides the words: the
+/// dates, the words left out, and a name it can't search yet.  So the user
+/// sees why the results look as they do.  `None` when there is nothing to
+/// say.
+fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
+    let r = app.search.results.as_ref()?;
+    let u = &r.understood;
+    let (dates, leave) = res::understood_lines(u);
+    if dates.is_none() && leave.is_none() && u.names.is_empty() {
+        return None;
+    }
+    let item = |g: Glyph, words: String| row![icons::view(g, 14.0, t::INK3), text(words).size(t::T_SMALL).color(t::INK2)].spacing(6).align_y(Alignment::Center);
+    let mut r = row![].spacing(t::S5).align_y(Alignment::Center);
+    if let Some(d) = dates {
+        r = r.push(item(Glyph::Calendar, d));
+    }
+    if let Some(l) = leave {
+        r = r.push(item(Glyph::LeaveOut, l));
+    }
+    if !u.names.is_empty() {
+        let names: Vec<String> = u.names.iter().map(|n| format!("@{n}")).collect();
+        r = r.push(item(Glyph::Info, format!("Searching by name comes later, so {} was left out", res::and_list(&names))));
+    }
+    Some(column![container(r.wrap().vertical_spacing(t::S1)).padding(Padding::from([t::S2, t::S3])).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into())
+}
+
+/// The fursuits' list's heading carries *Hide fursuits*.
+const FURSUIT_LINKS: &[(NaiveDate, &str)] = &[(res::FURSUITS_DAY, "Hide fursuits")];
+
 fn results_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.search;
     let Some(r) = s.results.as_ref() else { return Space::new().into() };
-    let footer = (coverage(&s.status) == Coverage::Whole).then_some((s.end_line.as_str(), "Preferences ▸ Search sets how close a match must be."));
+    // The end note: the fursuits left out (with the way to show them), then
+    // that this is everything, once search sees the whole library.
+    let note = (!r.fursuits.is_empty() && !s.fursuits_shown).then_some((s.left_out_line.as_str(), "Show fursuits too"));
+    let end = (coverage(&s.status) == Coverage::Whole).then_some((s.end_line.as_str(), "Preferences ▸ Search sets how close a match must be."));
+    let footer = (note.is_some() || end.is_some()).then_some(grid::Footer { note, end });
     let data = GridData {
         sections: &s.layout.sections,
         coll: &r.coll,
@@ -1127,6 +1344,7 @@ fn results_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         restack: Some(Restack { seq: s.restack_seq, sections: &s.before.0, bursts: &s.before.1, focus: s.restack_focus }),
         label: CellLabel::Date,
         footer,
+        links: if s.fursuits_shown { FURSUIT_LINKS } else { &[] },
     };
     Grid::new(data, s.thumb_size, |e| m(Msg::Grid(e)))
         .keyboard(keyboard_ok && !s.completions && app.quicklook.is_none())
@@ -1149,9 +1367,14 @@ fn photo_heading<'a>(label: &'a str, note: &'a str) -> Element<'a, Message> {
     container(r).height(grid::HEADER_H).center_y(grid::HEADER_H).padding(Padding::from([0.0, 16.0])).width(Length::Fill).into()
 }
 
-/// A recent search to click on the photos' grey.
-fn word_button<'a>(words: &str) -> Element<'a, Message> {
-    button(text(words.to_string()).size(14).font(paint::MEDIUM))
+/// A recent search, or a thing found (with how many photos show it), to
+/// click on the photos' grey: it runs that search.
+fn word_button<'a>(words: &str, count: Option<usize>) -> Element<'a, Message> {
+    let mut label = row![text(words.to_string()).size(14).font(paint::MEDIUM)].spacing(5).align_y(iced::alignment::Vertical::Bottom);
+    if let Some(n) = count {
+        label = label.push(text(util::thousands(n as u64)).size(t::T_SMALL).color(t::PHOTO_INK3));
+    }
+    button(label)
         .padding(Padding::from([2.0, 0.0]))
         .style(|_t, status| {
             let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
@@ -1160,6 +1383,9 @@ fn word_button<'a>(words: &str) -> Element<'a, Message> {
         .on_press(m(Msg::Run(words.to_string())))
         .into()
 }
+
+/// The most things shown on the start page.
+const START_THINGS: usize = 24;
 
 /// An example search, as a key cap on the photos' grey, and what it shows.
 fn example<'a>(words: &'a str, about: &'a str) -> Element<'a, Message> {
@@ -1178,30 +1404,43 @@ fn example<'a>(words: &'a str, about: &'a str) -> Element<'a, Message> {
     row![container(chip).width(170), text(about).size(t::T_BODY).color(t::PHOTO_INK2)].align_y(Alignment::Center).into()
 }
 
-/// Nothing typed: the last searches, and how to search.
+/// Nothing typed: the last searches, the things in the photos, and how to
+/// search.
 fn start_page(app: &App) -> Element<'_, Message> {
     let recent = &app.settings.search_recent;
+    let words_block = |words: iced::widget::Row<'static, Message>| container(words.wrap().vertical_spacing(4)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 }).max_width(1000);
     let mut col = column![].padding(Padding { top: t::S1, bottom: t::S5, left: 0.0, right: 0.0 });
     if !recent.is_empty() {
         col = col.push(photo_heading("Recent searches", "The last 10. Forget them in Preferences ▸ Search."));
         let mut words = row![].spacing(18);
         for w in recent {
-            words = words.push(word_button(w));
+            words = words.push(word_button(w, None));
         }
-        col = col.push(container(words.wrap().vertical_spacing(4)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 }).max_width(1000));
+        col = col.push(words_block(words));
+    }
+    // Objects and scenes only: never people, fursuits or animals.
+    let things: Vec<&Thing> = res::offered(&app.search.things).take(START_THINGS).collect();
+    if !things.is_empty() {
+        col = col.push(photo_heading("Things in your photos", "Suggested from what search learned. Never shown on photos."));
+        let mut words = row![].spacing(18);
+        for th in things {
+            words = words.push(word_button(&th.word, Some(th.photos)));
+        }
+        col = col.push(words_block(words));
     }
     col = col.push(photo_heading("Ways to search", ""));
     let examples = column![
         example("red car at night", "Photos that look like the words, best match first"),
-        example("fireworks", "One word is enough"),
-        example("people dancing", "What a photo shows, not its file or folder name"),
+        example("fireworks -crowd", "Leave a word out: fireworks, without the crowd"),
+        example("fireworks 2024", "Only those dates: 2024, jun 2024, apr–jun 2024"),
     ]
     .spacing(10)
     .padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
     col = col.push(examples);
     col = col.push(
-        container(text("Results are read-only, like the calendar's days: Open day › takes you to a photo's day.").size(t::T_SMALL).color(t::PHOTO_INK3))
-            .padding(Padding::from([0.0, 16.0])),
+        container(text("Search goes by what a photo shows, not its file or folder name. Results are read-only, like the calendar's days: Open day › takes you to a photo's day.").size(t::T_SMALL).color(t::PHOTO_INK3))
+            .padding(Padding::from([0.0, 16.0]))
+            .max_width(760),
     );
     container(scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill))
         .width(Length::Fill)
@@ -1212,18 +1451,36 @@ fn start_page(app: &App) -> Element<'_, Message> {
 
 fn no_results(app: &App) -> Element<'_, Message> {
     let s = &app.search;
-    let words = s.results.as_ref().map(|r| r.words.clone()).unwrap_or_default();
+    let words = s.results.as_ref().map(|r| r.looks_like().to_string()).unwrap_or_default();
+    let dates = s.results.as_ref().and_then(|r| r.understood.dates);
     let (title, body) = if coverage(&s.status) != Coverage::Whole {
         (
             format!("Nothing in the {} photos indexed so far looks like “{words}”", util::thousands(s.status.indexed_shots as u64)),
             "Results fill in as indexing reaches older days. Or try another word.".to_string(),
         )
+    } else if let Some(d) = dates {
+        (format!("Nothing from {} looks like “{words}”", d.label()), "Try other dates, another word, or fewer words.".to_string())
     } else {
         (
             format!("Nothing in the library looks like “{words}”"),
             "Try another word, or fewer words. Search goes by what a photo shows, not by file names or folder names.".to_string(),
         )
     };
+    quiet_page(title, body)
+}
+
+/// Only a name was searched, which search can't do yet: the page says so,
+/// plainly, and nothing ran.
+fn names_later(app: &App) -> Element<'_, Message> {
+    let name = app.search.ran.clone().unwrap_or_default();
+    quiet_page(
+        "Searching by name comes later".to_string(),
+        format!("“{name}” is a name. For now, search by what a photo shows, such as fireworks or a red car at night."),
+    )
+}
+
+/// A title and a line, centred on the photos' grey.
+fn quiet_page<'a>(title: String, body: String) -> Element<'a, Message> {
     let col = column![
         Space::new().height(Length::FillPortion(2)),
         text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK).align_x(iced::alignment::Horizontal::Center),
@@ -1370,15 +1627,20 @@ pub fn debug_state(app: &App) -> String {
     let s = &app.search;
     let name = |id: RecordId| s.results.as_ref().and_then(|r| r.coll.get(id)).map(|r| r.stem()).unwrap_or_else(|| "?".into());
     // Tiles and their marks side by side (looking each up would be quadratic).
-    let runs = s.layout.runs.first().map(Vec::as_slice).unwrap_or(&[]);
-    let stacked: Vec<(RecordId, RunMark)> = s.layout.tiles.iter().zip(runs).filter_map(|(&id, m)| m.filter(|m| m.stacked).map(|m| (id, m))).collect();
+    let runs: Vec<Option<RunMark>> = s.layout.runs.iter().flatten().copied().collect();
+    let stacked: Vec<(RecordId, RunMark)> = s.layout.tiles.iter().zip(&runs).filter_map(|(&id, m)| m.filter(|m| m.stacked).map(|m| (id, m))).collect();
     let stacks: Vec<String> = stacked.iter().take(6).map(|&(id, m)| format!("{}x{}", name(id), m.total)).collect();
-    let open = s.layout.runs.first().map_or(0, |r| r.iter().flatten().filter(|m| !m.stacked && m.first).count());
+    let open = runs.iter().flatten().filter(|m| !m.stacked && m.first).count();
     let st = &s.status;
     let mut sel: Vec<String> = s.selection.iter().map(|&id| name(id)).collect();
     sel.sort();
+    let sections: Vec<String> = s.layout.sections.iter().map(|x| format!("{}:{}", x.label, x.ids.len())).collect();
+    let understood = s.results.as_ref().map(|r| {
+        let u = &r.understood;
+        format!("words={:?} exclude={:?} dates={:?} names={:?}", u.words, u.exclude, u.dates.map(|d| d.label()), u.names)
+    });
     format!(
-        "view={:?} page={:?} query={:?} ran={:?} pending={:?} error={:?} photos={} tiles={} stacks={} {:?} open_bursts={} selection={:?} anchor={:?} completions={} hi={:?} recent={:?} from={:?}/{:?} coverage={:?} status=[models={} indexed={}/{} asked={} pass={:?} device={:?} stopped={:?} waiting={} restarts={} exports={}] downloads={:?} dialog={:?} banner_hidden={} steps={} closeness={:.2} scroll={} fake={}",
+        "view={:?} page={:?} query={:?} ran={:?} pending={:?} error={:?} photos={} tiles={} sections={:?} fursuits={} fursuits_shown={} animal={:?} understood={:?} stacks={} {:?} open_bursts={} selection={:?} anchor={:?} completions={} hi={:?} recent={:?} from={:?}/{:?} coverage={:?} status=[models={} indexed={}/{} asked={} pass={:?} device={:?} stopped={:?} waiting={} restarts={} exports={}] downloads={:?} dialog={:?} banner_hidden={} steps={} closeness={:.2} scroll={} fake={}",
         app.view,
         page(app),
         s.query,
@@ -1387,6 +1649,11 @@ pub fn debug_state(app: &App) -> String {
         s.error,
         s.photos(),
         s.layout.tiles.len(),
+        sections,
+        s.results.as_ref().map_or(0, |r| r.fursuits.len()),
+        s.fursuits_shown,
+        s.results.as_ref().and_then(|r| r.animal.clone()),
+        understood,
         stacked.len(),
         stacks,
         open,
