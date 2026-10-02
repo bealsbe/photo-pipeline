@@ -8,7 +8,7 @@ build = "build.rs"
 
 [dependencies]
 iced = { version = "0.14", features = ["image", "canvas", "advanced", "tokio", "wgpu"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 dirs = "7"
 fast_image_resize = "6.1"

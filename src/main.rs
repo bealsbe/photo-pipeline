@@ -10,10 +10,12 @@ mod bus;
 mod exif;
 mod exif_panel;
 mod imaging;
+mod ml;
 mod model;
 mod ops;
 mod profile;
 mod scan;
+mod search;
 mod settings;
 mod ui;
 mod util;
@@ -25,6 +27,11 @@ fn main() -> iced::Result {
     if args.len() == 3 && args[1] == "--dump-scan" {
         dump_scan(std::path::Path::new(&args[2]));
         return Ok(());
+    }
+    // The ML helper process: the same binary, started by the app with a
+    // flag (plan §4.3).  No window, no fonts.
+    if args.get(1).is_some_and(|a| a == ml::worker::FLAG) {
+        std::process::exit(ml::worker::main(&args[2..]));
     }
     profile::init();
     #[cfg(feature = "profiler")]

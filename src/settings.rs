@@ -70,7 +70,26 @@ pub struct Settings {
     /// Show the menus in the KDE global menu when the panel has one.  Read
     /// at start; `PP_NO_GLOBAL_MENU` in the environment overrides it.
     pub global_menu: bool,
+
+    // Library search (docs/library-search-plan.md §7a.8).
+    /// Preferences ▸ Search ▸ *Run models on*: the graphics card (the
+    /// default) or the processor.  Never changed by the app itself.
+    pub search_device: crate::ml::Device,
+    /// Preferences ▸ Search ▸ *How close matches must be*: a value in
+    /// `search::CLOSENESS_MIN..=CLOSENESS_MAX`; higher is stricter; the
+    /// reset button sets `search::CLOSENESS_DEFAULT`.
+    pub search_closeness: f32,
+    /// Preferences ▸ Search ▸ *Index new exports* (on): after the first
+    /// index, each export is added to search on its own.
+    pub search_index_exports: bool,
+    /// The last [`RECENT_SEARCHES`] queries, newest first (§7a.3).
+    /// *Forget them* in Preferences clears it.
+    pub search_recent: Vec<String>,
 }
+
+/// How many recent searches are kept.
+#[allow(dead_code)] // used by the search page (the UI round)
+pub const RECENT_SEARCHES: usize = 10;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -110,6 +129,41 @@ impl Default for Settings {
             viewer_y: None,
             viewer_maximized: false,
             global_menu: true,
+            search_device: crate::ml::Device::Gpu,
+            search_closeness: crate::search::CLOSENESS_DEFAULT,
+            search_index_exports: true,
+            search_recent: Vec::new(),
+        }
+    }
+}
+
+#[allow(dead_code)] // used by the search page (the UI round)
+impl Settings {
+    /// Note a query just run: it moves to the front of the recent list
+    /// (once, however often it is run), and the list keeps its last
+    /// [`RECENT_SEARCHES`].  Blank queries aren't kept.
+    pub fn remember_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        self.search_recent.retain(|r| r != q);
+        self.search_recent.insert(0, q.to_string());
+        self.search_recent.truncate(RECENT_SEARCHES);
+    }
+
+    /// Preferences ▸ *Forget them*.
+    pub fn forget_searches(&mut self) {
+        self.search_recent.clear();
+    }
+
+    /// The closeness, kept within the slider's range (an old or edited
+    /// settings file can't push it outside).
+    pub fn closeness(&self) -> f32 {
+        if self.search_closeness.is_finite() {
+            self.search_closeness.clamp(crate::search::CLOSENESS_MIN, crate::search::CLOSENESS_MAX)
+        } else {
+            crate::search::CLOSENESS_DEFAULT
         }
     }
 }
@@ -300,6 +354,32 @@ mod tests {
         let py = Settings::from_qsettings("[filter]\npruned=true\nmarked_only=false\n");
         assert!(py.filter_pruned && !py.filter_marked_only && !py.filter_pruned_only);
         assert!(!Settings::from_qsettings("[filter]\npruned=false\n").filter_pruned);
+    }
+
+    #[test]
+    fn search_settings_default_to_the_card_and_keep_ten_recent_searches() {
+        let mut s = Settings::default();
+        assert_eq!(s.search_device, crate::ml::Device::Gpu);
+        assert!(s.search_index_exports);
+        assert_eq!(s.closeness(), crate::search::CLOSENESS_DEFAULT);
+        for i in 0..12 {
+            s.remember_search(&format!("query {i}"));
+        }
+        s.remember_search("  ");
+        s.remember_search("query 5");
+        assert_eq!(s.search_recent.len(), RECENT_SEARCHES);
+        assert_eq!(s.search_recent[0], "query 5", "a repeat moves to the front");
+        assert_eq!(s.search_recent.iter().filter(|q| *q == "query 5").count(), 1);
+        assert!(!s.search_recent.iter().any(|q| q == "query 0" || q == "query 1"));
+        s.forget_searches();
+        assert!(s.search_recent.is_empty());
+        // Older settings files, and odd values, read safely.
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).expect("parses");
+        assert_eq!(old.search_device, crate::ml::Device::Gpu);
+        let odd = Settings { search_closeness: 99.0, ..Settings::default() };
+        assert_eq!(odd.closeness(), crate::search::CLOSENESS_MAX);
+        let text = serde_json::to_string(&Settings { search_device: crate::ml::Device::Cpu, ..Settings::default() }).unwrap();
+        assert!(text.contains(r#""search_device":"cpu""#));
     }
 
     #[test]

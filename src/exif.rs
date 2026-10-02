@@ -77,7 +77,7 @@ const MAKER_NOTE_MAX_ENTRIES: usize = 512;
 /// What the header says about how a frame was shot, beyond its capture
 /// time: enough to find the frames of one shutter press and where the
 /// camera focused.  Read with the capture time, from the same bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ShotMeta {
     /// Milliseconds past the capture time's second (EXIF SubSecTimeOriginal),
     /// if the camera recorded them.

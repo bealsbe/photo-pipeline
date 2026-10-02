@@ -11,7 +11,7 @@ use super::crop::Crop;
 pub use crate::exif::ShotMeta;
 use crate::util;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FileType {
     Jpg,
     Raw,
