@@ -305,6 +305,38 @@ fn score_labels() {
         z += 0.25;
     }
     eprintln!("best mean F1 {:.3} at closeness {:.2} (the default candidate; the slider's range is {CLOSENESS_MIN}–{CLOSENESS_MAX})", best.0, best.1);
+
+    // The absolute rule: the model's own match probability.
+    eprintln!("probability sweep (sigmoid of the trained scale and bias): mean precision / recall / F1, mean hits");
+    let mut best_p = (0.0f64, 0.0f32);
+    for &p in &[0.01f32, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
+        let (mut ps, mut rs, mut fs, mut ns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        for (q, scores) in &per_query {
+            let rel = &relevant[q];
+            let hits: Vec<usize> = query::cut_by_probability(scores, |_| false, p).into_iter().map(|(i, _)| i).collect();
+            let tp = hits.iter().filter(|i| rel.contains(i)).count() as f64;
+            let pr = if hits.is_empty() { 1.0 } else { tp / hits.len() as f64 };
+            let r = tp / rel.len() as f64;
+            ps.push(pr);
+            rs.push(r);
+            fs.push(if pr + r > 0.0 { 2.0 * pr * r / (pr + r) } else { 0.0 });
+            ns.push(hits.len() as f64);
+        }
+        let f = mean(&fs);
+        eprintln!("  p ≥ {p:>4.2} (cos ≥ {:.3}): P {:.3}  R {:.3}  F1 {f:.3}  hits {:.1}", query::cosine_for_probability(p), mean(&ps), mean(&rs), mean(&ns));
+        if f > best_p.0 {
+            best_p = (f, p);
+        }
+    }
+    eprintln!("best mean F1 {:.3} at p ≥ {:.2}", best_p.0, best_p.1);
+    // Per query, how the two rules fare at their best settings.
+    eprintln!("{:>16} {:>9} {:>9} {:>9} {:>9}", "query", "z hits", "z right", "p hits", "p right");
+    for (q, scores) in &per_query {
+        let rel = &relevant[q];
+        let z: Vec<usize> = query::cut(scores, |_| false, best.1).into_iter().map(|(i, _)| i).collect();
+        let p: Vec<usize> = query::cut_by_probability(scores, |_| false, best_p.1).into_iter().map(|(i, _)| i).collect();
+        eprintln!("{q:>16} {:>9} {:>9} {:>9} {:>9}", z.len(), z.iter().filter(|i| rel.contains(i)).count(), p.len(), p.iter().filter(|i| rel.contains(i)).count());
+    }
     s.client.shutdown();
 }
 

@@ -72,6 +72,38 @@ pub fn cut(scores: &[f32], skip: impl Fn(usize) -> bool, closeness: f32) -> Vec<
     hits
 }
 
+/// SigLIP2's trained pairing calibration: the model was trained with a
+/// sigmoid loss, so `σ(SCALE · cosine + BIAS)` is its own estimate of the
+/// chance that a text and an image belong together, comparable between
+/// queries.  Read from `google/siglip2-base-patch16-256`'s weights
+/// (`logit_scale` = 4.7265 → e^4.7265, `logit_bias` = −16.7718).
+pub const SIGMOID_SCALE: f32 = 112.901_18;
+pub const SIGMOID_BIAS: f32 = -16.771_803;
+
+/// The model's own probability that a shot matches the query.
+pub fn match_probability(cosine: f32) -> f32 {
+    1.0 / (1.0 + (-(SIGMOID_SCALE * cosine + SIGMOID_BIAS)).exp())
+}
+
+/// The cosine at which [`match_probability`] reaches `p`.
+pub fn cosine_for_probability(p: f32) -> f32 {
+    let p = p.clamp(1e-6, 1.0 - 1e-6);
+    ((p / (1.0 - p)).ln() - SIGMOID_BIAS) / SIGMOID_SCALE
+}
+
+/// Scores whose match probability is at least `min_probability`, as
+/// (row, score), best first and at most [`MAX_HITS`]; rows in `skip`
+/// never count.  The absolute alternative to [`cut`]: it also answers
+/// queries most of the library matches ("fursuit" here), where nothing
+/// stands out from the spread.  Pure.
+pub fn cut_by_probability(scores: &[f32], skip: impl Fn(usize) -> bool, min_probability: f32) -> Vec<(usize, f32)> {
+    let threshold = cosine_for_probability(min_probability);
+    let mut hits: Vec<(usize, f32)> = scores.iter().copied().enumerate().filter(|&(i, s)| s >= threshold && !skip(i)).collect();
+    hits.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
+    hits.truncate(MAX_HITS);
+    hits
+}
+
 /// The median and the median absolute deviation of `v`.
 pub fn median_and_mad(v: &[f32]) -> (f32, f32) {
     let mut s: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
@@ -176,6 +208,24 @@ mod tests {
         assert!(cut(&[], |_| false, CLOSENESS_DEFAULT).is_empty());
         // A flat field: nothing stands out.
         assert!(cut(&vec![0.2; 50], |_| false, CLOSENESS_DEFAULT).is_empty());
+    }
+
+    #[test]
+    fn the_sigmoid_calibration_is_absolute() {
+        // The numbers measured on the sample: "fursuit" hits around 0.18,
+        // a weak "camera" hit around 0.10, background around 0.03.
+        assert!(match_probability(0.184) > 0.95);
+        assert!((0.1..0.4).contains(&match_probability(0.137)));
+        assert!(match_probability(0.10) < 0.02);
+        assert!(match_probability(0.03) < 1e-4);
+        for p in [0.05f32, 0.3, 0.5, 0.9] {
+            let c = cosine_for_probability(p);
+            assert!((match_probability(c) - p).abs() < 1e-4, "{p}");
+        }
+        let scores = [0.03, 0.20, 0.15, 0.12, 0.19];
+        let hits = cut_by_probability(&scores, |i| i == 4, 0.5);
+        assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [1, 2], "best first, the accident skipped");
+        assert!(cut_by_probability(&scores, |_| false, 0.999).is_empty());
     }
 
     #[test]
