@@ -197,7 +197,8 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 - **Analysing a folder.** Prune ▸ *Analyse this folder* (also on the side
   rail, and in the Hints menu) reads each photo's embedded preview once
   and looks for frames that look out of focus, accidental frames (almost
-  black, white or one tone: a lens cap, a pocket, the floor), files that
+  black, white or one tone: a lens cap, a pocket, the floor; a lit subject
+  against a dark background never counts as one), files that
   are in the folder twice, and the sharpest frame of each burst.  It only
   ever runs when you ask, in the background: the status bar shows how far
   it has got, with a × to stop it (what it checked is kept), and you can

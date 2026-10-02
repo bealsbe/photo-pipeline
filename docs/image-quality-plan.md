@@ -47,7 +47,8 @@ The user's answers to the questions the UI pass raised.
 | 4 | Hints in the list view | **Not now.** | As built (grid, quick look, viewer, sheet, compare). |
 | 5 | What the Duplicates filter shows | **Only the extra copies** (changed later on 2026-10-01: showing both was no help), with *Prune these copies…* above them — one click, one confirmation, one undo step. | The copy to keep of each is never shown as a duplicate. |
 | 6 | "Almost black" on night shoots: sharp, underexposed shots called accidents | **Fix now**: an almost black frame must be empty too, by the dark rule's whole-frame measure. | The black rule: p99 ≤ 24 and the whole frame < 1.25.  See "The black rule needs nothing anywhere" below. |
-| 7 | "Almost one tone" on night shoots | **Later**: a study of its own. | Nothing yet; see "Open: one tone on night shoots" below. |
+| 7 | "Almost one tone" on night shoots | **Later**: a study of its own. | Settled later the same day by the lit-region rule; see "A lit subject against the dark" below. |
+| 8 | A lit subject against a dark background (low-key photos) | **Never accidental** — the user: "that is not accidental", asking for detection "a bit more robust and sophisticated". | Per-tile brightness (`ALGO` 2) and a look-alike-neighbour check; see "A lit subject against the dark" below. |
 
 ### Phase 1 as built (2026-09-30)
 
@@ -351,7 +352,39 @@ No true accident was lost (the cloth changes label, not status).  Before
 both changes the night shoot had 218 accidental files (109 captures);
 now 64 (32).
 
-### Open: one tone on night shoots (2026-10-01)
+### A lit subject against the dark (2026-10-01)
+
+Accidental used to be decided from whole-frame numbers (median, span,
+whole-frame sharpness), and in a low-key photo the black background
+dominates all of them: a dim dancer under stage light has a luma span of
+27–40, the same as a wall.  What tells them apart is *where* the light is.
+The analysis now keeps each tile's mean brightness (`Features::luma`, the
+same 12 × 8 grid as sharpness; measurements of `ALGO` 1 are taken again,
+digests kept).  Two checks follow:
+
+- **A lit region means a subject.**  A frame with a median luma of at most
+  40 is never accidental when at least 2 tiles are at least 12 bright and 3×
+  its darkest tenth (each +2, so near-black noise doesn't count).  It is
+  judged for focus like any frame instead.  On the night shoot every real
+  frame the rules called accidental has 4–67 such tiles; lens caps, the
+  cloth, a wall and a black frame have none (the brightest of them reaches
+  2.6× its darkest tenth).  A costume swept past the lens with lights behind
+  has a lit region too and becomes *out of focus*, which it is: something is
+  there, smeared.  Sharpness relative to brightness was tried and doesn't
+  separate them (the swept frame sits among the dim photos).
+- **An accident doesn't look like the photos around it.**  A frame that looks
+  like (pHash within 16) a frame not called accidental, at most 3 frames and
+  5 s away in the same folder and camera, is not accidental.  Accidents'
+  nearest neighbours measured 26–32 bits away, real frames' mostly 8–18; a
+  run of lens-cap frames can't clear itself.
+
+Counts (files): the night shoot 64 → 10 accidental (lens caps, the cloth, a
+shot of the floor, and one completely motion-blurred costume in daylight,
+which brightness can't tell from the floor shot), the event-day samples
+1 → 0 and 2 → 1, others unchanged at 0; nothing newly flagged anywhere.  The
+54 cleared files now count as out of focus.
+
+### One tone on night shoots (2026-10-01, settled by the above)
 
 Decision 7 of 2026-10-01: a later study.  The one-tone rule (p99 − p1 ≤ 40
 with a sharpest area below 15) calls all 21 of its captures on the night
@@ -361,8 +394,7 @@ whole-frame test that settled the black and dark rules doesn't separate
 them: they measure 1.17–2.73, and the one-tone accident found elsewhere (a
 wall) 1.56, and the dark cloth above, now one tone too, 2.59.  *Nothing in
 focus anywhere* has 2 dim subjects among its 6 night captures as well.
-Until then, these show as accidental in the hints, and *Prune accidental
-frames…* lists them with their thumbnails before marking anything.
+All of these are now cleared by the lit-region rule above.
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling

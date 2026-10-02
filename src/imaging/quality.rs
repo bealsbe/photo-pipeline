@@ -31,8 +31,8 @@ use crate::model::record::FileType;
 
 /// The measurements' version.  Bump it when any of them, or the plane they
 /// are taken on, changes: cached results of another version are measured
-/// again rather than misread.
-pub const ALGO: u32 = 1;
+/// again rather than misread.  2: per-tile brightness ([`Features::luma`]).
+pub const ALGO: u32 = 2;
 
 /// Tiles across the long and short side of the plane.
 pub const GRID_LONG: usize = 12;
@@ -109,6 +109,10 @@ pub struct Features {
     /// ([`CLIPPED`]) in 255ths, rounded up (any at all is at least 1).
     /// Those pixels add nothing to the tile's sharpness.
     pub clipped: [u8; TILES],
+    /// Per tile, the mean luma (0–255, rounded), in the same order as
+    /// `tiles`: where the frame is lit, so a lit subject against a dark
+    /// background can be told from a frame with nothing in it.
+    pub luma: [u8; TILES],
     /// Over the whole frame.
     pub global: f32,
     /// Around the camera's AF point, when the camera said where that was:
@@ -199,10 +203,12 @@ pub fn measure(p: Plane<'_>, orientation: u8, focus: Option<(f32, f32)>, source:
     let lap = laplacian_tiles(p, cols, rows);
     let mut tiles = [0u16; TILES];
     let mut clipped = [0u8; TILES];
+    let mut luma = [0u8; TILES];
     for i in 0..TILES {
         let n = lap.counts[i].max(1) as f64;
         tiles[i] = tile_code(lap.sums[i] as f64 / n);
         clipped[i] = (lap.clipped[i] as f64 * 255.0 / n).ceil().min(255.0) as u8;
+        luma[i] = (lap.luma[i] as f64 / n).round().min(255.0) as u8;
     }
     let global = if lap.count > 0 { (lap.total as f64 / lap.count as f64) as f32 } else { 0.0 };
     let focus = focus.map(|(x, y)| {
@@ -218,6 +224,7 @@ pub fn measure(p: Plane<'_>, orientation: u8, focus: Option<(f32, f32)>, source:
         orientation,
         tiles,
         clipped,
+        luma,
         global,
         focus,
         entropy,
@@ -233,15 +240,17 @@ pub fn measure(p: Plane<'_>, orientation: u8, focus: Option<(f32, f32)>, source:
 struct LapTiles {
     sums: [u64; TILES],
     clipped: [u32; TILES],
+    /// Sum of the luma of the pixels counted.
+    luma: [u64; TILES],
     counts: [u32; TILES],
     total: u64,
     count: u64,
 }
 
 /// Sum of squared 4-neighbour Laplacians per tile, over interior pixels,
-/// and how many of each tile's pixels touch blown highlights.
+/// how many of each tile's pixels touch blown highlights, and their luma.
 fn laplacian_tiles(p: Plane<'_>, cols: usize, rows: usize) -> LapTiles {
-    let mut out = LapTiles { sums: [0; TILES], clipped: [0; TILES], counts: [0; TILES], total: 0, count: 0 };
+    let mut out = LapTiles { sums: [0; TILES], clipped: [0; TILES], luma: [0; TILES], counts: [0; TILES], total: 0, count: 0 };
     let (w, h) = (p.width, p.height);
     if w < 3 || h < 3 {
         return out;
@@ -261,6 +270,8 @@ fn laplacian_tiles(p: Plane<'_>, cols: usize, rows: usize) -> LapTiles {
             let t = ty * cols + c;
             out.sums[t] += s;
             out.clipped[t] += lit;
+            // At most 4 000 × 255 a segment: a u32 holds it.
+            out.luma[t] += mid[x0..x1].iter().map(|&v| v as u32).sum::<u32>() as u64;
             out.counts[t] += (x1 - x0) as u32;
             out.total += s;
             out.count += (x1 - x0) as u64;

@@ -18,7 +18,7 @@ use super::bursts::Bursts;
 use super::collection::{Collection, RecordId};
 use super::duplicates::{self, DuplicateGroup, Kind as DupKind};
 use super::record::{FileType, PhotoRecord};
-use crate::imaging::quality::{self, Features};
+use crate::imaging::quality::{self, Features, TILES};
 use crate::util::canonical_parent;
 
 /// "Looks out of focus" whatever else is in the burst: the sharpest area
@@ -78,6 +78,34 @@ pub const DIM_P50: u8 = 12;
 pub const EMPTY_GLOBAL: f32 = 1.25;
 /// … or nothing sharp anywhere at any exposure (a blurred wall).
 pub const FEATURELESS_LOCAL: f32 = 5.0;
+
+/// A lit subject against a dark background is a photo, not an accident.
+/// A frame whose median luma is at most [`LOWKEY_P50`] is never accidental
+/// when it holds a lit region: at least [`LIT_TILES`] tiles at least
+/// [`LIT_FLOOR`] bright and [`LIT_RATIO`] times as bright as its darkest
+/// tenth (+2 each, so near-black noise doesn't count).  It is judged for
+/// focus like any other frame instead.
+///
+/// Set on a night shoot: every frame of a real subject the earlier rules
+/// called accidental (30 captures, dim dancers and costumes lit by the
+/// stage) has 4–67 such tiles; the frames with nothing in them (lens caps,
+/// a cloth, a wall, a black frame) have none, the brightest of them at 2.6
+/// times its darkest tenth.  A costume swept past the lens with lights
+/// behind it has a lit region too, and is called out of focus instead,
+/// which it is.  Brightness, not sharpness, decides: sharpness scales with
+/// brightness, so a dim subject in focus measures like a bright one blurred.
+pub const LOWKEY_P50: u8 = 40;
+pub const LIT_TILES: usize = 2;
+pub const LIT_FLOOR: u8 = 12;
+pub const LIT_RATIO: f32 = 3.0;
+/// An accident doesn't look like the photos around it.  A frame that looks
+/// like ([`LOOK_ALIKE`]) a frame not called accidental, taken within
+/// [`CONTEXT_MS`] and at most [`CONTEXT_FRAMES`] frames before or after it
+/// (same folder and camera), shows what the photographer was shooting, and
+/// is not accidental.  On the night shoot, accidents' nearest neighbours
+/// measured 26–32 bits away; real frames' mostly 8–18.
+pub const CONTEXT_MS: i64 = 5000;
+pub const CONTEXT_FRAMES: usize = 3;
 
 /// Why a frame looks out of focus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -364,6 +392,7 @@ impl Hints {
                 })
             })
             .collect();
+        clear_accidents_in_context(&shots, &mut out.hints);
         out.moments = moments(&shots, bursts);
         // Ranking: by score; a copy suggested for pruning after the one
         // kept; then capture order.
@@ -636,7 +665,32 @@ fn to_review(coll: &Collection, id: RecordId) -> bool {
     coll.get(id).is_some() && !decided(id) && !coll.find_pair(id).is_some_and(decided)
 }
 
+/// Why a frame looks accidental (from its measurements alone; see
+/// [`clear_accidents_in_context`] for the frames around it).
 fn accident(f: &Features) -> Option<Accident> {
+    let found = accident_by_levels(f)?;
+    // A lit subject against the dark is a photo (perhaps a soft one).
+    if found != Accident::Blank && f.p50() <= LOWKEY_P50 && lit_region(f) {
+        return None;
+    }
+    Some(found)
+}
+
+/// Tiles of a lit region: bright enough in themselves, and well above the
+/// frame's darkest tenth.
+fn lit_tiles(f: &Features) -> usize {
+    let mut sorted = f.luma;
+    sorted.sort_unstable();
+    let dark = sorted[TILES / 10] as f32 + 2.0;
+    f.luma.iter().filter(|&&l| l >= LIT_FLOOR && l as f32 + 2.0 >= LIT_RATIO * dark).count()
+}
+
+fn lit_region(f: &Features) -> bool {
+    lit_tiles(f) >= LIT_TILES
+}
+
+/// The frame's levels and sharpness alone.
+fn accident_by_levels(f: &Features) -> Option<Accident> {
     let local = f.local();
     if f.p99() <= BLACK_P99 && f.global < EMPTY_GLOBAL {
         Some(Accident::Black)
@@ -652,6 +706,43 @@ fn accident(f: &Features) -> Option<Accident> {
         Some(Accident::Featureless)
     } else {
         None
+    }
+}
+
+/// Frames called accidental that look like a nearby frame that isn't
+/// ([`CONTEXT_MS`], [`CONTEXT_FRAMES`]) show what was being shot: not
+/// accidents.  Judged against the calls before this pass, so the order
+/// frames are visited in doesn't matter.
+fn clear_accidents_in_context(shots: &[Shot<'_>], hints: &mut [Option<ShotHint>]) {
+    let called: Vec<bool> = hints.iter().map(|h| h.as_ref().is_some_and(|h| h.accidental.is_some())).collect();
+    if !called.contains(&true) {
+        return;
+    }
+    let mut groups: HashMap<(&PathBuf, u32), Vec<usize>> = HashMap::new();
+    for (i, s) in shots.iter().enumerate() {
+        if s.millis.is_some() && s.features.is_some() {
+            groups.entry((&s.folder, s.camera)).or_default().push(i);
+        }
+    }
+    for mut g in groups.into_values() {
+        g.sort_by_key(|&i| (shots[i].millis, i));
+        for (k, &i) in g.iter().enumerate() {
+            if !called[i] {
+                continue;
+            }
+            let (t, h) = (shots[i].millis.unwrap_or(0), shots[i].features.expect("measured").phash);
+            let near = g[k.saturating_sub(CONTEXT_FRAMES)..k].iter().chain(g[k + 1..(k + 1 + CONTEXT_FRAMES).min(g.len())].iter());
+            let alike = near.copied().any(|j| {
+                !called[j]
+                    && (shots[j].millis.unwrap_or(0) - t).abs() <= CONTEXT_MS
+                    && quality::distance(h, shots[j].features.expect("measured").phash) <= LOOK_ALIKE
+            });
+            if alike {
+                if let Some(hint) = hints[i].as_mut() {
+                    hint.accidental = None;
+                }
+            }
+        }
     }
 }
 
@@ -935,25 +1026,103 @@ mod tests {
         let murky = dim(0.06, 0.5, 12, 0.0);
         assert!(old(&murky) && murky.p50() > DARK_P50 && murky.global < EMPTY_GLOBAL && murky.local() < FEATURELESS_LOCAL);
         assert_eq!(accident(&murky), None);
-        // Darker still and empty all over: an accident.
-        let swept = dim(0.03, 0.5, 12, 0.0);
-        assert!(swept.p50() <= DARK_P50 && swept.global < EMPTY_GLOBAL);
-        assert_eq!(accident(&swept), Some(Accident::Dark));
-        // The two dim photos are judged for focus like any frame: nothing
+        // Darker still, empty all over and nothing lit in it (a dark
+        // costume filling the frame): an accident ("almost black" takes it
+        // first: with no lit region its brightest pixels stay dark too).
+        let swept = dim(0.03, 0.04, 12, 0.0);
+        assert!(swept.p50() <= DARK_P50 && swept.global < EMPTY_GLOBAL && !lit_region(&swept));
+        assert_eq!(accident(&swept), Some(Accident::Black));
+        // The same darkness with a lit subject smeared across it (a costume
+        // swept past the lens, lights behind): something is there, so it is
+        // judged for focus instead.
+        let smeared = dim(0.03, 0.5, 12, 0.0);
+        assert_eq!(accident_by_levels(&smeared), Some(Accident::Dark));
+        assert!(lit_region(&smeared), "lit tiles {}", lit_tiles(&smeared));
+        assert_eq!(accident(&smeared), None);
+        // The dim photos are judged for focus like any frame: nothing
         // sharp, so out of focus (and not counted as accidental).
         let s = Shoot::new(vec![
             (rec("/s/noisy.JPG", 0, Some(0)), Some(noisy)),
             (rec("/s/murky.JPG", 10_000, Some(0)), Some(murky)),
             (rec("/s/swept.JPG", 20_000, Some(0)), Some(swept)),
+            (rec("/s/smeared.JPG", 30_000, Some(0)), Some(smeared)),
         ]);
         let h = s.hints(&[]);
-        for n in ["noisy", "murky"] {
+        for n in ["noisy", "murky", "smeared"] {
             let x = h.get(s.id(&format!("/s/{n}.JPG"))).unwrap();
             assert_eq!((x.accidental, x.soft), (None, Some(Soft::Absolute)), "{n}");
             assert_eq!(h.plate(s.id(&format!("/s/{n}.JPG"))), Some(Plate::Soft));
         }
         assert_eq!(h.plate(s.id("/s/swept.JPG")), Some(Plate::Accidental));
-        assert_eq!((h.summary().accidental, h.summary().soft_only), (1, 2));
+        assert_eq!((h.summary().accidental, h.summary().soft_only), (1, 3));
+    }
+
+    #[test]
+    fn a_lit_subject_against_the_dark_is_never_accidental() {
+        // A dark frame with a subject in the middle, as bright as `subject`
+        // (of full exposure): a lit region once it stands well above the dark.
+        let frame = |subject: f32| dim(0.03, subject, 8, 0.0);
+        let lit = frame(0.5);
+        assert!(lit.p50() <= LOWKEY_P50 && lit_region(&lit), "lit tiles {}", lit_tiles(&lit));
+        assert_eq!(accident(&lit), None);
+        // Barely above the dark: no lit region, so the frame is judged as
+        // before (here: almost black).
+        let faint = frame(0.045);
+        assert!(!lit_region(&faint), "lit tiles {}", lit_tiles(&faint));
+        assert!(accident(&faint).is_some());
+        // A lens cap has no lit region at all.
+        let cap = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
+        assert_eq!(lit_tiles(&cap), 0);
+        // One bright tile isn't a region: a pinpoint of light.
+        assert!(LIT_TILES >= 2);
+        // Bright frames aren't judged this way at all (a white frame stays
+        // "almost white").
+        let white = feats(&Img::from_fn(192, 128, |x, _| 245.0 + (x % 5) as f32));
+        assert_eq!(accident(&white), Some(Accident::Blank));
+    }
+
+    #[test]
+    fn a_frame_like_the_photos_around_it_is_not_an_accident() {
+        // A dim scene with a lit subject (not accidental) and the same scene
+        // a fifth as bright (no lit region left: called accidental by its
+        // levels), which looks just like it.
+        let scene = dim(0.05, 0.3, 3, 0.0);
+        let darker = feats(&{
+            let mut img = texture(192, 128, 3).blur(3).darker(0.05 * 0.2);
+            img.paste(&texture(192, 128, 5).darker(0.3 * 0.2), 70, 30, 130, 100);
+            img.blur(3)
+        });
+        assert_eq!(accident(&scene), None);
+        let called = accident(&darker);
+        assert!(
+            called.is_some(),
+            "the darker frame is called accidental on its own: levels {:?} local {} global {} lit {} by levels {:?}",
+            darker.levels,
+            darker.local(),
+            darker.global,
+            lit_tiles(&darker),
+            accident_by_levels(&darker)
+        );
+        let d = quality::distance(scene.phash, darker.phash);
+        assert!(d <= LOOK_ALIKE, "they look alike: {d} bits");
+        let run = |gap: i64| {
+            let s = Shoot::new(vec![
+                (rec("/s/a.JPG", 0, Some(0)), Some(scene.clone())),
+                (rec("/s/b.JPG", gap, Some(0)), Some(darker.clone())),
+                (rec("/s/c.JPG", 2 * gap, Some(0)), Some(scene.clone())),
+            ]);
+            let h = s.hints(&[]);
+            h.get(s.id("/s/b.JPG")).and_then(|x| x.accidental)
+        };
+        // Shot a second apart: what the photographer was shooting.
+        assert_eq!(run(1000), None);
+        // Ten seconds apart: too far to tell; judged on its own.
+        assert_eq!(run(10_000), called);
+        // Accidents in a run (a lens cap left on) don't clear each other.
+        let cap = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
+        let s = Shoot::new((0..3).map(|i| (rec(&format!("/s/cap{i}.JPG"), i * 500, Some(0)), Some(cap.clone()))).collect());
+        let h = s.hints(&[]);
+        assert!((0..3).all(|i| h.get(s.id(&format!("/s/cap{i}.JPG"))).is_some_and(|x| x.accidental == Some(Accident::Black))));
     }
 
     #[test]
@@ -966,11 +1135,14 @@ mod tests {
         // A dim, even wall: a narrow span of tones, soft.
         let wall = feats(&texture(192, 128, 5).blur(8).darker(0.15));
         assert!(wall.p99() - wall.p1() <= FLAT_SPAN, "{:?}", wall.levels);
-        // Dark and blurred, with a soft lamp in a corner.
-        let mut dark = texture(192, 128, 3).blur(6).darker(0.05);
-        dark.paste(&Img::from_fn(192, 128, |_, _| 120.0).blur(0), 0, 0, 40, 30);
-        let dark_soft = feats(&dark.blur(8));
+        // Dark and blurred, with nothing lit in it.
+        let dark_soft = feats(&texture(192, 128, 3).blur(6).darker(0.05).blur(8));
         let dark_levels = dark_soft.levels;
+        // The same with a soft lamp in a corner: a lit region, so a photo
+        // (however soft), judged for focus, not an accident.
+        let mut lamp = texture(192, 128, 3).blur(6).darker(0.05);
+        lamp.paste(&Img::from_fn(192, 128, |_, _| 120.0).blur(0), 0, 0, 40, 30);
+        let lamp_soft = feats(&lamp.blur(8));
         // A dark night shot that worked: a lit, sharp subject on black.
         let mut night = texture(192, 128, 3).darker(0.03);
         night.paste(&texture(192, 128, 3), 70, 40, 120, 80);
@@ -983,6 +1155,7 @@ mod tests {
             (rec("/s/dark.JPG", 30_000, Some(0)), Some(dark_soft)),
             (rec("/s/night.JPG", 40_000, Some(0)), Some(dark_sharp.clone())),
             (rec("/s/notyet.JPG", 50_000, Some(0)), None),
+            (rec("/s/lamp.JPG", 60_000, Some(0)), Some(lamp_soft)),
         ]);
         assert!(dark_sharp.p50() <= DARK_P50, "the night shot is dark: {}", dark_sharp.p50());
         let h = s.hints(&[]);
@@ -992,15 +1165,16 @@ mod tests {
         assert_eq!(get("white").unwrap().accidental, Some(Accident::Blank));
         assert_eq!(get("wall").unwrap().accidental, Some(Accident::Flat));
         let dark = get("dark").unwrap();
-        assert_eq!(dark.accidental, Some(Accident::Dark), "local {} levels {:?}", dark.local, dark_levels);
+        assert_eq!(dark.accidental, Some(Accident::Black), "local {} levels {:?}", dark.local, dark_levels);
         let night = get("night").unwrap();
         assert_eq!((night.accidental, night.soft), (None, None), "local {}", night.local);
+        assert_eq!(get("lamp").map(|x| (x.accidental, x.soft)), Some((None, Some(Soft::Absolute))));
         assert_eq!(get("notyet"), None);
         // Singles have no moment and no rank.
         assert_eq!(h.moment_of(s.id("/s/soft.JPG")), None);
         assert_eq!(get("soft").unwrap().rank, None);
         let sum = h.summary();
-        assert_eq!((sum.shots, sum.measured, sum.accidental), (7, 6, 4));
+        assert_eq!((sum.shots, sum.measured, sum.accidental), (8, 7, 4));
     }
 
     #[test]

@@ -107,6 +107,9 @@ const HAS_FEATURES: u8 = 1;
 const HAS_HEAD: u8 = 2;
 const HAS_SAMPLES: u8 = 4;
 const HAS_FOCUS: u8 = 8;
+/// Per-tile luma follows the features (from `ALGO` 2).  Older files lack
+/// it; their measurements are of another `ALGO` and are taken again.
+const HAS_LUMA: u8 = 16;
 
 fn f32_bits(w: &mut Writer, v: f32) {
     w.u32(v.to_bits());
@@ -116,7 +119,7 @@ fn read_f32(r: &mut Reader<'_>) -> Option<f32> {
     Some(f32::from_bits(r.u32()?))
 }
 
-fn write_features(w: &mut Writer, f: &Features) {
+fn write_features(w: &mut Writer, f: &Features, luma: bool) {
     w.u8(f.source as u8);
     w.u16(f.width);
     w.u16(f.height);
@@ -132,9 +135,12 @@ fn write_features(w: &mut Writer, f: &Features) {
     f32_bits(w, f.mean);
     w.u64(f.dhash);
     w.u64(f.phash);
+    if luma {
+        w.0.extend_from_slice(&f.luma);
+    }
 }
 
-fn read_features(r: &mut Reader<'_>, has_focus: bool) -> Option<Features> {
+fn read_features(r: &mut Reader<'_>, has_focus: bool, has_luma: bool) -> Option<Features> {
     let source = Source::from_u8(r.u8()?)?;
     let (width, height, orientation) = (r.u16()?, r.u16()?, r.u8()?);
     let mut tiles = [0u16; TILES];
@@ -148,6 +154,7 @@ fn read_features(r: &mut Reader<'_>, has_focus: bool) -> Option<Features> {
     let levels: [u8; 5] = r.take(5)?.try_into().ok()?;
     let mean = read_f32(r)?;
     let (dhash, phash) = (r.u64()?, r.u64()?);
+    let luma: [u8; TILES] = if has_luma { r.take(TILES)?.try_into().ok()? } else { [0; TILES] };
     Some(Features {
         source,
         width,
@@ -155,6 +162,7 @@ fn read_features(r: &mut Reader<'_>, has_focus: bool) -> Option<Features> {
         orientation,
         tiles,
         clipped,
+        luma,
         global,
         focus: has_focus.then_some(focus),
         entropy,
@@ -169,6 +177,11 @@ fn read_features(r: &mut Reader<'_>, has_focus: bool) -> Option<Features> {
 const ENTRY_MIN: usize = 4 + 8 + 8 + 1;
 
 fn encode(root: &Path, entries: &HashMap<PathBuf, Entry>, algo: u32) -> Vec<u8> {
+    encode_with(root, entries, algo, true)
+}
+
+/// `luma: false` writes the layout files had before per-tile luma.
+fn encode_with(root: &Path, entries: &HashMap<PathBuf, Entry>, algo: u32, luma: bool) -> Vec<u8> {
     let mut w = Writer(Vec::with_capacity(64 + entries.len() * 380));
     w.0.extend_from_slice(MAGIC);
     w.u32(VERSION);
@@ -184,13 +197,13 @@ fn encode(root: &Path, entries: &HashMap<PathBuf, Entry>, algo: u32) -> Vec<u8> 
         w.u64(e.size);
         w.u64(e.mtime);
         let focus = e.features.as_ref().is_some_and(|f| f.focus.is_some());
-        let flags = e.features.as_ref().map_or(0, |_| HAS_FEATURES)
+        let flags = e.features.as_ref().map_or(0, |_| HAS_FEATURES | if luma { HAS_LUMA } else { 0 })
             | e.head.map_or(0, |_| HAS_HEAD)
             | e.samples.map_or(0, |_| HAS_SAMPLES)
             | if focus { HAS_FOCUS } else { 0 };
         w.u8(flags);
         if let Some(f) = &e.features {
-            write_features(&mut w, f);
+            write_features(&mut w, f, luma);
         }
         if let Some(h) = e.head {
             w.u64(h);
@@ -216,11 +229,13 @@ fn decode(data: &[u8], root: &Path) -> Option<HashMap<PathBuf, Entry>> {
     for _ in 0..n {
         let k = r.path()?;
         let (size, mtime, flags) = (r.u64()?, r.u64()?, r.u8()?);
-        let features = if flags & HAS_FEATURES != 0 { Some(read_features(&mut r, flags & HAS_FOCUS != 0)?) } else { None };
+        let has_luma = flags & HAS_LUMA != 0;
+        let features = if flags & HAS_FEATURES != 0 { Some(read_features(&mut r, flags & HAS_FOCUS != 0, has_luma)?) } else { None };
         let head = if flags & HAS_HEAD != 0 { Some(r.u64()?) } else { None };
         let samples = if flags & HAS_SAMPLES != 0 { Some(r.u64()?) } else { None };
-        // Measurements of another version are taken again; digests hold.
-        let features = features.filter(|_| same_algo);
+        // Measurements of another version (or without per-tile luma, which
+        // only an older one lacks) are taken again; digests hold.
+        let features = features.filter(|_| same_algo && has_luma);
         out.insert(k, Entry { size, mtime, features, head, samples });
     }
     r.done().then_some(out)
@@ -277,6 +292,21 @@ mod tests {
         let sum = crate::model::binfile::fnv1a(&v2);
         v2.extend_from_slice(&sum.to_le_bytes());
         assert_eq!(decode(&v2, root), None);
+    }
+
+    #[test]
+    fn a_file_from_before_tile_luma_keeps_its_digests() {
+        let root = Path::new("/shoot");
+        let entries = sample();
+        // As written by ALGO 1: no luma, no flag for it.
+        let data = encode_with(root, &entries, quality::ALGO - 1, false);
+        let back = decode(&data, root).expect("still a sound file");
+        assert!(back.values().all(|e| e.features.is_none()), "measured again");
+        assert_eq!(back[Path::new("sub/b.ARW")].samples, Some(9));
+        assert_eq!(back[Path::new("b.JPG")].head, Some(u64::MAX));
+        // The current layout keeps the luma.
+        let now = decode(&encode(root, &entries, quality::ALGO), root).expect("sound");
+        assert_eq!(now[Path::new("a.JPG")].features.as_ref().map(|f| f.luma), entries[Path::new("a.JPG")].features.as_ref().map(|f| f.luma));
     }
 
     #[test]
