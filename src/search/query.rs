@@ -72,20 +72,28 @@ pub fn cut(scores: &[f32], skip: impl Fn(usize) -> bool, closeness: f32) -> Vec<
     hits
 }
 
+// The absolute (probability) cut below is the alternative phase 0 weighs
+// against `cut`; until the labels decide, only the evaluation calls it.
+// Whichever loses is removed then, and these allows with it.
+
 /// SigLIP2's trained pairing calibration: the model was trained with a
 /// sigmoid loss, so `σ(SCALE · cosine + BIAS)` is its own estimate of the
 /// chance that a text and an image belong together, comparable between
 /// queries.  Read from `google/siglip2-base-patch16-256`'s weights
 /// (`logit_scale` = 4.7265 → e^4.7265, `logit_bias` = −16.7718).
+#[cfg_attr(not(test), allow(dead_code))]
 pub const SIGMOID_SCALE: f32 = 112.901_18;
+#[cfg_attr(not(test), allow(dead_code))]
 pub const SIGMOID_BIAS: f32 = -16.771_803;
 
 /// The model's own probability that a shot matches the query.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn match_probability(cosine: f32) -> f32 {
     1.0 / (1.0 + (-(SIGMOID_SCALE * cosine + SIGMOID_BIAS)).exp())
 }
 
 /// The cosine at which [`match_probability`] reaches `p`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn cosine_for_probability(p: f32) -> f32 {
     let p = p.clamp(1e-6, 1.0 - 1e-6);
     ((p / (1.0 - p)).ln() - SIGMOID_BIAS) / SIGMOID_SCALE
@@ -96,6 +104,7 @@ pub fn cosine_for_probability(p: f32) -> f32 {
 /// never count.  The absolute alternative to [`cut`]: it also answers
 /// queries most of the library matches ("fursuit" here), where nothing
 /// stands out from the spread.  Pure.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn cut_by_probability(scores: &[f32], skip: impl Fn(usize) -> bool, min_probability: f32) -> Vec<(usize, f32)> {
     let threshold = cosine_for_probability(min_probability);
     let mut hits: Vec<(usize, f32)> = scores.iter().copied().enumerate().filter(|&(i, s)| s >= threshold && !skip(i)).collect();

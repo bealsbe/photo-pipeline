@@ -83,6 +83,35 @@
 //! prefs library /path         # as if the folder picker returned /path
 //! prefs editcopy /path        #   (library / edit-copy destination)
 //! pkey tab                    # a key press in the Preferences window
+//! prefs search-gpu|search-cpu|checkcard|closeness-reset|exports|forget
+//! prefs search-rebuild|search-clear|models-delete|models-open
+//!                             # Preferences ▸ Search and its Storage rows
+//! prefs closeness 4.5         # set how close matches must be (the slider)
+//! prefs show-search           # open Preferences at its Search section
+//! search open                 # the search page (Ctrl+F, the rail)
+//! search type red car         # type into the field (replacing it)
+//! search enter|down|up|tab    # keys in the field (Enter searches, or
+//!                             # takes the recent search ↑ ↓ chose)
+//! search run red car          # type and search
+//! search esc|clear|back       # Esc on the page, the field's ×, ‹ back
+//! search key right|left|space|enter|g|shift+g   # keys on the results
+//! search click 3 [ctrl]       # click the 4th result tile
+//! search activate 3           # double-click it (the viewer, read-only)
+//! search tab 3                # click the burst tab on the 4th tile
+//! search scroll 20000 3000    # scroll the results to y=20000 px over 3 s
+//! search openday              # Open day ›
+//! search index                # Index the library… (the download dialog)
+//! search dlg download|cancel|close|sums|retry|stop|show
+//!                             # the download dialog's buttons
+//! search stop|steps           # the status bar's × / its progress
+//! search trycard|tryagain|prefs|hidebanner   # the banner's buttons
+//! search fake indexing 300    # set the stand-in engine (PP_SEARCH_FAKE):
+//!                             # notindexed, indexed, indexing [n],
+//!                             # export [n], pause, resume, cardcrash,
+//!                             # selfcheck, nocard, away [share],
+//!                             # restarted, waiting [n], mismatch, offline
+//! search wait 5000            # wait (up to 5 s) for the query in flight
+//! search dump                 # print the page's state
 //! quit
 //! ```
 
@@ -141,14 +170,22 @@ pub struct ScrollDrive {
     from: f32,
     to: f32,
     ms: f32,
+    /// The search page's results rather than the grid.
+    search: bool,
 }
 
 /// One frame of a scripted scroll.
 pub fn drive_scroll(app: &mut App) {
     let Some(d) = &app.script_scroll else { return };
     let k = (d.start.elapsed().as_secs_f32() * 1000.0 / d.ms).min(1.0);
-    app.grid.scroll = d.from + (d.to - d.from) * k;
-    app.grid.scroll_seq += 1;
+    let y = d.from + (d.to - d.from) * k;
+    if d.search {
+        app.search.scroll = y;
+        app.search.scroll_seq += 1;
+    } else {
+        app.grid.scroll = y;
+        app.grid.scroll_seq += 1;
+    }
     if k >= 1.0 {
         app.script_scroll = None;
     }
@@ -216,6 +253,13 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             }
         }
         "prefs" => prefs_step(app, &arg),
+        "search" => {
+            let (t, wait) = search_step(app, i, &arg);
+            if let Some(t) = wait {
+                return t;
+            }
+            t
+        }
         "key" | "vkey" => {
             let (key, mods) = parse_key(&arg);
             let id = if cmd == "key" { app.main_id } else { app.viewer.as_ref().map(|v| v.id) };
@@ -513,7 +557,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         "gridscroll" => {
             let mut a = arg.split_whitespace().map(|x| x.parse::<f32>().unwrap_or(0.0));
             let (to, ms) = (a.next().unwrap_or(0.0), a.next().unwrap_or(1000.0).max(1.0));
-            app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.grid.scroll, to, ms });
+            app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.grid.scroll, to, ms, search: false });
             Task::none()
         }
         "shown" => {
@@ -784,6 +828,16 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "clear-library" => Some(Control::Clear(Cache::Library)),
         "clear-capture" => Some(Control::Clear(Cache::CaptureTimes)),
         "clear-quality" => Some(Control::Clear(Cache::Quality)),
+        "search-gpu" => Some(Control::SearchDevice(crate::ml::Device::Gpu)),
+        "search-cpu" => Some(Control::SearchDevice(crate::ml::Device::Cpu)),
+        "checkcard" => Some(Control::CheckCard),
+        "closeness-reset" => Some(Control::ClosenessReset),
+        "exports" => Some(Control::IndexExports),
+        "forget" => Some(Control::ForgetSearches),
+        "search-rebuild" => Some(Control::SearchRebuild),
+        "search-clear" => Some(Control::SearchClear),
+        "models-delete" => Some(Control::ModelsDelete),
+        "models-open" => Some(Control::ModelsOpen),
         "close-button" => Some(Control::Close),
         _ => None,
     };
@@ -809,12 +863,23 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             }
         }
         "confirm" => app.update(Message::Prefs(Msg::ClearConfirmed)),
+        "closeness" => {
+            // As the slider sets it: its position runs closer to looser.
+            let v: f32 = rest.parse().unwrap_or(crate::search::CLOSENESS_DEFAULT);
+            let t = app.update(Message::Prefs(Msg::Closeness(crate::search::CLOSENESS_MIN + crate::search::CLOSENESS_MAX - v)));
+            Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
+        }
+        "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),
         "editcopy" => app.update(Message::FolderPicked(super::FolderTarget::EditCopySetting, Some(rest.into()))),
         "dump" => {
             let s = &app.settings;
             eprintln!("[prefs] {}", app.prefs.debug_state());
+            eprintln!(
+                "[prefs] search device={:?} closeness={} index_exports={} recent={:?}",
+                s.search_device, s.search_closeness, s.search_index_exports, s.search_recent
+            );
             eprintln!(
                 "[prefs] settings advance={} show_pruned={} names={} thumb={} filmstrip={} burst_sheet={} viewer={}x{} max={} library={:?} edit_copy={:?} subfolder={} global_menu={}",
                 s.viewer_advance,
@@ -847,6 +912,106 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Task::none()
         }
     }
+}
+
+/// One `search …` step.  Returns the task, and for `search wait` the
+/// polling task that replaces the script's own next step.
+fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Task<Message>>) {
+    use super::search::{DialogMsg, Msg};
+    use crate::ui::grid::GridEvent;
+    let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    let rest = rest.trim();
+    let s = |m: Msg| Message::Search(m);
+    let tile = |app: &App, n: &str| app.search.layout.tiles.get(n.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0)).copied();
+    let main_key = |app: &mut App, spec: &str| {
+        let (key, mods) = parse_key(spec);
+        match app.main_id {
+            Some(id) => app.on_key_public(id, key, mods),
+            None => Task::none(),
+        }
+    };
+    let t = match what {
+        "open" => app.update(Message::Cmd(Cmd::Search)),
+        "type" => app.update(s(Msg::Input(rest.to_string()))),
+        "run" => {
+            let t = app.update(s(Msg::Input(rest.to_string())));
+            Task::batch([t, app.update(s(Msg::Submit))])
+        }
+        "enter" => app.update(s(Msg::Submit)),
+        "down" | "up" => main_key(app, what),
+        "tab" if rest.is_empty() => main_key(app, "tab"),
+        "esc" => main_key(app, "escape"),
+        "key" => main_key(app, rest),
+        "clear" => app.update(s(Msg::Clear)),
+        "back" => app.update(s(Msg::Back)),
+        "click" => match tile(app, rest) {
+            Some(id) => {
+                let modifiers = if rest.ends_with("ctrl") { Modifiers::CTRL } else { Modifiers::empty() };
+                app.update(s(Msg::Grid(GridEvent::Click { id, modifiers })))
+            }
+            None => Task::none(),
+        },
+        "activate" => match tile(app, rest) {
+            Some(id) => app.update(s(Msg::Grid(GridEvent::Activate(id)))),
+            None => Task::none(),
+        },
+        "tab" if !rest.is_empty() => match tile(app, rest) {
+            Some(id) => app.update(s(Msg::Grid(GridEvent::ToggleBurst(id)))),
+            None => Task::none(),
+        },
+        "openday" => app.update(s(Msg::OpenDay)),
+        "index" => app.update(s(Msg::IndexLibrary)),
+        "dlg" => {
+            let m = match rest {
+                "download" => Some(DialogMsg::Download),
+                "cancel" => Some(DialogMsg::Cancel),
+                "close" => Some(DialogMsg::Close),
+                "sums" => Some(DialogMsg::Sums),
+                "retry" => Some(DialogMsg::Retry),
+                "stop" => Some(DialogMsg::StopDownload),
+                "show" => Some(DialogMsg::Show),
+                _ => None,
+            };
+            match m {
+                Some(m) => app.update(s(Msg::Dialog(m))),
+                None => Task::none(),
+            }
+        }
+        "stop" => app.update(s(Msg::Stop)),
+        "steps" => app.update(s(Msg::Steps(true))),
+        "trycard" => app.update(s(Msg::TryCard)),
+        "tryagain" => app.update(s(Msg::TryAgain)),
+        "prefs" => app.update(s(Msg::OpenPrefs)),
+        "hidebanner" => app.update(s(Msg::HideBanner)),
+        "fake" => {
+            app.search.link.fake(rest);
+            Task::none()
+        }
+        "scroll" => {
+            let mut a = rest.split_whitespace().map(|x| x.parse::<f32>().unwrap_or(0.0));
+            let (to, ms) = (a.next().unwrap_or(0.0), a.next().unwrap_or(1000.0).max(1.0));
+            app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.search.scroll, to, ms, search: true });
+            Task::none()
+        }
+        "wait" => {
+            let left: u64 = rest.parse().unwrap_or(5_000);
+            if app.search.pending.is_some() && left > 0 {
+                app.script[i] = format!("search wait {}", left.saturating_sub(100));
+                return (Task::none(), Some(Task::perform(tokio::time::sleep(Duration::from_millis(100)), move |_| Message::Script(i))));
+            }
+            eprintln!("[search] wait done: pending={:?}", app.search.pending);
+            Task::none()
+        }
+        "dump" => {
+            eprintln!("[search] {}", super::search::debug_state(app));
+            Task::none()
+        }
+        _ => {
+            eprintln!("[script] unknown search action {arg}");
+            Task::none()
+        }
+    };
+    (t, None)
 }
 
 fn dialog_msg(name: &str) -> Option<super::dialogs::Msg> {

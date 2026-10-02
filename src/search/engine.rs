@@ -22,7 +22,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use super::index::{Index, Key, PathEntry, Record};
-use super::pass::{self, Job};
+use super::pass;
 use super::{Hit, PassKind, PassProgress, Status, Stopped, query};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::client::{Client, Embedder, EmbedderFactory, HelperError, StartError};

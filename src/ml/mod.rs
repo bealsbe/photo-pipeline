@@ -18,11 +18,6 @@
 //! way, stops the work and is reported ([`CardFailure`]); nothing here ever
 //! moves work to the processor on its own.
 
-// Until the search page constructs a `search::Engine` (the UI branch), the
-// backend is unused in this crate and every item would warn.  The UI branch
-// removes this line; nothing else in the module needs it.
-#![allow(dead_code, unused_imports)]
-
 pub mod client;
 pub mod download;
 pub mod models;

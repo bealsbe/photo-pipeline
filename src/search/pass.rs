@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 
-use super::index::{Key, PathMap, Vectors};
+use super::index::{PathMap, Vectors};
 use super::Stopped;
 use crate::ml::client::{Embedder, Embedding, HelperError};
 use crate::model::library_index::LibraryIndex;
@@ -233,6 +233,7 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
 pub mod tests {
     use super::*;
     use crate::ml::client::{FileError, ImageResult};
+    use crate::search::index::Key;
     use crate::ml::{CardFailure, Device, SelfCheck};
     use crate::model::record::ShotMeta;
 

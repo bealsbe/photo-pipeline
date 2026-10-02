@@ -47,6 +47,12 @@ cargo test --release  # unit tests; must pass with zero warnings
   `PHOTO_*` greys around photos (never tint those).  Sentence-case copy, plain
   verbs, no ALL-CAPS labels.  Shared view pieces in `src/app/kit.rs` and
   `style.rs`; icons are drawn in code (`src/ui/icons.rs`).
+- **Library search:** the page (`src/app/search*.rs`) only talks to the
+  engine through `search_link` and its `BgEvent`s; the engine (`src/ml`,
+  `src/search`) is separate work.  Results are read-only (no P, M or U)
+  and are built from the calendar's library index, never from disk.  When
+  the card fails, say so and stop: never offer or move work to the
+  processor.  `PP_SEARCH_FAKE` stands in for the engine in tests.
 - **Windows** open with `app::window_settings()`: it carries the Wayland app
   id (`app::APP_ID`, which must match `assets/<id>.desktop.in` and
   `install.sh`) and the icon.  A window without it shows the generic
@@ -81,7 +87,9 @@ cargo test --release  # unit tests; must pass with zero warnings
 - Headless UI: `kwin_wayland --virtual --socket pp-test --width 1600
   --height 1000 &`, then run with `WAYLAND_DISPLAY=pp-test PP_SCRIPT=<file>`
   (commands at the top of `src/app/testing.rs`; `shot main <png>` takes
-  screenshots; `scan-wait` / `analyse-wait` wait for a scan or a pass).
+  screenshots; `scan-wait` / `analyse-wait` wait for a scan or a pass;
+  `search …` drives the search page, with `PP_SEARCH_FAKE=indexed` for a
+  library already indexed).
   Kill the compositor by PID, never `pkill` by pattern.  A script that
   needs hints analyses the folder itself (`cmd Analyse`): don't rely on a
   cache left by an earlier run.

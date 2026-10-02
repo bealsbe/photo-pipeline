@@ -469,7 +469,7 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
 /// prunes them all after the usual confirmation.
 pub fn copies_bar(app: &App) -> Option<Element<'_, Message>> {
     let n = app.derived.copies_to_prune;
-    if app.filter.hint != Some(HintFilter::Duplicates) || n == 0 || app.view == super::View::Calendar {
+    if app.filter.hint != Some(HintFilter::Duplicates) || n == 0 || app.view.is_library() {
         return None;
     }
     let count = util::thousands(n as u64);

@@ -1,5 +1,7 @@
 //! Quick look (Space in the grid): the focused photo large, over the grid,
-//! inside the main window — a check without opening the viewer.
+//! inside the main window — a check without opening the viewer.  It serves
+//! the search page's results too, read-only (no P, M or U), as the
+//! library's photos are.
 //!
 //! It steps through the grid's open days in grid order and takes the grid's
 //! selection along (scrolling the grid beneath to follow), so closing lands
@@ -19,13 +21,23 @@ use iced::{Element, Point, Rectangle, Size, Task};
 
 use super::{App, Message, View, viewer, viewer_burst};
 use crate::imaging::loader::FullImage;
-use crate::model::collection::RecordId;
+use crate::model::collection::{Collection, RecordId};
 use crate::model::record::FileType;
 use crate::ui::quick_look::{self as ql, QuickLook as Widget, QuickLookEvent, Shown};
 use crate::ui::side_menu::RAIL_W;
 use crate::ui::theme as t;
 
+/// Whose photos quick look shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// The working folder's grid.
+    Grid,
+    /// The search page's results (read-only).
+    Search,
+}
+
 pub struct QuickLook {
+    pub place: Place,
     /// The photo shown.
     pub id: RecordId,
     /// Where it sat in the grid's order when last seen there.  While it is
@@ -93,8 +105,14 @@ impl Nav {
         Nav { ids, starts }
     }
 
-    fn of(app: &App) -> Nav {
-        Nav::new(app.derived.sections.iter().filter(|s| !app.grid.collapsed.contains(&s.date)).map(|s| s.ids.as_slice()))
+    fn of(app: &App, place: Place) -> Nav {
+        match place {
+            Place::Grid => Nav::new(app.derived.sections.iter().filter(|s| !app.grid.collapsed.contains(&s.date)).map(|s| s.ids.as_slice())),
+            Place::Search => {
+                let s = &app.search;
+                Nav::new(s.layout.sections.iter().filter(|x| !s.collapsed.contains(&x.date)).map(|x| x.ids.as_slice()))
+            }
+        }
     }
 
     pub fn locate(&self, id: RecordId, hint: usize) -> Pos {
@@ -150,6 +168,29 @@ pub fn focus(nav: &Nav, anchor: Option<RecordId>, selection: &HashSet<RecordId>)
         .or((!nav.ids.is_empty()).then_some(0))
 }
 
+// ── whose photos ────────────────────────────────────────────────────────────
+
+/// Where quick look can open in the view on screen.
+fn place_here(app: &App) -> Option<Place> {
+    match app.view {
+        View::Grid => Some(Place::Grid),
+        View::Search if app.search.has_results() => Some(Place::Search),
+        _ => None,
+    }
+}
+
+fn place(app: &App) -> Place {
+    app.quicklook.as_ref().map_or(Place::Grid, |q| q.place)
+}
+
+/// The records of the photos `place` shows.
+fn coll(app: &App, place: Place) -> &Collection {
+    match place {
+        Place::Grid => &app.coll,
+        Place::Search => app.search.results.as_ref().map_or(&app.coll, |r| &r.coll),
+    }
+}
+
 // ── opening, stepping, closing ──────────────────────────────────────────────
 
 pub fn toggle(app: &mut App) -> Task<Message> {
@@ -157,13 +198,19 @@ pub fn toggle(app: &mut App) -> Task<Message> {
     if app.quicklook.is_some() {
         return close(app);
     }
-    if app.view != View::Grid || app.modal.is_some() {
+    if app.modal.is_some() {
         return Task::none();
     }
-    let nav = Nav::of(app);
-    let Some(i) = focus(&nav, app.grid.anchor, &app.grid.selection) else { return Task::none() };
+    let Some(place) = place_here(app) else { return Task::none() };
+    let nav = Nav::of(app, place);
+    let (anchor, selection) = match place {
+        Place::Grid => (app.grid.anchor, &app.grid.selection),
+        Place::Search => (app.search.anchor, &app.search.selection),
+    };
+    let Some(i) = focus(&nav, anchor, selection) else { return Task::none() };
     crate::profile::mark("to first frame");
     app.quicklook = Some(QuickLook {
+        place,
         id: nav.ids[i],
         hint: i,
         path: PathBuf::new(),
@@ -179,12 +226,13 @@ pub fn toggle(app: &mut App) -> Task<Message> {
 
 pub fn close(app: &mut App) -> Task<Message> {
     let Some(q) = app.quicklook.take() else { return Task::none() };
-    let nav = Nav::of(app);
+    let nav = Nav::of(app, q.place);
     match nav.landing(nav.locate(q.id, q.hint)) {
         Some(i) => {
-            select(app, nav.ids[i]);
-            reveal(app, nav.ids[i], q.viewport);
+            select(app, q.place, nav.ids[i]);
+            reveal(app, q.place, nav.ids[i], q.viewport);
         }
+        None if q.place == Place::Search => app.search.selection.clear(),
         None if !app.grid.select_mode => app.grid.selection.clear(),
         None => {}
     }
@@ -198,12 +246,16 @@ pub fn close(app: &mut App) -> Task<Message> {
 /// move to the stack it was folded into, so quick look keeps showing a
 /// tile of the grid.
 pub fn follow(app: &mut App) -> Task<Message> {
-    let Some(id) = app.quicklook.as_ref().map(|q| q.id) else { return Task::none() };
-    let nav = Nav::of(app);
+    let Some((id, place)) = app.quicklook.as_ref().map(|q| (q.id, q.place)) else { return Task::none() };
+    let nav = Nav::of(app, place);
     if nav.ids.contains(&id) {
         return Task::none();
     }
-    match app.tile_of(id).and_then(|t| nav.ids.iter().position(|&x| x == t)) {
+    let tile = match place {
+        Place::Grid => app.tile_of(id),
+        Place::Search => app.search.layout.tile_of(id),
+    };
+    match tile.and_then(|t| nav.ids.iter().position(|&x| x == t)) {
         Some(i) => show(app, &nav, i, false),
         None => Task::none(),
     }
@@ -211,7 +263,7 @@ pub fn follow(app: &mut App) -> Task<Message> {
 
 fn step(app: &mut App, mv: Move) -> Task<Message> {
     let Some(q) = &app.quicklook else { return Task::none() };
-    let nav = Nav::of(app);
+    let nav = Nav::of(app, q.place);
     match nav.target(nav.locate(q.id, q.hint), mv) {
         Some(i) => show(app, &nav, i, true),
         None => Task::none(),
@@ -220,7 +272,13 @@ fn step(app: &mut App, mv: Move) -> Task<Message> {
 
 /// The grid's selection follows the photo shown (only the focus, in
 /// select mode, so a selection being built survives).
-fn select(app: &mut App, id: RecordId) {
+fn select(app: &mut App, place: Place, id: RecordId) {
+    if place == Place::Search {
+        let s = &mut app.search;
+        s.selection = [id].into();
+        s.anchor = Some(id);
+        return;
+    }
     if !app.grid.select_mode {
         app.grid.selection = [id].into();
     }
@@ -228,7 +286,12 @@ fn select(app: &mut App, id: RecordId) {
 }
 
 /// Scroll the grid beneath so `id` is in view when quick look closes.
-fn reveal(app: &mut App, id: RecordId, viewport: Size) {
+fn reveal(app: &mut App, place: Place, id: RecordId, viewport: Size) {
+    if place == Place::Search {
+        let s = &mut app.search;
+        s.reveal = (s.reveal.0 + 1, Some(id));
+        return;
+    }
     if let Some(y) = crate::ui::grid::reveal_scroll(&app.derived.sections, &app.grid.collapsed, app.thumb_size, if app.show_names { crate::ui::grid::LABEL_H } else { 0.0 }, viewport, app.grid.scroll, id) {
         app.grid.scroll = y;
         app.grid.scroll_seq += 1;
@@ -240,10 +303,11 @@ fn reveal(app: &mut App, id: RecordId, viewport: Size) {
 /// photo has stayed [`SETTLE`] when `browsing`.
 fn show(app: &mut App, nav: &Nav, i: usize, browsing: bool) -> Task<Message> {
     let id = nav.ids[i];
-    let Some((path, ft)) = app.coll.get(id).map(|r| (r.path.clone(), r.file_type)) else { return Task::none() };
-    select(app, id);
+    let place = place(app);
+    let Some((path, ft)) = coll(app, place).get(id).map(|r| (r.path.clone(), r.file_type)) else { return Task::none() };
+    select(app, place, id);
     let viewport = app.quicklook.as_ref().map(|q| q.viewport).unwrap_or(Size::ZERO);
-    reveal(app, id, viewport);
+    reveal(app, place, id, viewport);
 
     // A viewer window may be loading too; its queue isn't ours to drop.
     if app.viewer.is_none() {
@@ -255,7 +319,7 @@ fn show(app: &mut App, nav: &Nav, i: usize, browsing: bool) -> Task<Message> {
         app.loader.request(&path, ft);
     }
     for j in [i + 1, i.wrapping_sub(1)] {
-        let near: Option<(PathBuf, FileType)> = nav.ids.get(j).and_then(|&n| app.coll.get(n)).map(|r| (r.path.clone(), r.file_type));
+        let near: Option<(PathBuf, FileType)> = nav.ids.get(j).and_then(|&n| coll(app, place).get(n)).map(|r| (r.path.clone(), r.file_type));
         if let Some((p, t)) = near {
             app.loader.request_preview(&p, t, false);
         }
@@ -287,7 +351,8 @@ fn show(app: &mut App, nav: &Nav, i: usize, browsing: bool) -> Task<Message> {
 }
 
 fn toggle_flag(app: &mut App, prune: bool) -> Task<Message> {
-    let Some(id) = app.quicklook.as_ref().map(|q| q.id) else { return Task::none() };
+    // Search results are the library's: read-only.
+    let Some(id) = app.quicklook.as_ref().filter(|q| q.place == Place::Grid).map(|q| q.id) else { return Task::none() };
     // A stacked burst can't be marked, here as in the grid.
     if app.is_stack(id) {
         return app.stack_mark_hint();
@@ -309,19 +374,22 @@ fn toggle_flag(app: &mut App, prune: bool) -> Task<Message> {
 /// burst (as in the grid).
 fn enter_land(app: &App) -> viewer_burst::Land {
     match app.quicklook.as_ref() {
-        Some(q) if app.is_stack(q.id) => viewer_burst::Land::Sheet,
+        Some(q) if q.place == Place::Grid && app.is_stack(q.id) => viewer_burst::Land::Sheet,
         _ => viewer_burst::Land::Frame,
     }
 }
 
 pub fn open_viewer(app: &mut App, land: viewer_burst::Land) -> Task<Message> {
-    let Some((id, hint)) = app.quicklook.as_ref().map(|q| (q.id, q.hint)) else { return Task::none() };
+    let Some((id, hint, place)) = app.quicklook.as_ref().map(|q| (q.id, q.hint, q.place)) else { return Task::none() };
     let closed = close(app);
+    if place == Place::Search {
+        return Task::batch([closed, super::search::open_viewer(app, id)]);
+    }
     let mut items = app.derived.visible.clone();
     let index = match items.iter().position(|&x| x == id) {
         Some(i) => i,
         None => {
-            let nav = Nav::of(app);
+            let nav = Nav::of(app, Place::Grid);
             let next = nav.ids.get(hint).copied();
             let at = next.and_then(|n| items.iter().position(|&x| x == n)).unwrap_or(items.len());
             items.insert(at, id);
@@ -356,7 +424,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Option<Tas
         (Key::Named(Named::Delete), _) | (_, Some("p")) => return Some(toggle_flag(app, true)),
         (_, Some("m")) => return Some(toggle_flag(app, false)),
         (_, Some("u")) => {
-            let pruned = app.quicklook.as_ref().and_then(|q| app.coll.get(q.id)).is_some_and(|r| r.is_pruned);
+            let pruned = app.quicklook.as_ref().filter(|q| q.place == Place::Grid).and_then(|q| app.coll.get(q.id)).is_some_and(|r| r.is_pruned);
             return Some(if pruned { toggle_flag(app, true) } else { Task::none() });
         }
         _ => return None,
@@ -382,7 +450,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Allocated(_, Err(_)) => Task::none(),
         Msg::Settled(key) => {
             let Some(q) = app.quicklook.as_ref().filter(|q| q.key == key && q.full.is_none()) else { return Task::none() };
-            if let Some(ft) = app.coll.get(q.id).map(|r| r.file_type) {
+            if let Some(ft) = coll(app, q.place).get(q.id).map(|r| r.file_type) {
                 let path = q.path.clone();
                 app.loader.request(&path, ft);
             }
@@ -454,14 +522,16 @@ fn allocate(app: &App) -> Task<Message> {
 
 /// One line for the test driver.
 pub fn debug_state(app: &App) -> String {
-    let name = |id: RecordId| app.coll.get(id).map(|r| r.filename()).unwrap_or_else(|| "?".into());
+    let place = place(app);
+    let name = |id: RecordId| coll(app, place).get(id).map(|r| r.filename()).unwrap_or_else(|| "?".into());
     let mut sel: Vec<String> = app.derived.visible.iter().filter(|id| app.grid.selection.contains(id)).map(|&id| name(id)).collect();
     sel.truncate(4);
     let grid = format!("grid selection={sel:?} anchor={:?} scroll={:.0}", app.grid.anchor.map(name), app.grid.scroll);
     let Some(q) = &app.quicklook else { return format!("closed; {grid}") };
-    let r = app.coll.get(q.id);
+    let r = coll(app, q.place).get(q.id);
     format!(
-        "open {} at {:?} preview={} full={} failed={:?} pruned={} marked={} viewport={:?}; {grid}",
+        "open {:?} {} at {:?} preview={} full={} failed={:?} pruned={} marked={} viewport={:?}; {grid}",
+        q.place,
         name(q.id),
         position(app, q.id),
         q.preview.as_ref().map(|i| format!("{}x{}", i.levels[0].width, i.levels[0].height)).unwrap_or("-".into()),
@@ -477,7 +547,11 @@ pub fn debug_state(app: &App) -> String {
 
 /// (1-based position, count) of `id` among the grid's open days.
 fn position(app: &App, id: RecordId) -> Option<(usize, usize)> {
-    let open = app.derived.sections.iter().filter(|s| !app.grid.collapsed.contains(&s.date));
+    let (sections, collapsed) = match place(app) {
+        Place::Grid => (&app.derived.sections, &app.grid.collapsed),
+        Place::Search => (&app.search.layout.sections, &app.search.collapsed),
+    };
+    let open = sections.iter().filter(|s| !collapsed.contains(&s.date));
     let (mut before, mut found, mut total) = (0, None, 0);
     for s in open {
         if found.is_none() {
@@ -493,7 +567,8 @@ fn position(app: &App, id: RecordId) -> Option<(usize, usize)> {
 
 pub fn view(app: &App) -> Option<Element<'_, Message>> {
     let q = app.quicklook.as_ref()?;
-    let r = app.coll.get(q.id)?;
+    let search = q.place == Place::Search;
+    let r = coll(app, q.place).get(q.id)?;
     let types = if r.is_paired() {
         vec![("RAW", t::RAW), ("JPG", t::JPG)]
     } else {
@@ -502,9 +577,15 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
             FileType::Jpg => vec![("JPG", t::JPG)],
         }
     };
+    let thumbs = if search { &app.search.thumbs } else { &app.thumbs };
+    let burst = if search {
+        app.search.layout.frames_of(q.id).and_then(|f| Some((f.iter().position(|&x| x == q.id)? + 1, f.len())))
+    } else {
+        app.bursts.of(q.id).zip(app.bursts.frame_index(q.id)).map(|(b, i)| (i + 1, app.bursts.frames(b).len()))
+    };
     let shown = Shown {
         key: q.key,
-        thumb: app.thumbs.get(&r.path).filter(|th| th.ok).map(|th| th.levels[0].clone()),
+        thumb: thumbs.get(&r.path).filter(|th| th.ok).map(|th| th.levels[0].clone()),
         preview: q.preview.clone(),
         full: q.full.clone(),
         status: q.failed.clone(),
@@ -512,11 +593,12 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
         types,
         position: position(app, q.id),
         when: r.shot_time().format("%Y-%m-%d  %H:%M:%S").to_string(),
-        burst: app.bursts.of(q.id).zip(app.bursts.frame_index(q.id)).map(|(b, i)| (i + 1, app.bursts.frames(b).len())),
-        hint: crate::ui::hint_plate::phrase(&app.quality.hints, q.id),
+        burst,
+        hint: if search { None } else { crate::ui::hint_plate::phrase(&app.quality.hints, q.id) },
         pruned: r.is_pruned,
         marked: r.is_marked,
         crop: r.crop.clone(),
+        read_only: search,
     };
     Some(Widget::new(shown, app.scale_factor, |e| Message::QuickLook(Msg::Widget(e))).into())
 }

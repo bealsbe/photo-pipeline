@@ -15,7 +15,12 @@
 //!   marks that exist nowhere else.
 //! - **Keyboard.**  iced has no focus for buttons or switches, so the page
 //!   keeps its own: Tab and Shift+Tab move a focus ring, Space or Enter
-//!   presses, ← and → change the thumbnail size, Esc closes.
+//!   presses, ← and → change the thumbnail size and how close search
+//!   matches must be, Esc closes.
+//! - **Search** (`search_prefs` words): where models run, how close
+//!   matches must be (a slider with a reset to the default), indexing new
+//!   exports, and the recent searches.  Its index and models show in
+//!   Storage, cleared or deleted after a confirmation that says the cost.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -28,6 +33,8 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Recta
 
 use super::commands::Cmd;
 use super::preferences_storage::{self as storage, Cache, Cleared, Survey, Usage};
+use crate::ml::{CardFailure, Device, SelfCheck};
+use crate::search::{CLOSENESS_DEFAULT, CLOSENESS_MAX, CLOSENESS_MIN, Stopped, estimate};
 use super::{App, FilterMsg, FolderTarget, Message, dialogs, kit, style, viewer_advance, viewer_filmstrip};
 use crate::settings::{self, Settings};
 use crate::ui::grid::{MAX_SIZE, MIN_SIZE};
@@ -57,8 +64,22 @@ pub enum Control {
     EditCopyFolder,
     EditCopySubfolder,
     GlobalMenu,
+    /// Run models on: the graphics card or the processor.
+    SearchDevice(Device),
+    /// Check the card again (its self-check against the processor).
+    CheckCard,
+    /// How close matches must be (the slider; ← → move it).
+    Closeness,
+    /// Back to the default closeness.
+    ClosenessReset,
+    IndexExports,
+    ForgetSearches,
     Open(Cache),
     Clear(Cache),
+    SearchRebuild,
+    SearchClear,
+    ModelsOpen,
+    ModelsDelete,
     OpenUnsaved,
     Close,
 }
@@ -78,6 +99,17 @@ impl Control {
             Control::EditCopyFolder => "pref-edit-copy",
             Control::EditCopySubfolder => "pref-edit-copy-subfolder",
             Control::GlobalMenu => "pref-global-menu",
+            Control::SearchDevice(Device::Gpu) => "pref-search-gpu",
+            Control::SearchDevice(Device::Cpu) => "pref-search-cpu",
+            Control::CheckCard => "pref-check-card",
+            Control::Closeness => "pref-closeness",
+            Control::ClosenessReset => "pref-closeness-reset",
+            Control::IndexExports => "pref-index-exports",
+            Control::ForgetSearches => "pref-forget-searches",
+            Control::SearchRebuild => "pref-search-rebuild",
+            Control::SearchClear => "pref-search-clear",
+            Control::ModelsOpen => "pref-models-open",
+            Control::ModelsDelete => "pref-models-delete",
             Control::Open(Cache::Thumbs) => "pref-open-thumbs",
             Control::Open(Cache::Library) => "pref-open-library",
             Control::Open(Cache::CaptureTimes) => "pref-open-capture",
@@ -103,6 +135,23 @@ pub enum Msg {
     ClearConfirmed,
     ConfirmCancel,
     Cleared(Cache, Option<(Cleared, Usage)>),
+    /// The closeness slider moved (its position: closer to the left).
+    Closeness(f32),
+    /// The slider was let go: save, and search again.
+    ClosenessDone,
+    /// Bring a control into view (after the window has opened).
+    Reveal(Control),
+    /// Count the sizes again (after the engine cleared or deleted).
+    Recount,
+}
+
+/// What a confirmation asks about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ask {
+    Cache(Cache),
+    SearchRebuild,
+    SearchClear,
+    ModelsDelete,
 }
 
 /// The Preferences window and what it has counted.
@@ -121,8 +170,8 @@ pub struct Prefs {
     clearing: Option<Cache>,
     /// The last clear, for a word under that cache's size.
     last_clear: Option<(Cache, Cleared)>,
-    /// The cache a confirmation is asking about.
-    confirm: Option<Cache>,
+    /// What a confirmation is asking about.
+    confirm: Option<Ask>,
 }
 
 impl Prefs {
@@ -146,6 +195,11 @@ impl Prefs {
         self.survey.as_ref()?.caches.iter().find(|(k, _)| *k == c).map(|(_, u)| *u)
     }
 
+    /// The search index's and the models' sizes, once counted.
+    fn search_storage(&self) -> Option<&storage::SearchStorage> {
+        self.survey.as_ref().map(|s| &s.search)
+    }
+
     /// One line for the test driver.
     pub fn debug_state(&self) -> String {
         let sizes: Vec<String> = Cache::ALL
@@ -157,7 +211,7 @@ impl Prefs {
             .collect();
         let journal = self.survey.as_ref().map(|s| format!("{:?}", s.journal)).unwrap_or_else(|| "…".into());
         format!(
-            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] journal={journal} last_clear={:?}",
+            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] search={:?} journal={journal} last_clear={:?}",
             self.window.is_some(),
             self.focus,
             self.ring,
@@ -165,6 +219,7 @@ impl Prefs {
             self.clearing,
             self.counting,
             sizes.join(", "),
+            self.search_storage(),
             self.last_clear,
         )
     }
@@ -174,8 +229,9 @@ fn m(msg: Msg) -> Message {
     Message::Prefs(msg)
 }
 
-/// Run `f` on a thread of its own; `None` if it panicked.
-async fn on_worker<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+/// Run `f` on a thread of its own; `None` if it panicked.  (The search
+/// page runs its own work here too.)
+pub(super) async fn on_worker<T: Send + 'static>(name: &str, f: impl FnOnce() -> T + Send + 'static) -> Option<T> {
     let (tx, rx) = iced::futures::channel::oneshot::channel();
     let spawned = std::thread::Builder::new().name(name.into()).spawn(move || {
         let _ = tx.send(f());
@@ -208,6 +264,17 @@ pub fn open(app: &mut App) -> Task<Message> {
     Task::batch([opened.map(Message::WindowOpened), recount(app)])
 }
 
+/// Open the window (or bring it up) with `c` in view and ringed: the
+/// search page's and the banner's way to Preferences ▸ Search.
+pub fn open_at(app: &mut App, c: Control) -> Task<Message> {
+    let opened = open(app);
+    app.prefs.focus = Some(c);
+    app.prefs.ring = true;
+    // A window just opened has no layout yet: reveal once it has.
+    let later = Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| m(Msg::Reveal(c)));
+    Task::batch([opened, reveal_search_section(), later])
+}
+
 pub fn close(app: &mut App) -> Task<Message> {
     app.prefs.confirm = None;
     match app.prefs.window.take() {
@@ -235,7 +302,8 @@ fn recount(app: &mut App) -> Task<Message> {
     p.survey_seq += 1;
     p.counting = true;
     let seq = p.survey_seq;
-    Task::perform(on_worker("prefs-count", storage::survey), move |s| m(Msg::Surveyed(seq, s)))
+    let library = app.library.clone();
+    Task::perform(on_worker("prefs-count", move || storage::survey(library.as_deref())), move |s| m(Msg::Surveyed(seq, s)))
 }
 
 /// A folder chosen for the edit copies (Change… on the page).
@@ -279,7 +347,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::ClearConfirmed => {
             let p = &mut app.prefs;
-            let Some(cache) = p.confirm.take() else { return Task::none() };
+            let cache = match p.confirm.take() {
+                None => return Task::none(),
+                Some(Ask::Cache(c)) => c,
+                Some(search) => return search_confirmed(app, search),
+            };
             if p.clearing.is_some() {
                 return Task::none();
             }
@@ -306,7 +378,52 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             // old size: count again instead.
             if was_counting { recount(app) } else { Task::none() }
         }
+        Msg::Closeness(position) => {
+            // The slider runs from closer (left) to looser (right).
+            app.settings.search_closeness = (CLOSENESS_MIN + CLOSENESS_MAX - position).clamp(CLOSENESS_MIN, CLOSENESS_MAX);
+            Task::none()
+        }
+        Msg::ClosenessDone => closeness_changed(app),
+        Msg::Reveal(c) if matches!(c, Control::SearchDevice(_)) => reveal_search_section(),
+        Msg::Reveal(c) => reveal(c),
+        Msg::Recount => recount(app),
     }
+}
+
+/// The closeness was set: save it and search again.
+fn closeness_changed(app: &mut App) -> Task<Message> {
+    app.settings.save_in_background();
+    super::search::rerun(app);
+    Task::none()
+}
+
+fn set_closeness(app: &mut App, v: f32) -> Task<Message> {
+    app.settings.search_closeness = v.clamp(CLOSENESS_MIN, CLOSENESS_MAX);
+    closeness_changed(app)
+}
+
+/// A search storage action was confirmed: the engine does it on its own
+/// thread; the sizes are counted again after.
+fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
+    let link = &app.search.link;
+    let text = match ask {
+        Ask::SearchRebuild => {
+            link.rebuild_index();
+            "Rebuilding the search index. Search works on what has been rebuilt so far."
+        }
+        Ask::SearchClear => {
+            link.clear_index();
+            "Cleared the search index."
+        }
+        Ask::ModelsDelete => {
+            link.delete_models();
+            "Deleted the downloaded model."
+        }
+        Ask::Cache(_) => return Task::none(),
+    };
+    let status = app.show_status(text, 6000);
+    let later = Task::perform(tokio::time::sleep(Duration::from_millis(600)), |_| m(Msg::Recount));
+    Task::batch([status, later])
 }
 
 /// Snap like the filter bar's slider, and remember it.
@@ -352,6 +469,48 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::SearchDevice(d) => {
+            if app.settings.search_device != d {
+                app.settings.search_device = d;
+                app.settings.save_in_background();
+                app.search.link.set_device(d);
+            }
+            Task::none()
+        }
+        Control::CheckCard => {
+            app.search.link.try_card_again();
+            Task::none()
+        }
+        Control::Closeness => Task::none(),
+        Control::ClosenessReset => set_closeness(app, CLOSENESS_DEFAULT),
+        Control::IndexExports => {
+            let on = !app.settings.search_index_exports;
+            app.settings.search_index_exports = on;
+            app.settings.save_in_background();
+            app.search.link.set_index_exports(on);
+            Task::none()
+        }
+        Control::ForgetSearches => {
+            app.settings.forget_searches();
+            app.settings.save_in_background();
+            app.show_status("Recent searches forgotten.", 4000)
+        }
+        Control::SearchRebuild | Control::SearchClear | Control::ModelsDelete => {
+            if search_action_ready(app, c) {
+                app.prefs.confirm = Some(match c {
+                    Control::SearchRebuild => Ask::SearchRebuild,
+                    Control::SearchClear => Ask::SearchClear,
+                    _ => Ask::ModelsDelete,
+                });
+            }
+            Task::none()
+        }
+        Control::ModelsOpen => {
+            if let Some(d) = crate::ml::models::models_dir().filter(|_| models_exist(&app.prefs)) {
+                dialogs::open_folder(&d);
+            }
+            Task::none()
+        }
         Control::Open(cache) => {
             if let Some(d) = cache.dir() {
                 dialogs::open_folder(&d);
@@ -360,7 +519,7 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
         }
         Control::Clear(cache) => {
             if clearable(&app.prefs, cache) {
-                app.prefs.confirm = Some(cache);
+                app.prefs.confirm = Some(Ask::Cache(cache));
             }
             Task::none()
         }
@@ -376,6 +535,22 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
 
 fn clearable(p: &Prefs, c: Cache) -> bool {
     p.clearing.is_none() && p.usage(c).is_some_and(|u| u.files > 0)
+}
+
+fn models_exist(p: &Prefs) -> bool {
+    p.search_storage().is_some_and(|s| s.models_bytes > 0)
+}
+
+/// Whether a search storage action can be asked for now.
+fn search_action_ready(app: &App, c: Control) -> bool {
+    let st = &app.search.status;
+    let has_index = st.indexed_shots > 0 || app.prefs.search_storage().is_some_and(|s| s.index_bytes > 0);
+    match c {
+        Control::SearchRebuild => st.models_installed && has_index && st.pass.is_none(),
+        Control::SearchClear => has_index,
+        Control::ModelsDelete => st.models_installed || models_exist(&app.prefs),
+        _ => false,
+    }
 }
 
 fn remembered_viewer_size(s: &Settings) -> bool {
@@ -399,6 +574,18 @@ fn controls(app: &App) -> Vec<Control> {
         v.push(Control::ViewerSize);
     }
     v.extend([Control::Library, Control::EditCopyFolder, Control::EditCopySubfolder]);
+    v.extend([Control::SearchDevice(Device::Gpu), Control::SearchDevice(Device::Cpu)]);
+    if app.settings.search_device == Device::Gpu {
+        v.push(Control::CheckCard);
+    }
+    v.push(Control::Closeness);
+    if !at_default(app.settings.closeness()) {
+        v.push(Control::ClosenessReset);
+    }
+    v.push(Control::IndexExports);
+    if !app.settings.search_recent.is_empty() {
+        v.push(Control::ForgetSearches);
+    }
     if !settings::global_menu_forced_off() {
         v.push(Control::GlobalMenu);
     }
@@ -409,6 +596,17 @@ fn controls(app: &App) -> Vec<Control> {
         if clearable(p, c) {
             v.push(Control::Clear(c));
         }
+    }
+    for c in [Control::SearchRebuild, Control::SearchClear] {
+        if search_action_ready(app, c) {
+            v.push(c);
+        }
+    }
+    if models_exist(p) {
+        v.push(Control::ModelsOpen);
+    }
+    if search_action_ready(app, Control::ModelsDelete) {
+        v.push(Control::ModelsDelete);
     }
     if p.survey.as_ref().is_some_and(|s| s.journal.exists) {
         v.push(Control::OpenUnsaved);
@@ -425,6 +623,15 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
             Key::Named(Named::Enter) => update(app, Msg::ClearConfirmed),
             _ => Task::none(),
         };
+    }
+    if let Key::Named(dir @ (Named::ArrowLeft | Named::ArrowRight | Named::ArrowDown | Named::ArrowUp)) = &key {
+        if app.prefs.focus == Some(Control::Closeness) {
+            // ← closer, → looser, as the slider runs.
+            let looser = matches!(*dir, Named::ArrowRight | Named::ArrowUp);
+            let v = app.settings.closeness() + if looser { -0.25 } else { 0.25 };
+            app.prefs.ring = true;
+            return set_closeness(app, v);
+        }
     }
     match &key {
         Key::Named(Named::Escape) => return close(app),
@@ -481,6 +688,9 @@ struct Reveal {
     page: Id,
     view: Option<(Rectangle, Rectangle, Vector)>,
     found: Option<Rectangle>,
+    /// Put the target at the top of the page (a section), rather than
+    /// scrolling just far enough to show it (a control).
+    to_top: bool,
 }
 
 impl Operation for Reveal {
@@ -502,7 +712,12 @@ impl Operation for Reveal {
 
     fn finish(&self) -> Outcome<()> {
         let (Some((view, content, offset)), Some(target)) = (self.view, self.found) else { return Outcome::None };
-        match reveal_offset(view.height, content.height, offset.y, target.y - content.y, target.height) {
+        let wanted = if self.to_top {
+            Some((target.y - content.y - t::S4).clamp(0.0, (content.height - view.height).max(0.0)))
+        } else {
+            reveal_offset(view.height, content.height, offset.y, target.y - content.y, target.height)
+        };
+        match wanted {
             Some(y) => Outcome::Chain(Box::new(adv::operation::scrollable::scroll_to(self.page.clone(), AbsoluteOffset { x: None, y: Some(y) }))),
             None => Outcome::None,
         }
@@ -532,7 +747,14 @@ fn reveal(c: Control) -> Task<Message> {
     if c == Control::Close {
         return Task::none();
     }
-    adv::operate(Reveal { target: Id::new(c.id()), page: Id::new(SCROLL), view: None, found: None }).discard()
+    adv::operate(Reveal { target: Id::new(c.id()), page: Id::new(SCROLL), view: None, found: None, to_top: false }).discard()
+}
+
+/// The search section's id, to bring it to the top of the page.
+const SEARCH_SECTION: &str = "pref-section-search";
+
+fn reveal_search_section() -> Task<Message> {
+    adv::operate(Reveal { target: Id::new(SEARCH_SECTION), page: Id::new(SCROLL), view: None, found: None, to_top: true }).discard()
 }
 
 // ── view ────────────────────────────────────────────────────────────────────
@@ -550,6 +772,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         grid(app),
         viewer(app),
         folders(app),
+        search_section(app),
         desktop(app),
         storage_section(app),
         kit::caption(format!(
@@ -576,8 +799,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
     let base = container(column![body, kit::hairline(), bar]).width(Length::Fill).height(Length::Fill).style(style::fill(t::GROUND));
     let mut layers: Vec<Element<'_, Message>> = vec![base.into()];
-    if let Some(cache) = p.confirm {
-        layers.push(confirm_view(p, cache));
+    if let Some(ask) = p.confirm {
+        layers.push(confirm_view(app, ask));
     }
     stack(layers).width(Length::Fill).height(Length::Fill).into()
 }
@@ -748,9 +971,178 @@ fn storage_section(app: &App) -> Element<'_, Message> {
                 "Photo analysis",
                 "What analysing found in each folder (sharpness, exposure, fingerprints), so its hints show at once and analysing again reads only new photos.",
             ),
+            search_index_row(app),
+            models_row(app),
             unsaved_row(app),
         ],
     )
+}
+
+/// The value column of a storage row: a size, and a quieter line.
+fn size_column<'a>(value: String, sub: Option<String>) -> Element<'a, Message> {
+    let mut size = column![text(value).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].align_x(Alignment::End).width(96);
+    if let Some(s) = sub {
+        size = size.push(text(s).size(t::T_SMALL).color(t::INK3));
+    }
+    size.into()
+}
+
+fn search_index_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let st = &app.search.status;
+    let (value, sub) = match p.search_storage() {
+        None => ("…".to_string(), Some("counting".to_string())),
+        Some(s) if s.index_bytes == 0 && st.indexed_shots == 0 => ("Empty".to_string(), Some("not indexed yet".to_string())),
+        Some(s) => (util::fmt_bytes(s.index_bytes), Some(util::plural(st.indexed_shots as u64, "photo"))),
+    };
+    let rebuild = focusable(p, Control::SearchRebuild, kit::btn("Rebuild…", style::ghost(), search_action_ready(app, Control::SearchRebuild).then(|| m(Msg::Press(Control::SearchRebuild)))));
+    let clear = focusable(p, Control::SearchClear, kit::btn("Clear…", style::secondary(), search_action_ready(app, Control::SearchClear).then(|| m(Msg::Press(Control::SearchClear)))));
+    let path = crate::search::index::cache_dir().map(|d| tilde(&d)).unwrap_or_default();
+    let about = column![
+        text("What each photo looks like to search, so a search reads no photos.").size(t::T_SMALL).color(t::INK3),
+        text(path).size(t::T_SMALL).color(t::INK4)
+    ]
+    .spacing(2);
+    setting("Search index", about.into(), row![size_column(value, sub), rebuild, clear].spacing(t::S1).align_y(Alignment::Center).into())
+}
+
+fn models_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let (value, sub) = match p.search_storage() {
+        None => ("…".to_string(), Some("counting".to_string())),
+        Some(s) if s.models_bytes == 0 => ("None".to_string(), Some("nothing downloaded".to_string())),
+        Some(s) => (util::fmt_bytes(s.models_bytes), Some("the search model".to_string())),
+    };
+    let open = focusable(p, Control::ModelsOpen, kit::btn("Open", style::ghost(), models_exist(p).then(|| m(Msg::Press(Control::ModelsOpen)))));
+    let delete = focusable(p, Control::ModelsDelete, kit::btn("Delete…", style::secondary(), search_action_ready(app, Control::ModelsDelete).then(|| m(Msg::Press(Control::ModelsDelete)))));
+    let path = crate::ml::models::models_dir().map(|d| tilde(&d)).unwrap_or_default();
+    let about = column![
+        text("The search model. Deleted, it downloads again, after asking, when it's next needed.").size(t::T_SMALL).color(t::INK3),
+        text(path).size(t::T_SMALL).color(t::INK4)
+    ]
+    .spacing(2);
+    setting("Downloaded models", about.into(), row![size_column(value, sub), open, delete].spacing(t::S1).align_y(Alignment::Center).into())
+}
+
+// ── search ──────────────────────────────────────────────────────────────────
+
+fn at_default(v: f32) -> bool {
+    (v - CLOSENESS_DEFAULT).abs() < 0.05
+}
+
+/// What the closeness means, in words.
+pub fn closeness_words(v: f32) -> &'static str {
+    if at_default(v) {
+        "The default: good matches, right for most searches."
+    } else if v > CLOSENESS_DEFAULT {
+        "Closer than the default: fewer results, all of them close."
+    } else {
+        "Looser than the default: more results, some only a little alike."
+    }
+}
+
+fn search_section(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let s = &app.settings;
+    let st = &app.search.status;
+    let shots = st.library_shots;
+    let gpu = s.search_device == Device::Gpu;
+
+    // Run models on.
+    let mut about_device = column![].spacing(t::S1);
+    if gpu {
+        about_device = about_device.push(
+            text("Indexing runs on the graphics card, about 6 times faster than the processor. If the card fails, indexing stops and says why; nothing moves to the processor by itself.")
+                .size(t::T_SMALL)
+                .color(t::INK3),
+        );
+        let name = st.device.name.clone().unwrap_or_else(|| "the graphics card".into());
+        let (tone, line) = match (&st.stopped, &st.device.self_check) {
+            (Some(Stopped::Card(CardFailure::NoCard)), _) => (t::WARN, "No graphics card Photo Pipeline can use was found.".to_string()),
+            (_, SelfCheck::Failed { .. }) => (t::WARN, "Last check: the card gave different results from the processor, so indexing is stopped until it passes.".to_string()),
+            (_, SelfCheck::Passed { .. }) => (t::INK2, format!("Last check: {name} gives the same results as the processor.")),
+            (_, SelfCheck::NotRun) => (t::INK2, "Not checked yet: that happens before the first index.".to_string()),
+        };
+        let check = focusable(
+            p,
+            Control::CheckCard,
+            iced::widget::button(text("Check again").size(t::T_SMALL).font(paint::MEDIUM))
+                .padding(Padding::from([1.0, 4.0]))
+                .style(style::link().style())
+                .on_press(m(Msg::Press(Control::CheckCard))),
+        );
+        about_device = about_device.push(row![text(line).size(t::T_SMALL).color(tone), check].spacing(t::S1).align_y(Alignment::Center).wrap());
+    } else {
+        let all = estimate::describe_seconds(estimate::seconds(shots, Device::Cpu));
+        let day = estimate::describe_seconds(estimate::seconds(5_000, Device::Cpu));
+        about_device = about_device.push(
+            text(format!("Indexing this library on the processor: {all}. Each new day of 5,000 photos: {day}."))
+                .size(t::T_SMALL)
+                .color(t::INK3),
+        );
+    }
+    let segment = |d: Device| -> Element<'_, Message> { focusable(p, Control::SearchDevice(d), kit::segment(d.label(), s.search_device == d, None, m(Msg::Press(Control::SearchDevice(d))))) };
+    let device_control = kit::segmented(vec![segment(Device::Gpu), segment(Device::Cpu)]);
+
+    // How close matches must be: closer to the left, looser to the right.
+    let v = s.closeness();
+    let position = CLOSENESS_MIN + CLOSENESS_MAX - v;
+    let slider = slider(CLOSENESS_MIN..=CLOSENESS_MAX, position, |x| m(Msg::Closeness(x)))
+        .step(0.05_f32)
+        .on_release(m(Msg::ClosenessDone))
+        .width(160)
+        .style(style::zoom_slider(true));
+    let ends = row![text("Closer").size(t::T_SMALL).color(t::INK3), Space::new().width(Length::Fill), text("Looser").size(t::T_SMALL).color(t::INK3)].width(160);
+    let reset_on = !at_default(v);
+    let reset = kit::tip(
+        focusable(
+            p,
+            Control::ClosenessReset,
+            iced::widget::button(container(icons::view(Glyph::Undo, 14.0, if reset_on { t::INK2 } else { t::INK4 })).center(Length::Fill))
+                .width(24)
+                .height(24)
+                .padding(0)
+                .style(style::ghost().radius(4.0).style())
+                .on_press_maybe(reset_on.then(|| m(Msg::Press(Control::ClosenessReset)))),
+        ),
+        "Reset to the default (good matches)",
+        true,
+    );
+    let closeness = row![column![focusable(p, Control::Closeness, container(slider).padding(Padding::from([4.0, 2.0]))), ends].spacing(0), reset]
+        .spacing(t::S1)
+        .align_y(Alignment::Center);
+
+    let recent = s.search_recent.len();
+    let forget = focusable(p, Control::ForgetSearches, kit::btn("Forget them", style::secondary(), (recent > 0).then(|| m(Msg::Press(Control::ForgetSearches)))));
+    let model = crate::ml::models::search_models().first().map(|mi| {
+        format!(
+            "{}, from {}. {}, {}. The same for everyone, so results don't depend on a choice here.",
+            mi.name,
+            mi.publisher,
+            estimate::describe_bytes(mi.bytes()).trim_start_matches("about "),
+            mi.licence
+        )
+    });
+    let search = section(
+        "Search",
+        Some("Find photos in the library by what they show. Everything stays on this computer."),
+        vec![
+            setting("Run models on", about_device.into(), device_control),
+            setting("How close matches must be", about(format!("How alike a photo must be to what you typed to come up in a search. {}", closeness_words(v))), closeness.into()),
+            setting(
+                "Index new exports",
+                about("After each export, its photos are added to search in the background: a line in the status bar, nothing to answer."),
+                switch(p, Control::IndexExports, s.search_index_exports, true),
+            ),
+            setting("Search model", about(model.unwrap_or_default()), kit::caption("Fixed").into()),
+            setting(
+                "Recent searches",
+                about(if recent == 0 { "The last 10 searches show when the search field is empty. None are kept now.".to_string() } else { format!("The last 10 searches show when the search field is empty. {} kept now.", recent) }),
+                forget,
+            ),
+        ],
+    );
+    container(search).id(SEARCH_SECTION).width(Length::Fill).into()
 }
 
 fn count_word(c: Cache, n: u64) -> String {
@@ -849,7 +1241,12 @@ fn clear_btn_width() -> f32 {
     paint::text_width("Clear…", t::T_BODY, paint::MEDIUM).ceil() + 2.0 * t::S4 + 2.0 * RING
 }
 
-fn confirm_view(p: &Prefs, cache: Cache) -> Element<'_, Message> {
+fn confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let cache = match ask {
+        Ask::Cache(c) => c,
+        search => return search_confirm_view(app, search),
+    };
     let u = p.usage(cache).unwrap_or_default();
     let size = util::fmt_bytes(u.bytes);
     let (title, body, ok) = match cache {
@@ -894,6 +1291,54 @@ fn confirm_view(p: &Prefs, cache: Cache) -> Element<'_, Message> {
             vec![
                 kit::btn("Cancel", style::secondary(), Some(m(Msg::ConfirmCancel))).into(),
                 kit::btn(ok, style::danger(), Some(m(Msg::ClearConfirmed))).into(),
+            ],
+        ),
+    ]
+    .spacing(t::S3);
+    dialogs::backdrop(dialogs::frame_fit(content.into(), 460.0))
+}
+
+/// The search index and the models: what rebuilding, clearing or deleting
+/// costs.
+fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
+    let st = &app.search.status;
+    let shots = st.library_shots;
+    let d = app.settings.search_device;
+    let read = estimate::describe_bytes(estimate::bytes_read(shots));
+    let time = format!("{} {} {}", estimate::describe_seconds(estimate::seconds(shots, d)), if d == Device::Gpu { "with" } else { "on" }, d.phrase());
+    let models = app.prefs.search_storage().map(|s| s.models_bytes).unwrap_or(0);
+    let (title, body, ok, danger) = match ask {
+        Ask::SearchRebuild => (
+            "Rebuild the search index?",
+            format!("Every photo in the library is read again: {read}, {time}. Meanwhile search works on what has been rebuilt so far."),
+            "Rebuild",
+            false,
+        ),
+        Ask::SearchClear => (
+            "Clear the search index?",
+            format!("Search won't work until the library is indexed again ({time}). Your photos are not changed."),
+            "Clear the index",
+            true,
+        ),
+        _ => (
+            "Delete the downloaded model?",
+            format!(
+                "{} is freed. Search keeps working on what is indexed; indexing new photos, or the next index, asks to download it again.",
+                if models > 0 { util::fmt_bytes(models) } else { "Its space".to_string() }
+            ),
+            "Delete",
+            true,
+        ),
+    };
+    let content = column![
+        dialogs::header(title, None),
+        kit::secondary(body),
+        Space::new().height(t::S2),
+        dialogs::footer(
+            vec![],
+            vec![
+                kit::btn("Cancel", style::secondary(), Some(m(Msg::ConfirmCancel))).into(),
+                kit::btn(ok, if danger { style::danger() } else { style::primary() }, Some(m(Msg::ClearConfirmed))).into(),
             ],
         ),
     ]

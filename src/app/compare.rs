@@ -144,7 +144,7 @@ impl Compare {
 fn selected(app: &App) -> Vec<RecordId> {
     match app.view {
         View::Grid => app.derived.visible.iter().copied().filter(|id| app.grid.selection.contains(id)).collect(),
-        View::Calendar => Vec::new(),
+        View::Calendar | View::Search => Vec::new(),
     }
 }
 
@@ -152,14 +152,14 @@ fn selected(app: &App) -> Vec<RecordId> {
 pub fn can_open(app: &App) -> bool {
     let n = match app.view {
         View::Grid => app.grid.selection.len(),
-        View::Calendar => 0,
+        View::Calendar | View::Search => 0,
     };
     (2..=MAX_PANES).contains(&n)
 }
 
 /// Compare the selection (the C key).
 pub fn open_selected(app: &mut App) -> Task<Message> {
-    if app.view == View::Calendar {
+    if app.view.is_library() {
         return Task::none();
     }
     let ids = selected(app);

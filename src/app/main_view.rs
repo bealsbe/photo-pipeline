@@ -9,7 +9,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Point
 use super::commands::{Cmd, MENUS};
 use super::kit::{self, tip};
 use super::style::{self, Look};
-use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, hints_ui, network};
+use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, hints_ui, network, search, search_setup};
 use crate::model::filter::{FilterState, SortKey};
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
 use crate::ui::grid::{Grid, GridData, Restack};
@@ -41,7 +41,8 @@ const SLIDER_W: f32 = 96.0;
 const ZOOM_W: f32 = 14.0 + 6.0 + SLIDER_W + 6.0 + 14.0;
 
 pub fn view(app: &App) -> Element<'_, Message> {
-    let keyboard_ok = app.modal.is_none() && app.menu.is_none() && app.date_popup.is_none() && app.bulk.is_none() && !app.quality.menu;
+    let keyboard_ok =
+        app.modal.is_none() && app.menu.is_none() && app.date_popup.is_none() && app.bulk.is_none() && !app.quality.menu && app.search.dialog.is_none() && !app.search.steps;
 
     // ── content column ──────────────────────────────────────────────────
     let mut col = column![].width(Length::Fill).height(Length::Fill);
@@ -54,7 +55,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(b) = hints_ui::banner(app) {
         col = col.push(b);
     }
-    if app.view != View::Calendar {
+    if let Some(b) = search_setup::banner(app) {
+        col = col.push(b);
+    }
+    if !app.view.is_library() {
         col = col.push(filter_bar(app));
     }
     if let Some(b) = hints_ui::copies_bar(app) {
@@ -83,6 +87,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
                     bursts: &app.derived.before_runs,
                     focus: app.derived.restack_focus,
                 }),
+                label: crate::ui::grid::CellLabel::Name,
+                footer: None,
             };
             Grid::new(data, app.thumb_size, Message::Grid)
                 .keyboard(keyboard_ok && !app.side_expanded && app.quicklook.is_none())
@@ -92,17 +98,25 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 .into()
         }
         View::Calendar => calendar::view(app, keyboard_ok),
+        View::Search => search::view(app, keyboard_ok),
     };
     // Background work shows as a sweep along the content's top edge.
     let busy = app.scanning
         || match app.view {
             View::Calendar => app.calendar.is_indexing() || app.calendar.thumbs.pending() > 0,
+            // The first index runs along the top of the search page (an
+            // export's is quiet: the status bar only).
+            View::Search => {
+                app.search.pending.is_some()
+                    || app.search.thumbs.pending() > 0
+                    || app.search.status.pass.as_ref().is_some_and(|p| p.kind != crate::search::PassKind::NewExports && app.search.status.stopped.is_none())
+            }
             _ => app.thumbs.pending() > 0 || app.quality.analysing(),
         };
     // Quick look covers the grid (an empty layer keeps the stack's shape).
-    let quick_look = super::quicklook::view(app).filter(|_| app.view == View::Grid).unwrap_or_else(|| space().into());
+    let quick_look = super::quicklook::view(app).filter(|_| matches!(app.view, View::Grid | View::Search)).unwrap_or_else(|| space().into());
     // The Hints menu opens over the content, under its control.
-    let hints_menu = hints_ui::menu_layer(app).filter(|_| app.view != View::Calendar).unwrap_or_else(|| space().into());
+    let hints_menu = hints_ui::menu_layer(app).filter(|_| !app.view.is_library()).unwrap_or_else(|| space().into());
     col = col.push(stack![content, quick_look, ActivityBar::new(busy), hints_menu].width(Length::Fill).height(Length::Fill));
 
     let central = stack![
@@ -136,6 +150,12 @@ pub fn view(app: &App) -> Element<'_, Message> {
         layers.push(dialogs::view(app, modal));
     }
     if let Some(dialog) = app.main_id.and_then(|id| super::bulk::overlay(app, id)) {
+        layers.push(dialog);
+    }
+    if let Some(steps) = search_setup::steps_layer(app) {
+        layers.push(steps);
+    }
+    if let Some(dialog) = search_setup::dialog(app) {
         layers.push(dialog);
     }
     if let Some(prompt) = network::quit_overlay(app) {
@@ -190,6 +210,7 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
     match cmd {
         Cmd::GridView => Some(app.view == View::Grid),
         Cmd::CalendarView => Some(app.view == View::Calendar),
+        Cmd::Search => Some(app.view == View::Search),
         Cmd::FolderBar => Some(app.folder_bar_visible),
         Cmd::FileNames => Some(app.show_names),
         Cmd::SideMenu => Some(app.side_expanded),
@@ -197,6 +218,7 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
         Cmd::ToReview => Some(app.filter.to_review),
         Cmd::QuickLook => Some(app.quicklook.is_some()),
         Cmd::AdvanceAfterMark => Some(app.settings.viewer_advance),
+        Cmd::StackBursts if app.view == View::Search => Some(app.search.all_stacked()),
         Cmd::StackBursts => Some(app.stacking.all()),
         Cmd::ProblemsOnly => Some(app.filter.hint == Some(crate::model::hints::HintFilter::Problems)),
         _ => None,
@@ -214,22 +236,30 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
         return super::viewer_burst::can_open(app);
     }
     if cmd == Cmd::QuickLook {
-        return app.view == View::Grid && !app.derived.visible.is_empty();
+        return match app.view {
+            View::Grid => !app.derived.visible.is_empty(),
+            View::Search => !app.search.layout.tiles.is_empty(),
+            _ => false,
+        };
     }
     if cmd == Cmd::StackBurst {
-        return app.view == View::Grid && app.focused_burst().is_some();
+        return match app.view {
+            View::Grid => app.focused_burst().is_some(),
+            View::Search => app.search.focused_burst(),
+            _ => false,
+        };
     }
     if cmd == Cmd::Analyse {
         return !app.scanning && !app.coll.is_empty() && !app.quality.analysing();
     }
     let analysed = !app.quality.analysing() && app.quality.hints.coverage().0 > 0;
     if matches!(cmd, Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly) {
-        return analysed && app.view != View::Calendar;
+        return analysed && !app.view.is_library();
     }
     if cmd == Cmd::KeepThisPruneRest {
         return analysed && super::viewer_burst::can_open(app);
     }
-    !(app.view == View::Calendar && matches!(cmd, Cmd::SelectMode | Cmd::PruneSelected | Cmd::MarkSelected | Cmd::ToReview))
+    !(app.view.is_library() && matches!(cmd, Cmd::SelectMode | Cmd::PruneSelected | Cmd::MarkSelected | Cmd::ToReview))
 }
 
 /// Wide enough for the longest label plus its shortcut, as Qt sizes menus.
@@ -753,6 +783,9 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     if let Some(slot) = hints_ui::status_slot(app) {
         r = r.push(slot);
     }
+    if let Some(slot) = search_setup::status_slot(app) {
+        r = r.push(slot);
+    }
     r = r.push(counts);
     if let Some(p) = review_progress(app) {
         r = r.push(Space::new().width(t::S3)).push(kit::vrule(12.0)).push(Space::new().width(t::S2)).push(p);
@@ -858,7 +891,7 @@ const PROGRESS_W: f32 = 64.0;
 /// differ from the file counts beside them.  Clicking switches To review.
 fn review_progress(app: &App) -> Option<Element<'_, Message>> {
     let p = app.derived.progress;
-    if app.view == View::Calendar || app.scanning || p.shots == 0 {
+    if app.view.is_library() || app.scanning || p.shots == 0 {
         return None;
     }
     let shots = format!("shot{}", util::s(p.shots));
