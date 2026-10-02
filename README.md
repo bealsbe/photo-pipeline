@@ -66,6 +66,10 @@ src/app/               the application: state, update, views
   main_view.rs         menu bar, side rail, folder bar, filter bar, status bar
   viewer.rs            the image viewer window (crop tool, EXIF panel)
   calendar.rs          library calendar state and views
+  search.rs            the search page: field, start page, results, Open day
+  search_results.rs    results from hits (no I/O), burst stacks, recent searches
+  search_setup.rs      the download dialog, indexing in the status bar, banners
+  search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
   quality.rs           the analysis as the app holds it (runs on request)
   hints_ui.rs          its Hints control and menu, progress, banner
@@ -276,15 +280,18 @@ gathers the settings on one page: advance after marking, whether All and
 Marked show pruned photos (the filter bar's old *Show pruned*), file names
 and thumbnail size, the viewer's filmstrip, remembered size and whether a
 burst shows all its frames first, the library and
-edit-copy folders, and whether to use the KDE global menu (a change there takes
-effect at the next start; `PP_NO_GLOBAL_MENU=1` still forces the in-window
-menus).  Changes apply at once and are saved; the menus and the viewer's
-toggles stay in step with the page.
+edit-copy folders, search (see "Library search" below), and whether to use
+the KDE global menu (a change there takes effect at the next start;
+`PP_NO_GLOBAL_MENU=1` still forces the in-window menus).  Changes apply at
+once and are saved; the menus and the viewer's toggles stay in step with
+the page.
 
 The Storage section shows how much space the thumbnail, library-index,
 capture-time and photo-analysis caches take, and clears any of them after
 saying what that costs; they are rebuilt as you work (the analysis when you
-next analyse a folder).  It also shows any marks waiting to be saved to a
+next analyse a folder).  The search index can be rebuilt or cleared, and the
+downloaded model deleted, each after a confirmation that says what it costs.
+It also shows any marks waiting to be saved to a
 folder that couldn't be reached.  Those live in
 `~/.local/share/photo-pipeline/unsaved/` and are never cleared from the app:
 they are your marks, not a cache.
@@ -327,6 +334,61 @@ Measured on a 110 386-file library on an SMB share:
 The first time a library is opened, or after F5, it's still read in full,
 about 3 s here.  Opening a working folder reads capture times with the same
 reader, so it gains the read-ahead fix too.
+
+## Library search
+
+**Search the library** (Ctrl+F, on the side rail under the calendar, or in
+the View menu) finds photos in the library by what they show: type a few
+words, such as *red car at night*, and press Enter.  Everything runs on this
+computer; nothing about your photos is sent anywhere.  The plan behind it is
+`docs/library-search-plan.md`.
+
+- **A page of its own.**  It keeps its query while you work elsewhere, and
+  its back button names where it returns ("‹ Grid", "‹ Jul 2026").  Ctrl+F
+  brings it back with the field ready to type into (its text selected).  Esc
+  closes the list under the field and never leaves the page.
+- **The field.**  While you type, it offers your recent searches (the last
+  10) that have a word starting with what you typed; ↑ ↓ choose one, Enter
+  or Tab takes it, Enter alone searches what you typed and moves to the
+  results.  With nothing typed, the page shows the recent searches and a
+  few ways to search.  Preferences ▸ Search ▸ *Forget them* clears them.
+- **Results, best first.**  One list in the grid of a library day, on the
+  same grey, with each photo's date under it (hover for the date and time
+  to the second, and where the file is).  A burst is one stacked tile at
+  the rank of its best frame, as in the grid: G or its tab shows its frames
+  in shooting order, Shift+G every burst (for these results only).  ← →
+  move, Space is quick look, Enter or a double-click opens the viewer.
+  Results are read-only, like the calendar's days: P, M and U do nothing
+  here.
+- **Open day ›** shows the selected photo's day in the calendar with the
+  photo selected; that page's back button reads "‹ Search" (as does Esc)
+  and returns to the same results.
+- **Before the first index**, the page says what indexing costs (what is
+  read from the library, how long it takes, what is downloaded and kept)
+  and offers *Index the library…*.  A dialog asks once: it lists each model
+  with its size, its licence in plain words and its publisher, with the
+  sources and SHA-256 checksums a click away, then shows the download.  A
+  file that doesn't match its checksum is deleted and the dialog says so.
+- **Indexing** runs in the background, newest days first: the status bar
+  shows how far it has got, with × to stop (what is indexed is kept) and a
+  click for its steps.  A search while it runs looks at the photos indexed
+  so far, under a strip that says so, and fills in as it goes.  After an
+  export, the new photos are added on their own, as a quiet line in the
+  status bar (Preferences ▸ Search ▸ *Index new exports*).
+- **When something fails**, a banner under the folder bar says what, in any
+  view: the graphics card stopped responding, gave different answers from
+  the processor, or isn't there; the library stopped answering; or the
+  search helper couldn't run.  It offers *Try the card again* and the way
+  to Preferences.  Nothing ever moves to the processor by itself: the
+  processor is used only when chosen in Preferences ▸ Search ▸ *Run models
+  on*.  Searching what is already indexed keeps working.
+- **Preferences ▸ Search:** where models run (the graphics card, checked
+  against the processor first, or the processor, with what each costs),
+  *How close matches must be* (a slider from closer to looser, with a reset
+  to the default, good matches), *Index new exports*, the search model, and
+  the recent searches.
+- **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
+  explaining itself.
 
 ## File safety
 
@@ -447,7 +509,11 @@ These are deliberate:
   ```
 
   Use scratch copies of photos and a throwaway `HOME` for anything that
-  writes.
+  writes.  `PP_SEARCH_FAKE=1` (or `=indexed`, to start indexed) puts a
+  stand-in in the search engine's place: made-up hits from the library
+  index, downloads and indexing on a timer, and every failure the page
+  shows on request (`search fake …`).  It downloads, reads and writes
+  nothing.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with
