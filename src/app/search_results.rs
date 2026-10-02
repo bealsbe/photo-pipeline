@@ -414,10 +414,12 @@ pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &
     }
     let minus = last.starts_with('-');
     let stem = last.trim_start_matches('-').to_lowercase();
-    // Words already in the query aren't offered again.
+    // Things already in the query (a word, or the words of "parking
+    // lots", left out or not) aren't offered again.
     let before = &tokens[..tokens.len() - usize::from(open && !tokens.is_empty())];
-    let used: HashSet<String> = before.iter().map(|w| w.trim_start_matches('-').to_lowercase()).collect();
-    let fresh = |t: &Thing| !t.kind.is_subject() && t.photos > 0 && !used.contains(&t.word.to_lowercase());
+    let said: Vec<String> = before.iter().map(|w| w.trim_start_matches('-').trim_matches('"').to_lowercase()).collect();
+    let said = format!(" {} ", said.join(" "));
+    let fresh = |t: &Thing| !t.kind.is_subject() && t.photos > 0 && !said.contains(&format!(" {} ", t.word.to_lowercase()));
     if minus && stem.is_empty() {
         // "-": the things most photos show, to leave out.
         o.picks.extend(things.iter().filter(|t| fresh(t)).take(MAX_THINGS).map(|t| Pick::Thing { word: t.word.clone(), photos: t.photos, minus }));
@@ -445,6 +447,8 @@ pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &
 pub fn apply(typed: &str, pick: &Pick) -> String {
     let (text, replace) = match pick {
         Pick::Recent(r) => return r.clone(),
+        // Two words left out stay together: -"parking lots".
+        Pick::Thing { word, minus: true, .. } if word.contains(' ') => (format!("-\"{word}\""), 1),
         Pick::Thing { word, minus, .. } => (if *minus { format!("-{word}") } else { word.clone() }, 1),
         Pick::Date { text, replace, .. } => (text.clone(), *replace),
     };
@@ -608,6 +612,15 @@ mod tests {
         assert_eq!(o.picks[0].group(), "Leave out");
         assert_eq!(labels(&offer("fireworks -cr", &vocab(), &days(), &[])), ["-crowds 70"]);
         assert_eq!(apply("fireworks -cr", &o.picks[3]), "fireworks -crowds ");
+        // Two words left out stay together, and the parser reads them so.
+        let lots = Pick::Thing { word: "parking lots".into(), photos: 3, minus: true };
+        let typed = apply("cars -pa", &lots);
+        assert_eq!(typed, "cars -\"parking lots\" ");
+        assert_eq!(parse(&typed).exclude, ["parking lots"]);
+        assert_eq!(parse(&typed).words, "cars");
+        // Once in the query, a thing of two words isn't offered again.
+        let things = vec![thing("parking lots", 3, Kind::Scene), thing("parks", 9, Kind::Scene)];
+        assert_eq!(labels(&offer(&format!("{typed}pa"), &things, NO_DAYS, &[])), ["parks 9"]);
     }
 
     #[test]
