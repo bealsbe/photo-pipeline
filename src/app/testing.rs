@@ -49,9 +49,13 @@
 //! lclick 3                    # list click on the 4th row
 //! activate 0                  # open the viewer on a grid tile
 //! aspect 1:1                  # pick a crop ratio in the viewer
-//! filter pruned|marked|all|date|date-from|date-close
-//! filter show-all|to-review|show-marked   # the All · To review · Marked choice
+//! filter marked|all|date|date-from|date-close   # (all: the Reset button)
+//! filter show-all|to-review|show-marked|show-pruned
+//!                             # the All · To review · Marked · Pruned choice
+//! filter pruned               # Preferences ▸ Show pruned photos, on or off
+//!                             # (the filter bar's old Show pruned chip)
 //! progress                    # print review progress and the filter
+//! shown                       # print the grid's tiles (list's rows), marks
 //! dlg export-go               # press a dialog button (see `dialog_msg`)
 //! gridscroll 20000 3000       # scroll the grid to y=20000 px over 3 s
 //! zoom 240                    # set the grid's thumbnail size
@@ -73,7 +77,7 @@
 //! netquit keep|quit           # answer the quit prompt
 //! rename /from /to            # move a folder (simulate a share going away)
 //! prefs open|close|dump       # the Preferences window; dump prints its state
-//! prefs advance               # press a control (see `pref_control`)
+//! prefs advance               # press a control (see `prefs_step`)
 //! prefs thumbsize 240         # drag the thumbnail-size slider there
 //! prefs confirm|cancel        # answer a Clear confirmation
 //! prefs resize 540 640        # resize the Preferences window
@@ -434,9 +438,11 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 None => Task::none(),
             }
         }
+        // Show pruned photos is a preference now; scripts that toggled the
+        // chip keep working.
+        "filter" if arg == "pruned" => app.toggle_show_pruned(),
         "filter" => {
             let m = match arg.as_str() {
-                "pruned" => Some(super::FilterMsg::TogglePruned),
                 "marked" => Some(super::FilterMsg::ToggleMarkedOnly),
                 "all" => Some(super::FilterMsg::ResetAll),
                 "date" => Some(super::FilterMsg::ToggleDate),
@@ -445,6 +451,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "show-all" => Some(super::FilterMsg::Show(super::Show::All)),
                 "to-review" => Some(super::FilterMsg::Show(super::Show::ToReview)),
                 "show-marked" => Some(super::FilterMsg::Show(super::Show::Marked)),
+                "show-pruned" => Some(super::FilterMsg::Show(super::Show::Pruned)),
                 _ => None,
             };
             match m {
@@ -514,6 +521,21 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let mut a = arg.split_whitespace().map(|x| x.parse::<f32>().unwrap_or(0.0));
             let (to, ms) = (a.next().unwrap_or(0.0), a.next().unwrap_or(1000.0).max(1.0));
             app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.grid.scroll, to, ms });
+            Task::none()
+        }
+        "shown" => {
+            // The grid's tiles (or the list's rows) with their marks.
+            let ids: Vec<crate::model::collection::RecordId> = match app.view {
+                super::View::List => app.derived.list_rows.iter().map(|r| r.primary()).collect(),
+                _ => app.derived.tiles.clone(),
+            };
+            let names: Vec<String> = ids
+                .iter()
+                .filter_map(|&id| app.coll.get(id))
+                .map(|r| format!("{}{}{}", r.stem(), if r.is_pruned { " P" } else { "" }, if r.is_marked { " M" } else { "" }))
+                .collect();
+            let unpruned = ids.iter().filter(|&&id| app.coll.get(id).is_some_and(|r| !r.is_pruned)).count();
+            eprintln!("[shown] view={:?} show={:?} n={} not_pruned={unpruned} {:?}", app.view, app.filter.show(), names.len(), names.iter().take(40).collect::<Vec<_>>());
             Task::none()
         }
         "progress" => {
@@ -751,6 +773,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
     let rest = rest.trim();
     let control = match what {
         "advance" => Some(Control::Advance),
+        "showpruned" => Some(Control::ShowPruned),
         "names" => Some(Control::FileNames),
         "stack" => Some(Control::StackBursts),
         "filmstrip" => Some(Control::Filmstrip),
@@ -796,8 +819,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             let s = &app.settings;
             eprintln!("[prefs] {}", app.prefs.debug_state());
             eprintln!(
-                "[prefs] settings advance={} names={} thumb={} filmstrip={} burst_sheet={} viewer={}x{} max={} library={:?} edit_copy={:?} subfolder={} global_menu={}",
+                "[prefs] settings advance={} show_pruned={} names={} thumb={} filmstrip={} burst_sheet={} viewer={}x{} max={} library={:?} edit_copy={:?} subfolder={} global_menu={}",
                 s.viewer_advance,
+                s.filter_pruned,
                 s.show_file_names,
                 s.thumb_size,
                 s.viewer_filmstrip,

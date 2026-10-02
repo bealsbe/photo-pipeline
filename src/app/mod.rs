@@ -108,10 +108,15 @@ pub enum FolderTarget {
 /// Filter bar state (what the widgets show).
 #[derive(Debug, Clone)]
 pub struct FilterUi {
+    /// Preferences ▸ Show pruned photos: pruned photos stay in All and
+    /// Marked.  The Pruned filter shows them either way, To review never.
     pub show_pruned: bool,
+    /// At most one of these three is on (see [`Show`]).
     pub marked_only: bool,
-    /// Only photos neither pruned nor marked.  Never on with `marked_only`.
+    /// Only photos neither pruned nor marked.
     pub to_review: bool,
+    /// Only pruned photos.
+    pub pruned_only: bool,
     pub sort_key: SortKey,
     pub sort_asc: bool,
     pub date_on: bool,
@@ -129,6 +134,7 @@ impl FilterUi {
             show_pruned: false,
             marked_only: false,
             to_review: false,
+            pruned_only: false,
             sort_key: SortKey::Date,
             sort_asc: true,
             date_on: false,
@@ -148,7 +154,11 @@ impl FilterUi {
             sort_asc: self.sort_asc,
             ..FilterState::default()
         };
-        if self.to_review { state.only_to_review() } else { state }
+        match self.show() {
+            Show::ToReview => state.only_to_review(),
+            Show::Pruned => state.only_pruned(),
+            Show::All | Show::Marked => state,
+        }
     }
 
     /// Which photos the "Show" choice lets through.
@@ -157,6 +167,8 @@ impl FilterUi {
             Show::ToReview
         } else if self.marked_only {
             Show::Marked
+        } else if self.pruned_only {
+            Show::Pruned
         } else {
             Show::All
         }
@@ -165,22 +177,24 @@ impl FilterUi {
     fn set_show(&mut self, show: Show) {
         self.to_review = show == Show::ToReview;
         self.marked_only = show == Show::Marked;
+        self.pruned_only = show == Show::Pruned;
     }
 }
 
-/// The filter bar's three-way choice: every photo, only those still to
-/// review (neither pruned nor marked), or only those marked for export.
-/// One choice rather than two toggles, because the last two can't both hold.
+/// The filter bar's four-way choice: every photo, only those still to
+/// review (neither pruned nor marked), only those marked for export, or
+/// only those pruned.  One choice rather than toggles, because "not yet
+/// pruned or marked" can't hold with either of the last two.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Show {
     All,
     ToReview,
     Marked,
+    Pruned,
 }
 
 #[derive(Debug, Clone)]
 pub enum FilterMsg {
-    TogglePruned,
     ToggleMarkedOnly,
     Sort(SortKey),
     ToggleDate,
@@ -452,6 +466,7 @@ impl App {
         filter.show_pruned = settings.filter_pruned;
         filter.marked_only = settings.filter_marked_only;
         filter.to_review = settings.filter_to_review && !filter.marked_only;
+        filter.pruned_only = settings.filter_pruned_only && !filter.marked_only && !filter.to_review;
         filter.sort_key = SortKey::parse(&settings.sort_key);
         filter.sort_asc = settings.sort_asc;
         let from = NaiveDate::parse_from_str(&settings.filter_date_from, "%Y-%m-%d").ok();
@@ -1039,6 +1054,7 @@ impl App {
         s.filter_pruned = self.filter.show_pruned;
         s.filter_marked_only = self.filter.marked_only;
         s.filter_to_review = self.filter.to_review;
+        s.filter_pruned_only = self.filter.pruned_only;
         s.sort_key = self.filter.sort_key.as_str().into();
         s.sort_asc = self.filter.sort_asc;
         s.filter_date_from = if self.filter.date_on { self.filter.date_from.format("%Y-%m-%d").to_string() } else { String::new() };
@@ -1127,12 +1143,13 @@ impl App {
         self.save_export_marks()
     }
 
-    /// With "To review" showing, a photo leaves the view as soon as it is
-    /// pruned or marked.  Note where the single selected photo sat, so the
+    /// With To review, Marked or Pruned showing, a photo leaves the view as
+    /// soon as its mark no longer fits (pruned or marked; unmarked;
+    /// un-pruned).  Note where the single selected photo sat, so the
     /// selection can move on to the photo that takes its place and the pile
     /// can be worked through with P and M alone.
     fn review_place(&self) -> Option<usize> {
-        if !self.filter.to_review {
+        if self.filter.show() == Show::All {
             return None;
         }
         match self.view {
@@ -1883,11 +1900,21 @@ impl App {
         self.calendar.set_library_root(Some(path), &self.workers);
     }
 
+    /// Preferences ▸ Show pruned photos: whether pruned photos stay in All
+    /// and Marked.  Saved at once, as every preference is.
+    pub fn toggle_show_pruned(&mut self) -> Task<Message> {
+        self.filter.show_pruned = !self.filter.show_pruned;
+        self.settings.filter_pruned = self.filter.show_pruned;
+        self.settings.save_in_background();
+        self.refresh_views();
+        self.update_status_count();
+        Task::none()
+    }
+
     fn on_filter(&mut self, m: FilterMsg) -> Task<Message> {
         // A filter changed: the Hints menu has done its job.
         self.quality.menu = false;
         match m {
-            FilterMsg::TogglePruned => self.filter.show_pruned = !self.filter.show_pruned,
             FilterMsg::ToggleMarkedOnly => {
                 let show = if self.filter.marked_only { Show::All } else { Show::Marked };
                 self.filter.set_show(show);
@@ -1946,10 +1973,9 @@ impl App {
                 self.filter.date_from = NaiveDate::from_ymd_opt(chrono::Datelike::year(&today), 1, 1).unwrap_or(today);
                 self.filter.date_to = today;
             }
+            // Filters only: Show pruned photos is a preference now.
             FilterMsg::ResetAll => {
-                self.filter.show_pruned = false;
-                self.filter.marked_only = false;
-                self.filter.to_review = false;
+                self.filter.set_show(Show::All);
                 self.filter.date_on = false;
                 self.filter.hint = None;
                 self.date_popup = None;
@@ -2286,26 +2312,68 @@ mod review_filter_tests {
     use super::*;
 
     #[test]
-    fn show_choice_is_one_of_three_and_sets_the_filter() {
+    fn show_choice_is_one_of_four_and_sets_the_filter() {
         let mut f = FilterUi::defaults();
         f.show_pruned = true;
         assert_eq!(f.show(), Show::All);
 
         // To review: pruned stay hidden even with "Show pruned" on.
         f.set_show(Show::ToReview);
-        assert_eq!((f.to_review, f.marked_only), (true, false));
+        assert_eq!((f.to_review, f.marked_only, f.pruned_only), (true, false, false));
         let st = f.state();
         assert!(!st.show_pruned && !st.show_marked && st.show_unpruned && st.show_unmarked);
 
         // Marked replaces it; "Show pruned" applies again.
         f.set_show(Show::Marked);
-        assert_eq!((f.show(), f.to_review), (Show::Marked, false));
+        assert_eq!((f.show(), f.to_review, f.pruned_only), (Show::Marked, false, false));
         let st = f.state();
         assert!(st.show_pruned && st.show_marked && !st.show_unmarked);
 
+        // Pruned replaces that: pruned photos only, marked or not.
+        f.set_show(Show::Pruned);
+        assert_eq!((f.show(), f.to_review, f.marked_only), (Show::Pruned, false, false));
+        let st = f.state();
+        assert!(st.show_pruned && !st.show_unpruned && st.show_marked && st.show_unmarked);
+
         f.set_show(Show::All);
-        assert_eq!((f.to_review, f.marked_only), (false, false));
+        assert_eq!((f.to_review, f.marked_only, f.pruned_only), (false, false, false));
         assert_eq!(f.state(), FilterState { show_pruned: true, ..FilterState::default() });
+    }
+
+    #[test]
+    fn the_show_pruned_preference_never_hides_the_pruned_filter() {
+        use crate::model::record::{FileType, MTime, PhotoRecord};
+        let mut c = crate::model::collection::Collection::new();
+        let mut add = |name: &str, pruned: bool, marked: bool| {
+            let p = PathBuf::from(format!("/s/{name}"));
+            let mut r = PhotoRecord::new(p.clone(), FileType::from_path(&p).unwrap(), 10, MTime::from_unix(1_700_000_000, 0), None);
+            (r.is_pruned, r.is_marked) = (pruned, marked);
+            c.add(r)
+        };
+        let kept = add("A.JPG", false, false);
+        let pruned = add("B.JPG", true, false);
+        let both = add("C.JPG", true, true);
+        let marked = add("D.JPG", false, true);
+        let shown = |f: &FilterUi| filter::visible_sorted(&c, &f.state());
+        let mut f = FilterUi::defaults();
+        for pref in [false, true] {
+            f.show_pruned = pref;
+            f.set_show(Show::Pruned);
+            assert_eq!(shown(&f), [pruned, both], "Pruned, preference {pref}");
+            f.set_show(Show::ToReview);
+            assert_eq!(shown(&f), [kept], "To review, preference {pref}");
+        }
+        // The preference decides All and Marked.
+        f.show_pruned = false;
+        f.set_show(Show::All);
+        assert_eq!(shown(&f), [kept, marked]);
+        f.set_show(Show::Marked);
+        assert_eq!(shown(&f), [marked]);
+        f.show_pruned = true;
+        f.set_show(Show::All);
+        assert_eq!(shown(&f), [kept, pruned, both, marked]);
+        f.set_show(Show::Marked);
+        assert_eq!(shown(&f), [both, marked]);
     }
 
     #[test]
@@ -2319,5 +2387,10 @@ mod review_filter_tests {
         assert_eq!((st.date_from, st.date_to), (Some(f.date_from), Some(f.date_to)));
         assert_eq!((st.sort_key, st.sort_asc), (SortKey::Name, false));
         assert!(!st.show_pruned && !st.show_marked);
+        // So does Pruned.
+        f.set_show(Show::Pruned);
+        let st = f.state();
+        assert_eq!((st.date_from, st.date_to), (Some(f.date_from), Some(f.date_to)));
+        assert_eq!((st.sort_key, st.sort_asc), (SortKey::Name, false));
     }
 }

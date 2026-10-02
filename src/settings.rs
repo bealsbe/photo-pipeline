@@ -19,10 +19,15 @@ static SAVE_GEN: AtomicU64 = AtomicU64::new(0);
 #[serde(default)]
 pub struct Settings {
     pub view_index: u32,
+    /// Preferences ▸ Show pruned photos: pruned photos stay in All and
+    /// Marked.  The key is the one the filter bar's "Show pruned" saved
+    /// (and the Python app's), so older settings carry over.
     pub filter_pruned: bool,
     pub filter_marked_only: bool,
     /// Rust only: the "To review" filter.
     pub filter_to_review: bool,
+    /// Rust only: the "Pruned" filter.
+    pub filter_pruned_only: bool,
     pub sort_key: String,
     pub sort_asc: bool,
     pub filter_date_from: String,
@@ -74,6 +79,7 @@ impl Default for Settings {
             filter_pruned: false,
             filter_marked_only: false,
             filter_to_review: false,
+            filter_pruned_only: false,
             sort_key: "date".into(),
             sort_asc: true,
             filter_date_from: String::new(),
@@ -176,6 +182,11 @@ impl Settings {
     fn import_qsettings() -> Option<Settings> {
         let p = dirs::config_dir()?.join("PhotoPipeline").join("PhotoPipeline.conf");
         let text = fs::read_to_string(p).ok()?;
+        Some(Self::from_qsettings(&text))
+    }
+
+    /// The settings a QSettings INI holds, over the defaults.
+    fn from_qsettings(text: &str) -> Settings {
         let mut s = Settings::default();
         let mut section = String::from("General");
         for line in text.lines() {
@@ -208,7 +219,7 @@ impl Settings {
                 _ => {}
             }
         }
-        Some(s)
+        s
     }
 }
 
@@ -276,6 +287,19 @@ mod tests {
         let back: Settings = serde_json::from_str(&text).expect("parses");
         assert_eq!(serde_json::to_value(&back).unwrap(), serde_json::to_value(&s).unwrap());
         assert!(text.contains("\"global_menu\": false"));
+    }
+
+    #[test]
+    fn show_pruned_keeps_its_key() {
+        // A settings file from before the Pruned filter, "Show pruned" on.
+        let old: Settings = serde_json::from_str(r#"{"filter_pruned": true, "filter_marked_only": false}"#).expect("parses");
+        assert!(old.filter_pruned && !old.filter_pruned_only);
+        let text = serde_json::to_string(&Settings { filter_pruned: true, filter_pruned_only: true, ..Settings::default() }).unwrap();
+        assert!(text.contains(r#""filter_pruned":true"#) && text.contains(r#""filter_pruned_only":true"#));
+        // The Python app's "Show pruned" becomes the preference.
+        let py = Settings::from_qsettings("[filter]\npruned=true\nmarked_only=false\n");
+        assert!(py.filter_pruned && !py.filter_marked_only && !py.filter_pruned_only);
+        assert!(!Settings::from_qsettings("[filter]\npruned=false\n").filter_pruned);
     }
 
     #[test]

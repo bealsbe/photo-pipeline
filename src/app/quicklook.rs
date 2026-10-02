@@ -29,7 +29,8 @@ pub struct QuickLook {
     /// The photo shown.
     pub id: RecordId,
     /// Where it sat in the grid's order when last seen there.  While it is
-    /// hidden (pruned, with "Show pruned" off) the photos after it have
+    /// hidden (a mark that no longer fits the filter: pruned with Show
+    /// pruned photos off, un-pruned under Pruned) the photos after it have
     /// moved up into its place, so this is where browsing carries on.
     hint: usize,
     path: PathBuf,

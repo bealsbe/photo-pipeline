@@ -10,7 +10,7 @@ use super::commands::{Cmd, MENUS};
 use super::kit::{self, tip};
 use super::style::{self, Look};
 use super::{App, FilterMsg, FolderTarget, Message, Show, View, calendar, dialogs, hints_ui, network};
-use crate::model::filter::SortKey;
+use crate::model::filter::{FilterState, SortKey};
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
 use crate::ui::grid::{Grid, GridData, Restack};
 use crate::ui::icons::{self, Glyph};
@@ -64,6 +64,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = match app.view {
         View::Grid | View::List if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
         View::Grid | View::List if pile_done(app) => pile_done_page(app),
+        View::Grid | View::List if none_shown(app) => none_shown_page(app),
         View::Grid => {
             let data = GridData {
                 sections: &app.derived.sections,
@@ -495,36 +496,33 @@ fn tone_dot<'a>(color: Color) -> Element<'a, Message> {
         .into()
 }
 
-/// An on/off filter; `None` disables it (it doesn't apply right now).
-fn toggle_chip<'a>(label: &'a str, on: bool, tone: Color, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
-    let mut content = row![].spacing(6).align_y(Alignment::Center);
-    // A dot in the filter's colour says what it is about, even when off.
-    let dot = if msg.is_none() {
-        alpha(tone, 0.3)
-    } else if on {
-        tone
-    } else {
-        alpha(tone, 0.55)
-    };
-    content = content.push(tone_dot(dot));
-    content = content.push(text(label).size(t::T_SMALL).font(paint::MEDIUM));
-    button(container(content).center_y(Length::Fill))
-        .height(t::CONTROL_SM)
-        .padding(Padding::from([0.0, 10.0]))
-        .style(Look { disabled_border: t::LINE, ..style::toggle(on, tone) }.style())
-        .on_press_maybe(msg)
+/// The filter bar's Show choice: label, filter, colour (the dot and the
+/// chosen segment's tint) and tooltip.
+const SHOW_OPTIONS: [(&str, Show, Option<Color>, Option<&str>); 4] = [
+    ("All", Show::All, None, None),
+    ("To review", Show::ToReview, Some(t::SIGNAL), Some("Show only photos not yet pruned or marked  (Ctrl+U)")),
+    ("Marked", Show::Marked, Some(t::KEEP), Some("Show only photos marked for export")),
+    ("Pruned", Show::Pruned, Some(t::REJECT), Some("Show only photos marked to prune")),
+];
+
+/// The Show choice's width as [`show_choice`] lays it out (the Hints
+/// control's menu opens under the control after it).
+pub(super) fn show_choice_width() -> f32 {
+    let label = |s: &str| paint::text_width(s, t::T_SMALL, paint::MEDIUM);
+    let segments: f32 = SHOW_OPTIONS
+        .iter()
+        .map(|(l, _, tone, _)| 2.0 * (t::S3 - 2.0) + if tone.is_some() { 6.0 + 6.0 } else { 0.0 } + label(l))
+        .sum();
+    // kit::segmented: 2 px padding round, 2 px between segments.
+    2.0 * 2.0 + segments + 2.0 * (SHOW_OPTIONS.len() as f32 - 1.0)
 }
 
-/// All · To review · Marked.  One choice rather than two toggles, because
-/// "not yet pruned or marked" and "marked" can't both hold.  The chosen
-/// filter takes its colour, as the toggle chips do.
+/// All · To review · Marked · Pruned.  One choice rather than toggles,
+/// because "not yet pruned or marked" can't hold with either of the last
+/// two.  The chosen filter takes its colour: green for marked, red for
+/// pruned, as on the photos and in the status bar.
 fn show_choice<'a>(show: Show) -> Element<'a, Message> {
-    let options = [
-        ("All", Show::All, None, None),
-        ("To review", Show::ToReview, Some(t::SIGNAL), Some("Show only photos not yet pruned or marked  (Ctrl+U)")),
-        ("Marked", Show::Marked, Some(t::KEEP), Some("Show only photos marked for export")),
-    ];
-    let items = options
+    let items = SHOW_OPTIONS
         .into_iter()
         .map(|(label, choice, tone, hint)| {
             let active = show == choice;
@@ -559,19 +557,10 @@ fn show_choice<'a>(show: Show) -> Element<'a, Message> {
 
 fn filter_bar(app: &App) -> Element<'_, Message> {
     let f = &app.filter;
-    // Pruned photos are reviewed, so "Show pruned" has nothing to add to
-    // the To review pile.
-    let pruned_chip = toggle_chip(
-        "Show pruned",
-        f.show_pruned && !f.to_review,
-        t::REJECT,
-        (!f.to_review).then_some(Message::Filter(FilterMsg::TogglePruned)),
-    );
-    let pruned_chip: Element<'_, Message> =
-        if f.to_review { tip(pruned_chip, "Pruned photos are already reviewed", true) } else { pruned_chip.into() };
+    // Whether All and Marked keep pruned photos is a preference (Show
+    // pruned photos); the Pruned choice shows them either way.
     let mut r = row![
         show_choice(f.show()),
-        pruned_chip,
         hints_ui::chip(app),
         Space::new().width(Length::Fill),
     ]
@@ -800,24 +789,81 @@ fn pile_done_page(app: &App) -> Element<'_, Message> {
             "Nothing to review in these dates",
             format!("{} outside them {} still to review.", util::plural(left as u64, "shot"), if left == 1 { "is" } else { "are" }),
             ("Show all dates", FilterMsg::ToggleDate),
-            "Turn off the date filter",
+            Some("Turn off the date filter"),
         )
     } else {
         (
             "Nothing left to review",
             "Every shot in this folder is pruned or marked.".to_string(),
             ("Show all photos", FilterMsg::Show(Show::All)),
-            "Ctrl+U",
+            Some("Ctrl+U"),
         )
     };
+    empty_page(app, Glyph::Check, title, body, action, hint)
+}
+
+/// Marked or Pruned is showing and nothing is in it.
+fn none_shown(app: &App) -> bool {
+    let empty = match app.view {
+        View::List => app.derived.list_rows.is_empty(),
+        _ => app.derived.visible.is_empty(),
+    };
+    matches!(app.filter.show(), Show::Marked | Show::Pruned) && empty && !app.scanning && !app.coll.is_empty()
+}
+
+/// Nothing is marked, or pruned: say how photos get here.
+fn none_shown_page(app: &App) -> Element<'_, Message> {
+    let pruned = app.filter.show() == Show::Pruned;
+    // Some would show without the date range: offer those.
+    let undated = FilterState { date_from: None, date_to: None, ..app.filter.state() };
+    let outside = app.filter.date_on && app.coll.iter().any(|r| undated.accept(r));
+    let (glyph, what) = if pruned { (Glyph::Prune, "pruned") } else { (Glyph::Keep, "marked") };
+    let (title, body, action, hint) = if outside {
+        (
+            format!("Nothing {what} in these dates"),
+            format!("There are {what} photos outside them."),
+            ("Show all dates", FilterMsg::ToggleDate),
+            Some("Turn off the date filter"),
+        )
+    } else if pruned {
+        (
+            "Nothing pruned".to_string(),
+            "Photos you prune with P show here until they go to the Trash.".to_string(),
+            ("Show all photos", FilterMsg::Show(Show::All)),
+            None,
+        )
+    } else {
+        (
+            "Nothing marked".to_string(),
+            "Photos you mark for export with M show here.".to_string(),
+            ("Show all photos", FilterMsg::Show(Show::All)),
+            None,
+        )
+    };
+    empty_page(app, glyph, title, body, action, hint)
+}
+
+/// A filter that shows nothing: what's going on, and a way out.
+fn empty_page<'a>(
+    app: &App,
+    glyph: Glyph,
+    title: impl text::IntoFragment<'a>,
+    body: String,
+    action: (&'a str, FilterMsg),
+    hint: Option<&'a str>,
+) -> Element<'a, Message> {
     let mut col = column![].spacing(t::S2).align_x(Alignment::Center).max_width(460);
     col = col.push(Space::new().height(Length::FillPortion(3)));
-    col = col.push(icons::view(Glyph::Check, 48.0, t::INK4));
+    col = col.push(icons::view(glyph, 48.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
     col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
     col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(tip(kit::btn(action.0, style::secondary(), Some(Message::Filter(action.1))), hint, true));
+    let button = kit::btn(action.0, style::secondary(), Some(Message::Filter(action.1)));
+    col = col.push(match hint {
+        Some(h) => tip(button, h, true),
+        None => button.into(),
+    });
     col = col.push(Space::new().height(Length::FillPortion(4)));
     let ground = if app.view == View::Grid { t::PHOTO_GROUND } else { t::GROUND };
     container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).style(style::fill(ground)).into()

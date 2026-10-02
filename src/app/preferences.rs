@@ -46,6 +46,7 @@ const PAGE_W: f32 = 640.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Control {
     Advance,
+    ShowPruned,
     FileNames,
     StackBursts,
     ThumbSize,
@@ -66,6 +67,7 @@ impl Control {
     fn id(self) -> &'static str {
         match self {
             Control::Advance => "pref-advance",
+            Control::ShowPruned => "pref-show-pruned",
             Control::FileNames => "pref-names",
             Control::StackBursts => "pref-stack-bursts",
             Control::ThumbSize => "pref-thumb-size",
@@ -316,6 +318,7 @@ fn set_thumb_size(app: &mut App, v: f32) {
 fn press(app: &mut App, c: Control) -> Task<Message> {
     match c {
         Control::Advance => viewer_advance::toggle(app),
+        Control::ShowPruned => app.toggle_show_pruned(),
         Control::FileNames => app.run_cmd(Cmd::FileNames),
         Control::StackBursts => app.run_cmd(Cmd::StackBursts),
         Control::ThumbSize => Task::none(),
@@ -383,7 +386,15 @@ fn remembered_viewer_size(s: &Settings) -> bool {
 /// right now are skipped).
 fn controls(app: &App) -> Vec<Control> {
     let p = &app.prefs;
-    let mut v = vec![Control::Advance, Control::FileNames, Control::StackBursts, Control::ThumbSize, Control::Filmstrip, Control::BurstSheet];
+    let mut v = vec![
+        Control::Advance,
+        Control::ShowPruned,
+        Control::FileNames,
+        Control::StackBursts,
+        Control::ThumbSize,
+        Control::Filmstrip,
+        Control::BurstSheet,
+    ];
     if remembered_viewer_size(&app.settings) {
         v.push(Control::ViewerSize);
     }
@@ -576,14 +587,21 @@ fn culling(app: &App) -> Element<'_, Message> {
     section(
         "Culling",
         None,
-        vec![setting(
-            "Advance after marking",
-            about("In the viewer, P or M moves on to the next photo once it marks one. Clearing a mark stays put."),
-            row![keycap("Ctrl+Shift+A"), switch(p, Control::Advance, app.settings.viewer_advance, true)]
-                .spacing(t::S3)
-                .align_y(Alignment::Center)
-                .into(),
-        )],
+        vec![
+            setting(
+                "Advance after marking",
+                about("In the viewer, P or M moves on to the next photo once it marks one. Clearing a mark stays put."),
+                row![keycap("Ctrl+Shift+A"), switch(p, Control::Advance, app.settings.viewer_advance, true)]
+                    .spacing(t::S3)
+                    .align_y(Alignment::Center)
+                    .into(),
+            ),
+            setting(
+                "Show pruned photos",
+                about("Pruned photos stay in All and Marked, crossed out. Off, they leave as you prune them; the Pruned filter shows them either way."),
+                switch(p, Control::ShowPruned, app.filter.show_pruned, true),
+            ),
+        ],
     )
 }
 

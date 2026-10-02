@@ -133,7 +133,7 @@ pub fn open(app: &mut App, action: Action) -> Task<Message> {
 
 fn filtered(app: &App) -> bool {
     let f = &app.filter;
-    f.date_on || f.marked_only || f.to_review || f.hint.is_some()
+    f.date_on || f.marked_only || f.to_review || f.pruned_only || f.hint.is_some()
 }
 
 /// *Keep this, prune the rest* on the grid's (or quick look's, or the

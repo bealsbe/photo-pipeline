@@ -216,15 +216,11 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
 // ── the filter bar's Hints control ──────────────────────────────────────────
 
 /// Where the Hints control starts on the filter bar, from the bar's left
-/// edge: after All · To review · Marked and Show pruned (their widths as
-/// the filter bar builds them), so the menu opens under it.
+/// edge: after All · To review · Marked · Pruned (its width as the filter
+/// bar builds it), so the menu opens under it.
 pub fn chip_x() -> f32 {
-    let w = |s: &str| paint::text_width(s, t::T_SMALL, paint::MEDIUM);
-    let seg_pad = 2.0 * (t::S3 - 2.0);
-    let dot = 6.0 + 6.0;
-    let segmented = 2.0 * 2.0 + (seg_pad + w("All")) + (seg_pad + dot + w("To review")) + (seg_pad + dot + w("Marked")) + 2.0 * 2.0;
-    let pruned = 2.0 * 10.0 + dot + w("Show pruned");
-    super::main_view::BAR_PAD + segmented + super::main_view::GAP + pruned + super::main_view::GAP
+    use super::main_view::{BAR_PAD, GAP, show_choice_width};
+    BAR_PAD + show_choice_width() + GAP
 }
 
 /// The Hints control: the filter's name when one is on, else "Hints" with

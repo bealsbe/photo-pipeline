@@ -116,6 +116,12 @@ impl FilterState {
     pub fn only_to_review(self) -> Self {
         Self { show_pruned: false, show_marked: false, ..self }
     }
+
+    /// Narrow to the pruned photos, whatever `show_pruned` said: marked
+    /// as well or not.
+    pub fn only_pruned(self) -> Self {
+        Self { show_pruned: true, show_unpruned: false, ..self }
+    }
 }
 
 /// How far culling has got, in shots: a shot is what the grid shows as one
@@ -377,6 +383,54 @@ mod tests {
         // "Show pruned" can't bring pruned photos back into the pile.
         let st = FilterState { show_pruned: true, ..FilterState::default() }.only_to_review();
         assert!(!st.accept(c.get(a).unwrap()));
+    }
+
+    #[test]
+    fn pruned_shows_only_pruned_photos_whatever_show_pruned_says() {
+        let (mut c, [raw1, jpg1, raw2, jpg2, jpg3, raw4]) = shoot();
+        // Shot 1 pruned, shot 2 marked, the lone JPG pruned and marked.
+        set(&mut c, &[raw1, jpg1], |r| r.is_pruned = true);
+        set(&mut c, &[raw2, jpg2], |r| r.is_marked = true);
+        set(&mut c, &[jpg3], |r| {
+            r.is_pruned = true;
+            r.is_marked = true;
+        });
+        for show_pruned in [false, true] {
+            let st = FilterState { show_pruned, ..FilterState::default() }.only_pruned();
+            let accepted: Vec<bool> = [raw1, jpg1, raw2, jpg2, jpg3, raw4].iter().map(|&id| st.accept(c.get(id).unwrap())).collect();
+            assert_eq!(accepted, [true, true, false, false, true, false], "show_pruned = {show_pruned}");
+            // One tile per shot: the pair as its JPG, and the lone JPG.
+            let shown = dedup_pairs(&visible_sorted(&c, &st), &c);
+            assert_eq!(shown, [jpg1, jpg3]);
+            // The list folds the pair into one row too.
+            let rows = list_rows(&c, &st);
+            assert_eq!(rows.len(), 2);
+            assert!(rows.iter().any(|r| r.is_paired() && r.raw == Some(raw1)));
+        }
+        // Un-pruning a shot takes it out at once.
+        set(&mut c, &[raw1, jpg1], |r| r.is_pruned = false);
+        let st = FilterState::default().only_pruned();
+        assert_eq!(dedup_pairs(&visible_sorted(&c, &st), &c), [jpg3]);
+        // With "Show pruned" off, the unfiltered view hides them instead.
+        let all = FilterState { show_pruned: false, ..FilterState::default() };
+        assert!(!all.accept(c.get(jpg3).unwrap()));
+        assert!(all.accept(c.get(raw4).unwrap()));
+    }
+
+    #[test]
+    fn pruned_combines_with_date_and_type_filters() {
+        let (mut c, [raw1, jpg1, _, _, jpg3, raw4]) = shoot();
+        set(&mut c, &[raw1, jpg1, jpg3, raw4], |r| r.is_pruned = true);
+        let day2 = NaiveDate::from_ymd_opt(2025, 3, 2);
+        // Day 2: the lone JPG and the lone RAW.
+        let st = FilterState { date_from: day2, date_to: day2, ..FilterState::default() }.only_pruned();
+        assert_eq!(dedup_pairs(&visible_sorted(&c, &st), &c), [jpg3, raw4]);
+        // RAWs only: the pair's RAW, now its JPG is hidden, and the lone RAW.
+        let raws = FilterState { show_jpg: false, ..FilterState::default() }.only_pruned();
+        assert_eq!(tiles(&c, &raws), 2);
+        // Pruned and to review can't both hold.
+        let both = FilterState::default().only_pruned().only_to_review();
+        assert_eq!(tiles(&c, &both), 0);
     }
 
     #[test]

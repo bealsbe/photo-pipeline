@@ -137,10 +137,15 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 - **Culling progress.** The status bar shows how far through the folder you
   are, for example "212 of 740 shots reviewed", with a thin bar.  A shot is
   reviewed once it's pruned or marked, and a RAW+JPG pair counts once.  The
-  filter bar's **All · To review · Marked** choice narrows the grid to the
-  shots still to review (Ctrl+U, or click the progress).  There, a photo leaves
-  the grid as soon as you prune or mark it and the next one is selected, so P
-  and M alone work through the pile.
+  filter bar's **All · To review · Marked · Pruned** choice narrows the grid
+  and the list: To review to the shots still to review (Ctrl+U, or click the
+  progress), Marked to those marked for export, Pruned to those marked to
+  prune.  A photo leaves as soon as its mark no longer fits (under To review,
+  once you prune or mark it; under Pruned, once P un-prunes it) and the next
+  one is selected, so P and M alone work through the pile.  Pruned shows
+  every pruned photo, whatever Preferences ▸ *Show pruned photos* says; that
+  setting (off at first) decides whether All and Marked keep pruned photos,
+  crossed out, or drop them as you prune.
 - **Quick look.** In the grid, Space shows the selected photo large over the
   grid without opening the viewer.  Arrow keys (or A/D) step through the
   photos and the grid's selection follows; P and M mark the photo shown; Enter
@@ -221,9 +226,10 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
     accidental, duplicates (only the extra copies: the copy to keep of
     each isn't shown), or the sharpest of each burst, each with its count.
     With Duplicates on, a strip under the filter bar offers *Prune these
-    copies…*, which prunes every extra copy shown after one confirmation.  It works with All · To review · Marked: *To
-    review* and *Possible problems* make a quick pile to go through with
-    P.  View ▸ *Show only possible problems* turns that one on and off.
+    copies…*, which prunes every extra copy shown after one confirmation.
+    It works with All · To review · Marked · Pruned: *To review* and
+    *Possible problems* make a quick pile to go through with P.  View ▸
+    *Show only possible problems* turns that one on and off.
     Before a folder is analysed, the Hints menu says what analysing does
     and how long it should take.
   - **Bulk actions** (Prune menu): *Keep this, prune the rest* (the
@@ -264,9 +270,10 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
 ## Preferences
 
 Preferences (Ctrl+, — in the Edit menu, or at the foot of the side rail)
-gathers the settings on one page: advance after marking, file names and
-thumbnail size, the viewer's filmstrip, remembered size and whether a burst
-shows all its frames first, the library and
+gathers the settings on one page: advance after marking, whether All and
+Marked show pruned photos (the filter bar's old *Show pruned*), file names
+and thumbnail size, the viewer's filmstrip, remembered size and whether a
+burst shows all its frames first, the library and
 edit-copy folders, and whether to use the KDE global menu (a change there takes
 effect at the next start; `PP_NO_GLOBAL_MENU=1` still forces the in-window
 menus).  Changes apply at once and are saved; the menus and the viewer's
@@ -361,9 +368,11 @@ These are deliberate:
   wording in the dialogs.
 - **KDE global menu** support (see above); the Python app had none.
 - **New culling tools** (see "Working through a shoot"): culling progress and
-  the To review filter, quick look, compare, the viewer's filmstrip and
-  auto-advance, undo/redo, the combined RAW+JPG tag, bursts, and analysing a
-  folder (hints, the Hints filter and the bulk actions).
+  the To review and Pruned filters, quick look, compare, the viewer's
+  filmstrip and auto-advance, undo/redo, the combined RAW+JPG tag, bursts,
+  and analysing a folder (hints, the Hints filter and the bulk actions).
+  *Show pruned* moved from the filter bar to Preferences, under the same
+  saved setting.
 - **Library calendar** keeps its index between runs and re-reads only
   changed folders (see above).  In a day's grid, a renamed file's capture
   time is read from its name, to the minute, instead of from EXIF.  The order
