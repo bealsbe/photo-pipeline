@@ -133,6 +133,22 @@ pub struct Calendar {
     prefetch_at: Option<Instant>,
     bus: crate::bus::Bus,
     hovered: Option<NaiveDate>,
+    /// A day opened from search (Open day ›): its back button returns
+    /// there, and the calendar goes back to where it was.
+    from_search: Option<Position>,
+    /// The photo to select once the day's records are in.
+    pick: Option<PathBuf>,
+    /// Bring the selected photo into view (bumped with it).
+    day_reveal: (u64, Option<RecordId>),
+}
+
+/// Where the calendar was: its page and day.
+#[derive(Debug, Clone, Copy)]
+struct Position {
+    mode: Mode,
+    year: i32,
+    month: u32,
+    day: Option<NaiveDate>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +156,8 @@ pub enum Msg {
     Stage(StageEvent),
     Grid(GridEvent),
     Back,
+    /// Back to the search the day was opened from.
+    BackToSearch,
     Prev,
     Next,
     SetMode(Mode),
@@ -186,6 +204,9 @@ impl Calendar {
             prefetch_at: None,
             bus,
             hovered: None,
+            from_search: None,
+            pick: None,
+            day_reveal: (0, None),
         };
         if (1..=12).contains(&s.calendar_month) && s.calendar_year > 1900 && s.calendar_year < 3000 {
             c.year = s.calendar_year;
@@ -294,6 +315,64 @@ impl Calendar {
 
     pub fn deactivate(&mut self) {
         self.active = false;
+    }
+
+    /// Search builds its results from the library's index: read it, if
+    /// nothing has yet (the calendar may never have been opened).
+    pub fn want_index(&mut self) {
+        if self.root.is_some() && self.index.is_none() && self.running.is_none() {
+            self.start_index(self.wanted_scan());
+        }
+    }
+
+    /// Open day › from search: `day`, with the photo at `path` selected and
+    /// in view.  Shown at once (no zoom: it isn't reached from a month).
+    pub fn open_from_search(&mut self, day: NaiveDate, path: PathBuf) {
+        if self.from_search.is_none() {
+            self.from_search = Some(Position { mode: self.mode, year: self.year, month: self.month, day: self.day });
+        }
+        self.pending = None;
+        self.transition = None;
+        self.mode = Mode::Day;
+        self.day = Some(day);
+        self.year = day.year();
+        self.month = day.month();
+        self.after_change();
+        self.pick = Some(path);
+        self.apply_pick();
+    }
+
+    /// The day page was opened from search (its back button says so).
+    pub fn is_from_search(&self) -> bool {
+        self.from_search.is_some() && self.mode == Mode::Day
+    }
+
+    /// Leaving the calendar, or its search day: it goes back to the page
+    /// it showed before.
+    pub fn leave_search_day(&mut self) {
+        if let Some(p) = self.from_search.take() {
+            self.pick = None;
+            self.transition = None;
+            self.pending = None;
+            (self.mode, self.year, self.month, self.day) = (p.mode, p.year, p.month, p.day);
+            if self.mode == Mode::Day {
+                self.mode = Mode::Month;
+            }
+        }
+    }
+
+    /// Select the photo asked for, once its day is loaded.
+    fn apply_pick(&mut self) {
+        let (Some(path), Some(d)) = (self.pick.clone(), self.day) else { return };
+        let Some(data) = self.day_data(d).cloned() else { return };
+        self.pick = None;
+        let Some(id) = data.coll.id_of(&path) else { return };
+        // The grid shows a pair once: whichever half is its tile.
+        let tile = if data.ids.contains(&id) { Some(id) } else { data.coll.find_pair(id).filter(|p| data.ids.contains(p)) };
+        if let Some(t) = tile {
+            self.day_selection = [t].into();
+            self.day_reveal = (self.day_reveal.0 + 1, Some(t));
+        }
     }
 
     /// The library changed on disk (e.g. after an export): look for what changed.
@@ -509,6 +588,9 @@ impl Calendar {
         }
         if self.pending.as_ref().is_some_and(|p| p.date == date) {
             self.flush_pending();
+        }
+        if self.pick.is_some() && self.day == Some(date) && self.mode == Mode::Day {
+            self.apply_pick();
         }
     }
 
@@ -737,6 +819,8 @@ impl Calendar {
         if self.mode != Mode::Day {
             return;
         }
+        // From search, the day page has no month behind it to zoom out to.
+        self.from_search = None;
         let Some(d) = self.day else { return };
         self.pending = None;
         let rect = calendar_stage::month_layout(self.stage_size, d.year(), d.month()).cell_rect(d);
@@ -928,6 +1012,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
         },
         Msg::Grid(ev) => return on_day_grid(app, ev),
+        Msg::BackToSearch => return app.switch_view(View::Search),
         Msg::Back => cal.go_back(),
         Msg::Prev => cal.step(-1),
         Msg::Next => cal.step(1),
@@ -1023,6 +1108,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     }
     if cal.mode == Mode::Day {
         match (key, c) {
+            (Key::Named(Named::Escape), _) | (Key::Named(Named::Backspace), _) if cal.is_from_search() => return app.switch_view(View::Search),
             (Key::Named(Named::Escape), _) | (Key::Named(Named::Backspace), _) => cal.go_back(),
             (_, Some("[")) => cal.step(-1),
             (_, Some("]")) => cal.step(1),
@@ -1102,6 +1188,8 @@ fn paint_day(cal: &Calendar, r: &mut paint::Renderer, bounds: Rectangle, date: N
         moments: &[],
         hints: None,
         restack: None,
+        label: grid::CellLabel::Name,
+        footer: None,
     };
     let open = |d: NaiveDate| if cal.day_collapsed.contains(&d) { 0.0 } else { 1.0 };
     let ps = grid::PaintState::snapshot(0.0, cal.day_thumb, alpha, &open);
@@ -1127,11 +1215,14 @@ fn day_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         moments: &[],
         hints: None,
         restack: None,
+        label: grid::CellLabel::Name,
+        footer: None,
     };
     Grid::new(gd, cal.day_thumb, |e| Message::Calendar(Msg::Grid(e)))
         .keyboard(keyboard_ok)
         .scroll_seq(cal.day_scroll_seq)
         .layout_key(cal.day_scroll_seq)
+        .reveal(cal.day_reveal.0, cal.day_reveal.1)
         .into()
 }
 
@@ -1175,7 +1266,14 @@ fn header(cal: &Calendar) -> Element<'_, Message> {
         }
     };
     let mut r = row![].spacing(t::S1).align_y(Alignment::Center);
-    if is_day {
+    if is_day && cal.is_from_search() {
+        r = r.push(kit::tip(
+            kit::icon_text_btn(Glyph::ChevronLeft, "Search", t::INK2, style::secondary(), cmsg(Msg::BackToSearch)),
+            "Back to the search  (Esc)",
+            true,
+        ));
+        r = r.push(Space::new().width(t::S2));
+    } else if is_day {
         let d = cal.day.unwrap_or_else(|| Local::now().date_naive());
         r = r.push(kit::tip(
             kit::icon_text_btn(Glyph::ChevronLeft, format!("{} {}", MONTH_ABBR[d.month0() as usize], d.year()), t::INK2, style::secondary(), cmsg(Msg::Back)),

@@ -70,7 +70,26 @@ pub struct Settings {
     /// Show the menus in the KDE global menu when the panel has one.  Read
     /// at start; `PP_NO_GLOBAL_MENU` in the environment overrides it.
     pub global_menu: bool,
+
+    // Library search (docs/library-search-plan.md §7a.8).
+    /// Preferences ▸ Search ▸ *Run models on*: the graphics card (the
+    /// default) or the processor.  Never changed by the app itself.
+    pub search_device: crate::ml::Device,
+    /// Preferences ▸ Search ▸ *How close matches must be*: a value in
+    /// `search::CLOSENESS_MIN..=CLOSENESS_MAX`; higher is stricter; the
+    /// reset button sets `search::CLOSENESS_DEFAULT`.
+    pub search_closeness: f32,
+    /// Preferences ▸ Search ▸ *Index new exports* (on): after the first
+    /// index, each export is added to search on its own.
+    pub search_index_exports: bool,
+    /// The last [`RECENT_SEARCHES`] queries, newest first (§7a.3).
+    /// *Forget them* in Preferences clears it.
+    pub search_recent: Vec<String>,
 }
+
+/// How many recent searches are kept.
+
+pub const RECENT_SEARCHES: usize = 10;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -110,6 +129,44 @@ impl Default for Settings {
             viewer_y: None,
             viewer_maximized: false,
             global_menu: true,
+            search_device: crate::ml::Device::Gpu,
+            search_closeness: crate::search::CLOSENESS_DEFAULT,
+            search_index_exports: true,
+            search_recent: Vec::new(),
+        }
+    }
+}
+
+
+impl Settings {
+    /// Note a query just run: it moves to the front of the recent list
+    /// (once, however often it is run), and the list keeps its last
+    /// [`RECENT_SEARCHES`].  Blank queries aren't kept.
+    pub fn remember_search(&mut self, query: &str) {
+        let q = query.trim();
+        if q.is_empty() {
+            return;
+        }
+        self.search_recent.retain(|r| r != q);
+        self.search_recent.insert(0, q.to_string());
+        self.search_recent.truncate(RECENT_SEARCHES);
+    }
+
+    /// Preferences ▸ *Forget them*.
+    pub fn forget_searches(&mut self) {
+        self.search_recent.clear();
+    }
+
+    /// The closeness to search with.  A value outside the slider's range
+    /// means the default: an earlier build saved the setting on another
+    /// scale (2–6, standard deviations above the spread) and a file edited
+    /// by hand could hold anything; neither is a match probability.
+    pub fn closeness(&self) -> f32 {
+        let c = self.search_closeness;
+        if c.is_finite() && (crate::search::CLOSENESS_MIN..=crate::search::CLOSENESS_MAX).contains(&c) {
+            c
+        } else {
+            crate::search::CLOSENESS_DEFAULT
         }
     }
 }
@@ -302,6 +359,49 @@ mod tests {
         let py = Settings::from_qsettings("[filter]\npruned=true\nmarked_only=false\n");
         assert!(py.filter_pruned && !py.filter_marked_only && !py.filter_pruned_only);
         assert!(!Settings::from_qsettings("[filter]\npruned=false\n").filter_pruned);
+    }
+
+    #[test]
+    fn search_settings_default_to_the_card_and_keep_ten_recent_searches() {
+        let mut s = Settings::default();
+        assert_eq!(s.search_device, crate::ml::Device::Gpu);
+        assert!(s.search_index_exports);
+        assert_eq!(s.closeness(), crate::search::CLOSENESS_DEFAULT);
+        for i in 0..12 {
+            s.remember_search(&format!("query {i}"));
+        }
+        s.remember_search("  ");
+        s.remember_search("query 5");
+        assert_eq!(s.search_recent.len(), RECENT_SEARCHES);
+        assert_eq!(s.search_recent[0], "query 5", "a repeat moves to the front");
+        assert_eq!(s.search_recent.iter().filter(|q| *q == "query 5").count(), 1);
+        assert!(!s.search_recent.iter().any(|q| q == "query 0" || q == "query 1"));
+        s.forget_searches();
+        assert!(s.search_recent.is_empty());
+        // A settings file from before search: its own values stay, the
+        // search fields take their defaults.
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200, "library_folder": "/mnt/nas/lib", "viewer_advance": true, "stack_bursts": true}"#).expect("parses");
+        assert_eq!((old.thumb_size, old.library_folder.as_str(), old.viewer_advance, old.stack_bursts), (200, "/mnt/nas/lib", true, true));
+        assert_eq!(old.search_device, crate::ml::Device::Gpu);
+        assert!(old.search_index_exports && old.search_recent.is_empty());
+        assert_eq!(old.closeness(), crate::search::CLOSENESS_DEFAULT);
+        // The Python app's QSettings import has none of them either.
+        let py = Settings::from_qsettings("[General]\nlibrary_folder=/mnt/nas/lib\nview_index=2\n");
+        assert_eq!((py.library_folder.as_str(), py.view_index), ("/mnt/nas/lib", 2));
+        assert_eq!(py.search_device, crate::ml::Device::Gpu);
+        assert!(py.search_index_exports && py.search_recent.is_empty());
+        // Values outside the range mean the default: a settings file from
+        // the build whose closeness was 2–6, a hand-edited one, or NaN.
+        for old in [3.5f32, 2.0, 6.0, 99.0, 0.0, -1.0, f32::NAN] {
+            let s = Settings { search_closeness: old, ..Settings::default() };
+            assert_eq!(s.closeness(), crate::search::CLOSENESS_DEFAULT, "{old}");
+        }
+        let kept = Settings { search_closeness: crate::search::CLOSENESS_MAX, ..Settings::default() };
+        assert_eq!(kept.closeness(), crate::search::CLOSENESS_MAX);
+        let kept = Settings { search_closeness: 0.01, ..Settings::default() };
+        assert_eq!(kept.closeness(), 0.01);
+        let text = serde_json::to_string(&Settings { search_device: crate::ml::Device::Cpu, ..Settings::default() }).unwrap();
+        assert!(text.contains(r#""search_device":"cpu""#));
     }
 
     #[test]

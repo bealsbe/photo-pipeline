@@ -14,6 +14,10 @@ pub mod main_view;
 pub mod quicklook;
 pub mod quality;
 pub mod network;
+pub mod search;
+pub mod search_link;
+pub mod search_results;
+pub mod search_setup;
 pub mod preferences;
 pub mod preferences_storage;
 pub mod style;
@@ -73,15 +77,25 @@ pub fn window_settings() -> window::Settings {
 pub enum View {
     Grid,
     Calendar,
+    /// Search the library (not kept between runs: the app starts where
+    /// search was opened from).
+    Search,
 }
 
 impl View {
+    /// A library page: read-only, no filter bar, no marking.
+    pub fn is_library(self) -> bool {
+        matches!(self, View::Calendar | View::Search)
+    }
+
     /// The saved `view_index`, numbered as the Python app numbers its views
-    /// (0 was its list view, gone here).
+    /// (0 was its list view, gone here).  Search isn't saved: the app starts
+    /// where search was opened from.
     fn index(self) -> u32 {
         match self {
             View::Grid => 1,
             View::Calendar => 2,
+            View::Search => 1,
         }
     }
 
@@ -255,6 +269,8 @@ pub enum Message {
     Hints(hints_ui::Msg),
     /// A bulk action's confirmation.
     Bulk(bulk::Msg),
+    /// The search page, its download dialog and indexing.
+    Search(search::Msg),
 }
 
 impl Message {
@@ -291,6 +307,7 @@ impl Message {
             Message::Prefs(_) => "Prefs",
             Message::Hints(_) => "Hints",
             Message::Bulk(_) => "Bulk",
+            Message::Search(_) => "Search",
         }
     }
 }
@@ -410,6 +427,8 @@ pub struct App {
     /// The Preferences window (Ctrl+,).
     pub prefs: preferences::Prefs,
     pub calendar: calendar::Calendar,
+    /// The search page (Ctrl+F) and the engine's link.
+    pub search: search::Search,
     /// Network shares: probes, failing saves, the banner, the quit prompt.
     pub net: network::Net,
     quitting: bool,
@@ -447,6 +466,7 @@ impl App {
             })
         };
         let calendar = calendar::Calendar::new(&settings, bus.clone());
+        let search = search::Search::new(bus.clone(), &settings);
         let global_menu = global_menu::GlobalMenu::start(bus.clone(), settings.global_menu_wanted(crate::settings::global_menu_forced_off()));
 
         let mut filter = FilterUi::defaults();
@@ -549,6 +569,7 @@ impl App {
             compare: None,
             shortcuts: None,
             calendar,
+            search,
             net: network::Net::default(),
             quitting: false,
             script: testing::load(),
@@ -679,7 +700,7 @@ impl App {
     }
 
     fn update_status_count(&mut self) {
-        if self.view == View::Calendar || self.coll.is_empty() || self.scanning {
+        if self.view.is_library() || self.coll.is_empty() || self.scanning {
             return;
         }
         let total = self.coll.len();
@@ -1021,7 +1042,7 @@ impl App {
 
     fn save_session(&mut self) {
         let s = &mut self.settings;
-        s.view_index = self.view.index();
+        s.view_index = if self.view == View::Search { self.search.from.index() } else { self.view.index() };
         s.filter_pruned = self.filter.show_pruned;
         s.filter_marked_only = self.filter.marked_only;
         s.filter_to_review = self.filter.to_review;
@@ -1052,10 +1073,23 @@ impl App {
     // ── views ───────────────────────────────────────────────────────────
 
     pub fn switch_view(&mut self, v: View) -> Task<Message> {
+        let was = self.view;
         self.view = v;
         self.menu = None;
-        if v != View::Grid {
+        if v != was {
             self.quicklook = None;
+        }
+        // Back from a day opened from search: search's own back button
+        // still returns where search was opened from.
+        let from = if was == View::Calendar && self.calendar.is_from_search() { View::Search } else { was };
+        if v != View::Calendar {
+            self.calendar.leave_search_day();
+        }
+        if v == View::Search {
+            self.calendar.deactivate();
+            search::arriving(self, from);
+            let text = self.calendar.status_text();
+            return self.show_status(text, 0);
         }
         if v == View::Calendar {
             self.calendar.activate(&self.workers);
@@ -1183,7 +1217,7 @@ impl App {
                 }
                 open
             }
-            View::Calendar => return Task::none(),
+            View::Calendar | View::Search => return Task::none(),
         };
         if ids.is_empty() {
             return hint;
@@ -1320,6 +1354,19 @@ impl App {
             }
             return Task::none();
         }
+        // The search page's download dialog takes the keys while open.
+        if self.search.dialog.is_some() {
+            return search_setup::dialog_key(self, &key);
+        }
+        // Esc on the search page closes its list, even when the field took
+        // it, and never leaves the page.
+        if self.view == View::Search && key == Key::Named(Named::Escape) && self.quicklook.is_none() && self.modal.is_none() {
+            if self.search.steps {
+                self.search.steps = false;
+                return Task::none();
+            }
+            return search::escape(self);
+        }
         // The Hints menu, like the date picker, takes the keys while open.
         if self.quality.menu {
             if key == Key::Named(Named::Escape) {
@@ -1356,7 +1403,7 @@ impl App {
             }
         }
         if let Some(cmd) = Cmd::from_key(&key, mods) {
-            let enabled = self.view != View::Calendar || !matches!(cmd, Cmd::SelectMode);
+            let enabled = !self.view.is_library() || !matches!(cmd, Cmd::SelectMode);
             if enabled {
                 return self.update(Message::Cmd(cmd));
             }
@@ -1367,6 +1414,7 @@ impl App {
         }
         match self.view {
             View::Calendar => calendar::on_key(self, &key, mods),
+            View::Search => search::on_key(self, &key, mods),
             View::Grid => self.grid_key(&key, mods),
         }
     }
@@ -1612,6 +1660,7 @@ impl App {
             Message::Prefs(m) => preferences::update(self, m),
             Message::Hints(m) => hints_ui::update(self, m),
             Message::Bulk(m) => bulk::update(self, m),
+            Message::Search(m) => search::update(self, m),
         }
     }
 
@@ -1631,6 +1680,7 @@ impl App {
             s.cancel();
         }
         quality::cancel(self);
+        self.search.link.shutdown();
         self.calendar.shutdown();
         self.loader.shutdown();
         let mut tasks = Vec::new();
@@ -1664,6 +1714,7 @@ impl App {
             Cmd::Sort => dialogs::open_sort(self),
             Cmd::GridView => self.switch_view(View::Grid),
             Cmd::CalendarView => self.switch_view(View::Calendar),
+            Cmd::Search => search::open(self),
             Cmd::QuickLook => quicklook::toggle(self),
             Cmd::SelectMode => {
                 let on = !self.grid.select_mode;
@@ -1709,8 +1760,8 @@ impl App {
                 Task::none()
             }
             Cmd::ToReview => {
-                // The calendar has no filter bar to show the change.
-                if self.view == View::Calendar {
+                // The library pages have no filter bar to show the change.
+                if self.view.is_library() {
                     return Task::none();
                 }
                 let show = if self.filter.to_review { Show::All } else { Show::ToReview };
@@ -1724,11 +1775,14 @@ impl App {
             }
             Cmd::Compare => compare::open_selected(self),
             Cmd::ReviewBurst => viewer_burst::open_from_main(self),
+            Cmd::StackBurst if self.view == View::Search => search::toggle_focused(self),
             Cmd::StackBurst if self.view != View::Grid => Task::none(),
             Cmd::StackBurst => match self.grid_focus() {
                 Some(id) => self.toggle_burst(id),
                 None => self.show_status("Select a photo to stack its burst.", 4000),
             },
+            // On the search page, for its results only.
+            Cmd::StackBursts if self.view == View::Search => search::toggle_all(self),
             // A saved preference: from the menu, the keys or Preferences,
             // whichever view is showing.
             Cmd::StackBursts => self.toggle_all_bursts(),
@@ -1740,7 +1794,7 @@ impl App {
             Cmd::PruneAccidental => bulk::open(self, bulk::Action::Accidental),
             Cmd::PruneCopies => bulk::open(self, bulk::Action::Copies),
             Cmd::ProblemsOnly => {
-                if self.view == View::Calendar {
+                if self.view.is_library() {
                     return Task::none();
                 }
                 let f = if self.filter.hint == Some(HintFilter::Problems) { None } else { Some(HintFilter::Problems) };
@@ -2018,6 +2072,8 @@ impl App {
                         self.thumbs.deliver(path, thumb);
                     } else if owner == OWNER_CALENDAR {
                         self.calendar.thumbs.deliver(path, thumb);
+                    } else if owner == thumbs::OWNER_SEARCH {
+                        self.search.thumbs.deliver(path, thumb);
                     }
                 }
                 BgEvent::Full { path, result } => {
@@ -2041,9 +2097,15 @@ impl App {
                     if done {
                         network::on_library_checked(self, true);
                     }
+                    let shown = index.clone();
                     if let Some(text) = self.calendar.on_index_ready(job, index, done) {
-                        if self.view == View::Calendar {
+                        if self.view.is_library() {
                             tasks.push(self.show_status(text, 0));
+                        }
+                        // The library as checked: search looks for new
+                        // photos in it.
+                        if done {
+                            search::on_library(self, shown);
                         }
                     }
                 }
@@ -2058,7 +2120,7 @@ impl App {
                 BgEvent::IndexError { job, message } => {
                     network::on_library_checked(self, false);
                     if let Some(text) = self.calendar.on_index_error(job, message) {
-                        if self.view == View::Calendar {
+                        if self.view.is_library() {
                             tasks.push(self.show_status(text, 0));
                         }
                     }
@@ -2078,8 +2140,13 @@ impl App {
                 BgEvent::GlobalMenu(present) => self.global_menu_present = present,
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
+                BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
+                BgEvent::SearchResults { seq, hits, indexed: _, error } => tasks.push(search::on_results(self, seq, hits, error)),
+                BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }
+        // The search pass steps back while thumbnails are wanted.
+        search::note_busy(self);
         if self.scan_dirty && self.last_refresh.elapsed() >= Duration::from_millis(200) {
             self.scan_dirty = false;
             self.refresh_views();

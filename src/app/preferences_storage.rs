@@ -188,18 +188,23 @@ pub fn journal(dir: &Path) -> Journal {
     Journal { exists: dir.is_dir(), waiting: json(dir), kept: json(&dir.join("kept")) }
 }
 
+/// The search index's and the downloaded models' sizes (the engine's
+/// `storage`): cleared through the engine, never here.
+pub type SearchStorage = crate::search::Storage;
+
 /// Every number the Storage section shows.
 #[derive(Debug, Clone, Default)]
 pub struct Survey {
     pub caches: Vec<(Cache, Usage)>,
     pub journal: Journal,
+    pub search: SearchStorage,
 }
 
 /// Measure every cache and count the unsaved marks (on a worker thread).
-pub fn survey() -> Survey {
+pub fn survey(library: Option<&Path>) -> Survey {
     let caches = Cache::ALL.iter().map(|&c| (c, c.dir().map(|d| measure(&d)).unwrap_or_default())).collect();
     let journal = crate::model::saver::default_journal_dir().map(|d| journal(&d)).unwrap_or_default();
-    Survey { caches, journal }
+    Survey { caches, journal, search: crate::search::engine::storage(library) }
 }
 
 #[cfg(test)]

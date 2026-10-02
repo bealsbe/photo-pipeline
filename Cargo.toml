@@ -8,7 +8,7 @@ build = "build.rs"
 
 [dependencies]
 iced = { version = "0.14", features = ["image", "canvas", "advanced", "tokio", "wgpu"] }
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 crossbeam-channel = "0.5"
 dirs = "7"
 fast_image_resize = "6.1"
@@ -35,6 +35,22 @@ zbus = "5"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
+# Library search (docs/library-search-plan.md §4): ONNX Runtime through
+# `ort`, pinned (a release candidate).  The first build downloads a static
+# ONNX Runtime with its WebGPU provider (~120 MB) into ~/.cache/ort.pyke.io,
+# and `copy-dylibs` puts libwebgpu_dawn.so beside the binary.  The helper
+# process alone loads models; `half` is the fp16 tensor type.
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs", "api-24", "webgpu", "half"] }
+half = "2"
+# The helper lists the Vulkan adapters to pick the card itself (the same
+# wgpu iced already builds).
+wgpu = { version = "27", default-features = false, features = ["std", "vulkan"] }
+# Model downloads: HTTPS with rustls, checked against pinned SHA-256s.
+ureq = "3"
+sha2 = "0.11"
+# The search model's text tokenizer (Gemma's SentencePiece, from its
+# tokenizer.json); no C regex engine.
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 # In-process CPU sampling for performance work: `--features profiler`, then
 # run with PP_PROFILE_OUT=<file> (see src/profile.rs).  Not in normal builds.
 pprof = { version = "0.15", optional = true }

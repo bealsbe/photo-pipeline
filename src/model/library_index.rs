@@ -177,6 +177,11 @@ impl LibraryDay {
         });
     }
 
+    /// The day's shots: indices into `files`, a RAW+JPG pair together.
+    pub fn shots(&self) -> &[Vec<usize>] {
+        &self.shots
+    }
+
     /// Up to `n` shots spread evenly through the day, preferring each shot's
     /// JPG (its embedded preview decodes far faster than a RAW thumbnail).
     pub fn preview_entries(&self, n: usize) -> Vec<&FileEntry> {

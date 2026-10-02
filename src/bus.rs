@@ -72,6 +72,16 @@ pub enum BgEvent {
     NetProbe { path: PathBuf, seq: u64, probe: Arc<crate::ops::netfs::Probe> },
     /// Results of an analysis pass (`crate::analysis`), with its progress.
     Analysis { run: u64, batch: Arc<crate::analysis::Batch> },
+
+    /// Library search: everything the views show about it changed
+    /// (`crate::search::Engine`).
+    SearchStatus(Arc<crate::search::Status>),
+    /// A query's answer: hits best first, already cut by closeness, and
+    /// how many shots were searched.  `error` is set when the query
+    /// couldn't run (no helper, no index); `hits` is then empty.
+    SearchResults { seq: u64, hits: Arc<Vec<crate::search::Hit>>, indexed: usize, error: Option<String> },
+    /// A model download's progress (`crate::ml::download`).
+    ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
@@ -109,6 +119,9 @@ impl BgEvent {
             BgEvent::Saver(_) => "Saver",
             BgEvent::NetProbe { .. } => "NetProbe",
             BgEvent::Analysis { .. } => "Analysis",
+            BgEvent::SearchStatus(_) => "SearchStatus",
+            BgEvent::SearchResults { .. } => "SearchResults",
+            BgEvent::ModelDownload { .. } => "ModelDownload",
         }
     }
 }

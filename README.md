@@ -53,6 +53,13 @@ window rules that matched the app before need the new id.)
   file per analysed folder: sharpness, exposure and hashes per shot, and the
   duplicate check's digests, so analysing again reads only changed files.
   Safe to delete.
+- **Search index (Rust only):** `~/.cache/photo_pipeline/search/<library>/`:
+  one vector per shot of the library (f16) with its content key and
+  capture info, and the path map that tells which files are already
+  indexed.  Safe to delete (search then needs the library indexed again).
+- **Downloaded models (Rust only):** `~/.cache/photo_pipeline/models/`, the
+  search model's files, checked against pinned SHA-256s (see "Models").
+  Safe to delete (they are downloaded again when asked).
 - **Settings:** on first run, the Python app's QSettings
   (`~/.config/PhotoPipeline/PhotoPipeline.conf`) are imported.  After that,
   settings live in `~/.config/photo-pipeline/settings.json`.
@@ -66,6 +73,10 @@ src/app/               the application: state, update, views
   main_view.rs         menu bar, side rail, folder bar, filter bar, status bar
   viewer.rs            the image viewer window (crop tool, EXIF panel)
   calendar.rs          library calendar state and views
+  search.rs            the search page: field, start page, results, Open day
+  search_results.rs    results from hits (no I/O), burst stacks, recent searches
+  search_setup.rs      the download dialog, indexing in the status bar, banners
+  search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
   quality.rs           the analysis as the app holds it (runs on request)
   hints_ui.rs          its Hints control and menu, progress, banner
@@ -84,6 +95,10 @@ src/model/             records, collection & pairing, filters, crops,
 src/ops/               file operations: export, sort, trash, edit copy,
                        crop export, and fsutil (the safe-write primitives)
 src/imaging/           JPEG/RAW decoding, thumbnails, viewer loader
+src/ml/                the search model: registry, download, the helper
+                       process (--ml-worker), its client, preview preparation
+src/search/            library search: the engine the app holds, the index
+                       files, the indexing pass, queries, estimates
 src/exif.rs            container metadata without decoding pixels
 native/                C shims over LibRaw and libjpeg-turbo
 vendor/LibRaw          LibRaw 0.22.2, the version rawpy uses
@@ -276,15 +291,18 @@ gathers the settings on one page: advance after marking, whether All and
 Marked show pruned photos (the filter bar's old *Show pruned*), file names
 and thumbnail size, the viewer's filmstrip, remembered size and whether a
 burst shows all its frames first, the library and
-edit-copy folders, and whether to use the KDE global menu (a change there takes
-effect at the next start; `PP_NO_GLOBAL_MENU=1` still forces the in-window
-menus).  Changes apply at once and are saved; the menus and the viewer's
-toggles stay in step with the page.
+edit-copy folders, search (see "Library search" below), and whether to use
+the KDE global menu (a change there takes effect at the next start;
+`PP_NO_GLOBAL_MENU=1` still forces the in-window menus).  Changes apply at
+once and are saved; the menus and the viewer's toggles stay in step with
+the page.
 
 The Storage section shows how much space the thumbnail, library-index,
 capture-time and photo-analysis caches take, and clears any of them after
 saying what that costs; they are rebuilt as you work (the analysis when you
-next analyse a folder).  It also shows any marks waiting to be saved to a
+next analyse a folder).  The search index can be rebuilt or cleared, and the
+downloaded model deleted, each after a confirmation that says what it costs.
+It also shows any marks waiting to be saved to a
 folder that couldn't be reached.  Those live in
 `~/.local/share/photo-pipeline/unsaved/` and are never cleared from the app:
 they are your marks, not a cache.
@@ -327,6 +345,117 @@ Measured on a 110 386-file library on an SMB share:
 The first time a library is opened, or after F5, it's still read in full,
 about 3 s here.  Opening a working folder reads capture times with the same
 reader, so it gains the read-ahead fix too.
+
+## Library search
+
+**Search the library** (Ctrl+F, on the side rail under the calendar, or in
+the View menu) finds photos in the library by what they show: type a few
+words, such as *red car at night*, and press Enter.  Everything runs on this
+computer; nothing about your photos is sent anywhere.  The plan behind it is
+`docs/library-search-plan.md`.
+
+- **A page of its own.**  It keeps its query while you work elsewhere, and
+  its back button names where it returns ("‹ Grid", "‹ Jul 2026").  Ctrl+F
+  brings it back with the field ready to type into (its text selected).  Esc
+  closes the list under the field and never leaves the page.
+- **The field.**  While you type, it offers your recent searches (the last
+  10) that have a word starting with what you typed; ↑ ↓ choose one, Enter
+  or Tab takes it, Enter alone searches what you typed and moves to the
+  results.  With nothing typed, the page shows the recent searches and a
+  few ways to search.  Preferences ▸ Search ▸ *Forget them* clears them.
+- **Results, best first.**  One list in the grid of a library day, on the
+  same grey, with each photo's date under it (hover for the date and time
+  to the second, and where the file is).  A burst is one stacked tile at
+  the rank of its best frame, as in the grid: G or its tab shows its frames
+  in shooting order, Shift+G every burst (for these results only).  ← →
+  move, Space is quick look, Enter or a double-click opens the viewer.
+  Results are read-only, like the calendar's days: P, M and U do nothing
+  here.
+- **Open day ›** shows the selected photo's day in the calendar with the
+  photo selected; that page's back button reads "‹ Search" (as does Esc)
+  and returns to the same results.
+- **Before the first index**, the page says what indexing costs (what is
+  read from the library, how long it takes, what is downloaded and kept)
+  and offers *Index the library…*.  A dialog asks once: it lists each model
+  with its size, its licence in plain words and its publisher, with the
+  sources and SHA-256 checksums a click away, then shows the download.  A
+  file that doesn't match its checksum is deleted and the dialog says so.
+- **Indexing** runs in the background, newest days first: the status bar
+  shows how far it has got, with × to stop (what is indexed is kept) and a
+  click for its steps.  A search while it runs looks at the photos indexed
+  so far, under a strip that says so, and fills in as it goes.  After an
+  export, the new photos are added on their own, as a quiet line in the
+  status bar (Preferences ▸ Search ▸ *Index new exports*).
+- **When something fails**, a banner under the folder bar says what, in any
+  view: the graphics card stopped responding, gave different answers from
+  the processor, or isn't there; the library stopped answering; or the
+  search helper couldn't run.  It offers *Try the card again* and the way
+  to Preferences.  Nothing ever moves to the processor by itself: the
+  processor is used only when chosen in Preferences ▸ Search ▸ *Run models
+  on*.  Searching what is already indexed keeps working.
+- **Preferences ▸ Search:** where models run (the graphics card, checked
+  against the processor first, or the processor, with what each costs),
+  *How close matches must be* (a slider from closer to looser, with a reset
+  to the default, good matches), *Index new exports*, the search model, and
+  the recent searches.
+- **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
+  explaining itself.
+
+### How it works
+
+- **The first index is asked for**, from the search page; after that each
+  export is added on its own (Preferences ▸ Search ▸ *Index new exports*).
+  Indexing reads each shot's embedded preview once (about 0.35 MB a shot),
+  newest days first, in the background, stepping back while the grid waits
+  for thumbnails; × stops it and what is done is kept.
+- **Where models run** is Preferences ▸ Search ▸ *Run models on*: the
+  graphics card (the default; WebGPU over Vulkan, used only after a
+  self-check against the processor on fixed inputs agrees) or the
+  processor.  If the card is chosen and fails (no usable card, the
+  self-check, a driver crash), indexing stops and a banner says what
+  failed.  **Nothing is ever moved to the processor by itself**; choose it
+  in Preferences if you want it.  Searching what is already indexed keeps
+  working either way: the text side always runs on the processor.
+- **The helper process.**  Models run in `photo-pipeline --ml-worker`, the
+  same binary started by the app, at low priority, exiting after a few idle
+  minutes.  A driver fault takes the helper down, not the app.
+- **Which card.**  The helper lists the Vulkan adapters itself and takes a
+  discrete card first, else an integrated one; a software adapter
+  (llvmpipe, SwiftShader) is never used, since that would be processor work
+  in disguise, and counts as no card.  The choice is pinned through Mesa's
+  device-select layer so the runtime can't wander to another device, and
+  the status names the adapter actually used.  `PP_GPU=<part of a name>`
+  picks a particular hardware adapter for testing (no setting for it yet).
+- **Keys survive renames.**  A shot is identified by a digest of its file's
+  size and first 64 KB, so Sort, export and copies keep its vector; a
+  cropped JPG re-encoded by a Move export is indexed again.
+- **How close matches must be** (Preferences ▸ Search) is a floor on the
+  model's own match probability (SigLIP 2's trained calibration, so it
+  means the same for every query): looser shows weaker matches, stricter
+  only the plainest; the default (0.3 %) keeps empty and dark frames out
+  while a thing most of the library shows comes back whole.  A setting
+  saved by an earlier build on another scale falls back to the default.
+- **Nothing is written into the library**, no sidecar, no XMP; the index and
+  the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
+  and clears them).  Queries read no photos.
+
+### Models
+
+Downloaded once, after a dialog that names each file, its size and licence;
+every file is checked against its SHA-256 before use and deleted if it
+doesn't match (`src/ml/models.rs` holds the pins).  Phase 1 uses one model:
+
+| Model | Files | Size | Licence | Source |
+|---|---|---|---|---|
+| SigLIP 2 ViT-B/16, 256 px (Google) | image tower (fp32), text tower (fp16), tokenizer | 971 MB | Apache-2.0 | Hugging Face `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js export of `google/siglip2-base-patch16-256` |
+
+The image tower is the fp32 file on purpose: the fp16 export gives wrong
+answers on WebGPU (the self-check refuses it) and is ten times slower on the
+processor.  The fp16 text tower's answers equal fp32's.
+
+ONNX Runtime comes through the `ort` crate (pinned release candidate); the
+first build downloads it (~120 MB) into `~/.cache/ort.pyke.io` and puts
+`libwebgpu_dawn.so` beside the binary.
 
 ## File safety
 
@@ -437,6 +566,17 @@ These are deliberate:
   slow or remote folders.  `bench::bench_index` times the library calendar:
   a full read, a check, the saved index and opening days.  It never writes
   to the library; it saves the library's index cache, as the app would.
+- **Search:** the engine, the pass, the index files, downloads and the
+  device rule are unit-tested with a fake helper (no models, no photos).
+  Tests that need the models are ignored and take `PP_MODEL_DIR=<folder
+  with the SigLIP2 files>`; the phase 0 harness (`src/search/eval.rs`) also
+  takes `PP_EVAL_PREVIEWS` and `PP_EVAL_OUT`, and `PP_EVAL_LABELS` to score
+  hand labels.  `bench::bench_search_index` indexes a library through the
+  real helper (`PP_BENCH_LIBRARY`, `PP_MODEL_DIR`, `PP_BENCH_DEVICE`) into a
+  temporary folder and times queries.  `PP_ML_FAKE_CARD=no-card|self-check|crash`
+  makes the graphics card fail without touching a device, for UI tests of
+  the banner.  Never point these at the real cache: downloads go wherever
+  `HOME` says, so use a throwaway one.
 - **Scripted UI:** `PP_SCRIPT=<file>` drives the app with commands such as
   `open`, `key`, `click`, `dlg`, `calday` and `shot`; see
   `src/app/testing.rs` for the full list.  To run it headless:
@@ -447,7 +587,11 @@ These are deliberate:
   ```
 
   Use scratch copies of photos and a throwaway `HOME` for anything that
-  writes.
+  writes.  `PP_SEARCH_FAKE=1` (or `=indexed`, to start indexed) puts a
+  stand-in in the search engine's place: made-up hits from the library
+  index, downloads and indexing on a timer, and every failure the page
+  shows on request (`search fake …`).  It downloads, reads and writes
+  nothing.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

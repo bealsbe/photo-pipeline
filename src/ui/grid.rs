@@ -143,6 +143,27 @@ pub struct GridData<'a> {
     pub hints: Option<&'a crate::model::hints::Hints>,
     /// The grid before bursts were last stacked or opened, to animate from.
     pub restack: Option<Restack<'a>>,
+    /// What the strip under each photo says.
+    pub label: CellLabel,
+    /// A line, and a quieter one, after the last photo (search results:
+    /// "That's everything that looks like …").
+    pub footer: Option<(&'a str, &'a str)>,
+}
+
+/// What the strip under each photo says: its file name (a working folder,
+/// a library day), or the date it was taken (search results, which mix
+/// days).  The tooltip says the rest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CellLabel {
+    Name,
+    Date,
+}
+
+/// The end note's height, when there is one.
+const FOOTER_H: f32 = 76.0;
+
+fn footer_h(data: &GridData<'_>) -> f32 {
+    if data.footer.is_some() { FOOTER_H } else { 0.0 }
 }
 
 /// What the grid looked like before bursts were stacked or opened.  A new
@@ -310,6 +331,12 @@ impl Metrics {
         Metrics { ts, cols, cell, label_h, content_w, tops, total: y + BOTTOM_MARGIN }
     }
 
+    /// Room for an end note after the last section.
+    fn with_footer(mut self, h: f32) -> Metrics {
+        self.total += h;
+        self
+    }
+
     fn cell_rect(&self, section: usize, index: usize) -> Rectangle {
         let (top, _) = self.tops[section];
         let row = index / self.cols;
@@ -427,6 +454,10 @@ pub struct State {
     /// The last [`Restack::seq`] seen, and the slide it started.
     restack_seq: u64,
     restack: Option<Slide>,
+    /// The last [`Grid::reveal`] seen, and the tile it asked to bring into
+    /// view (done at the next event, once the bounds are known).
+    reveal_seq: u64,
+    reveal: Option<RecordId>,
 }
 
 /// Tiles sliding to new places after bursts were stacked or opened.  All
@@ -487,6 +518,8 @@ impl State {
             reported_scroll: 0.0,
             restack_seq: 0,
             restack: None,
+            reveal_seq: 0,
+            reveal: None,
         }
     }
 
@@ -555,12 +588,13 @@ pub struct Grid<'a, Message> {
     initial_scroll: f32,
     scroll_seq: u64,
     layout_key: u64,
+    reveal: (u64, Option<RecordId>),
     on: Box<dyn Fn(GridEvent) -> Message + 'a>,
 }
 
 impl<'a, Message> Grid<'a, Message> {
     pub fn new(data: GridData<'a>, thumb_target: f32, on: impl Fn(GridEvent) -> Message + 'a) -> Self {
-        Self { data, thumb_target, keyboard: true, initial_scroll: 0.0, scroll_seq: 0, layout_key: 0, on: Box::new(on) }
+        Self { data, thumb_target, keyboard: true, initial_scroll: 0.0, scroll_seq: 0, layout_key: 0, reveal: (0, None), on: Box::new(on) }
     }
 
     /// Whether keyboard scrolling is live (off while a dialog is open).
@@ -586,6 +620,13 @@ impl<'a, Message> Grid<'a, Message> {
         self.layout_key = key;
         self
     }
+
+    /// Bump `seq` to scroll just far enough to show `id`'s tile (a
+    /// selection moved by the keys, a photo picked elsewhere).
+    pub fn reveal(mut self, seq: u64, id: Option<RecordId>) -> Self {
+        self.reveal = (seq, id);
+        self
+    }
 }
 
 impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
@@ -600,6 +641,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         s.last_collapsed = self.data.collapsed.clone();
         s.last_select_mode = self.data.select_mode;
         s.restack_seq = self.data.restack.map_or(0, |r| r.seq);
+        (s.reveal_seq, s.reveal) = self.reveal;
         s.bar = Anim {
             from: if self.data.select_mode { 1.0 } else { 0.0 },
             to: if self.data.select_mode { 1.0 } else { 0.0 },
@@ -660,6 +702,9 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             st.restack_seq = r.seq;
             start_slide(st, &self.data, r, now);
         }
+        if self.reveal.0 != st.reveal_seq {
+            (st.reveal_seq, st.reveal) = self.reveal;
+        }
     }
 
     fn size(&self) -> Size<Length> {
@@ -704,7 +749,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         }
         let metrics = {
             let st_ref: &State = st;
-            Metrics::new(data.sections, bounds.width, st_ref.size, st_ref.label_h, &|d| st_ref.openness(d, collapsed, now))
+            Metrics::new(data.sections, bounds.width, st_ref.size, st_ref.label_h, &|d| st_ref.openness(d, collapsed, now)).with_footer(footer_h(&data))
         };
         let max_scroll = (metrics.total - bounds.height).max(0.0);
         if !st.initialised {
@@ -712,6 +757,12 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             st.scroll = st.scroll.clamp(0.0, max_scroll);
         }
         clamp_scroll(st, max_scroll);
+        if let Some(id) = st.reveal.take() {
+            if let Some(target) = reveal_target(&metrics, data.sections, collapsed, bounds.height, st.target_scroll(), id) {
+                smooth_scroll_to(st, target, max_scroll, now);
+                shell.request_redraw();
+            }
+        }
 
         match event {
             Event::Window(window::Event::RedrawRequested(at)) => {
@@ -965,7 +1016,10 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                 Hover::Cell(id) => {
                     if let Some(r) = self.data.coll.get(id) {
                         let pair = self.data.coll.find_pair(id).and_then(|p| self.data.coll.get(p));
-                        let mut tip = tooltip_text(r, pair);
+                        let mut tip = match self.data.label {
+                            CellLabel::Name => tooltip_text(r, pair),
+                            CellLabel::Date => date_tooltip(r, pair),
+                        };
                         // What the analysis says comes first: it is why a
                         // plate is there.
                         let stacked = run_of(&self.data, id).is_some_and(|m| m.stacked);
@@ -1500,7 +1554,7 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
     let c = |col: Color| paint::with_alpha(col, op);
     paint::fill(r, bounds, c(t::PHOTO_GROUND));
     let label_h = ps.label_h.unwrap_or(if data.show_names { LABEL_H } else { 0.0 });
-    let m = Metrics::new(data.sections, bounds.width, ps.size, label_h, ps.openness);
+    let m = Metrics::new(data.sections, bounds.width, ps.size, label_h, ps.openness).with_footer(footer_h(data));
     let scroll = ps.scroll.clamp(0.0, (m.total - bounds.height).max(0.0));
     let origin_y = bounds.y - scroll;
     // Mid-slide, tiles come in from off screen: a screen either side of the
@@ -1556,6 +1610,16 @@ pub fn paint(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, ps: &Pain
             hr.x += bounds.x;
             hr.y = origin_y + stop;
             paint_header(r, hr, sec, data, ps.hover, s, o < 0.5, op, bounds);
+        }
+        if let Some((line, quiet)) = data.footer {
+            let top = origin_y + m.total - BOTTOM_MARGIN - FOOTER_H;
+            if top < bounds.y + bounds.height && top + FOOTER_H > bounds.y {
+                let w = bounds.width - SCROLLBAR_W;
+                paint::text(r, line, rect(bounds.x, top + 18.0, w, 18.0), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK3), HAlign::Center, bounds);
+                if !quiet.is_empty() {
+                    paint::text(r, quiet, rect(bounds.x, top + 38.0, w, 18.0), t::T_SMALL, paint::REGULAR, c(t::PHOTO_INK4), HAlign::Center, bounds);
+                }
+            }
         }
     });
 
@@ -1883,7 +1947,7 @@ fn paint_cell(
     let shown = (label_h / LABEL_H).clamp(0.0, 1.0);
     if shown > 0.01 {
         let strip_clip = mount.intersection(&clip).unwrap_or_default();
-        paint_cell_label(r, mount, id, rec, ts, thumb_rect, selected, op * shown, elide, strip_clip);
+        paint_cell_label(r, mount, id, rec, data.label, ts, thumb_rect, selected, op * shown, elide, strip_clip);
     }
     (thumb_rect, image_rect)
 }
@@ -2070,6 +2134,7 @@ fn paint_cell_label(
     mount: Rectangle,
     id: RecordId,
     rec: &PhotoRecord,
+    label: CellLabel,
     ts: f32,
     thumb_rect: Rectangle,
     selected: bool,
@@ -2078,9 +2143,9 @@ fn paint_cell_label(
     clip: Rectangle,
 ) {
     let c = |col: Color| paint::with_alpha(col, op);
-    // File name left, its tag right, in the strip under the photo.  The
-    // name is the stem: the tag says the type, and the tooltip has the full
-    // names.
+    // File name (or date) left, its tag right, in the strip under the
+    // photo.  The name is the stem: the tag says the type, and the tooltip
+    // has the full names.
     let strip = rect(thumb_rect.x, thumb_rect.y + ts + 2.0, ts, mount.y + mount.height - (thumb_rect.y + ts + 2.0));
     let kind = super::tags::Kind::of(rec);
     let (name_w, tag_x) = label_layout(ts, super::tags::kind_width(kind));
@@ -2101,19 +2166,50 @@ fn paint_cell_label(
             paint::hline(r, strip.x, strip.x + tw, strip.center_y().round(), 1.0, c(t::PHOTO_INK3));
         }
     };
+    let fit = |w: f32| match label {
+        CellLabel::Name => paint::elide_start(&rec.stem(), t::T_SMALL, paint::REGULAR, w),
+        CellLabel::Date => date_label(rec.shot_time().date(), w),
+    };
     match elide {
         Some(cache) => {
-            let key = (id, name_w as u32);
+            // Dates and names never share a key, should one grid's state
+            // serve the other.
+            let key = (id, name_w as u32 | if label == CellLabel::Date { 1 << 31 } else { 0 });
             if !cache.borrow().contains_key(&key) {
-                let shown = paint::elide_start(&rec.stem(), t::T_SMALL, paint::REGULAR, name_w);
-                cache.borrow_mut().insert(key, shown);
+                cache.borrow_mut().insert(key, fit(name_w));
             }
             if let Some(shown) = cache.borrow().get(&key) {
                 draw_name(r, shown);
             }
         }
-        None => draw_name(r, &paint::elide_start(&rec.stem(), t::T_SMALL, paint::REGULAR, name_w)),
+        None => draw_name(r, &fit(name_w)),
     }
+}
+
+/// A photo's date under its tile: "Oct 26, 2024", or shorter where that
+/// doesn't fit ("10/26/24", then the year).  The tooltip has it in full.
+pub fn date_label(d: NaiveDate, max_w: f32) -> String {
+    use chrono::Datelike;
+    let long = format!("{} {}, {}", crate::model::library_index::MONTH_ABBR[d.month0() as usize], d.day(), d.year());
+    let short = format!("{}/{}/{:02}", d.month(), d.day(), d.year() % 100);
+    let fits = |s: &str| paint::text_width(s, t::T_SMALL, paint::REGULAR) <= max_w;
+    [long, short].into_iter().find(|s| fits(s)).unwrap_or_else(|| d.year().to_string())
+}
+
+/// The hover text where the strip shows dates: when the photo was taken,
+/// to the second, then where the file is (both, for a pair).
+pub fn date_tooltip(r: &PhotoRecord, pair: Option<&PhotoRecord>) -> String {
+    let when = r.shot_time();
+    let mut lines = vec![when.format("%A, %B %-d, %Y, %H:%M:%S").to_string()];
+    match pair {
+        Some(other) => {
+            let (raw, jpg) = if r.file_type == FileType::Raw { (r, other) } else { (other, r) };
+            lines.push(raw.path.display().to_string());
+            lines.push(jpg.path.display().to_string());
+        }
+        None => lines.push(r.path.display().to_string()),
+    }
+    lines.join("\n")
 }
 
 /// The tag on a photo's corner (names hidden), on its plate of mount where
@@ -2208,18 +2304,27 @@ pub fn reveal_scroll(
     scroll: f32,
     id: RecordId,
 ) -> Option<f32> {
-    let (s, i) = sections.iter().enumerate().find_map(|(s, sec)| sec.ids.iter().position(|&x| x == id).map(|i| (s, i)))?;
-    if collapsed.contains(&sections[s].date) || size.height <= 0.0 {
+    if size.height <= 0.0 {
         return None;
     }
     let m = Metrics::new(sections, size.width, ts, label_h, &|d| if collapsed.contains(&d) { 0.0 } else { 1.0 });
+    reveal_target(&m, sections, collapsed, size.height, scroll, id)
+}
+
+/// The scroll offset that brings `id`'s mount wholly into view (see
+/// [`reveal_scroll`]), in a laid-out grid `height` high.
+fn reveal_target(m: &Metrics, sections: &[Section], collapsed: &HashSet<NaiveDate>, height: f32, scroll: f32, id: RecordId) -> Option<f32> {
+    let (s, i) = sections.iter().enumerate().find_map(|(s, sec)| sec.ids.iter().position(|&x| x == id).map(|i| (s, i)))?;
+    if collapsed.contains(&sections[s].date) {
+        return None;
+    }
     let mount = mount_rect(m.cell_rect(s, i));
-    let max_scroll = (m.total - size.height).max(0.0);
+    let max_scroll = (m.total - height).max(0.0);
     let target = if mount.y < scroll {
         // Up: at the top, with its day's header when it is in the first row.
         if i < m.cols { m.tops[s].0 } else { mount.y - ROW_GAP }
-    } else if mount.y + mount.height > scroll + size.height {
-        mount.y + mount.height + ROW_GAP - size.height
+    } else if mount.y + mount.height > scroll + height {
+        mount.y + mount.height + ROW_GAP - height
     } else {
         return None;
     };
@@ -2360,6 +2465,8 @@ mod tests {
             moments: &[],
             hints: None,
             restack: None,
+            label: CellLabel::Name,
+            footer: None,
         };
         // The header counts photos, frames in stacks too.
         assert_eq!(chip_label(&sections[0], &none).0, "16 photos");
@@ -2438,6 +2545,8 @@ mod tests {
             moments: &[],
             hints: None,
             restack: None,
+            label: CellLabel::Name,
+            footer: None,
         };
         let open = |_: NaiveDate| 1.0;
         let width = 1000.0;
