@@ -2,14 +2,16 @@
 //! closeness cut-off, accidental frames left out, best first.  Pure apart
 //! from the text encoder, so it is unit-tested on synthetic vectors.
 //!
-//! **Closeness.**  Raw cosine scores aren't comparable between queries
-//! (a vague word scores everything a little), so a hit must stand out
-//! from the query's own spread: its score at least `closeness` robust
-//! standard deviations above the median of all scores (median absolute
-//! deviation scaled to a normal's).  Preferences ▸ Search ▸ *How close
-//! matches must be* is a slider over [`CLOSENESS_MIN`]..=[`CLOSENESS_MAX`]
-//! with a reset to [`CLOSENESS_DEFAULT`].  *Provisional* until phase 0's
-//! labelled set fixes the range and the default.
+//! **Closeness.**  A hit needs the model's own match probability
+//! ([`match_probability`]: SigLIP2's sigmoid over its trained scale and
+//! bias, comparable between queries) of at least the closeness setting.
+//! Preferences ▸ Search ▸ *How close matches must be* is a slider over
+//! [`CLOSENESS_MIN`]..=[`CLOSENESS_MAX`] (higher is stricter) with a reset
+//! to [`CLOSENESS_DEFAULT`].  A cut relative to the query's own spread
+//! was tried first and fails for things most of the library shows
+//! ("fursuit" here: nothing stands out); it stays in the evaluation
+//! harness for comparison.  *Provisional* until phase 0's labelled set
+//! fine-tunes the default.
 
 use std::path::PathBuf;
 
@@ -18,12 +20,21 @@ use serde::{Deserialize, Serialize};
 
 use super::index::Key;
 
-/// The loosest setting: more results, more misses among them.
-pub const CLOSENESS_MIN: f32 = 2.0;
-/// The strictest: only what stands far out.
-pub const CLOSENESS_MAX: f32 = 6.0;
-/// Good matches, what works for most people (provisional).
-pub const CLOSENESS_DEFAULT: f32 = 3.5;
+/// The loosest setting, a match probability of 0.03 %: cosine ≥ 0.077,
+/// where the sample's dark and empty frames start to come in.
+pub const CLOSENESS_MIN: f32 = 0.0003;
+/// The strictest, 30 %: cosine ≥ 0.141, only the plainest matches
+/// (a fireworks fountain, a fursuit, a snow mountain).
+pub const CLOSENESS_MAX: f32 = 0.3;
+/// Good matches, what works for most people: a match probability of
+/// 0.3 % (cosine ≥ 0.098), provisional.  Measured on the 1 779-preview
+/// sample: the background sits below 1e-4 and the weak, dark frames near
+/// 1e-3, so both stay out; the plain hits sit between 3e-3 and 0.98
+/// ("fursuit" top 0.98 and median 0.70, so a thing most of the library
+/// shows comes back whole; "camera" top 0.21; "car" and "food" tops 0.013
+/// and 0.004, their one clear hit each), so they stay in.  At 0.01 "food"
+/// and "cake" would have nothing; at 0.001 the dark frames join "camera".
+pub const CLOSENESS_DEFAULT: f32 = 0.003;
 /// Never more results than this, however loose the setting.
 pub const MAX_HITS: usize = 2_000;
 
@@ -55,65 +66,59 @@ pub fn prompt(text: &str) -> String {
     format!("a photo of a {}.", text.trim())
 }
 
-/// Scores above the closeness cut-off, as (row, score), best first and at
-/// most [`MAX_HITS`].  `scores` holds every row's cosine; rows in `skip`
-/// (accidental frames) never count.  Pure.
-pub fn cut(scores: &[f32], skip: impl Fn(usize) -> bool, closeness: f32) -> Vec<(usize, f32)> {
+/// The relative cut the app no longer uses, kept for the evaluation
+/// harness: scores at least `z` robust standard deviations (1.4826 × the
+/// median absolute deviation) above the median, as (row, score), best
+/// first and at most [`MAX_HITS`]; rows in `skip` never count.  Pure.
+#[cfg(test)]
+pub fn cut(scores: &[f32], skip: impl Fn(usize) -> bool, z: f32) -> Vec<(usize, f32)> {
     if scores.is_empty() {
         return Vec::new();
     }
     let (median, mad) = median_and_mad(scores);
-    // 1.4826 × MAD estimates a normal's standard deviation.
     let spread = (1.4826 * mad).max(1e-4);
-    let threshold = median + closeness.clamp(CLOSENESS_MIN, CLOSENESS_MAX) * spread;
+    let threshold = median + z * spread;
     let mut hits: Vec<(usize, f32)> = scores.iter().copied().enumerate().filter(|&(i, s)| s >= threshold && !skip(i)).collect();
     hits.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     hits.truncate(MAX_HITS);
     hits
 }
-
-// The absolute (probability) cut below is the alternative phase 0 weighs
-// against `cut`; until the labels decide, only the evaluation calls it.
-// Whichever loses is removed then, and these allows with it.
 
 /// SigLIP2's trained pairing calibration: the model was trained with a
 /// sigmoid loss, so `σ(SCALE · cosine + BIAS)` is its own estimate of the
 /// chance that a text and an image belong together, comparable between
 /// queries.  Read from `google/siglip2-base-patch16-256`'s weights
 /// (`logit_scale` = 4.7265 → e^4.7265, `logit_bias` = −16.7718).
-#[cfg_attr(not(test), allow(dead_code))]
 pub const SIGMOID_SCALE: f32 = 112.901_18;
-#[cfg_attr(not(test), allow(dead_code))]
 pub const SIGMOID_BIAS: f32 = -16.771_803;
 
 /// The model's own probability that a shot matches the query.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn match_probability(cosine: f32) -> f32 {
     1.0 / (1.0 + (-(SIGMOID_SCALE * cosine + SIGMOID_BIAS)).exp())
 }
 
 /// The cosine at which [`match_probability`] reaches `p`.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn cosine_for_probability(p: f32) -> f32 {
     let p = p.clamp(1e-6, 1.0 - 1e-6);
     ((p / (1.0 - p)).ln() - SIGMOID_BIAS) / SIGMOID_SCALE
 }
 
-/// Scores whose match probability is at least `min_probability`, as
-/// (row, score), best first and at most [`MAX_HITS`]; rows in `skip`
-/// never count.  The absolute alternative to [`cut`]: it also answers
-/// queries most of the library matches ("fursuit" here), where nothing
-/// stands out from the spread.  Pure.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn cut_by_probability(scores: &[f32], skip: impl Fn(usize) -> bool, min_probability: f32) -> Vec<(usize, f32)> {
-    let threshold = cosine_for_probability(min_probability);
+/// Scores whose match probability is at least `closeness` (clamped to the
+/// slider's range), as (row, score), best first and at most [`MAX_HITS`];
+/// rows in `skip` (accidental frames) never count.  Being absolute, it
+/// also answers queries most of the library matches ("fursuit" here),
+/// where nothing stands out from the spread.  Pure.
+pub fn cut_by_probability(scores: &[f32], skip: impl Fn(usize) -> bool, closeness: f32) -> Vec<(usize, f32)> {
+    let threshold = cosine_for_probability(closeness.clamp(CLOSENESS_MIN, CLOSENESS_MAX));
     let mut hits: Vec<(usize, f32)> = scores.iter().copied().enumerate().filter(|&(i, s)| s >= threshold && !skip(i)).collect();
     hits.sort_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
     hits.truncate(MAX_HITS);
     hits
 }
 
-/// The median and the median absolute deviation of `v`.
+/// The median and the median absolute deviation of `v` (the harness's
+/// score spread).
+#[cfg(test)]
 pub fn median_and_mad(v: &[f32]) -> (f32, f32) {
     let mut s: Vec<f32> = v.iter().copied().filter(|x| x.is_finite()).collect();
     if s.is_empty() {
@@ -208,15 +213,38 @@ mod tests {
         scores[20] = 0.35;
         scores[30] = 0.3;
         scores[40] = 0.5; // the accident
-        let hits = cut(&scores, |i| i == 40, CLOSENESS_DEFAULT);
+        let hits = cut(&scores, |i| i == 40, 3.5);
         assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [10, 20, 30]);
         assert!(hits[0].1 > hits[1].1 && hits[1].1 > hits[2].1, "best first");
-        // Looser finds more, stricter fewer, and the range is clamped.
-        assert!(cut(&scores, |_| false, CLOSENESS_MIN).len() >= 4);
-        assert!(cut(&scores, |_| false, 100.0).len() <= cut(&scores, |_| false, CLOSENESS_MAX).len());
-        assert!(cut(&[], |_| false, CLOSENESS_DEFAULT).is_empty());
-        // A flat field: nothing stands out.
-        assert!(cut(&vec![0.2; 50], |_| false, CLOSENESS_DEFAULT).is_empty());
+        // Looser finds more, stricter fewer.
+        assert!(cut(&scores, |_| false, 2.0).len() >= 4);
+        assert!(cut(&scores, |_| false, 100.0).len() <= cut(&scores, |_| false, 6.0).len());
+        assert!(cut(&[], |_| false, 3.5).is_empty());
+        // A flat field: nothing stands out — which is why the app uses the
+        // probability rule instead.
+        assert!(cut(&vec![0.2; 50], |_| false, 3.5).is_empty());
+        assert_eq!(cut_by_probability(&vec![0.2; 50], |_| false, CLOSENESS_DEFAULT).len(), 50);
+    }
+
+    #[test]
+    fn the_closeness_range_is_a_probability_floor_with_higher_stricter() {
+        assert!(CLOSENESS_MIN < CLOSENESS_DEFAULT && CLOSENESS_DEFAULT < CLOSENESS_MAX);
+        assert!(CLOSENESS_MIN > 0.0 && CLOSENESS_MAX < 1.0);
+        // The sample's landmarks: background out at every setting, a plain
+        // fursuit in at every setting, the weak camera hit in by default,
+        // the dark frames out by default.
+        let (background, dark, camera, fursuit) = (0.03f32, 0.089, 0.137, 0.184);
+        for c in [CLOSENESS_MIN, CLOSENESS_DEFAULT, CLOSENESS_MAX] {
+            let hits = cut_by_probability(&[background, dark, camera, fursuit], |_| false, c);
+            assert!(hits.iter().all(|h| h.0 != 0), "{c}: background");
+            assert!(hits.iter().any(|h| h.0 == 3), "{c}: fursuit");
+        }
+        let default = cut_by_probability(&[background, dark, camera, fursuit], |_| false, CLOSENESS_DEFAULT);
+        assert_eq!(default.iter().map(|h| h.0).collect::<Vec<_>>(), [3, 2]);
+        assert!(cut_by_probability(&[camera], |_| false, CLOSENESS_MAX).is_empty(), "stricter drops the weak hit");
+        assert_eq!(cut_by_probability(&[dark], |_| false, CLOSENESS_MIN).len(), 1, "looser admits the dark frame");
+        // Out-of-range settings are clamped, not taken literally.
+        assert_eq!(cut_by_probability(&[fursuit], |_| false, 5.0).len(), cut_by_probability(&[fursuit], |_| false, CLOSENESS_MAX).len());
     }
 
     #[test]
@@ -232,9 +260,9 @@ mod tests {
             assert!((match_probability(c) - p).abs() < 1e-4, "{p}");
         }
         let scores = [0.03, 0.20, 0.15, 0.12, 0.19];
-        let hits = cut_by_probability(&scores, |i| i == 4, 0.5);
+        let hits = cut_by_probability(&scores, |i| i == 4, 0.3);
         assert_eq!(hits.iter().map(|h| h.0).collect::<Vec<_>>(), [1, 2], "best first, the accident skipped");
-        assert!(cut_by_probability(&scores, |_| false, 0.999).is_empty());
+        assert!(cut_by_probability(&[0.10, 0.03], |_| false, CLOSENESS_MAX).is_empty());
     }
 
     #[test]

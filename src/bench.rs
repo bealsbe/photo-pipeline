@@ -422,9 +422,18 @@ fn bench_search_index() {
     // Queries: the first pays the text helper's start, the rest are warm.
     let mut stream = Box::pin(bus::stream(&rx));
     let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-    for (seq, q) in ["camera", "car", "food", "fireworks", "dog", "sunset", "crowd", "cake", "snow", "camera"].iter().enumerate() {
+    // Each query at the default closeness, then at the loosest setting, to
+    // show the margin; the last repeats the first for the text cache.
+    let queries = ["fursuit", "people dancing", "camera", "car", "dog", "food", "fireworks", "sunset", "crowd"];
+    let runs: Vec<(&str, f32)> = queries
+        .iter()
+        .map(|q| (*q, crate::search::CLOSENESS_DEFAULT))
+        .chain(queries.iter().map(|q| (*q, crate::search::CLOSENESS_MIN)))
+        .chain(std::iter::once(("fursuit", crate::search::CLOSENESS_DEFAULT)))
+        .collect();
+    for (seq, (q, closeness)) in runs.into_iter().enumerate() {
         let t = Instant::now();
-        engine.query(seq as u64, q, crate::search::CLOSENESS_DEFAULT);
+        engine.query(seq as u64, q, closeness);
         let hits = rt.block_on(async {
             use iced::futures::StreamExt;
             loop {
@@ -439,7 +448,7 @@ fn bench_search_index() {
                 }
             }
         });
-        println!("query {q:>10}  {:>4} hits  {:>8.1} ms", hits.unwrap_or(0), ms(t));
+        println!("query {q:>16} at {closeness:<7}  {:>4} hits  {:>8.1} ms", hits.unwrap_or(0), ms(t));
     }
     engine.shutdown();
     std::thread::sleep(Duration::from_millis(200));

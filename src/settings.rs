@@ -157,11 +157,14 @@ impl Settings {
         self.search_recent.clear();
     }
 
-    /// The closeness, kept within the slider's range (an old or edited
-    /// settings file can't push it outside).
+    /// The closeness to search with.  A value outside the slider's range
+    /// means the default: an earlier build saved the setting on another
+    /// scale (2–6, standard deviations above the spread) and a file edited
+    /// by hand could hold anything; neither is a match probability.
     pub fn closeness(&self) -> f32 {
-        if self.search_closeness.is_finite() {
-            self.search_closeness.clamp(crate::search::CLOSENESS_MIN, crate::search::CLOSENESS_MAX)
+        let c = self.search_closeness;
+        if c.is_finite() && (crate::search::CLOSENESS_MIN..=crate::search::CLOSENESS_MAX).contains(&c) {
+            c
         } else {
             crate::search::CLOSENESS_DEFAULT
         }
@@ -387,8 +390,16 @@ mod tests {
         assert_eq!((py.library_folder.as_str(), py.view_index), ("/mnt/nas/lib", 2));
         assert_eq!(py.search_device, crate::ml::Device::Gpu);
         assert!(py.search_index_exports && py.search_recent.is_empty());
-        let odd = Settings { search_closeness: 99.0, ..Settings::default() };
-        assert_eq!(odd.closeness(), crate::search::CLOSENESS_MAX);
+        // Values outside the range mean the default: a settings file from
+        // the build whose closeness was 2–6, a hand-edited one, or NaN.
+        for old in [3.5f32, 2.0, 6.0, 99.0, 0.0, -1.0, f32::NAN] {
+            let s = Settings { search_closeness: old, ..Settings::default() };
+            assert_eq!(s.closeness(), crate::search::CLOSENESS_DEFAULT, "{old}");
+        }
+        let kept = Settings { search_closeness: crate::search::CLOSENESS_MAX, ..Settings::default() };
+        assert_eq!(kept.closeness(), crate::search::CLOSENESS_MAX);
+        let kept = Settings { search_closeness: 0.01, ..Settings::default() };
+        assert_eq!(kept.closeness(), 0.01);
         let text = serde_json::to_string(&Settings { search_device: crate::ml::Device::Cpu, ..Settings::default() }).unwrap();
         assert!(text.contains(r#""search_device":"cpu""#));
     }
