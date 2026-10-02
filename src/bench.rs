@@ -354,3 +354,94 @@ fn bench_bursts() {
         );
     }
 }
+
+/// Library search (plan §9): the first index of a library through the
+/// real engine and helper, then queries.
+///
+/// ```text
+/// PP_BENCH_LIBRARY=<library root> PP_MODEL_DIR=<models> [PP_BENCH_DEVICE=gpu|cpu] \
+///     cargo test --release -- --ignored --nocapture --exact bench::bench_search_index
+/// ```
+///
+/// Reads the library only (a scratch folder of symlinks is fine); the
+/// index goes to a temporary folder that is removed at the end.  Prints
+/// the time per shot (the share's bandwidth decides on the card), the
+/// helper's device report, and the time of ten queries.
+#[test]
+#[ignore]
+fn bench_search_index() {
+    use crate::ml::Device;
+    use crate::model::library_cache::{self, Store};
+    use crate::model::library_index;
+    use crate::search::engine::{Config, Engine};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let Ok(dir) = std::env::var("PP_BENCH_LIBRARY") else { return };
+    assert!(std::env::var("PP_MODEL_DIR").is_ok(), "PP_MODEL_DIR must point at the model folder");
+    let device = match std::env::var("PP_BENCH_DEVICE").as_deref() {
+        Ok("cpu") => Device::Cpu,
+        _ => Device::Gpu,
+    };
+    let dir = PathBuf::from(dir);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let scanned = library_cache::scan(&dir, None, true, &cancelled, &|_| {}).unwrap().unwrap();
+    let store = parking_lot::Mutex::new(Store::new(dir.clone()));
+    let lib = Arc::new(library_index::index_from_tree(&dir, &scanned.tree, &store, &cancelled).unwrap());
+    println!("library         {:>6} shots in {} days", lib.total_shots, lib.len());
+    for d in lib.days.values() {
+        println!("  {}  {:>5} shots  {:>5} files  ({} JPG, {} RAW)", d.date, d.shot_count, d.files.len(), d.jpg_count, d.raw_count);
+    }
+    let scratch = std::env::temp_dir().join(format!("pp-bench-search-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&scratch);
+    let (bus, rx) = bus::channel();
+    let config = Config { factory: crate::ml::client::Client::factory(), models_ready: Box::new(|| true), index_dir: Some(scratch.clone()) };
+    let engine = Engine::with_config(bus, device, true, config);
+    engine.on_library(lib.clone());
+    let t = Instant::now();
+    engine.start_first_index(&[crate::ml::models::ModelId::Siglip2]);
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let status = loop {
+        let s = engine.status();
+        if s.stopped.is_some() || (s.first_index_asked && s.pass.is_none() && s.indexed_shots > 0) {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "the index didn't finish: {s:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let elapsed = ms(t);
+    println!(
+        "first index     {:>6} shots  {:>8.0} ms  ({:.1} ms per shot) on {} ({:?}, self-check {:?}); stopped: {:?}",
+        status.indexed_shots,
+        elapsed,
+        elapsed / status.indexed_shots.max(1) as f64,
+        device.label(),
+        status.device.name,
+        status.device.self_check,
+        status.stopped
+    );
+    // Queries: the first pays the text helper's start, the rest are warm.
+    let mut stream = Box::pin(bus::stream(&rx));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    for (seq, q) in ["camera", "car", "food", "fireworks", "dog", "sunset", "crowd", "cake", "snow", "camera"].iter().enumerate() {
+        let t = Instant::now();
+        engine.query(seq as u64, q, crate::search::CLOSENESS_DEFAULT);
+        let hits = rt.block_on(async {
+            use iced::futures::StreamExt;
+            loop {
+                let Some(batch) = stream.next().await else { return None };
+                for ev in batch {
+                    if let BgEvent::SearchResults { seq: s, hits, error, .. } = ev {
+                        if s as usize == seq {
+                            assert!(error.is_none(), "{q}: {error:?}");
+                            return Some(hits.len());
+                        }
+                    }
+                }
+            }
+        });
+        println!("query {q:>10}  {:>4} hits  {:>8.1} ms", hits.unwrap_or(0), ms(t));
+    }
+    engine.shutdown();
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = std::fs::remove_dir_all(&scratch);
+}

@@ -55,6 +55,24 @@ start=$SECONDS
 cargo build --release
 echo "Built target/release/photo-pipeline in $((SECONDS - start)) s"
 
+# ── The binary must start on its own ─────────────────────────────────────
+# ONNX Runtime's WebGPU provider lives in libwebgpu_dawn.so beside the
+# binary, found through its runpath (build.rs).  Check it the way the
+# desktop entry will meet it: no LD_LIBRARY_PATH, no cargo environment.
+bin=target/release/photo-pipeline
+if missing="$(env -u LD_LIBRARY_PATH ldd "$bin" | grep 'not found')"; then
+    echo "The binary can't find its shared libraries:" >&2
+    echo "$missing" >&2
+    exit 1
+fi
+# The helper is the same binary with a flag; without models it must still
+# load and answer with a plain "failed" line (it then exits 1), not crash.
+reply="$(env -u LD_LIBRARY_PATH "$bin" --ml-worker --device cpu --models /nonexistent </dev/null 2>/dev/null || true)"
+if [[ $reply != *'"reply":"failed"'* ]]; then
+    echo "The search helper (photo-pipeline --ml-worker) doesn't start: ${reply:-no reply}" >&2
+    exit 1
+fi
+
 if ((run_tests)); then
     echo "Running unit tests…"
     cargo test --release

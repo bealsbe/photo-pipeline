@@ -2078,6 +2078,10 @@ impl App {
                 BgEvent::GlobalMenu(present) => self.global_menu_present = present,
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
+                // Library search (`crate::search::Engine`): the search page
+                // takes these over when it lands; until then they are
+                // delivered and dropped.
+                BgEvent::SearchStatus(_) | BgEvent::SearchResults { .. } | BgEvent::ModelDownload { .. } => {}
             }
         }
         if self.scan_dirty && self.last_refresh.elapsed() >= Duration::from_millis(200) {

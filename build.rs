@@ -97,6 +97,14 @@ fn main() {
     println!("cargo:rerun-if-changed=native/libraw_shim.cpp");
     println!("cargo:rerun-if-changed=native/jpeg_shim.c");
     println!("cargo:rerun-if-changed=build.rs");
+    // ONNX Runtime's WebGPU provider needs libwebgpu_dawn.so, which `ort`'s
+    // copy-dylibs puts beside the binary (target/<profile>/).  A runpath of
+    // the binary's own folder finds it however the app is launched (run.sh,
+    // the desktop entry, the --ml-worker helper); `$ORIGIN/..` serves test
+    // binaries, which live one level down in deps/.  The `$` reaches the
+    // linker as is: no shell is involved.
+    #[cfg(target_os = "linux")]
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN:$ORIGIN/..");
 
     let mut build = cc::Build::new();
     build

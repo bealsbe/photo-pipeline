@@ -1509,3 +1509,104 @@ how).  Contact sheets show people's faces and stay out of the repository.
 | `export_onnx.py`, `bruteforce.py`, `compare_dump.py`, `rsort/`, `rsgpu/` | ONNX export, CPU timings, search cost; the Rust `ort` crates (CPU and WebGPU) |
 | `out/` | Embeddings (`*.npy`), detections, groups, tags, query rankings |
 | `sheets/` | Contact sheets: `q_*` queries, `d_*`/`neg_*` contrast, `tag_*`/`tags_*` tags, `det_*` detectors, `subj_*` groups, `more_*` "more like this", `faces*` people |
+
+---
+
+## As built — phases 0 and 1 (backend)
+
+*What the code does where it differs from, or settles, the sections
+above.  Written as the backend landed (2026-10-02); the search page is the
+UI round's.*
+
+### Models (§4.4, decision 13)
+
+- **Source.**  Immich keeps no ONNX export of the checkpoint the study
+  measured (SigLIP2 ViT-B/16 at 256 px; its B/16 is the 224 px
+  checkpoint, fp32 only, 1.5 GB).  The app pins Hugging Face's
+  `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js
+  export of `google/siglip2-base-patch16-256` (Apache-2.0), maintained by
+  the Hugging Face staff: the measured checkpoint.
+- **Precision, measured here.**  The fp16 *image* tower gives wrong
+  answers on WebGPU (cosine 0.61 against the processor's answers; the
+  self-check refuses it) and runs ten times slower on the processor
+  (300 ms a photo: ONNX Runtime casts around every fp16 op on x86).  So
+  the image tower is the **fp32 file (372 MB)**.  The fp16 *text* tower's
+  answers equal fp32's (cosine 1.000) and a query costs ~50 ms against
+  ~30 on the processor, so it stays fp16 (565 MB).  With the tokenizer
+  (34 MB): **971 MB**, not the ~750 MB the dialog copy assumed.
+- The fp32 image tower passes the self-check on this card: cosine
+  0.999999, largest difference 8.6e-7 over four fixed inputs (the
+  tolerance is cosine ≥ 0.995, difference ≤ 0.02, provisional).
+  Vectors from the Rust pipeline equal the study's open_clip embeddings
+  (cosine ≥ 0.9995 on 64 previews), so §3's numbers carry over.
+
+### The helper and the client (§4.3)
+
+As planned: `photo-pipeline --ml-worker --device gpu|cpu`, JSON lines on
+its pipes, nice 10 and the idle I/O class, exit after 3 idle minutes.
+Additions: `--text-only` (the text tower alone, on the processor, for
+queries after a card failure); text requests are answered between image
+chunks (32 photos on the card, 8 on the processor), so a query waits at
+most a fraction of a second while indexing runs; previews are read and
+prepared on 6 threads ahead of inference.  Measured: 1 779 local previews
+in 10.0 s on the card (5.6 ms a photo, reading and decoding included);
+the helper starts in ~1.2 s.  `libwebgpu_dawn.so` sits beside the binary
+and is found through a runpath (`$ORIGIN`); `build.sh` checks both.
+
+### Costs measured on the share (`bench::bench_search_index`)
+
+Scratch libraries of symlinks into the archive, read over SMB, the index
+in a temporary folder, the card: a Sony day (126 shots, MPF previews)
+runs at 32 photos per ~230 ms once going, **7.2 ms a shot**, the plan's
+number; the whole bench including the helper's start and the library
+diff took 17 ms a shot on so small a set.  Older bodies' JPGs have no
+MPF preview, so the whole JPG is read and decoded at a DCT reduction:
+on the Canon days (2017–18) chunks took ~535 ms, **~17 ms a shot**.  The
+library's 3 230 RAW-only shots go through LibRaw's smallest preview of at
+least 300 px.  Queries: ~33 ms with the text encoded (27 ms of it in the
+text tower), 7 ms when the text is cached; the engine prints both with
+`PP_PROFILE=1`.
+
+### The index (§6)
+
+As planned, with these details: the vectors file is append-only in sealed
+blocks (a torn tail is dropped), compacted on load when more than a tenth
+of its rows have no path; a file of another model, weights or
+preprocessing version is not read (the index is simply built again:
+"the old file answers until the new one is complete" is not built in
+phase 1, nor for Rebuild, which clears first).  A renamed or copied file
+costs one preview read and one inference, after which its known key is
+mapped without a new row (the plan's "one head read" short cut isn't
+built; renames in the library are rare).  Burst stacks come from
+`Bursts::find` over the indexed shots when a query needs them.
+
+### Closeness (§7.2, UI 4) — open until the labels arrive
+
+The relative cut (a score above the query's own spread, in robust
+standard deviations) fails for things most of the library shows: on the
+1 779-preview sample "fursuit" (74 % of it) gets **no** hits at any
+setting, "crowd" one, "dog" none.  SigLIP2 was trained with a sigmoid
+pairing loss whose scale and bias are part of its weights (e^4.7265 =
+112.9 and −16.77); σ(scale·cosine + bias) is the model's own absolute
+match probability and is comparable between queries: "fursuit" top 0.98,
+median 0.70; a weak "camera" hit at cosine 0.137 → 0.21; background
+< 1e-4.  Both rules are implemented (`query::cut`,
+`query::cut_by_probability`) and the phase 0 harness scores both on the
+labelled set; the slider keeps its meaning (higher = stricter) whichever
+wins, and its range and default are set then.
+
+### Phase 0 so far
+
+- Harness: `src/search/eval.rs` (ignored tests `candidates` and
+  `score_labels`; `PP_MODEL_DIR`, `PP_EVAL_PREVIEWS`, `PP_EVAL_OUT`,
+  `PP_EVAL_LABELS`).  36 generic queries, the top 50 of each as
+  candidates, five prompt templates compared by mAP, P@10/P@50, recall in
+  the pool, both closeness rules swept, the fursuit contrast on animal
+  words.
+- The labelling page is local HTML in the scratch folder (real photos;
+  never published), pre-ticked by eye; the user's labels decide the
+  prompt template, the closeness rule, range and default, and whether
+  the animal-word contrast holds (dog: the real dogs rank 1 and 45 of 50;
+  the model's "fursuit beats it" flag marks 47 of the other 48).
+- Not done in this round: the face-model comparison (lower priority, no
+  people set labelled yet).

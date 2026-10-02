@@ -77,7 +77,7 @@ const MAKER_NOTE_MAX_ENTRIES: usize = 512;
 /// What the header says about how a frame was shot, beyond its capture
 /// time: enough to find the frames of one shutter press and where the
 /// camera focused.  Read with the capture time, from the same bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ShotMeta {
     /// Milliseconds past the capture time's second (EXIF SubSecTimeOriginal),
     /// if the camera recorded them.
@@ -480,7 +480,7 @@ fn read_header(path: &Path, is_raw: bool, want_meta: bool) -> (Option<NaiveDateT
 }
 
 /// From a RAW's first bytes (`file` for anything past them).
-fn shot_from_raw_head(head: Vec<u8>, file: &mut File, want_meta: bool) -> (Option<NaiveDateTime>, ShotMeta) {
+pub(crate) fn shot_from_raw_head(head: Vec<u8>, file: &mut File, want_meta: bool) -> (Option<NaiveDateTime>, ShotMeta) {
     let Some(end) = Endian::from_header(&head).filter(|_| head.len() >= 8) else { return (None, ShotMeta::default()) };
     let ifd0 = end.u32(&head[4..8]);
     let whole = head.len() < CAPTURE_HEAD_RAW;
@@ -488,7 +488,7 @@ fn shot_from_raw_head(head: Vec<u8>, file: &mut File, want_meta: bool) -> (Optio
 }
 
 /// From a JPEG's header bytes.
-fn shot_from_jpeg_head(head: &[u8], want_meta: bool) -> (Option<NaiveDateTime>, ShotMeta) {
+pub(crate) fn shot_from_jpeg_head(head: &[u8], want_meta: bool) -> (Option<NaiveDateTime>, ShotMeta) {
     match exif_tiff(head) {
         Some((tiff, end, ifd0, _)) => shot_from_tiff(&mut BytesSource(tiff), end, ifd0, want_meta),
         None => (None, ShotMeta::default()),

@@ -84,6 +84,13 @@ pub fn decode_jpeg_full(data: &[u8]) -> Result<Pixels, String> {
     turbo_decode(data, 1, Out::Native)
 }
 
+/// Decode at 1/`denom` scale (1, 2, 4 or 8) in the JPEG's own channels
+/// (grayscale stays one channel, the rest RGB): the cheapest way to a
+/// small colour image for the search model's input.
+pub fn decode_jpeg_full_scaled(data: &[u8], denom: u32) -> Result<Pixels, String> {
+    turbo_decode(data, denom, Out::Native)
+}
+
 /// Full-resolution decode straight to RGBA, ready for the GPU.
 pub fn decode_jpeg_rgba(data: &[u8]) -> Result<Pixels, String> {
     turbo_decode(data, 1, Out::Rgba)
