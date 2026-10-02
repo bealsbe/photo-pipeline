@@ -44,7 +44,11 @@ pub const MOMENT_GAP_MS: i64 = 2000;
 /// three of the next) look alike: pHash within this.
 pub const MOMENT_HASH: u32 = 16;
 
-/// Accidental frames: almost black (a lens cap, a pocket) …
+/// Accidental frames: almost black (a lens cap, a pocket) with nothing
+/// anywhere: the 99th percentile at most this and the whole frame
+/// ([`Features::global`]) below [`EMPTY_GLOBAL`].  Black frames measure
+/// 0.13–0.15; a night shoot's sharp, underexposed shots of a DJ booth,
+/// which the percentile alone called black, 5.9–10 …
 pub const BLACK_P99: u8 = 24;
 /// … almost white (pointed at a light) …
 pub const BLANK_P1: u8 = 235;
@@ -53,7 +57,7 @@ pub const BLANK_P1: u8 = 235;
 pub const FLAT_SPAN: u8 = 40;
 /// … very dark, with nothing sharp in it and nothing anywhere: the median
 /// luma at most [`DARK_P50`], the sharpest area below [`DARK_LOCAL`] and
-/// the whole frame ([`Features::global`]) below [`DARK_GLOBAL`] …
+/// the whole frame ([`Features::global`]) below [`EMPTY_GLOBAL`] …
 ///
 /// A dim frame (median at most [`DIM_P50`]) with nothing sharp that
 /// misses either of the other two is a dim photo, not an accident: it is
@@ -67,8 +71,11 @@ pub const FLAT_SPAN: u8 = 40;
 /// other shoots only accidents measure below 1.3.
 pub const DARK_P50: u8 = 6;
 pub const DARK_LOCAL: f32 = 12.0;
-pub const DARK_GLOBAL: f32 = 1.25;
 pub const DIM_P50: u8 = 12;
+/// "Nothing anywhere" for the black and the dark rules: the whole frame's
+/// sharpness below this.  Accidents measure 0.13–1.11; the real photos
+/// those rules used to catch, 1.02 and up (dim) and 5.9 and up (black).
+pub const EMPTY_GLOBAL: f32 = 1.25;
 /// … or nothing sharp anywhere at any exposure (a blurred wall).
 pub const FEATURELESS_LOCAL: f32 = 5.0;
 
@@ -630,7 +637,7 @@ fn to_review(coll: &Collection, id: RecordId) -> bool {
 
 fn accident(f: &Features) -> Option<Accident> {
     let local = f.local();
-    if f.p99() <= BLACK_P99 {
+    if f.p99() <= BLACK_P99 && f.global < EMPTY_GLOBAL {
         Some(Accident::Black)
     } else if f.p1() >= BLANK_P1 {
         Some(Accident::Blank)
@@ -639,7 +646,7 @@ fn accident(f: &Features) -> Option<Accident> {
     } else if f.p50() <= DIM_P50 && local < DARK_LOCAL {
         // Dim with nothing sharp: an accident only when darker still and
         // empty all over; else a dim photo (perhaps soft, never featureless).
-        (f.p50() <= DARK_P50 && f.global < DARK_GLOBAL).then_some(Accident::Dark)
+        (f.p50() <= DARK_P50 && f.global < EMPTY_GLOBAL).then_some(Accident::Dark)
     } else if local < FEATURELESS_LOCAL {
         Some(Accident::Featureless)
     } else {
@@ -885,6 +892,25 @@ mod tests {
         assert_eq!((a3.relative, a3.best_alike, a3.soft), (1.0, None, None));
     }
 
+    #[test]
+    fn almost_black_is_an_accident_only_with_nothing_anywhere() {
+        // A lens cap: under the black percentile and empty all over.
+        let cap = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
+        assert!(cap.p99() <= BLACK_P99 && cap.global < EMPTY_GLOBAL, "{} {}", cap.p99(), cap.global);
+        assert_eq!(accident(&cap), Some(Accident::Black));
+        // A sharp shot underexposed as far (a stage before its lights
+        // come up): just as black by its percentile, but full of edges.
+        let stage = feats(&texture(192, 128, 3).darker(0.08));
+        assert!(stage.p99() <= BLACK_P99 && stage.global >= EMPTY_GLOBAL, "{} {}", stage.p99(), stage.global);
+        assert_eq!(accident(&stage), None);
+        // Near black and soft, with a faint weave all over (a dark cloth
+        // up close): not empty, so not "almost black", but one tone with
+        // nothing sharp, which is still an accident.
+        let cloth = feats(&Img::from_fn(192, 128, |x, y| 3.0 + ((x + 2 * y) % 9 < 3) as u8 as f32 * 2.0).blur(1));
+        assert!(cloth.p99() <= BLACK_P99 && cloth.global >= EMPTY_GLOBAL && cloth.local() < SOFT_LOCAL, "{} {} {}", cloth.p99(), cloth.global, cloth.local());
+        assert_eq!(accident(&cloth), Some(Accident::Flat));
+    }
+
     /// A dim scene, `dark` of full exposure, with a brighter subject in the
     /// middle at `subject`, all blurred by `blur`, plus sensor noise.
     fn dim(dark: f32, subject: f32, blur: usize, noise: f32) -> Features {
@@ -901,16 +927,16 @@ mod tests {
         // Darker than DARK_P50, but the frame holds detail all over (the
         // noise of a high ISO, edges): a dim photo.
         let noisy = dim(0.04, 0.5, 6, 0.3);
-        assert!(old(&noisy) && noisy.p50() <= DARK_P50 && noisy.global >= DARK_GLOBAL, "{} {} {}", noisy.p50(), noisy.local(), noisy.global);
+        assert!(old(&noisy) && noisy.p50() <= DARK_P50 && noisy.global >= EMPTY_GLOBAL, "{} {} {}", noisy.p50(), noisy.local(), noisy.global);
         assert_eq!(accident(&noisy), None);
         // Empty all over and with nothing sharp, but not that dark: a dim
         // photo too, and not "featureless" either.
         let murky = dim(0.06, 0.5, 12, 0.0);
-        assert!(old(&murky) && murky.p50() > DARK_P50 && murky.global < DARK_GLOBAL && murky.local() < FEATURELESS_LOCAL);
+        assert!(old(&murky) && murky.p50() > DARK_P50 && murky.global < EMPTY_GLOBAL && murky.local() < FEATURELESS_LOCAL);
         assert_eq!(accident(&murky), None);
         // Darker still and empty all over: an accident.
         let swept = dim(0.03, 0.5, 12, 0.0);
-        assert!(swept.p50() <= DARK_P50 && swept.global < DARK_GLOBAL);
+        assert!(swept.p50() <= DARK_P50 && swept.global < EMPTY_GLOBAL);
         assert_eq!(accident(&swept), Some(Accident::Dark));
         // The two dim photos are judged for focus like any frame: nothing
         // sharp, so out of focus (and not counted as accidental).
@@ -933,7 +959,8 @@ mod tests {
     fn nothing_sharp_is_soft_anywhere_and_dark_featureless_frames_are_accidents() {
         let soft_single = feats(&texture(192, 128, 3).blur(9));
         assert!(soft_single.local() < SOFT_LOCAL);
-        let black = feats(&Img::from_fn(192, 128, |x, y| ((x + y) % 7) as f32));
+        // A lens cap: near black, only the sensor's noise in it.
+        let black = feats(&Img::from_fn(192, 128, |_, _| 3.0).noisy(0.2, 3));
         let white = feats(&Img::from_fn(192, 128, |x, _| 245.0 + (x % 5) as f32));
         // A dim, even wall: a narrow span of tones, soft.
         let wall = feats(&texture(192, 128, 5).blur(8).darker(0.15));

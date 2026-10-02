@@ -35,6 +35,8 @@ The user's answers to the questions the UI pass raised.
 | 3 | Where a burst's sheet opens | **On the frame you came from**, the sharpest marked with its ring. | As built. |
 | 4 | Hints in the list view | **Not now.** | As built (grid, quick look, viewer, sheet, compare). |
 | 5 | What the Duplicates filter shows | **Both copies**, the one kept and the ones suggested for pruning. | As built ("Possible problems" lists only the copies). |
+| 6 | "Almost black" on night shoots: sharp, underexposed shots called accidents | **Fix now**: an almost black frame must be empty too, by the dark rule's whole-frame measure. | The black rule: p99 ≤ 24 and the whole frame < 1.25.  See "The black rule needs nothing anywhere" below. |
+| 7 | "Almost one tone" on night shoots | **Later**: a study of its own. | Nothing yet; see "Open: one tone on night shoots" below. |
 
 ### Phase 1 as built (2026-09-30)
 
@@ -120,7 +122,8 @@ entropy, 64-bit dHash and pHash taken *as shown*.  1.35 ms per preview.
   of the best frame of its press that looks like it (pHash ≤ 16) while
   `local` < 60.  Good night shots start at local 21; the 13:50
   minimum-focus-distance frames are 5–10.
-- *Accidental*: p99 ≤ 24 (black); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
+- *Accidental*: p99 ≤ 24 with the whole frame < 1.25 (black, empty:
+  2026-10-01); p1 ≥ 235 (white); p99 − p1 ≤ 40 with
   local < 15 (one tone: wall, sleeve); median ≤ 6 with local < 12 and the
   whole frame (`Features::global`) < 1.25 (dark, nothing sharp, nothing
   anywhere: tightened 2026-10-01, see "The dark rule, tightened"); local
@@ -302,14 +305,53 @@ engine's soft count doesn't change (those frames were soft already); the
 hints now show them as out of focus rather than accidental (night shoot,
 Out of focus: 428 → 574 files).
 
-**Still open (not decided).**  On the same night shoot other rules call
-dim real subjects accidents too: *one tone* (all 21 of its captures:
-dancers lit dimly, a luma span ≤ 40), *almost black* (4 of 7: sharp shots
-of a DJ booth, sharpest area 88–145) and *nothing in focus anywhere* (2
-of 6).  The one-tone accident found elsewhere (a wall) measures 1.56 over
-the whole frame, so the whole-frame test wouldn't separate those;
-requiring "nothing sharp" of the black rule would (true black frames:
-sharpest area 0.3–0.4).
+### The black rule needs nothing anywhere (2026-10-01)
+
+Decision 6 of 2026-10-01.  The black rule (99th percentile ≤ 24) also
+caught 4 captures (8 files) on the night shoot that are sharp,
+underexposed shots of a DJ booth: a whole-frame sharpness of 5.94–9.98
+(sharpest area 88–145), between frames of the same scene with its lights
+blown.  The black frames themselves (a lens cap, twice on the night
+shoot and once elsewhere) measure 0.13–0.15.
+
+**The rule.**  Almost black is now p99 ≤ 24 *and* the whole frame below
+1.25: the same "nothing anywhere" cut-off as the dark rule, one constant
+(`EMPTY_GLOBAL`).  It sits 8× above the black frames and 4.75× below the
+nearest DJ-booth shot, near the geometric middle of the gap (0.94), and
+no accident from either rule measures between 1.11 and 1.25.
+
+**Each frame the black rule caught, after:**
+
+| Frame | Whole frame | Sharpest area | After | Why that's right |
+|---|---|---|---|---|
+| Lens cap ×2 (night) | 0.13, 0.15 | 0.3 | black | Empty: a true accident. |
+| Lens cap (elsewhere) | 0.13 | 0.4 | black | The same. |
+| DJ booth ×4 (night) | 5.94–9.98 | 88–145 | not accidental | A real, sharp photo; it isn't soft either. |
+| Dark cloth up close (night) | 2.59 | 5.2 | one tone | Near black with a faint weave all over, right after a run of DJ shots: an accident.  Not empty, so the black rule lets it go, and the next rule (span 12 ≤ 40, nothing sharp) catches it. |
+
+| Shoot | Black rule, files (captures) | All accidental, files (captures) |
+|---|---|---|
+| Night shoot, exported twice | 14 (7) → 4 (2) | 72 (36) → 64 (32) |
+| Event day | 0 → 0 | 0 → 0 |
+| Tuning samples S1, S2, S3 | 0 → 0 | 1 → 1, 0 → 0, 2 → 2 |
+| Four more library days | 1 → 1 | 2 → 2 |
+
+No true accident was lost (the cloth changes label, not status).  Before
+both changes the night shoot had 218 accidental files (109 captures);
+now 64 (32).
+
+### Open: one tone on night shoots (2026-10-01)
+
+Decision 7 of 2026-10-01: a later study.  The one-tone rule (p99 − p1 ≤ 40
+with a sharpest area below 15) calls all 21 of its captures on the night
+shoot accidents (42 files), and every one is a dim photo of dancers: a
+luma span of 27–40 at medians 4–10, sharpest areas 4.9–14.2.  The
+whole-frame test that settled the black and dark rules doesn't separate
+them: they measure 1.17–2.73, and the one-tone accident found elsewhere (a
+wall) 1.56, and the dark cloth above, now one tone too, 2.59.  *Nothing in
+focus anywhere* has 2 dim subjects among its 6 night captures as well.
+Until then, these show as accidental in the hints, and *Prune accidental
+frames…* lists them with their thumbnails before marking anything.
 
 **Labelling (phase 0) is optional.**  None of the checks learn from data;
 labels only measure them and set cut-offs.  Lighter options than labelling
