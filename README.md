@@ -373,6 +373,12 @@ and `src/search`.
 - **Keys survive renames.**  A shot is identified by a digest of its file's
   size and first 64 KB, so Sort, export and copies keep its vector; a
   cropped JPG re-encoded by a Move export is indexed again.
+- **How close matches must be** (Preferences ▸ Search) is a floor on the
+  model's own match probability (SigLIP 2's trained calibration, so it
+  means the same for every query): looser shows weaker matches, stricter
+  only the plainest; the default (0.3 %) keeps empty and dark frames out
+  while a thing most of the library shows comes back whole.  A setting
+  saved by an earlier build on another scale falls back to the default.
 - **Nothing is written into the library**, no sidecar, no XMP; the index and
   the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
   and clears them).  Queries read no photos.

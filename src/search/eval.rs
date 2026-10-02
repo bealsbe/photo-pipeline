@@ -281,10 +281,10 @@ fn score_labels() {
         }
         per_query.push((q, scores));
     }
-    eprintln!("closeness sweep (z above the median in robust SDs): mean precision / recall / F1 over the labelled queries, mean hits");
+    eprintln!("relative sweep (z above the median in robust SDs, the rule the app doesn't use): mean precision / recall / F1 over the labelled queries, mean hits");
     let mut best = (0.0f64, 0.0f32);
-    let mut z = CLOSENESS_MIN;
-    while z <= CLOSENESS_MAX + 1e-6 {
+    let mut z = 2.0f32;
+    while z <= 6.0 + 1e-6 {
         let (mut ps, mut rs, mut fs, mut ns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (q, scores) in &per_query {
             let rel = &relevant[q];
@@ -304,12 +304,15 @@ fn score_labels() {
         }
         z += 0.25;
     }
-    eprintln!("best mean F1 {:.3} at closeness {:.2} (the default candidate; the slider's range is {CLOSENESS_MIN}–{CLOSENESS_MAX})", best.0, best.1);
+    eprintln!("best mean F1 {:.3} at z {:.2}", best.0, best.1);
 
-    // The absolute rule: the model's own match probability.
-    eprintln!("probability sweep (sigmoid of the trained scale and bias): mean precision / recall / F1, mean hits");
+    // The app's rule: the model's own match probability.
+    eprintln!(
+        "probability sweep (the app's rule; slider {CLOSENESS_MIN}–{CLOSENESS_MAX}, default {}): mean precision / recall / F1, mean hits",
+        query::CLOSENESS_DEFAULT
+    );
     let mut best_p = (0.0f64, 0.0f32);
-    for &p in &[0.01f32, 0.02, 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9] {
+    for &p in &[0.0003f32, 0.0005, 0.001, 0.002, 0.003, 0.005, 0.01, 0.02, 0.03, 0.05, 0.1, 0.2, 0.3] {
         let (mut ps, mut rs, mut fs, mut ns) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for (q, scores) in &per_query {
             let rel = &relevant[q];

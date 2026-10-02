@@ -1598,20 +1598,27 @@ mapped without a new row (the plan's "one head read" short cut isn't
 built; renames in the library are rare).  Burst stacks come from
 `Bursts::find` over the indexed shots when a query needs them.
 
-### Closeness (§7.2, UI 4) — open until the labels arrive
+### Closeness (§7.2, UI 4) — the probability rule, default provisional
 
-The relative cut (a score above the query's own spread, in robust
+The plan's relative cut (a score above the query's own spread, in robust
 standard deviations) fails for things most of the library shows: on the
 1 779-preview sample "fursuit" (74 % of it) gets **no** hits at any
 setting, "crowd" one, "dog" none.  SigLIP2 was trained with a sigmoid
 pairing loss whose scale and bias are part of its weights (e^4.7265 =
 112.9 and −16.77); σ(scale·cosine + bias) is the model's own absolute
-match probability and is comparable between queries: "fursuit" top 0.98,
-median 0.70; a weak "camera" hit at cosine 0.137 → 0.21; background
-< 1e-4.  Both rules are implemented (`query::cut`,
-`query::cut_by_probability`) and the phase 0 harness scores both on the
-labelled set; the slider keeps its meaning (higher = stricter) whichever
-wins, and its range and default are set then.
+match probability and is comparable between queries.  **The app uses
+it** (`query::cut_by_probability`; the user decided so on 2026-10-02,
+before the labels): the slider is a floor on that probability, higher
+stricter, over 0.03 %–30 % (cosine 0.077–0.141), **default 0.3 %**
+(cosine ≥ 0.098).  From the sample: the background sits below 1e-4 and
+the dark, empty frames near 1e-3, so both stay out; the plain hits sit
+between 3e-3 and 0.98 ("fursuit" top 0.98 and median 0.70, so it comes
+back whole; "camera" top 0.21; "car" and "food" tops 0.013 and 0.004,
+their one clear hit each).  At 1 % "food" and "cake" would have nothing;
+at 0.1 % the dark frames join "camera".  The user's labels fine-tune the
+default; the relative rule lives on only in the harness, for comparison.
+A closeness saved by the earlier build (2–6) is outside the new range and
+reads as the default.
 
 ### Phase 0 so far
 

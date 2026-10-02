@@ -764,7 +764,7 @@ impl Worker {
         let records = &ix.vectors.records;
         let resolver = self.resolver.as_ref();
         let known = |i: usize| resolver.is_some_and(|r| r.shots.contains_key(&records[i].key));
-        let cut = query::cut(&scores, |i| records[i].accidental || !known(i), closeness);
+        let cut = query::cut_by_probability(&scores, |i| records[i].accidental || !known(i), closeness);
         let Some(r) = resolver else { return Vec::new() };
         cut.into_iter()
             .filter_map(|(i, score)| {
