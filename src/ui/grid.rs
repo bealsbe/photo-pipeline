@@ -2153,23 +2153,25 @@ fn paint_select_bar(r: &mut Renderer, bounds: Rectangle, data: &GridData<'_>, al
     paint::text(r, "Done", done, t::T_BODY, paint::SEMIBOLD, c(t::ON_SIGNAL), HAlign::Center, bounds);
 }
 
-/// The hover text: the full file name (both, for a pair — the grid shows
-/// only the stem), then size and date.
+/// The hover text: each file's full path (both, for a pair — the grid shows
+/// only the stem, and after a Sort the halves sit in `RAW/` and `JPG/`), then
+/// size and date.
 pub fn tooltip_text(r: &PhotoRecord, pair: Option<&PhotoRecord>) -> String {
+    let path = |r: &PhotoRecord| r.path.display().to_string();
     let date = |r: &PhotoRecord| r.modified.local.format("%Y-%m-%d %H:%M").to_string();
     match pair {
         Some(other) => {
             let (raw, jpg) = if r.file_type == FileType::Raw { (r, other) } else { (other, r) };
             let newest = if raw.modified.local >= jpg.modified.local { raw } else { jpg };
             [
-                raw.filename(),
-                jpg.filename(),
+                path(raw),
+                path(jpg),
                 format!("RAW {}, JPG {}", util::fmt_size_whole(raw.file_size), util::fmt_size_whole(jpg.file_size)),
                 format!("Modified {}", date(newest)),
             ]
             .join("\n")
         }
-        None => [r.filename(), format!("{} file, {}", r.file_type.label(), util::fmt_size_whole(r.file_size)), format!("Modified {}", date(r))].join("\n"),
+        None => [path(r), format!("{} file, {}", r.file_type.label(), util::fmt_size_whole(r.file_size)), format!("Modified {}", date(r))].join("\n"),
     }
 }
 
@@ -2525,15 +2527,17 @@ mod tests {
 
     #[test]
     fn tooltip_names_both_halves_of_a_pair() {
-        let raw = rec("/s/20260724_0108_0001.ARW", 39 << 20, 200);
-        let jpg = rec("/s/20260724_0108_0001.JPG", 8 << 20, 100);
+        // After a Sort the halves sit in different folders: the full paths
+        // say where.
+        let raw = rec("/s/RAW/20260724_0108_0001.ARW", 39 << 20, 200);
+        let jpg = rec("/s/JPG/20260724_0108_0001.JPG", 8 << 20, 100);
         // RAW first, whichever half the tile shows.
         let (mb39, mb8) = (util::fmt_size_whole(39 << 20), util::fmt_size_whole(8 << 20));
-        let expected = format!("20260724_0108_0001.ARW\n20260724_0108_0001.JPG\nRAW {mb39}, JPG {mb8}\nModified ");
+        let expected = format!("/s/RAW/20260724_0108_0001.ARW\n/s/JPG/20260724_0108_0001.JPG\nRAW {mb39}, JPG {mb8}\nModified ");
         assert!(tooltip_text(&jpg, Some(&raw)).starts_with(&expected));
         assert!(tooltip_text(&raw, Some(&jpg)).starts_with(&expected));
         let single = tooltip_text(&jpg, None);
-        assert!(single.starts_with(&format!("20260724_0108_0001.JPG\nJPG file, {mb8}\nModified ")), "{single}");
+        assert!(single.starts_with(&format!("/s/JPG/20260724_0108_0001.JPG\nJPG file, {mb8}\nModified ")), "{single}");
     }
 
     #[test]

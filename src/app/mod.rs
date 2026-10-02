@@ -1652,7 +1652,9 @@ impl App {
     }
 
     fn run_cmd(&mut self, cmd: Cmd) -> Task<Message> {
-        self.side_expanded = false;
+        // Any command closes the side menu; Show menu labels flips it from
+        // how it was.
+        let was_expanded = std::mem::take(&mut self.side_expanded);
         self.menu = None;
         match cmd {
             Cmd::Open => self.pick_folder(FolderTarget::Working),
@@ -1699,7 +1701,7 @@ impl App {
             Cmd::Quit => self.quit(),
             Cmd::Shortcuts => self.open_shortcuts(),
             Cmd::SideMenu => {
-                self.side_expanded = !self.side_expanded;
+                self.side_expanded = !was_expanded;
                 Task::none()
             }
             Cmd::FolderBar => {
