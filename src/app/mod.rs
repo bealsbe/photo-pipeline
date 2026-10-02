@@ -2283,3 +2283,37 @@ mod review_filter_tests {
         assert_eq!((st.sort_key, st.sort_asc), (SortKey::Name, false));
     }
 }
+
+#[cfg(test)]
+mod view_index_tests {
+    use super::*;
+
+    /// The list view is gone: a settings file that last showed it opens
+    /// the grid, and the rest of it still loads.
+    #[test]
+    fn a_saved_list_view_opens_the_grid() {
+        let old: Settings = serde_json::from_str(r#"{"view_index": 0, "last_folder": "/home/me/shoot", "thumb_size": 240}"#).expect("parses");
+        assert_eq!(View::from_index(old.view_index), View::Grid);
+        assert_eq!((old.last_folder.as_str(), old.thumb_size), ("/home/me/shoot", 240));
+        // Grid and calendar keep their numbers, so older builds and the
+        // Python app read what this one saves.
+        assert_eq!((View::Grid.index(), View::Calendar.index()), (1, 2));
+        for v in [View::Grid, View::Calendar] {
+            assert_eq!(View::from_index(v.index()), v);
+        }
+        assert_eq!(View::from_index(7), View::Grid, "anything unknown opens the grid too");
+    }
+
+    /// The Python app saved its list as view 0: the import opens the grid
+    /// and carries the rest over.
+    #[test]
+    fn importing_the_python_apps_list_view_opens_the_grid() {
+        let py = Settings::from_qsettings("[General]\nview_index=0\nlast_folder=/home/me/shoot\n[filter]\nmarked_only=true\n");
+        assert_eq!(View::from_index(py.view_index), View::Grid);
+        assert_eq!(py.last_folder, "/home/me/shoot");
+        assert!(py.filter_marked_only);
+        // Its grid and calendar come across as they were.
+        assert_eq!(View::from_index(Settings::from_qsettings("view_index=1\n").view_index), View::Grid);
+        assert_eq!(View::from_index(Settings::from_qsettings("view_index=2\n").view_index), View::Calendar);
+    }
+}

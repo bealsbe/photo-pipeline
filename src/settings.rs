@@ -185,8 +185,10 @@ impl Settings {
         Some(Self::from_qsettings(&text))
     }
 
-    /// The settings a QSettings INI holds, over the defaults.
-    fn from_qsettings(text: &str) -> Settings {
+    /// The settings a QSettings INI holds, over the defaults.  Its
+    /// `view_index` is kept as saved: the app opens the grid for the
+    /// Python app's list (`app::View::from_index`).
+    pub(crate) fn from_qsettings(text: &str) -> Settings {
         let mut s = Settings::default();
         let mut section = String::from("General");
         for line in text.lines() {
