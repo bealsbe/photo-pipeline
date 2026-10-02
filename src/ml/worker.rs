@@ -177,8 +177,10 @@ impl Models {
         let vision = match device {
             Device::Cpu => cpu_session(&path(0), cpu_threads()).map_err(|e| Load::Other(format!("image model: {e}")))?,
             Device::Gpu => {
+                // Which card, before Dawn is asked for one (ml::gpu).
+                let adapter = super::gpu::pin().map_err(Load::Card)?;
+                out.name = Some(adapter.name.clone());
                 let mut gpu = gpu_session(&path(0)).map_err(|e| Load::Card(card_failure(&e)))?;
-                out.name = adapter_name();
                 let mut cpu = cpu_session(&path(0), cpu_threads()).map_err(|e| Load::Other(format!("image model: {e}")))?;
                 let (cosine, max_diff) = self_check(&mut gpu, &mut cpu).map_err(|e| Load::Card(card_failure(&e)))?;
                 eprintln!("ml-worker: self-check cosine {cosine:.6}, largest difference {max_diff:.2e}");
@@ -293,8 +295,12 @@ fn cpu_session(path: &Path, threads: usize) -> ort::Result<Session> {
 }
 
 fn gpu_session(path: &Path) -> ort::Result<Session> {
+    use ort::ep::ArbitrarilyConfigurableExecutionProvider;
+    // The device is pinned by ml::gpu; the power preference is a second
+    // steer for drivers without Mesa's device-select layer.
+    let ep = ort::ep::WebGPU::default().with_arbitrary_config("ep.webgpuexecutionprovider.powerPreference", "high-performance");
     Session::builder()?
-        .with_execution_providers([ort::ep::WebGPU::default().build().error_on_failure()])?
+        .with_execution_providers([ep.build().error_on_failure()])?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .commit_from_file(path)
 }
@@ -309,19 +315,6 @@ fn card_failure(e: &ort::Error) -> CardFailure {
     } else {
         CardFailure::Failed(text)
     }
-}
-
-/// The adapter's name, best effort: the first `deviceName` vulkaninfo
-/// reports, within a short timeout; none without the tool.
-fn adapter_name() -> Option<String> {
-    let out = crate::ops::netfs::with_timeout(Duration::from_secs(3), || {
-        std::process::Command::new("vulkaninfo").arg("--summary").stderr(std::process::Stdio::null()).output().ok()
-    })??;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.lines().find_map(|l| {
-        let l = l.trim();
-        l.strip_prefix("deviceName").map(|r| r.trim_start_matches(|c: char| c == ' ' || c == '=').trim().to_string())
-    })
 }
 
 /// Fixed inputs through both sessions: (smallest cosine between the two

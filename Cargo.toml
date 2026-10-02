@@ -42,6 +42,9 @@ wayland-protocols-plasma = { version = "0.3", features = ["client"] }
 # process alone loads models; `half` is the fp16 tensor type.
 ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "download-binaries", "tls-rustls", "copy-dylibs", "api-24", "webgpu", "half"] }
 half = "2"
+# The helper lists the Vulkan adapters to pick the card itself (the same
+# wgpu iced already builds).
+wgpu = { version = "27", default-features = false, features = ["std", "vulkan"] }
 # Model downloads: HTTPS with rustls, checked against pinned SHA-256s.
 ureq = "3"
 sha2 = "0.11"

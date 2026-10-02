@@ -1540,6 +1540,24 @@ UI round's.*
   Vectors from the Rust pipeline equal the study's open_clip embeddings
   (cosine ≥ 0.9995 on 64 previews), so §3's numbers carry over.
 
+### Which card (§4.2)
+
+ONNX Runtime's WebGPU provider asks Dawn for an adapter and never says
+which it got; this machine offers the discrete card, the processor's
+integrated GPU and llvmpipe (software), and the driver's default ordering
+changes with the session (the integrated one came first in a headless
+run).  The helper therefore enumerates the Vulkan adapters with `wgpu`,
+chooses by a fixed rule (discrete, else integrated; never a software or
+virtual adapter, which is `NoCard`), pins Dawn to it through Mesa's
+device-select layer (`MESA_VK_DEVICE_SELECT=vendor:device!`, set in the
+helper before the session is made) and also asks for the high-performance
+power preference, then reports that adapter's name (`ml/gpu.rs`, with a
+unit test of the rule).  `PP_GPU=<part of a name>` picks a hardware
+adapter for tests.  Measured with 96 local previews: the 7900 XTX 5.7 ms a
+photo end to end (the earlier numbers were already its); the integrated
+GPU 244 ms; both pass the self-check.  Without Mesa's layer (another
+driver) only the power preference steers Dawn.
+
 ### The helper and the client (§4.3)
 
 As planned: `photo-pipeline --ml-worker --device gpu|cpu`, JSON lines on
