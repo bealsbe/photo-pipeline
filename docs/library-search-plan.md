@@ -1635,3 +1635,97 @@ reads as the default.
   the model's "fursuit beats it" flag marks 47 of the other 48).
 - Not done in this round: the face-model comparison (lower priority, no
   people set labelled yet).
+
+## As built — phase 2 (backend): tags and syntax
+
+*Written as the backend landed (2026-10-02); the search page's side is
+the UI round's.*
+
+### The vocabulary (§3.2, decision 8)
+
+`src/search/vocab.rs`: about 200 generic words, each with a kind
+(object, scene, person, fursuit, animal), a plural (what lists show and
+completions insert) and a flag for the words fursuits are taken for.
+`Kind::is_subject` (person, fursuit, animal) is the one gate that keeps
+*Things* to objects and scenes; the user's rule that people, fursuits and
+pets never appear in it, and are never combined, is held by tests in
+`vocab.rs`, `tags.rs` and `engine.rs`.  Multi-word entries ("night sky",
+"dance floor") need their words in a row and hide the shorter entries
+they contain.  Plurals go through the vocabulary's own forms, then
+plain English rules.
+
+### Hidden tags: the rule and its evidence
+
+- **Rule.**  A photo carries a word when SigLIP2's own match probability
+  for the word's prompt (the query template) reaches the word's floor,
+  **2 % by default** (cosine ≥ 0.114; `tags::DEFAULT_THRESHOLD`, a per-word
+  override is possible), and, for a word fursuits are taken for, when the
+  word also beats "fursuit".  Each word is judged on its own: the study's
+  softmax share let the fursuit label swallow the rest.
+- **Evidence** (`eval::tag_thresholds`, the phase 0 sample of 1 779
+  previews, 29 labelled words).  The absolute floor the search uses as
+  its strictest (30 %) is far too strict for tags: "fireworks" tops at
+  0.31 and "camera" at 0.21, so almost nothing is tagged.  Sweep (mean
+  precision over the tagged photos of the labelled words / share of the
+  labelled photos found): 0.5 % 0.74 / 0.44; 1 % 0.87 / 0.35; **2 % 0.94 /
+  0.27**; 3 % 0.94 / 0.23; 5 % 0.97 / 0.16; 10 % 0.97 / 0.08.  At 2 % every
+  tagged photo of 27 of the 29 words is right (selfie 7 of 8, crowd 3 of
+  4); the study's counts come back: camera 3 of 3 right, fireworks 19 of
+  19 (26 labelled), mountain 5 of 5, castle 4 of 4; by eye on contact
+  sheets, stage 25 of 25 and concert 18 plausible.  (The "fursuit" row's
+  precision is an artefact: only its top 50 were labelled.)
+- **The contrast at derivation.**  "stuffed animal" tagged 148 previews
+  at 2 %, 139 of them fursuits by the model's own fursuit probability;
+  the nine left after "beats fursuit" are real plush toys (by eye).  So
+  the fursuit-lookalike flag now means, for any kind, "tagged only where
+  the word beats fursuit", and is set on the animals, "stuffed animal"
+  and "cosplay" (986 tagged, 965 fursuits).  The same rule makes the
+  "dog" tag mean real dogs, which the ranking boost and phase 5 want;
+  the "fursuit" tag itself is unaffected (phase 4's head step reads it).
+- **Cost.**  The vocabulary's text vectors are encoded once (~2.7 s for
+  the prompts on the processor) and kept beside the index
+  (`vocab-<model>.bin`, keyed by the vocabulary's digest and the model's
+  weights), so later starts need no helper.  Tagging is in memory on the
+  engine's thread: 1 779 × 195 words in 95 ms, so the library's 56 710
+  shots take about 3 s on loading (once per start; rows are tagged as
+  batches arrive during a pass).  Tags are kept in memory only and
+  follow the index's generation (`Index::generation`: new rows tagged,
+  a cleared index started over).
+
+### Queries (§7.2) as applied
+
+- `search::parse` is pure and shared with the page: words, quotes
+  (`exact`), `-word`s, dates (a year, a month and year, a month range
+  `apr–jun 2024` with `-`, `–`, `—` or `..`, a year range), `@name`s.
+  Two date terms narrow each other; a month name alone stays a word
+  ("may flowers").  No words (a date, a `-word` or a name alone) runs
+  nothing and answers empty hits without an error.
+- One query encodes the words' prompt (or the quoted text), each
+  `-word`'s prompt and, for a real-animal query, "a photo of a
+  fursuit.", in one request; a photo is skipped where any `-word`'s
+  score reaches the words' score, or its day is outside the dates.  The
+  closeness cut applies to the words' score.  Then the animal split:
+  photos "fursuit" beats go to `fursuits` (best first), never to `hits`.
+  Then the boost: hits carrying every vocabulary word the query names
+  as a tag come first, each group still best first (`Hit::tagged`).
+- Dates filter on the day the calendar files the shot under; the
+  completions' months and years come from the calendar's days (the page
+  computes them; `parse::date_completions` is there if wanted).
+
+### API (the page's contract)
+
+`BgEvent::SearchResults { seq, hits, indexed, error, understood:
+Arc<Parsed>, fursuits: Arc<Vec<Hit>>, animal: Option<String> }`;
+`BgEvent::SearchThings(Arc<Vec<Thing>>)` and `Engine::things()`;
+`search::Thing { word (the plural), photos, kind }`;
+`search::complete_things`; `parse::{parse, Parsed, DateRange, date_text,
+date_completions}`.
+
+### Not built, and open
+
+- Per-word thresholds other than the default: none needed on the
+  sample; the hook is `Word::threshold`.
+- A tag file on disk: tags are recomputed on loading (seconds); if the
+  start ever feels slow with the full library, cache them by generation.
+- "Searching the photos indexed so far" during the first index already
+  carries tags for the rows done.

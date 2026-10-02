@@ -7,10 +7,11 @@
 //! **The rule.**  A shot carries a word when the model's own match
 //! probability for the word's prompt ([`super::query::match_probability`]
 //! over the cosine) reaches the word's threshold ([`DEFAULT_THRESHOLD`]
-//! unless the vocabulary gives one).  Each word is judged on its own, so
-//! a camera in a fursuit photo counts as a camera; the study's softmax
-//! share over the whole vocabulary let the fursuit label swallow the
-//! rest ("camera" tagged 3 photos where search found 7).
+//! unless the vocabulary gives one), and, for a word fursuits are taken
+//! for ([`super::vocab::Word::fursuit_lookalike`]), when the word also
+//! beats "fursuit".  Each word is otherwise judged on its own, so a camera
+//! in a fursuit photo counts as a camera; the study's softmax share over
+//! the whole vocabulary let the fursuit label swallow the rest.
 //!
 //! **Cost.**  Pure arithmetic on vectors already in memory, on the
 //! engine's thread, never the UI's: rows are tagged as they are added
@@ -35,9 +36,15 @@ use crate::model::binfile::{Reader, Writer, fnv1a};
 use crate::ops::fsutil;
 
 /// The match probability a photo needs to carry a word, unless the word
-/// says otherwise.  Calibrated on the phase 0 sample (1 779 previews, the
-/// user's labels): see the plan's as-built notes for the sweep.
-pub const DEFAULT_THRESHOLD: f32 = 0.3;
+/// says otherwise: 2 % (cosine ≥ 0.114), well above the search default
+/// of 0.3 %, so a tag is a plain match.  Swept on the phase 0 sample
+/// (1 779 previews, 29 labelled words, `eval::tag_thresholds`): at 2 %
+/// every tagged photo of 27 of the 29 words is right (selfie 7 of 8,
+/// crowd 3 of 4), with 27 % of the labelled photos found; the study's
+/// counts come back ("camera" 3 of 3 right, "fireworks" 19 of 19,
+/// "stage" 25 by eye); at 5 % precision is perfect but only 15 % are
+/// found and "camera" has one; at 0.5 % precision falls to 0.74.
+pub const DEFAULT_THRESHOLD: f32 = 0.02;
 
 const VOCAB_MAGIC: &[u8; 8] = b"PPSRCHT\0";
 const VOCAB_VERSION: u32 = 1;
@@ -182,14 +189,17 @@ impl Tags {
             return from != vectors.len();
         }
         let cosines: Vec<f32> = VOCABULARY.iter().map(|w| cosine_for_probability(w.threshold.unwrap_or(DEFAULT_THRESHOLD))).collect();
+        let fursuit = VOCABULARY.iter().position(|w| w.word == "fursuit");
         let mut row = vec![0f32; vectors.dim];
         for i in from..vectors.len() {
             for (x, &h) in row.iter_mut().zip(&vectors.data[i * vectors.dim..(i + 1) * vectors.dim]) {
                 *x = super::query::f16_to_f32(h);
             }
+            let dot = |j: usize| -> f32 { vocab.row(j).iter().zip(&row).map(|(a, b)| a * b).sum() };
+            let fursuit_dot = fursuit.map_or(f32::MIN, dot);
             for (j, &c) in cosines.iter().enumerate() {
-                let dot: f32 = vocab.row(j).iter().zip(&row).map(|(a, b)| a * b).sum();
-                if dot >= c {
+                let d = dot(j);
+                if d >= c && (!VOCABULARY[j].fursuit_lookalike || d > fursuit_dot) {
                     self.words.push(j as u16);
                 }
             }
@@ -242,20 +252,21 @@ pub mod tests {
         VocabVectors { dim: n, data }
     }
 
-    /// Vectors whose row `i` carries the words in `tags[i]` plainly
-    /// (cosine 0.5 with each, far above any threshold) and nothing else.
-    pub fn vectors_with(tags: &[&[usize]]) -> Vectors {
+    /// Vectors whose row `i` has the given cosine with each word in
+    /// `tags[i]` (0.5 is a plain match, far above any threshold) and
+    /// nothing else.
+    pub fn vectors_with(tags: &[&[(usize, f32)]]) -> Vectors {
         let n = VOCABULARY.len();
         let mut v = Vectors { dim: n, ..Vectors::default() };
         for (i, words) in tags.iter().enumerate() {
             let mut row = vec![0f32; n];
-            for &w in *words {
-                row[w] = 0.5;
+            for &(w, c) in *words {
+                row[w] = c;
             }
             // Fill the rest so the row is a unit vector without touching
-            // any word's axis past 0.05 (probability ~1e-6).
+            // any word's axis past 0.06 (probability ~1e-5).
             let spread = (1.0 - row.iter().map(|x| x * x).sum::<f32>()).max(0.0).sqrt();
-            let free: Vec<usize> = (0..n).filter(|j| !words.contains(j)).collect();
+            let free: Vec<usize> = (0..n).filter(|j| !words.iter().any(|(w, _)| w == j)).collect();
             let each = spread / (free.len() as f32).sqrt();
             for j in free {
                 row[j] = each;
@@ -273,28 +284,47 @@ pub mod tests {
         let fireworks = vocab::find("fireworks").unwrap();
         let fursuit = vocab::find("fursuit").unwrap();
         let dog = vocab::find("dog").unwrap();
+        let plush = vocab::find("stuffed animal").unwrap();
         let vocab = axis_vocab();
-        let vecs = vectors_with(&[&[camera], &[fireworks, fursuit], &[], &[dog]]);
+        let t = cosine_for_probability(DEFAULT_THRESHOLD);
+        assert!((match_probability(t) - DEFAULT_THRESHOLD).abs() < 1e-4);
+        let vecs = vectors_with(&[
+            &[(camera, 0.5)],
+            &[(fireworks, 0.5), (fursuit, 0.5)],
+            &[],
+            &[(dog, 0.5)],
+            // The contrast: a canine fursuit isn't a dog, a fursuit isn't a
+            // plush toy, but a dog beside a weaker fursuit is a dog.
+            &[(dog, 0.3), (fursuit, 0.5)],
+            &[(plush, 0.3), (fursuit, 0.5)],
+            &[(dog, 0.5), (fursuit, 0.3)],
+            // Just over the threshold is in, just under is out.
+            &[(camera, t + 0.003)],
+            &[(camera, t - 0.003)],
+        ]);
         let mut tags = Tags::default();
         assert!(tags.sync(&vecs, 1, &vocab));
-        assert_eq!(tags.len(), 4);
+        assert_eq!(tags.len(), 9);
         assert_eq!(tags.of(0), [camera as u16]);
         assert_eq!(tags.of(1).len(), 2);
         assert!(tags.has(1, fireworks) && tags.has(1, fursuit) && !tags.has(1, camera));
         assert!(tags.of(2).is_empty());
         assert!(tags.has(3, dog));
+        assert!(!tags.has(4, dog) && tags.has(4, fursuit), "{:?}", tags.of(4));
+        assert!(!tags.has(5, plush) && tags.has(5, fursuit), "{:?}", tags.of(5));
+        assert!(tags.has(6, dog) && tags.has(6, fursuit), "{:?}", tags.of(6));
+        assert_eq!(tags.of(7), [camera as u16]);
+        assert!(tags.of(8).is_empty());
         assert!(!tags.sync(&vecs, 1, &vocab), "nothing new");
-        // A row at the threshold exactly is in; just under is out.
-        let t = cosine_for_probability(DEFAULT_THRESHOLD);
-        assert!(match_probability(t) >= DEFAULT_THRESHOLD - 1e-4);
         // The generation moved on with more rows: only the new ones are
         // tagged, the old ones kept.
-        let more = vectors_with(&[&[camera], &[fireworks, fursuit], &[], &[dog], &[camera, dog]]);
+        let more = vectors_with(&[&[(camera, 0.5)], &[(fireworks, 0.5), (fursuit, 0.5)], &[], &[(dog, 0.5)], &[], &[], &[], &[], &[], &[(camera, 0.5), (dog, 0.5)]]);
         assert!(tags.sync(&more, 2, &vocab));
-        assert_eq!(tags.len(), 5);
-        assert!(tags.has(4, camera) && tags.has(4, dog));
+        assert_eq!(tags.len(), 10);
+        assert!(tags.has(9, camera) && tags.has(9, dog));
+        assert!(tags.has(4, fursuit), "old rows are kept as they were");
         // Fewer rows (a clear): everything starts over.
-        let fewer = vectors_with(&[&[fireworks]]);
+        let fewer = vectors_with(&[&[(fireworks, 0.5)]]);
         assert!(tags.sync(&fewer, 3, &vocab));
         assert_eq!(tags.len(), 1);
         assert!(tags.has(0, fireworks));
@@ -313,7 +343,8 @@ pub mod tests {
         let dog = vocab::find("dog").unwrap();
         let person = vocab::find("person").unwrap();
         let vocab = axis_vocab();
-        let mut vecs = vectors_with(&[&[camera, fursuit], &[fireworks, person, dog], &[fireworks, dog], &[camera], &[camera, fursuit], &[dog]]);
+        let p = 0.5f32;
+        let mut vecs = vectors_with(&[&[(camera, p), (fursuit, p)], &[(fireworks, p), (person, p), (dog, p)], &[(fireworks, p), (dog, p)], &[(camera, p)], &[(camera, p), (fursuit, p)], &[(dog, p)]]);
         vecs.records[4].accidental = true;
         let mut tags = Tags::default();
         tags.sync(&vecs, 1, &vocab);

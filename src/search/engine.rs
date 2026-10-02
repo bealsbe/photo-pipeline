@@ -1009,30 +1009,70 @@ mod tests {
 
     /// A results event for `seq`, from the bus: hits, indexed, error.
     fn results(rx: &crate::bus::Receiver, seq: u64) -> (Vec<Hit>, usize, Option<String>) {
-        let r = full_results(rx, seq);
+        let r = Events::new(rx).results(seq);
         (r.0, r.1, r.2)
     }
 
-    /// Everything a results event for `seq` says: hits, indexed, error,
-    /// the query understood, the fursuits left out and the animal word.
-    fn full_results(rx: &crate::bus::Receiver, seq: u64) -> (Vec<Hit>, usize, Option<String>, Parsed, Vec<Hit>, Option<String>) {
-        let mut stream = Box::pin(crate::bus::stream(rx));
-        let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-        rt.block_on(async {
-            use iced::futures::StreamExt;
-            let deadline = Instant::now() + Duration::from_secs(10);
-            while Instant::now() < deadline {
-                let Some(batch) = stream.next().await else { break };
-                for ev in batch {
-                    if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal } = ev {
-                        if s == seq {
-                            return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
+    /// Everything a results event says: hits, indexed, error, the query
+    /// understood, the fursuits left out and the animal word.
+    type Answer = (Vec<Hit>, usize, Option<String>, Parsed, Vec<Hit>, Option<String>);
+
+    /// The bus's events, read as one stream (a receiver can be streamed
+    /// only once).
+    struct Events {
+        stream: std::pin::Pin<Box<dyn iced::futures::Stream<Item = Vec<BgEvent>>>>,
+        rt: tokio::runtime::Runtime,
+    }
+
+    impl Events {
+        fn new(rx: &crate::bus::Receiver) -> Events {
+            Events { stream: Box::pin(crate::bus::stream(rx)), rt: tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap() }
+        }
+
+        /// The answer to query `seq`.
+        fn results(&mut self, seq: u64) -> Answer {
+            let stream = &mut self.stream;
+            self.rt.block_on(async {
+                use iced::futures::StreamExt;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    let Some(batch) = stream.next().await else { break };
+                    for ev in batch {
+                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal } = ev {
+                            if s == seq {
+                                return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
+                            }
                         }
                     }
                 }
-            }
-            panic!("no results for query {seq}");
-        })
+                panic!("no results for query {seq}");
+            })
+        }
+
+        /// The Things list: the first non-empty `SearchThings` (or the
+        /// engine's own once it has one).
+        fn things(&mut self, e: &Engine) -> Arc<Vec<Thing>> {
+            let stream = &mut self.stream;
+            self.rt.block_on(async {
+                use iced::futures::StreamExt;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if !e.things().is_empty() {
+                        return e.things();
+                    }
+                    assert!(Instant::now() < deadline, "no Things arrived");
+                    if let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(200), stream.next()).await {
+                        for ev in batch {
+                            if let BgEvent::SearchThings(t) = ev {
+                                if !t.is_empty() {
+                                    return t;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
+        }
     }
 
     fn logging_factory(gpu_fails: bool) -> (EmbedderFactory, Arc<Mutex<Vec<(Device, bool)>>>) {
@@ -1148,6 +1188,245 @@ mod tests {
         e2.clear_index();
         let s = wait_for(&e2, "the clear", |s| s.indexed_shots == 0);
         assert!(!s.first_index_asked);
+        e2.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An embedder whose space is the vocabulary's axes: a text names
+    /// vocabulary words and encodes to their axes (equally weighted, unit
+    /// length); a file named `NNNN-word-60-other-30.JPG` embeds with
+    /// cosine 0.60 along "word" and 0.30 along "other", the rest spread
+    /// thin.  So a query for "dog" finds the dog files, "fursuit" beats
+    /// "dog" where the file says so, and the tags are what the names say.
+    struct Axes;
+
+    impl Axes {
+        fn n() -> usize {
+            vocab::VOCABULARY.len() + 1
+        }
+
+        fn unit(parts: &[(usize, f32)]) -> Vec<f32> {
+            let n = Self::n();
+            let mut v = vec![0f32; n];
+            for &(i, c) in parts {
+                v[i] = c;
+            }
+            let used = v.iter().map(|x| x * x).sum::<f32>();
+            // The remainder goes on the spare axis, so no word's axis
+            // carries more than the name says.
+            v[n - 1] = (1.0 - used).max(0.0).sqrt();
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-6);
+            v.iter_mut().for_each(|x| *x /= norm);
+            v
+        }
+
+        /// `NNNN-dog-60-fursuit-30` → [(dog, 0.6), (fursuit, 0.3)].
+        fn parts_of(stem: &str) -> Vec<(usize, f32)> {
+            let toks: Vec<&str> = stem.split('-').collect();
+            let mut out = Vec::new();
+            let mut i = 1;
+            while i + 1 < toks.len() {
+                let word = toks[i].replace('_', " ");
+                if let (Some(w), Ok(pct)) = (vocab::find(&word), toks[i + 1].parse::<f32>()) {
+                    out.push((w, pct / 100.0));
+                }
+                i += 2;
+            }
+            out
+        }
+    }
+
+    impl Embedder for Axes {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            (Some("Axes card".into()), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            Ok(files
+                .iter()
+                .map(|(p, _)| {
+                    let stem = crate::util::stem(p);
+                    let frame: i64 = stem.split('-').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let base = NaiveDate::from_ymd_opt(2025, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap();
+                    let embedding = crate::ml::client::Embedding {
+                        key: Key::of(1, p.as_os_str().as_encoded_bytes()),
+                        capture: Some(base + chrono::Duration::minutes(frame)),
+                        meta: crate::model::record::ShotMeta::default(),
+                        accidental: stem.contains("accident"),
+                        vector: Axes::unit(&Axes::parts_of(&stem)),
+                    };
+                    crate::ml::client::ImageResult { path: p.clone(), result: Ok(embedding) }
+                })
+                .collect())
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let inner = t.strip_prefix("a photo of a ").and_then(|s| s.strip_suffix('.')).unwrap_or(t);
+                    let words = vocab::words_in(inner);
+                    if words.is_empty() {
+                        return Axes::unit(&[]);
+                    }
+                    let each = 1.0 / (words.len() as f32).sqrt();
+                    Axes::unit(&words.iter().map(|&w| (w, each)).collect::<Vec<_>>())
+                })
+                .collect())
+        }
+    }
+
+    /// A scratch library of the given files (day folder, file name).
+    fn library_of(name: &str, files: &[(&str, &str)]) -> (Arc<LibraryIndex>, PathBuf) {
+        let d = crate::search::index::tests::scratch(name);
+        let root = d.join("lib");
+        for (day, file) in files {
+            let folder = root.join(day).join("JPG");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(file), format!("not a jpeg: {file}")).unwrap();
+        }
+        let cancel = AtomicBool::new(false);
+        let scanned = crate::model::library_cache::scan(&root, None, true, &cancel, &|_| {}).expect("scans").expect("not cancelled");
+        let store = Mutex::new(crate::model::library_cache::Store::new(root.clone()));
+        let ix = crate::model::library_index::index_from_tree(&root, &scanned.tree, &store, &cancel).expect("an index");
+        assert_eq!(ix.total_shots, files.len());
+        (Arc::new(ix), d)
+    }
+
+    /// The query syntax, the boost and the kinds rule, end to end: a real
+    /// animal's query never carries a fursuit in its list (the fursuits
+    /// come apart), Things holds objects and scenes only, `-word` and
+    /// dates narrow, quotes are exact, `@name` searches nothing.
+    #[test]
+    fn the_syntax_the_tags_and_the_kinds_rule_hold_through_the_engine() {
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library_of(
+            "syntax",
+            &[
+                ("2025/Mar-2025/12-Mar-2025", "0001-dog-60.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0002-dog-30-fursuit-50.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0003-dog-10.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0004-crowd-50-fireworks-20.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0005-fireworks-30.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0006-camera-40.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0007-fursuit-60.JPG"),
+                ("2025/Mar-2025/12-Mar-2025", "0008-camera-50-accident.JPG"),
+                ("2024/Jun-2024/08-Jun-2024", "0009-camera-30.JPG"),
+                ("2024/Jun-2024/08-Jun-2024", "0010-dog-50.JPG"),
+                ("2024/Jun-2024/08-Jun-2024", "0011-stuffed_animal-30-fursuit-50.JPG"),
+            ],
+        );
+        let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let factory: EmbedderFactory = Box::new(move |device, text_only| {
+            log.lock().push((device, text_only));
+            Ok(Arc::new(Axes) as Arc<dyn Embedder>)
+        });
+        let config = Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
+        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 11);
+        e.start_first_index(&[ModelId::Siglip2]);
+        wait_for(&e, "the first index", |s| s.indexed_shots == 11 && s.pass.is_none());
+        let mut ev = Events::new(&rx);
+        let name = |h: &Hit| crate::util::stem(h.jpg.as_deref().unwrap()).split('-').next().unwrap().to_string();
+        let names = |hs: &[Hit]| hs.iter().map(name).collect::<Vec<_>>();
+
+        // Things: objects and scenes with photos, most first; never a
+        // subject kind, never the accidental frame, and the plush toy
+        // that is really a fursuit isn't counted.
+        let things = ev.things(&e);
+        let list: Vec<(String, usize)> = things.iter().map(|t| (t.word.clone(), t.photos)).collect();
+        assert_eq!(list, [("cameras".to_string(), 2), ("fireworks".to_string(), 2)], "{things:?}");
+        assert!(things.iter().all(|t| !t.kind.is_subject()));
+        assert_eq!(*e.things(), *things);
+        assert!(d.join("index").join("vocab-siglip2-b16-256.bin").is_file(), "the vocabulary's vectors are kept beside the index");
+
+        // "dog": the real dogs, tagged first (the weak one after), the
+        // canine fursuit in the list of its own, never in the main one.
+        e.query(1, "dog", super::super::CLOSENESS_DEFAULT);
+        let (hits, indexed, error, understood, fursuits, animal) = ev.results(1);
+        assert_eq!((indexed, error), (11, None));
+        assert_eq!(names(&hits), ["0001", "0010", "0003"], "{hits:?}");
+        assert_eq!(hits.iter().map(|h| h.tagged).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(names(&fursuits), ["0002"]);
+        assert_eq!(animal.as_deref(), Some("dog"));
+        assert_eq!(understood.words, "dog");
+        assert!(hits.iter().all(|h| fursuits.iter().all(|f| f.id != h.id)));
+
+        // "dog fursuit" asks for suits: no contrast, no section.
+        e.query(2, "dog fursuit", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, _, fursuits, animal) = ev.results(2);
+        assert!(names(&hits).contains(&"0002".to_string()) && fursuits.is_empty() && animal.is_none(), "{hits:?}");
+
+        // Dates filter on the shot's day, before the split.
+        e.query(3, "dogs 2024", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, fursuits, _) = ev.results(3);
+        assert_eq!(names(&hits), ["0010"]);
+        assert!(fursuits.is_empty());
+        assert_eq!(understood.dates.map(|r| r.label()).as_deref(), Some("2024"));
+        e.query(4, "camera jun 2024", super::super::CLOSENESS_DEFAULT);
+        let (hits, ..) = ev.results(4);
+        assert_eq!(names(&hits), ["0009"]);
+
+        // "-word": more like the words than like the word.
+        e.query(5, "fireworks -crowd", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, ..) = ev.results(5);
+        assert_eq!(names(&hits), ["0005"], "the crowd shot with a little fireworks goes");
+        assert_eq!(understood.exclude, ["crowd"]);
+        e.query(6, "fireworks", super::super::CLOSENESS_DEFAULT);
+        let (hits, ..) = ev.results(6);
+        assert_eq!(names(&hits), ["0005", "0004"]);
+
+        // Quotes: the prompt as typed; the accidental frame never shows.
+        e.query(7, "\"camera\"", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, ..) = ev.results(7);
+        assert!(understood.exact);
+        assert_eq!(names(&hits), ["0006", "0009"]);
+        assert!(hits.iter().all(|h| h.tagged));
+
+        // @name alone: nothing runs, no error; with words, the words.
+        e.query(8, "@Someone", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, error, understood, ..) = ev.results(8);
+        assert!(hits.is_empty() && error.is_none() && understood.is_empty());
+        assert_eq!(understood.names, ["Someone"]);
+        e.query(9, "@Someone camera", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, ..) = ev.results(9);
+        assert_eq!(names(&hits), ["0006", "0009"]);
+        assert_eq!(understood.names, ["Someone"]);
+
+        // An animal nothing matches: empty, still an animal query.
+        e.query(10, "cat", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, _, fursuits, animal) = ev.results(10);
+        assert!(hits.is_empty() && fursuits.is_empty() && animal.as_deref() == Some("cat"));
+
+        // Only the card was asked for anything: text and the vocabulary
+        // went through the same helper (text runs on the processor inside
+        // it), never a second one.
+        assert!(asked.lock().iter().all(|c| *c == (Device::Gpu, false)), "{:?}", asked.lock());
+        e.shutdown();
+        std::thread::sleep(Duration::from_millis(50));
+
+        // A second engine on the same index: the tags come back from the
+        // cached vocabulary with no helper at all, and Clear empties Things.
+        let (bus2, rx2) = crate::bus::channel();
+        let asked2: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let log2 = asked2.clone();
+        let factory: EmbedderFactory = Box::new(move |device, text_only| {
+            log2.lock().push((device, text_only));
+            Ok(Arc::new(Axes) as Arc<dyn Embedder>)
+        });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) });
+        e2.on_library(lib.clone());
+        wait_for(&e2, "the saved index", |s| s.indexed_shots == 11);
+        let things = Events::new(&rx2).things(&e2);
+        assert_eq!(things.len(), 2);
+        assert!(asked2.lock().is_empty(), "no helper was needed for the tags");
+        e2.clear_index();
+        wait_for(&e2, "the clear", |s| s.indexed_shots == 0);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !e2.things().is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(e2.things().is_empty());
         e2.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

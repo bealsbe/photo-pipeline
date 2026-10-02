@@ -46,8 +46,13 @@ pub struct Word {
     /// "fireworks", "food").
     pub plural: &'static str,
     pub kind: Kind,
-    /// A real animal that fursuits are taken for (decision 12b): a query
-    /// naming it, and not naming fursuits, leaves fursuits out by default.
+    /// Fursuits are taken for it: a photo carries its tag only where the
+    /// word beats "fursuit" (the measured contrast), and for a real
+    /// animal (decision 12b) a query naming it, and not naming fursuits,
+    /// leaves fursuits out by default.  Set on the animals and on the
+    /// things the sample confused with fursuits (a stuffed animal: 139 of
+    /// 148 tagged were fursuits before the contrast, every one left after
+    /// it a real plush toy).
     pub fursuit_lookalike: bool,
     /// The match probability ([`super::query::match_probability`]) a
     /// photo needs to carry the word as a hidden tag.  Calibrated on the
@@ -109,7 +114,7 @@ pub const VOCABULARY: &[Word] = &[
     w("tree", "trees", Kind::Object),
     w("christmas tree", "christmas trees", Kind::Object),
     w("toy", "toys", Kind::Object),
-    w("stuffed animal", "stuffed animals", Kind::Object),
+    Word { word: "stuffed animal", plural: "stuffed animals", kind: Kind::Object, fursuit_lookalike: true, threshold: None },
     w("guitar", "guitars", Kind::Object),
     w("piano", "pianos", Kind::Object),
     w("drum", "drums", Kind::Object),
@@ -180,7 +185,7 @@ pub const VOCABULARY: &[Word] = &[
     w("baby", "babies", Kind::Person),
     w("selfie", "selfies", Kind::Person),
     w("portrait", "portraits", Kind::Person),
-    w("cosplay", "cosplay", Kind::Person),
+    Word { word: "cosplay", plural: "cosplay", kind: Kind::Person, fursuit_lookalike: true, threshold: None },
     // Fursuits.
     w("fursuit", "fursuits", Kind::Fursuit),
     w("mascot costume", "mascot costumes", Kind::Fursuit),
@@ -368,13 +373,14 @@ pub fn names_fursuits(text: &str) -> bool {
     raw.iter().any(|w| FURSUIT_WORDS.contains(&w.as_str())) || words_in(text).iter().any(|&i| VOCABULARY[i].kind == Kind::Fursuit)
 }
 
-/// The real animal the query names (the first fursuit lookalike), when
-/// it doesn't name fursuits: decision 12b's contrast applies.
+/// The real animal the query names (the first animal word fursuits are
+/// taken for), when it doesn't name fursuits: decision 12b's contrast
+/// applies.
 pub fn animal_in(text: &str) -> Option<&'static Word> {
     if names_fursuits(text) {
         return None;
     }
-    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.fursuit_lookalike)
+    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.fursuit_lookalike && w.kind == Kind::Animal)
 }
 
 /// The query names a real animal and doesn't name fursuits (the
@@ -437,7 +443,7 @@ mod tests {
             assert!(seen.insert(w.word), "{} twice", w.word);
             assert_eq!(w.word, w.word.to_lowercase().trim());
             assert!(!w.word.is_empty() && !w.plural.is_empty());
-            assert!(!w.fursuit_lookalike || w.kind == Kind::Animal, "{}", w.word);
+            assert!(!w.fursuit_lookalike || w.kind != Kind::Fursuit, "{}", w.word);
             assert!(w.threshold.is_none_or(|t| t > 0.0 && t < 1.0), "{}", w.word);
             assert_eq!(w.prompt(), format!("a photo of a {}.", w.word));
         }

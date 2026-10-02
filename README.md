@@ -363,6 +363,29 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   or Tab takes it, Enter alone searches what you typed and moves to the
   results.  With nothing typed, the page shows the recent searches and a
   few ways to search.  Preferences ▸ Search ▸ *Forget them* clears them.
+- **What you can write.**  Plain words (*red car at night*) find photos
+  that look like them.  Everything else is optional and combines with
+  AND: `"a red car at night"` in quotes sends the words exactly as typed;
+  `-crowd` keeps only photos more like your words than like *crowd*
+  (*fireworks -crowd*); a date narrows to those days — `2024`, `jun 2024`,
+  `apr–jun 2024` or `2023–2024` (`-` and `..` work as the dash; full month
+  names too); `@Name` is for a person, fursuit or pet you have named,
+  which comes in a later phase (for now the page says so and searches
+  the other words).  A date, a `-word` or a name on its own searches
+  nothing.
+- **Things in your photos.**  The start page lists the things the index
+  knows the library holds — *cameras 96*, *fireworks 24*, *food 21* — most
+  photos first, and the list under the field offers them, with the
+  months and years that have photos, as you type.  The list holds objects
+  and scenes only: people, fursuits and pets never appear in it; they get
+  pages of their own later.  Photos that plainly show the thing you
+  searched for come first, then the rest by similarity.
+- **Animal words.**  In a library full of fursuits, *dog* would mostly
+  find canine fursuits, so a search for a real animal leaves the fursuits
+  out: a quiet line at the end says how many, and *Show fursuits too*
+  shows them as a section of their own after the real animals, never
+  mixed into their list.  *dog fursuit* (or *fursuit*) finds suits on
+  purpose.
 - **Results, best first.**  One list in the grid of a library day, on the
   same grey, with each photo's date under it (hover for the date and time
   to the second, and where the file is).  A burst is one stacked tile at
@@ -435,9 +458,25 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   only the plainest; the default (0.3 %) keeps empty and dark frames out
   while a thing most of the library shows comes back whole.  A setting
   saved by an earlier build on another scale falls back to the default.
-- **Nothing is written into the library**, no sidecar, no XMP; the index and
-  the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
-  and clears them).  Queries read no photos.
+- **Hidden tags.**  A vocabulary of a couple of hundred generic words
+  (`src/search/vocab.rs`: objects, scenes, people, fursuits, animals) is
+  encoded once by the text tower and kept beside the index; each indexed
+  photo is then tagged, from its stored vector alone, with the words whose
+  match probability reaches 2 % (a plain match; the search default is
+  0.3 %).  Words fursuits are taken for — the animals, a stuffed animal —
+  count only where the word beats *fursuit*.  Tags are never shown on a
+  photo: they make *Things in your photos*, the completions and the
+  ranking boost (a photo tagged with what you typed comes first).
+  Tagging is arithmetic on vectors already in memory, on the engine's
+  thread, as photos are indexed.
+- **`-word` and animal words** are the same measured contrast: a photo
+  counts only where its similarity to your words beats its similarity to
+  the word left out (or to *fursuit*).  Dates go by the day the shot was
+  taken, as the calendar files it.
+- **Nothing is written into the library**, no sidecar, no XMP; the index,
+  the vocabulary's vectors and the models live in
+  `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows and clears
+  them).  Queries read no photos.
 
 ### Models
 
@@ -571,7 +610,11 @@ These are deliberate:
   Tests that need the models are ignored and take `PP_MODEL_DIR=<folder
   with the SigLIP2 files>`; the phase 0 harness (`src/search/eval.rs`) also
   takes `PP_EVAL_PREVIEWS` and `PP_EVAL_OUT`, and `PP_EVAL_LABELS` to score
-  hand labels.  `bench::bench_search_index` indexes a library through the
+  hand labels; phase 2's `tag_thresholds` sweeps the hidden tags' floor
+  against those labels, and `library_queries` indexes a scratch library
+  (`PP_EVAL_LIBRARY`) and prints the example queries with their hit
+  counts, the fursuits left out and the Things list (`PP_EVAL_QUERIES`
+  overrides the queries, `;`-separated).  `bench::bench_search_index` indexes a library through the
   real helper (`PP_BENCH_LIBRARY`, `PP_MODEL_DIR`, `PP_BENCH_DEVICE`) into a
   temporary folder and times queries.  `PP_ML_FAKE_CARD=no-card|self-check|crash`
   makes the graphics card fail without touching a device, for UI tests of
