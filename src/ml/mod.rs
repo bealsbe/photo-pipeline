@@ -89,9 +89,9 @@ impl CardFailure {
     pub fn detail(&self) -> String {
         match self {
             CardFailure::NoCard => "No Vulkan graphics card was found.".into(),
-            CardFailure::SelfCheckFailed { cosine, max_diff } => {
-                format!("Its answers matched the processor's to {cosine:.4} (largest difference {max_diff:.4}).")
-            }
+            // Plain words for the banner (the measured agreement stays in
+            // the status, for Preferences and the profile log).
+            CardFailure::SelfCheckFailed { .. } => "Its answers didn't match the processor's on a test, so its results can't be trusted.".into(),
             CardFailure::Crashed => "Its driver stopped the search helper.".into(),
             CardFailure::Failed(why) => why.clone(),
         }
