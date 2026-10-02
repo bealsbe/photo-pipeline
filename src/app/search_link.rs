@@ -12,11 +12,10 @@
 //! (`search fake …` in a test script).  It sends the same events as the
 //! engine, so the page can't tell them apart.  It reads no photo and
 //! writes no file.  `PP_SEARCH_FAKE=indexed` starts it with the library
-//! indexed.  It also answers phase 2's questions: the things it "found"
-//! (a made-up vocabulary with counts that grow with the index, people,
-//! fursuits and animals among them so the page's filter is exercised),
-//! dates and `-word` applied to its hits, and, for an animal word, a share
-//! of the hits handed back as fursuits left out.
+//! indexed.  It answers phase 2's questions too: made-up Things (the
+//! vocabulary's objects and scenes, with counts that grow with the index),
+//! the query's dates and `-word`s applied to its hits, and, for an animal
+//! word, a share of the hits handed back as fursuits left out.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -25,8 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{Duration as Span, NaiveDateTime};
-
-use api::{Parsed, Thing, ThingKind};
 use parking_lot::Mutex;
 
 use crate::bus::{BgEvent, Bus};
@@ -36,7 +33,7 @@ use crate::ml::{CardFailure, Device, DeviceStatus, SelfCheck};
 use crate::model::library_index::{self, LibraryIndex};
 use crate::model::record::FileType;
 use crate::search::index::Key;
-use crate::search::{Engine, Hit, PassKind, PassProgress, Status, Stopped};
+use crate::search::{Engine, Hit, PassKind, PassProgress, Status, Stopped, Thing, vocab};
 use crate::util;
 
 pub enum Link {
@@ -57,6 +54,15 @@ impl Link {
         match self {
             Link::Engine(e) => e.status(),
             Link::Fake(f) => f.state.lock().status.clone(),
+        }
+    }
+
+    /// *Things in your photos* as last derived (`BgEvent::SearchThings`
+    /// carries each change).
+    pub fn things(&self) -> Arc<Vec<Thing>> {
+        match self {
+            Link::Engine(e) => e.things(),
+            Link::Fake(f) => f.state.lock().things.clone(),
         }
     }
 
@@ -184,194 +190,6 @@ impl Link {
     pub fn is_fake(&self) -> bool {
         matches!(self, Link::Fake(_))
     }
-
-    /// The things search found in the library, most photos first (a clone
-    /// of what the engine holds; no I/O).
-    pub fn things(&self) -> Arc<Vec<Thing>> {
-        match self {
-            Link::Engine(_) => Arc::new(Vec::new()),
-            Link::Fake(f) => f.things(),
-        }
-    }
-
-    /// What came with query `seq`'s hits besides them: the fursuits an
-    /// animal word left out, and what was understood of the words.
-    pub fn take_extra(&self, seq: u64) -> Option<Extra> {
-        match self {
-            Link::Engine(_) => None,
-            Link::Fake(f) => f.extras.lock().remove(&seq),
-        }
-    }
-}
-
-/// What a query's answer carries besides its hits.
-#[derive(Debug, Clone, Default)]
-pub struct Extra {
-    /// The fursuits an animal word left out (decision 12b), best first,
-    /// never among the hits.
-    pub fursuits: Arc<Vec<Hit>>,
-    /// The animal word that left them out, singular ("dog").
-    pub animal: Option<String>,
-    /// What the engine understood of the words, and applied.
-    pub understood: Arc<Parsed>,
-}
-
-/// The engine's phase 2 vocabulary and query syntax, as the page uses them.
-/// Stand-ins with the shapes asked of the engine (things, the parser, a
-/// date range's label) until it publishes its own.
-pub mod api {
-    use chrono::{Datelike, NaiveDate};
-
-    use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
-
-    /// What a thing in the vocabulary is.  Only objects and scenes are ever
-    /// offered (the start page, completions): never people, fursuits or
-    /// animals, which have their own kinds.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum ThingKind {
-        Object,
-        Scene,
-        Person,
-        Fursuit,
-        Animal,
-    }
-
-    impl ThingKind {
-        /// Offered on the start page and as a completion.
-        pub fn offered(self) -> bool {
-            matches!(self, ThingKind::Object | ThingKind::Scene)
-        }
-    }
-
-    /// A word of the vocabulary and how many indexed photos carry it.
-    #[derive(Debug, Clone, PartialEq)]
-    pub struct Thing {
-        pub word: String,
-        pub photos: usize,
-        pub kind: ThingKind,
-    }
-
-    /// Days from `from` to `to`, both included.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct DateRange {
-        pub from: NaiveDate,
-        pub to: NaiveDate,
-    }
-
-    impl DateRange {
-        pub fn year(y: i32) -> Option<DateRange> {
-            Some(DateRange { from: NaiveDate::from_ymd_opt(y, 1, 1)?, to: NaiveDate::from_ymd_opt(y, 12, 31)? })
-        }
-
-        /// Months `m0` to `m1` (1–12) of year `y`.
-        pub fn months(y: i32, m0: u32, m1: u32) -> Option<DateRange> {
-            let from = NaiveDate::from_ymd_opt(y, m0, 1)?;
-            let next = if m1 == 12 { NaiveDate::from_ymd_opt(y + 1, 1, 1)? } else { NaiveDate::from_ymd_opt(y, m1 + 1, 1)? };
-            Some(DateRange { from, to: next.pred_opt()? })
-        }
-
-        pub fn contains(&self, d: NaiveDate) -> bool {
-            self.from <= d && d <= self.to
-        }
-
-        /// "2024", "Jun 2024", "Apr–Jun 2024", "Nov 2023–Feb 2024".
-        pub fn label(&self) -> String {
-            let (f, t) = (self.from, self.to);
-            let whole_months = f.day() == 1 && t.succ_opt().is_some_and(|n| n.day() == 1);
-            let abbr = |d: NaiveDate| MONTH_ABBR[d.month0() as usize];
-            if whole_months && f.year() == t.year() && f.month() == 1 && t.month() == 12 {
-                f.year().to_string()
-            } else if whole_months && f.year() == t.year() && f.month() == t.month() {
-                format!("{} {}", abbr(f), f.year())
-            } else if whole_months && f.year() == t.year() {
-                format!("{}–{} {}", abbr(f), abbr(t), f.year())
-            } else if whole_months {
-                format!("{} {}–{} {}", abbr(f), f.year(), abbr(t), t.year())
-            } else {
-                format!("{} {} {}–{} {} {}", f.day(), abbr(f), f.year(), t.day(), abbr(t), t.year())
-            }
-        }
-    }
-
-    /// A query in parts: the words to look for, words to leave out
-    /// (`-word`), the dates (`2024`, `jun 2024`, `apr–jun 2024`) and names
-    /// (`@name`, which phase 2 doesn't search yet).
-    #[derive(Debug, Clone, Default, PartialEq)]
-    pub struct Parsed {
-        pub words: String,
-        pub exclude: Vec<String>,
-        pub dates: Option<DateRange>,
-        pub names: Vec<String>,
-    }
-
-    /// The month a word names (`jun`, `june`, `sept`), 1–12.
-    pub fn month_of(word: &str) -> Option<u32> {
-        let w = word.to_lowercase();
-        if w.len() < 3 {
-            return None;
-        }
-        let i = MONTH_NAME.iter().map(|m| m.to_lowercase()).position(|m| m == w || (m.starts_with(&w) && (w.len() == 3 || w == "sept")))?;
-        Some(i as u32 + 1)
-    }
-
-    fn year_of(word: &str) -> Option<i32> {
-        if word.len() != 4 || !word.bytes().all(|b| b.is_ascii_digit()) {
-            return None;
-        }
-        word.parse().ok().filter(|y| (1900..=2100).contains(y))
-    }
-
-    /// Split a query into its parts.  A month needs a year after it; on its
-    /// own it is a word.
-    pub fn parse(text: &str) -> Parsed {
-        let tokens: Vec<&str> = text.split_whitespace().collect();
-        let mut p = Parsed::default();
-        let mut words = Vec::new();
-        let mut i = 0;
-        while i < tokens.len() {
-            let tok = tokens[i];
-            let next_year = tokens.get(i + 1).and_then(|n| year_of(n));
-            let span = tok.split_once(['–', '-']).and_then(|(a, b)| Some((month_of(a)?, month_of(b)?)));
-            if let Some(name) = tok.strip_prefix('@').filter(|n| !n.is_empty()) {
-                p.names.push(name.to_string());
-            } else if let Some(w) = tok.strip_prefix('-').filter(|w| !w.is_empty()) {
-                p.exclude.push(w.to_lowercase());
-            } else if let Some(y) = year_of(tok) {
-                p.dates = DateRange::year(y);
-            } else if let (Some(m), Some(y)) = (month_of(tok), next_year) {
-                p.dates = DateRange::months(y, m, m);
-                i += 1;
-            } else if let (Some((a, b)), Some(y)) = (span, next_year) {
-                p.dates = DateRange::months(y, a.min(b), a.max(b));
-                i += 1;
-            } else {
-                words.push(tok);
-            }
-            i += 1;
-        }
-        p.words = words.join(" ");
-        p
-    }
-
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn a_query_splits_into_words_exclusions_dates_and_names() {
-            let p = parse("fireworks -crowd jun 2024");
-            assert_eq!(p.words, "fireworks");
-            assert_eq!(p.exclude, ["crowd"]);
-            assert_eq!(p.dates.unwrap().label(), "Jun 2024");
-            let p = parse("red car at night 2023 @Alice");
-            assert_eq!(p.words, "red car at night");
-            assert_eq!(p.names, ["Alice"]);
-            assert_eq!(p.dates.unwrap().label(), "2023");
-            assert_eq!(parse("cake apr–jun 2024").dates.unwrap().label(), "Apr–Jun 2024");
-            assert_eq!(parse("june").words, "june", "a month without a year is a word");
-            assert_eq!(parse("sept 2025").dates.unwrap().label(), "Sep 2025");
-        }
-    }
 }
 
 // ── the stand-in ────────────────────────────────────────────────────────────
@@ -383,8 +201,6 @@ const TICK: Duration = Duration::from_millis(250);
 pub struct Fake {
     bus: Bus,
     state: Arc<Mutex<FakeState>>,
-    /// Each answer's extras, by query, until the page takes them.
-    extras: Arc<Mutex<HashMap<u64, Extra>>>,
 }
 
 struct FakeState {
@@ -396,6 +212,8 @@ struct FakeState {
     /// Hold a running pass where it is (screenshots).
     paused: bool,
     index: Option<Arc<LibraryIndex>>,
+    /// Made-up Things, once something is indexed.
+    things: Arc<Vec<Thing>>,
     /// The ticker thread is running.
     ticking: bool,
     /// Indexed in full once the library's size is known.
@@ -441,14 +259,35 @@ impl Fake {
                 status.stopped = Some(Stopped::Card(f));
             }
         }
-        let state = FakeState { status, downloads: Vec::new(), fail_next: None, paused: false, index: None, ticking: false, start_indexed: indexed };
-        let fake = Fake { bus, state: Arc::new(Mutex::new(state)), extras: Arc::default() };
+        let state = FakeState { status, downloads: Vec::new(), fail_next: None, paused: false, index: None, things: Arc::new(Vec::new()), ticking: false, start_indexed: indexed };
+        let fake = Fake { bus, state: Arc::new(Mutex::new(state)) };
         fake.publish(&fake.state.lock());
         fake
     }
 
     fn publish(&self, s: &FakeState) {
         let _ = self.bus.unbounded_send(BgEvent::SearchStatus(Arc::new(s.status.clone())));
+    }
+
+    /// Made-up Things for the start page: the vocabulary's objects and
+    /// scenes with counts from a hash of each word, scaled to what is
+    /// indexed; sent whenever the indexed count changes.
+    fn publish_things(&self, s: &mut FakeState) {
+        let indexed = s.status.indexed_shots;
+        let mut things: Vec<Thing> = vocab::things()
+            .filter_map(|(_, w)| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                w.word.hash(&mut h);
+                let share = (h.finish() % 1000) as f64 / 1000.0;
+                let photos = ((share.powi(4) * 0.12 * indexed as f64).round() as usize).min(indexed);
+                (photos > 0).then(|| Thing { word: w.plural.to_string(), photos, kind: w.kind })
+            })
+            .collect();
+        things.sort_by(|a, b| b.photos.cmp(&a.photos).then_with(|| a.word.cmp(&b.word)));
+        if things != *s.things {
+            s.things = Arc::new(things);
+            let _ = self.bus.unbounded_send(BgEvent::SearchThings(s.things.clone()));
+        }
     }
 
     fn publish_downloads(&self, s: &FakeState) {
@@ -464,6 +303,7 @@ impl Fake {
         f(&mut s);
         self.publish(&s);
         self.publish_downloads(&s);
+        self.publish_things(&mut s);
         self.keep_ticking(&mut s);
     }
 
@@ -472,8 +312,8 @@ impl Fake {
             return;
         }
         s.ticking = true;
-        let (state, bus, extras) = (self.state.clone(), self.bus.clone(), self.extras.clone());
-        let me = Fake { bus, state, extras };
+        let (state, bus) = (self.state.clone(), self.bus.clone());
+        let me = Fake { bus, state };
         std::thread::Builder::new().name("search-fake".into()).spawn(move || me.run()).ok();
     }
 
@@ -488,6 +328,7 @@ impl Fake {
             step(&mut s);
             self.publish(&s);
             self.publish_downloads(&s);
+            self.publish_things(&mut s);
         }
     }
 
@@ -620,77 +461,41 @@ impl Fake {
             let s = self.state.lock();
             (s.index.clone(), s.status.indexed_shots)
         };
-        let (bus, words, extras) = (self.bus.clone(), text.to_string(), self.extras.clone());
+        let (bus, words) = (self.bus.clone(), text.to_string());
         std::thread::Builder::new()
             .name("search-fake-query".into())
             .spawn(move || {
-                let understood = api::parse(&words);
-                let hits = index.map(|ix| made_up_hits(&ix, &understood, closeness, indexed)).unwrap_or_default();
-                // An animal word (decision 12b): about half of what "looks
-                // like" it is fursuits here, handed back on their own.
-                let animal = if crate::search::vocab::is_animal_query(&understood.words) { animal_word(&understood.words) } else { None };
-                let (hits, fursuits): (Vec<Hit>, Vec<Hit>) = match animal {
-                    Some(_) => hits.into_iter().partition(|h| unit(&(h.id, "fursuit")) < 0.55),
-                    None => (hits, Vec::new()),
-                };
-                extras.lock().insert(seq, Extra { fursuits: Arc::new(fursuits), animal, understood: Arc::new(understood) });
-                let _ = bus.unbounded_send(BgEvent::SearchResults { seq, hits: Arc::new(hits), indexed, error: None });
+                let parsed = crate::search::parse(&words);
+                let animal = vocab::animal_in(&parsed.words).map(|w| w.word.to_string());
+                let mut hits = index.map(|ix| made_up_hits(&ix, &parsed.words, closeness, indexed)).unwrap_or_default();
+                if parsed.is_empty() {
+                    hits.clear();
+                }
+                if let Some(d) = parsed.dates {
+                    hits.retain(|h| d.contains(h.day));
+                }
+                // Each word left out takes about a third of the hits away.
+                hits.retain(|h| parsed.exclude.iter().all(|x| unit(&(x, h.id)) > 0.33));
+                // The fursuit contrast: every third hit of an animal query
+                // is a fursuit left out.
+                let mut fursuits = Vec::new();
+                if animal.is_some() {
+                    let (f, h): (Vec<(usize, Hit)>, Vec<(usize, Hit)>) = hits.into_iter().enumerate().partition(|(i, _)| i % 3 == 2);
+                    fursuits = f.into_iter().map(|(_, h)| h).collect();
+                    hits = h.into_iter().map(|(_, h)| h).collect();
+                }
+                let _ = bus.unbounded_send(BgEvent::SearchResults {
+                    seq,
+                    hits: Arc::new(hits),
+                    indexed,
+                    error: None,
+                    understood: Arc::new(parsed),
+                    fursuits: Arc::new(fursuits),
+                    animal,
+                });
             })
             .ok();
     }
-
-    /// The stand-in's vocabulary: made-up things with counts that grow with
-    /// what is indexed, people, fursuits and animals among them.
-    fn things(&self) -> Arc<Vec<Thing>> {
-        let indexed = self.state.lock().status.indexed_shots;
-        let mut out: Vec<Thing> = FAKE_THINGS
-            .iter()
-            .map(|&(word, share, kind)| Thing { word: word.to_string(), photos: (indexed as f64 * share).round() as usize, kind })
-            .filter(|t| t.photos > 0)
-            .collect();
-        out.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.word.cmp(&b.word)));
-        Arc::new(out)
-    }
-}
-
-/// The stand-in's vocabulary: a word, the share of photos that show it,
-/// and its kind.
-const FAKE_THINGS: &[(&str, f64, ThingKind)] = &[
-    ("fursuits", 0.55, ThingKind::Fursuit),
-    ("people", 0.40, ThingKind::Person),
-    ("convention hall", 0.12, ThingKind::Scene),
-    ("crowd", 0.09, ThingKind::Scene),
-    ("cameras", 0.08, ThingKind::Object),
-    ("night", 0.07, ThingKind::Scene),
-    ("stage", 0.06, ThingKind::Scene),
-    ("trees", 0.04, ThingKind::Object),
-    ("buildings", 0.035, ThingKind::Object),
-    ("signs", 0.03, ThingKind::Object),
-    ("park", 0.03, ThingKind::Scene),
-    ("badges", 0.025, ThingKind::Object),
-    ("food", 0.02, ThingKind::Object),
-    ("phones", 0.02, ThingKind::Object),
-    ("city street", 0.02, ThingKind::Scene),
-    ("cars", 0.015, ThingKind::Object),
-    ("drinks", 0.012, ThingKind::Object),
-    ("landscape", 0.01, ThingKind::Scene),
-    ("beach", 0.008, ThingKind::Scene),
-    ("sunset", 0.007, ThingKind::Scene),
-    ("flowers", 0.006, ThingKind::Object),
-    ("snow", 0.006, ThingKind::Scene),
-    ("balloons", 0.005, ThingKind::Object),
-    ("cake", 0.004, ThingKind::Object),
-    ("fireworks", 0.003, ThingKind::Object),
-    ("dogs", 0.002, ThingKind::Animal),
-    ("cats", 0.001, ThingKind::Animal),
-];
-
-/// The query's animal word, singular ("dogs" → "dog").
-fn animal_word(words: &str) -> Option<String> {
-    words.split(|c: char| !c.is_alphanumeric()).map(str::to_lowercase).find_map(|w| {
-        let one = w.strip_suffix("ies").map(|s| format!("{s}y")).or_else(|| w.strip_suffix('s').map(str::to_string)).unwrap_or_else(|| w.clone());
-        [w, one].into_iter().find(|x| crate::search::vocab::ANIMAL_WORDS.contains(&x.as_str()))
-    })
 }
 
 /// A hash of `x` as a number in 0..1.
@@ -750,13 +555,11 @@ fn step(s: &mut FakeState) {
 }
 
 /// The stand-in's hits: shots from the newest `indexed` of the library,
-/// scored by a hash of the words and the file name, best first, within the
-/// query's dates, and without about a third of them for each word left
-/// out.  "zebra" finds nothing; "everything" finds every shot (for long
-/// lists).
-fn made_up_hits(index: &LibraryIndex, q: &Parsed, closeness: f32, indexed: usize) -> Vec<Hit> {
-    let words = q.words.trim().to_lowercase();
-    if (words.is_empty() && q.dates.is_none()) || words.contains("zebra") {
+/// scored by a hash of the words and the file name, best first.  "zebra"
+/// finds nothing; "everything" finds every shot (for long lists).
+fn made_up_hits(index: &LibraryIndex, words: &str, closeness: f32, indexed: usize) -> Vec<Hit> {
+    let words = words.trim().to_lowercase();
+    if words.is_empty() || words.contains("zebra") {
         return Vec::new();
     }
     let everything = words == "everything";
@@ -808,11 +611,10 @@ fn made_up_hits(index: &LibraryIndex, q: &Parsed, closeness: f32, indexed: usize
             // Frames of a press score alike, so they come up together.
             let press = hash(&|h| (&words, next_burst, date).hash(h));
             let score = 0.7 * press + 0.3 * own;
-            let wanted = q.dates.is_none_or(|d| d.contains(*date)) && q.exclude.iter().all(|x| unit(&(x, &stem)) > 0.33);
-            if wanted && (everything || score > 1.0 - share) {
+            if everything || score > 1.0 - share {
                 let capture = when + Span::milliseconds(num.unwrap_or(0) as i64 % 1000 * 3);
                 let id = hash(&|h| (&stem, date).hash(h)).to_bits();
-                hits.push(Hit { id, key: Key([0; 16]), score: score as f32, day: *date, capture, burst: Some(next_burst), jpg, raw });
+                hits.push(Hit { id, key: Key([0; 16]), score: score as f32, tagged: own > 0.8, day: *date, capture, burst: Some(next_burst), jpg, raw });
             }
         }
     }

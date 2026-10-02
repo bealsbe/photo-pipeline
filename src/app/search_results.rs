@@ -6,17 +6,16 @@
 //! while typing, and the recent searches.  Pure, so it is tested without
 //! a window.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{Datelike, NaiveDate, NaiveDateTime};
+use chrono::{NaiveDate, NaiveDateTime};
 
-use super::search_link::api::{self, Parsed, Thing};
 use crate::model::bursts::RunMark;
 use crate::model::collection::{Collection, RecordId};
-use crate::model::library_index::{FileEntry, MONTH_ABBR, MONTH_NAME};
-use crate::search::Hit;
+use crate::model::library_index::FileEntry;
+use crate::search::{Hit, Parsed, Thing, parse};
 use crate::ui::grid::Section;
 
 /// The results' sections have no day: these stand in for their dates (the
@@ -386,54 +385,21 @@ pub struct Offer {
     pub names_later: bool,
 }
 
-/// Days with photos in the library, by month: what dates offer and count.
-#[derive(Debug, Clone, Default)]
-pub struct DayCounts {
-    months: BTreeMap<(i32, u32), usize>,
-}
-
-impl DayCounts {
-    pub fn from_days<'a>(days: impl IntoIterator<Item = &'a NaiveDate>) -> DayCounts {
-        let mut months = BTreeMap::new();
-        for d in days {
-            *months.entry((d.year(), d.month())).or_insert(0) += 1;
-        }
-        DayCounts { months }
-    }
-
-    /// Years with photos, newest first, and their days.
-    fn years(&self) -> Vec<(i32, usize)> {
-        let mut by_year: BTreeMap<i32, usize> = BTreeMap::new();
-        for (&(y, _), &n) in &self.months {
-            *by_year.entry(y).or_default() += n;
-        }
-        by_year.into_iter().rev().collect()
-    }
-
-    /// The years with photos in month `m`, newest first, and their days.
-    fn years_of(&self, m: u32) -> Vec<(i32, usize)> {
-        self.months.iter().rev().filter(|((_, mm), _)| *mm == m).map(|(&(y, _), &n)| (y, n)).collect()
-    }
-}
-
 /// At most this many of each group while typing.
 const MAX_THINGS: usize = 5;
 const MAX_DATES: usize = 4;
 const MAX_RECENT: usize = 3;
 
-/// The things worth offering: objects and scenes only, most photos first.
+/// The things worth offering: objects and scenes only (never people,
+/// fursuits or animals, whatever the engine sends), most photos first.
 pub fn offered(things: &[Thing]) -> impl Iterator<Item = &Thing> {
-    things.iter().filter(|t| t.kind.offered() && t.photos > 0)
+    things.iter().filter(|t| !t.kind.is_subject() && t.photos > 0)
 }
 
-fn month_pick(y: i32, m: u32, days: usize, replace: usize) -> Pick {
-    let i = (m - 1) as usize;
-    Pick::Date { label: format!("{} {y}", MONTH_NAME[i]), text: format!("{} {y}", MONTH_ABBR[i].to_lowercase()), days, replace }
-}
-
-/// What to offer while `typed` is in the field.  The last word is the one
+/// What to offer while `typed` is in the field, from the things found, the
+/// days with photos and the recent searches.  The last word is the one
 /// being typed; a space after it means none is.
-pub fn offer(typed: &str, things: &[Thing], days: &DayCounts, recent: &[String]) -> Offer {
+pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &'a NaiveDate>, recent: &[String]) -> Offer {
     let mut o = Offer::default();
     if typed.trim().is_empty() {
         o.picks = recent.iter().map(|r| Pick::Recent(r.clone())).collect();
@@ -451,39 +417,21 @@ pub fn offer(typed: &str, things: &[Thing], days: &DayCounts, recent: &[String])
     // Words already in the query aren't offered again.
     let before = &tokens[..tokens.len() - usize::from(open && !tokens.is_empty())];
     let used: HashSet<String> = before.iter().map(|w| w.trim_start_matches('-').to_lowercase()).collect();
-    if minus || !stem.is_empty() {
-        let fits = |t: &&Thing| {
-            let w = t.word.to_lowercase();
-            !used.contains(&w) && (stem.is_empty() || w.split(' ').any(|part| part.starts_with(&stem)))
-        };
-        for t in offered(things).filter(fits).take(MAX_THINGS) {
-            o.picks.push(Pick::Thing { word: t.word.clone(), photos: t.photos, minus });
-        }
+    let fresh = |t: &Thing| !t.kind.is_subject() && t.photos > 0 && !used.contains(&t.word.to_lowercase());
+    if minus && stem.is_empty() {
+        // "-": the things most photos show, to leave out.
+        o.picks.extend(things.iter().filter(|t| fresh(t)).take(MAX_THINGS).map(|t| Pick::Thing { word: t.word.clone(), photos: t.photos, minus }));
+    } else if !stem.is_empty() {
+        let found = crate::search::complete_things(things, &stem);
+        o.picks.extend(found.into_iter().filter(|t| fresh(t)).take(MAX_THINGS).map(|t| Pick::Thing { word: t.word, photos: t.photos, minus }));
     }
-    if !minus && !stem.is_empty() {
-        let digits = stem.bytes().all(|b| b.is_ascii_digit());
-        let prev_month = before.last().filter(|_| open).and_then(|w| api::month_of(w));
-        let dates: Vec<Pick> = match prev_month {
-            // "jun 20": June of the years starting so.
-            Some(m) if digits => days.years_of(m).into_iter().filter(|(y, _)| y.to_string().starts_with(&stem)).map(|(y, n)| month_pick(y, m, n, 2)).collect(),
-            _ if digits => days
-                .years()
-                .into_iter()
-                .filter(|(y, _)| y.to_string().starts_with(&stem))
-                .map(|(y, n)| Pick::Date { label: y.to_string(), text: y.to_string(), days: n, replace: 1 })
-                .collect(),
-            // "ju": June and July, newest first.
-            _ if stem.len() >= 2 && stem.chars().all(char::is_alphabetic) => {
-                let mut v: Vec<(i32, u32, usize)> = (1..=12u32)
-                    .filter(|&m| MONTH_NAME[(m - 1) as usize].to_lowercase().starts_with(&stem))
-                    .flat_map(|m| days.years_of(m).into_iter().map(move |(y, n)| (y, m, n)))
-                    .collect();
-                v.sort_by(|a, b| (b.0, b.1).cmp(&(a.0, a.1)));
-                v.into_iter().map(|(y, m, n)| month_pick(y, m, n, 1)).collect()
-            }
-            _ => Vec::new(),
-        };
-        o.picks.extend(dates.into_iter().take(MAX_DATES));
+    if open && !minus && !stem.is_empty() {
+        // "jun 20" offers June of the years starting so: both words go.
+        let numeric = stem.bytes().all(|b| b.is_ascii_digit());
+        let after_month = numeric && before.last().and_then(|w| parse::month_of(w)).is_some();
+        let replace = if after_month { 2 } else { 1 };
+        let hints = parse::date_completions(days, &tokens[tokens.len().saturating_sub(2)..].join(" "));
+        o.picks.extend(hints.into_iter().take(MAX_DATES).map(|h| Pick::Date { label: h.label, text: h.text, days: h.days, replace }));
     }
     let n = if o.picks.is_empty() { recent.len() } else { MAX_RECENT };
     o.picks.extend(completions(recent, typed).into_iter().take(n).map(|r| Pick::Recent(r.to_string())));
@@ -529,6 +477,7 @@ pub fn and_list(words: &[String]) -> String {
 mod tests {
     use super::*;
     use crate::model::record::{FileType, MTime};
+    use crate::search::Kind;
     use std::path::PathBuf;
 
     fn when(min: u32, ms: i64) -> NaiveDateTime {
@@ -555,7 +504,7 @@ mod tests {
             found,
             fursuits,
             animal: Some("dog".into()),
-            understood: api::parse("dogs"),
+            understood: parse("dogs"),
             missing: 0,
         }
     }
@@ -599,28 +548,32 @@ mod tests {
         assert_eq!(fursuits_heading(None), "Fursuits");
     }
 
-    fn thing(word: &str, photos: usize, kind: api::ThingKind) -> Thing {
+    fn thing(word: &str, photos: usize, kind: Kind) -> Thing {
         Thing { word: word.into(), photos, kind }
     }
 
+    /// Things as the engine might send them, a few subjects slipped in to
+    /// show the page keeps them out on its own.
     fn vocab() -> Vec<Thing> {
-        use api::ThingKind::*;
+        use Kind::*;
         vec![
             thing("fursuits", 900, Fursuit),
             thing("people", 800, Person),
             thing("food", 60, Object),
             thing("flowers", 40, Object),
             thing("fireworks", 24, Object),
-            thing("forest", 10, Scene),
+            thing("forests", 10, Scene),
             thing("foxes", 5, Animal),
-            thing("crowd", 70, Scene),
+            thing("crowds", 70, Scene),
         ]
     }
 
-    fn days() -> DayCounts {
+    fn days() -> Vec<NaiveDate> {
         let d = |y, m, day| NaiveDate::from_ymd_opt(y, m, day).unwrap();
-        DayCounts::from_days(&[d(2023, 6, 3), d(2024, 6, 1), d(2024, 6, 8), d(2024, 7, 4), d(2025, 1, 1), d(2025, 2, 9)])
+        vec![d(2023, 6, 3), d(2024, 6, 1), d(2024, 6, 8), d(2024, 7, 4), d(2025, 1, 1), d(2025, 2, 9)]
     }
+
+    const NO_DAYS: &[NaiveDate] = &[];
 
     fn labels(o: &Offer) -> Vec<String> {
         o.picks
@@ -635,38 +588,42 @@ mod tests {
 
     #[test]
     fn things_offered_are_objects_and_scenes_never_people_fursuits_or_animals() {
-        let o = offer("f", &vocab(), &days(), &[]);
-        assert_eq!(labels(&o), ["food 60", "flowers 40", "fireworks 24", "forest 10"], "most photos first; no fursuits, no foxes");
-        assert_eq!(o.stem, "f");
-        assert!(offer("peo", &vocab(), &days(), &[]).picks.is_empty(), "people are never a thing");
+        let o = offer("fo", &vocab(), NO_DAYS, &[]);
+        assert_eq!(labels(&o), ["food 60", "forests 10"], "no fursuits, no foxes");
+        assert_eq!(o.stem, "fo");
+        // A singular finds the plural the list shows.
+        assert_eq!(labels(&offer("forest", &vocab(), NO_DAYS, &[])), ["forests 10"]);
+        assert!(offer("peo", &vocab(), NO_DAYS, &[]).picks.is_empty(), "people are never a thing");
+        assert!(offer("fox", &vocab(), NO_DAYS, &[]).picks.is_empty(), "nor animals");
         // The start page's list follows the same rule.
-        let shown: Vec<&str> = offered(&vocab()).map(|t| t.word.as_str()).collect();
-        assert_eq!(shown, ["food", "flowers", "fireworks", "forest", "crowd"]);
+        let v = vocab();
+        let shown: Vec<&str> = offered(&v).map(|t| t.word.as_str()).collect();
+        assert_eq!(shown, ["food", "flowers", "fireworks", "forests", "crowds"]);
     }
 
     #[test]
     fn a_minus_offers_things_to_leave_out() {
         let o = offer("fireworks -", &vocab(), &days(), &[]);
-        assert_eq!(labels(&o), ["-food 60", "-flowers 40", "-forest 10", "-crowd 70"], "fireworks is already in the query");
+        assert_eq!(labels(&o), ["-food 60", "-flowers 40", "-forests 10", "-crowds 70"], "fireworks is already in the query; no dates after a minus");
         assert_eq!(o.picks[0].group(), "Leave out");
-        assert_eq!(labels(&offer("fireworks -cr", &vocab(), &days(), &[])), ["-crowd 70"]);
-        assert_eq!(apply("fireworks -cr", &o.picks[3]), "fireworks -crowd ");
+        assert_eq!(labels(&offer("fireworks -cr", &vocab(), &days(), &[])), ["-crowds 70"]);
+        assert_eq!(apply("fireworks -cr", &o.picks[3]), "fireworks -crowds ");
     }
 
     #[test]
     fn dates_offer_months_and_years_with_photos() {
-        // Years, newest first, with their days.
-        assert_eq!(labels(&offer("cake 202", &[], &days(), &[])), ["2025 (2)", "2024 (3)", "2023 (1)"]);
-        // A month's name: every year it has photos, newest first.
+        // Years with their days, the most first.
+        assert_eq!(labels(&offer("cake 202", &[], &days(), &[])), ["2024 (3)", "2025 (2)", "2023 (1)"]);
+        // A month's name: every year it has photos.
         let o = offer("cake ju", &[], &days(), &[]);
-        assert_eq!(labels(&o), ["July 2024 (1)", "June 2024 (2)", "June 2023 (1)"]);
-        assert_eq!(apply("cake ju", &o.picks[1]), "cake jun 2024 ");
+        assert_eq!(labels(&o), ["June 2024 (2)", "July 2024 (1)", "June 2023 (1)"]);
+        assert_eq!(apply("cake ju", &o.picks[0]), "cake jun 2024 ");
         // A month then the start of a year: both words are replaced.
         let o = offer("cake jun 20", &[], &days(), &[]);
         assert_eq!(labels(&o), ["June 2024 (2)", "June 2023 (1)"]);
         assert_eq!(apply("cake jun 20", &o.picks[0]), "cake jun 2024 ");
         assert!(offer("cake 1999", &[], &days(), &[]).picks.is_empty(), "no photos then");
-        assert!(offer("j", &[], &days(), &[]).picks.is_empty(), "one letter is too little for a month");
+        assert!(offer("cake ju ", &[], &days(), &[]).picks.is_empty(), "a space ends the word: nothing is being typed");
     }
 
     #[test]
@@ -674,7 +631,7 @@ mod tests {
         let recent: Vec<String> = ["fireworks 2024", "food trucks", "red car"].iter().map(|s| s.to_string()).collect();
         let o = offer("f", &vocab(), &days(), &recent);
         let groups: Vec<&str> = o.picks.iter().map(Pick::group).collect();
-        assert_eq!(groups, ["Things", "Things", "Things", "Things", "Recent searches", "Recent searches"]);
+        assert_eq!(groups, ["Things", "Things", "Things", "Things", "Dates", "Recent searches", "Recent searches"]);
         assert_eq!(labels(&offer("", &vocab(), &days(), &recent)), ["recent fireworks 2024", "recent food trucks", "recent red car"]);
         assert_eq!(apply("f", &Pick::Recent("food trucks".into())), "food trucks");
         // After a word is taken, the space ends it: recent searches that
@@ -690,10 +647,10 @@ mod tests {
 
     #[test]
     fn what_was_understood_reads_in_plain_words() {
-        let (dates, leave) = understood_lines(&api::parse("fireworks -crowd -stage jun 2024"));
+        let (dates, leave) = understood_lines(&parse("fireworks -crowd -stage jun 2024"));
         assert_eq!(dates.as_deref(), Some("Only Jun 2024"));
         assert_eq!(leave.as_deref(), Some("Leaving out crowd and stage"));
-        assert_eq!(understood_lines(&api::parse("fireworks")), (None, None));
+        assert_eq!(understood_lines(&parse("fireworks")), (None, None));
         assert_eq!(and_list(&["a".into(), "b".into(), "c".into()]), "a, b and c");
     }
 
@@ -769,6 +726,7 @@ mod tests {
             id: 0,
             key: crate::search::index::Key([0; 16]),
             score,
+            tagged: false,
             day: day(),
             capture: when(1, 250),
             burst: None,

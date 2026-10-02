@@ -340,6 +340,9 @@ pub struct Index {
     pub model: &'static ModelInfo,
     pub paths: PathMap,
     pub vectors: Vectors,
+    /// Moves on whenever the rows change (rows added, the index cleared);
+    /// what is derived from the rows (the hidden tags) is keyed by it.
+    pub generation: u64,
     paths_dirty: bool,
 }
 
@@ -378,7 +381,7 @@ impl Index {
                 }
             }
         }
-        let mut ix = Index { root: root.to_path_buf(), dir: dir.to_path_buf(), model, paths, vectors, paths_dirty: false };
+        let mut ix = Index { root: root.to_path_buf(), dir: dir.to_path_buf(), model, paths, vectors, generation: 1, paths_dirty: false };
         if dropped > 0 && dropped as f64 > COMPACT_SHARE * (dropped + ix.vectors.len()) as f64 {
             let _ = ix.rewrite_vectors();
         }
@@ -409,6 +412,7 @@ impl Index {
         }
         f.write_all(&framed(&Vectors::block(&new_rows)))?;
         f.sync_data()?;
+        self.generation += 1;
         Ok(self.vectors.push(&new_rows))
     }
 
@@ -472,6 +476,7 @@ impl Index {
         let _ = fs::remove_dir(&self.dir);
         self.paths = PathMap { root: self.root.clone(), ..PathMap::default() };
         self.vectors = Vectors::default();
+        self.generation += 1;
         self.paths_dirty = false;
         Ok(())
     }

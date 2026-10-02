@@ -22,8 +22,9 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use super::index::{Index, Key, PathEntry, Record};
-use super::pass;
-use super::{Hit, PassKind, PassProgress, Status, Stopped, query};
+use super::parse::{self, Parsed};
+use super::tags::{Tags, VocabVectors};
+use super::{Hit, PassKind, PassProgress, Status, Stopped, Thing, pass, query, vocab};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::client::{Client, Embedder, EmbedderFactory, HelperError, StartError};
 use crate::ml::models::{self, ModelId};
@@ -68,6 +69,8 @@ pub struct Engine {
 
 struct Shared {
     status: Mutex<Status>,
+    /// *Things in your photos*, as last derived from the tags.
+    things: Mutex<Arc<Vec<Thing>>>,
 }
 
 /// What the engine is built on; tests swap the pieces that touch the
@@ -99,7 +102,7 @@ impl Engine {
     pub fn with_config(bus: Bus, device: Device, index_exports: bool, config: Config) -> Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
         let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, ..Status::default() };
-        let shared = Arc::new(Shared { status: Mutex::new(status) });
+        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())) });
         let s = shared.clone();
         let me = tx.clone();
         let Config { factory, models_ready, index_dir } = config;
@@ -125,6 +128,9 @@ impl Engine {
                     first_index_pending: false,
                     resolver: None,
                     text_cache: HashMap::new(),
+                    vocab: None,
+                    vocab_tried: false,
+                    tags: Tags::default(),
                 }
                 .run()
             })
@@ -135,6 +141,13 @@ impl Engine {
     /// The latest snapshot (a clone; no I/O).
     pub fn status(&self) -> Status {
         self.shared.status.lock().clone()
+    }
+
+    /// *Things in your photos* as last derived: objects and scenes with
+    /// photos, most first (a cheap clone; no I/O).  Also sent as
+    /// `BgEvent::SearchThings` whenever it changes.
+    pub fn things(&self) -> Arc<Vec<Thing>> {
+        self.shared.things.lock().clone()
     }
 
     /// The library's index arrived or changed (`BgEvent::IndexReady` with
@@ -195,8 +208,9 @@ impl Engine {
         self.send(Cmd::DeleteModels);
     }
 
-    /// Run a query; `BgEvent::SearchResults { seq, .. }` answers.  Queries
-    /// never touch the library.
+    /// Run a query (the syntax of [`parse::parse`]); `BgEvent::SearchResults
+    /// { seq, .. }` answers, with the query as understood.  Queries never
+    /// touch the library.
     pub fn query(&self, seq: u64, text: &str, closeness: f32) {
         self.send(Cmd::Query { seq, text: text.to_string(), closeness });
     }
@@ -288,6 +302,13 @@ struct Worker {
     resolver: Option<Resolver>,
     /// Query texts encoded this session (bounded).
     text_cache: HashMap<String, Vec<f32>>,
+    /// The vocabulary's text vectors (from the cache file beside the
+    /// index, else encoded once), and whether encoding was tried since
+    /// the last chance for it.
+    vocab: Option<VocabVectors>,
+    vocab_tried: bool,
+    /// The hidden tags of the index's rows.
+    tags: Tags,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -319,6 +340,7 @@ impl Worker {
                 Cmd::StartFirstIndex(wanted) => self.start_first_index(wanted),
                 Cmd::DownloadsDone(ok) => {
                     self.download = None;
+                    self.vocab_tried = false;
                     self.update(|s| s.models_installed = (self.models_ready)());
                     if self.first_index_pending && ok.contains(&ModelId::Siglip2) {
                         self.first_index_pending = false;
@@ -384,6 +406,7 @@ impl Worker {
                         s.stopped = None;
                         s.waiting = 0;
                     });
+                    self.refresh_tags();
                 }
                 Cmd::RebuildIndex => {
                     self.cancel_pass();
@@ -397,6 +420,7 @@ impl Worker {
                         s.indexed_shots = 0;
                         s.stopped = None;
                     });
+                    self.refresh_tags();
                     self.start_pass(PassKind::Rebuild);
                 }
                 Cmd::DeleteModels => {
@@ -453,6 +477,7 @@ impl Worker {
         if let Some(ix) = &mut self.index {
             let _ = ix.save_paths();
         }
+        self.refresh_tags();
         self.update(|s| s.pass = None);
     }
 
@@ -471,7 +496,68 @@ impl Worker {
         self.library = Some(lib);
         self.resolver = None;
         self.refresh_counts();
+        if root_changed {
+            self.vocab_tried = false;
+        }
+        self.refresh_tags();
         self.maybe_index_new();
+    }
+
+    /// Bring the hidden tags up to the index (new rows tagged, a cleared
+    /// index started over) and publish *Things* when they changed.  The
+    /// vocabulary's vectors come from the cache file beside the index, or
+    /// are encoded once through the text tower (tried once per library
+    /// and whenever the models arrive); without them there are no tags,
+    /// and queries rank by similarity alone.
+    fn refresh_tags(&mut self) {
+        let Some(ix) = &self.index else { return };
+        if ix.is_empty() {
+            if !self.tags.is_empty() {
+                self.tags = Tags::default();
+                self.publish_things();
+            }
+            return;
+        }
+        let (dir, model) = (ix.dir.clone(), ix.model);
+        if self.vocab.is_none() {
+            self.vocab = VocabVectors::load(&dir, model);
+        }
+        if self.vocab.is_none() && !self.vocab_tried && (self.models_ready)() {
+            self.vocab_tried = true;
+            let _t = crate::profile::span("search", "vocabulary");
+            match self.encode(&VocabVectors::prompts()) {
+                Ok(rows) => match VocabVectors::from_rows(&rows) {
+                    Some(v) => {
+                        if let Err(e) = v.save(&dir, model) {
+                            eprintln!("search: couldn't keep the vocabulary's vectors: {e}");
+                        }
+                        self.vocab = Some(v);
+                    }
+                    None => eprintln!("search: the helper gave the vocabulary the wrong shape"),
+                },
+                Err(m) => eprintln!("search: the vocabulary couldn't be encoded: {m}"),
+            }
+        }
+        let (Some(ix), Some(vocab)) = (&self.index, &self.vocab) else { return };
+        let _t = crate::profile::span("search", "tags");
+        if self.tags.sync(&ix.vectors, ix.generation, vocab) {
+            self.publish_things();
+        }
+    }
+
+    /// Derive *Things* from the tags and send it.
+    fn publish_things(&self) {
+        let things = match &self.index {
+            Some(ix) if !self.tags.is_empty() => {
+                let live: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
+                let records = &ix.vectors.records;
+                self.tags.things(|i| !records[i].accidental && live.contains(&records[i].key))
+            }
+            _ => Vec::new(),
+        };
+        let things = Arc::new(things);
+        *self.shared.things.lock() = things.clone();
+        let _ = self.bus.unbounded_send(BgEvent::SearchThings(things));
     }
 
     fn refresh_counts(&self) {
@@ -623,6 +709,7 @@ impl Worker {
         }
         let kind = p.kind;
         self.absorb(&batch);
+        self.refresh_tags();
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
             self.pass = None;
@@ -699,81 +786,128 @@ impl Worker {
         }
     }
 
+    /// Encode texts through the text tower, going through the session's
+    /// cache; one request for whatever is missing.
+    fn encode(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+        let mut missing: Vec<String> = texts.iter().filter(|t| !self.text_cache.contains_key(*t)).cloned().collect();
+        missing.dedup();
+        if !missing.is_empty() {
+            let embedder = self.text_embedder()?;
+            let mut tries = 0;
+            let vs = loop {
+                match embedder.encode_text(&missing) {
+                    Ok(vs) if vs.len() == missing.len() => break vs,
+                    Ok(_) => return Err("The search helper gave no answer.".into()),
+                    Err(HelperError::Restarted) if tries < 2 => tries += 1,
+                    Err(e) => {
+                        return Err(match e {
+                            HelperError::Card(f) => f.title().to_string(),
+                            HelperError::Restarted => "The search helper keeps stopping.".into(),
+                            HelperError::Broken(m) => m,
+                        });
+                    }
+                }
+            };
+            if self.text_cache.len() + missing.len() > TEXT_CACHE.max(missing.len()) {
+                self.text_cache.clear();
+            }
+            for (t, v) in missing.into_iter().zip(vs) {
+                self.text_cache.insert(t, v);
+            }
+        }
+        Ok(texts.iter().map(|t| self.text_cache[t].clone()).collect())
+    }
+
     fn query(&mut self, seq: u64, text: &str, closeness: f32) {
         let indexed = self.index.as_ref().map_or(0, Index::len);
-        let answer = |hits: Vec<Hit>, error: Option<String>| BgEvent::SearchResults { seq, hits: Arc::new(hits), indexed, error };
-        if indexed == 0 {
-            let _ = self.bus.unbounded_send(answer(Vec::new(), None));
+        let parsed = Arc::new(parse::parse(text));
+        let animal = vocab::animal_in(&parsed.words).map(|w| w.word.to_string());
+        let bus = self.bus.clone();
+        let answer = |hits: Vec<Hit>, fursuits: Vec<Hit>, error: Option<String>| {
+            let _ = bus.unbounded_send(BgEvent::SearchResults {
+                seq,
+                hits: Arc::new(hits),
+                indexed,
+                error,
+                understood: parsed.clone(),
+                fursuits: Arc::new(fursuits),
+                animal: animal.clone(),
+            });
+        };
+        if indexed == 0 || parsed.is_empty() {
+            answer(Vec::new(), Vec::new(), None);
             return;
         }
         if !(self.models_ready)() {
-            let _ = self.bus.unbounded_send(answer(Vec::new(), Some("The search model isn't downloaded.".into())));
+            answer(Vec::new(), Vec::new(), Some("The search model isn't downloaded.".into()));
             return;
         }
-        let prompt = query::prompt(text);
-        let vector = match self.text_cache.get(&prompt) {
-            Some(v) => v.clone(),
-            None => {
-                let embedder = match self.text_embedder() {
-                    Ok(e) => e,
-                    Err(m) => {
-                        let _ = self.bus.unbounded_send(answer(Vec::new(), Some(m)));
-                        return;
-                    }
-                };
-                let mut tries = 0;
-                let v = loop {
-                    match embedder.encode_text(&[prompt.clone()]) {
-                        Ok(mut vs) if !vs.is_empty() => break vs.swap_remove(0),
-                        Ok(_) => {
-                            let _ = self.bus.unbounded_send(answer(Vec::new(), Some("The search helper gave no answer.".into())));
-                            return;
-                        }
-                        Err(HelperError::Restarted) if tries < 2 => tries += 1,
-                        Err(e) => {
-                            let m = match e {
-                                HelperError::Card(f) => f.title().to_string(),
-                                HelperError::Restarted => "The search helper keeps stopping.".into(),
-                                HelperError::Broken(m) => m,
-                            };
-                            let _ = self.bus.unbounded_send(answer(Vec::new(), Some(m)));
-                            return;
-                        }
-                    }
-                };
-                if self.text_cache.len() >= TEXT_CACHE {
-                    self.text_cache.clear();
-                }
-                self.text_cache.insert(prompt.clone(), v.clone());
-                v
+        // The prompts: the words, each exclusion, and "fursuit" for the
+        // contrast on a real animal's query.
+        let mut prompts = vec![if parsed.exact { parsed.words.clone() } else { query::prompt(&parsed.words) }];
+        prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
+        if animal.is_some() {
+            prompts.push(query::prompt("fursuit"));
+        }
+        let vectors = match self.encode(&prompts) {
+            Ok(v) => v,
+            Err(m) => {
+                answer(Vec::new(), Vec::new(), Some(m));
+                return;
             }
         };
         let t = std::time::Instant::now();
-        let hits = self.hits(&vector, closeness);
+        let (hits, fursuits) = self.hits(&parsed, &vectors, animal.is_some(), closeness);
         if crate::profile::on() {
-            eprintln!("search: {} hits of {indexed} in {:.1} ms", hits.len(), t.elapsed().as_secs_f64() * 1000.0);
+            eprintln!("search: {} hits ({} fursuits left out) of {indexed} in {:.1} ms", hits.len(), fursuits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
-        let _ = self.bus.unbounded_send(answer(hits, None));
+        answer(hits, fursuits, None);
     }
 
-    /// Score the index against a query vector, cut, and resolve the rows.
-    fn hits(&mut self, vector: &[f32], closeness: f32) -> Vec<Hit> {
+    /// Score the index against the query's vectors (the words, then each
+    /// exclusion, then "fursuit" when `contrast`), cut by closeness, and
+    /// resolve the rows: the hits (tagged with the query's words first,
+    /// then by similarity) and, with the contrast, the fursuits left out.
+    fn hits(&mut self, parsed: &Parsed, vectors: &[Vec<f32>], contrast: bool, closeness: f32) -> (Vec<Hit>, Vec<Hit>) {
         self.ensure_resolver();
-        let Some(ix) = &self.index else { return Vec::new() };
-        let scores = query::score_rows(vector, &ix.vectors.data, ix.vectors.dim);
+        let (Some(ix), Some(r)) = (&self.index, self.resolver.as_ref()) else { return (Vec::new(), Vec::new()) };
+        let Some((words, rest)) = vectors.split_first() else { return (Vec::new(), Vec::new()) };
+        let scores = query::score_rows(words, &ix.vectors.data, ix.vectors.dim);
+        let others: Vec<Vec<f32>> = rest.iter().map(|v| query::score_rows(v, &ix.vectors.data, ix.vectors.dim)).collect();
+        let (excluded, fursuit) = if contrast { others.split_at(others.len() - 1) } else { (others.as_slice(), &[][..]) };
         let records = &ix.vectors.records;
-        let resolver = self.resolver.as_ref();
-        let known = |i: usize| resolver.is_some_and(|r| r.shots.contains_key(&records[i].key));
-        let cut = query::cut_by_probability(&scores, |i| records[i].accidental || !known(i), closeness);
-        let Some(r) = resolver else { return Vec::new() };
-        cut.into_iter()
-            .filter_map(|(i, score)| {
-                let rec = &records[i];
-                let shot = r.shots.get(&rec.key)?;
-                let capture = rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64)).unwrap_or(shot.mtime);
-                Some(Hit { id: rec.key.short(), key: rec.key, score, day: shot.day, capture, burst: shot.burst, jpg: shot.jpg.clone(), raw: shot.raw.clone() })
-            })
-            .collect()
+        let dates = parsed.dates;
+        let skip = |i: usize| {
+            let rec = &records[i];
+            if rec.accidental {
+                return true;
+            }
+            let Some(shot) = r.shots.get(&rec.key) else { return true };
+            if dates.is_some_and(|d| !d.contains(shot.day)) {
+                return true;
+            }
+            excluded.iter().any(|e| e[i] >= scores[i])
+        };
+        let cut = query::cut_by_probability(&scores, skip, closeness);
+        let wanted = vocab::words_in(&parsed.words);
+        let tags = &self.tags;
+        let tagged = |i: usize| !wanted.is_empty() && tags.len() > i && wanted.iter().all(|&w| tags.has(i, w));
+        let mut hits = Vec::with_capacity(cut.len());
+        let mut fursuits = Vec::new();
+        for (i, score) in cut {
+            let rec = &records[i];
+            let Some(shot) = r.shots.get(&rec.key) else { continue };
+            let capture = rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64)).unwrap_or(shot.mtime);
+            let hit = Hit { id: rec.key.short(), key: rec.key, score, tagged: tagged(i), day: shot.day, capture, burst: shot.burst, jpg: shot.jpg.clone(), raw: shot.raw.clone() };
+            if fursuit.first().is_some_and(|f| f[i] > score) {
+                fursuits.push(hit);
+            } else {
+                hits.push(hit);
+            }
+        }
+        // The boost: tagged first, each group still best first.
+        hits.sort_by_key(|h| !h.tagged);
+        (hits, fursuits)
     }
 
     /// Build the key → shot table when the library or the index changed.
@@ -872,8 +1006,15 @@ mod tests {
         (Arc::new(ix), d)
     }
 
-    /// A results event for `seq`, from the bus.
+    /// A results event for `seq`, from the bus: hits, indexed, error.
     fn results(rx: &crate::bus::Receiver, seq: u64) -> (Vec<Hit>, usize, Option<String>) {
+        let r = full_results(rx, seq);
+        (r.0, r.1, r.2)
+    }
+
+    /// Everything a results event for `seq` says: hits, indexed, error,
+    /// the query understood, the fursuits left out and the animal word.
+    fn full_results(rx: &crate::bus::Receiver, seq: u64) -> (Vec<Hit>, usize, Option<String>, Parsed, Vec<Hit>, Option<String>) {
         let mut stream = Box::pin(crate::bus::stream(rx));
         let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
         rt.block_on(async {
@@ -882,9 +1023,9 @@ mod tests {
             while Instant::now() < deadline {
                 let Some(batch) = stream.next().await else { break };
                 for ev in batch {
-                    if let BgEvent::SearchResults { seq: s, hits, indexed, error } = ev {
+                    if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal } = ev {
                         if s == seq {
-                            return ((*hits).clone(), indexed, error);
+                            return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
                         }
                     }
                 }

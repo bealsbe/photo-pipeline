@@ -44,8 +44,7 @@ use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, ro
 use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task, Theme};
 
 use super::kit::{self, tip};
-use super::search_link::api::{self, Thing};
-use super::search_link::{Extra, Link};
+use super::search_link::Link;
 use super::search_results::{self as res, Layout, Pick, Results};
 use super::style;
 use super::{App, Message, View};
@@ -57,7 +56,7 @@ use crate::ml::{CardFailure, Device};
 use crate::model::bursts::RunMark;
 use crate::model::collection::RecordId;
 use crate::model::library_index::{FileEntry, LibraryIndex, MONTH_ABBR, MONTH_NAME};
-use crate::search::{Hit, PassKind, Status, Stopped, estimate};
+use crate::search::{Hit, Parsed, PassKind, Status, Stopped, Thing, estimate};
 use crate::settings::Settings;
 use crate::ui::grid::{self, CellLabel, Grid, GridData, GridEvent, Restack, Section};
 use crate::ui::icons::{self, Glyph};
@@ -132,12 +131,9 @@ pub struct Search {
     /// What it offers for the query (made on each keystroke, from memory).
     pub offer: res::Offer,
     pub hi: Option<usize>,
-    /// The things search found, most photos first (all kinds: what is
-    /// offered is filtered by kind).
+    /// *Things in your photos* as the engine last sent them, most photos
+    /// first (what is offered is filtered by kind again).
     pub things: Arc<Vec<Thing>>,
-    /// Days with photos by month, for date completions, and the library
-    /// index they were counted from.
-    days: (usize, res::DayCounts),
     /// Where the back button returns, and what it says.
     pub from: View,
     pub from_label: String,
@@ -147,9 +143,10 @@ pub struct Search {
     pub pending: Option<(u64, bool)>,
     /// The words of the results shown (or on their way).
     pub ran: Option<String>,
-    /// What was searched is only a name, which phase 2 can't search: no
-    /// query ran.
-    pub names_only: bool,
+    /// What was searched has no words to look for (only a name, which
+    /// phase 2 can't search, or only dates or words to leave out): no
+    /// query ran, and this says why.
+    pub no_words: Option<Parsed>,
     pub results: Option<Arc<Results>>,
     /// The fursuits an animal word left out are shown, as their own list.
     pub fursuits_shown: bool,
@@ -231,7 +228,7 @@ pub enum DialogMsg {
 impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
         let link = Link::new(bus, settings.search_device, settings.search_index_exports);
-        let status = link.status();
+        let (status, things) = (link.status(), link.things());
         Search {
             link,
             status,
@@ -240,14 +237,13 @@ impl Search {
             completions: false,
             offer: res::Offer::default(),
             hi: None,
-            things: Arc::new(Vec::new()),
-            days: (0, res::DayCounts::default()),
+            things,
             from: View::Grid,
             from_label: "Grid".into(),
             seq: 0,
             pending: None,
             ran: None,
-            names_only: false,
+            no_words: None,
             results: None,
             fursuits_shown: false,
             error: None,
@@ -417,7 +413,7 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     s.query = words.clone();
     s.completions = false;
     s.hi = None;
-    s.names_only = false;
+    s.no_words = None;
     if words.is_empty() {
         s.ran = None;
         s.results = None;
@@ -431,11 +427,12 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     if s.status.indexed_shots == 0 {
         return app.show_status("Nothing is indexed yet, so there is nothing to search.", 5000);
     }
-    // Only a name: phase 2 can't search names, so nothing runs; the page
-    // says names come later.
-    let parsed = api::parse(&words);
-    if parsed.words.is_empty() && parsed.exclude.is_empty() && parsed.dates.is_none() && !parsed.names.is_empty() {
-        s.names_only = true;
+    // No words to look for (only a name, which phase 2 can't search, or
+    // only dates or words to leave out): nothing runs, and the page says
+    // why.
+    let parsed = crate::search::parse(&words);
+    if parsed.is_empty() {
+        s.no_words = Some(parsed);
         s.ran = Some(words);
         s.results = None;
         s.error = None;
@@ -470,14 +467,22 @@ pub fn rerun(app: &mut App) {
     }
 }
 
+/// A query's answer (`BgEvent::SearchResults`): its hits, the fursuits an
+/// animal word left out, and the query as the engine applied it.
+pub struct Reply {
+    pub hits: Arc<Vec<Hit>>,
+    pub error: Option<String>,
+    pub understood: Arc<Parsed>,
+    pub fursuits: Arc<Vec<Hit>>,
+    pub animal: Option<String>,
+}
+
 /// A query's answer: build its records on a worker.
-pub fn on_results(app: &mut App, seq: u64, hits: Arc<Vec<Hit>>, error: Option<String>) -> Task<Message> {
-    // The fursuits left out and what was understood came with the hits.
-    let extra = app.search.link.take_extra(seq).unwrap_or_default();
+pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
     if app.search.pending.map(|p| p.0) != Some(seq) {
         return Task::none();
     }
-    if let Some(e) = error {
+    if let Some(e) = reply.error.clone() {
         let s = &mut app.search;
         s.pending = None;
         s.error = Some(e);
@@ -490,21 +495,21 @@ pub fn on_results(app: &mut App, seq: u64, hits: Arc<Vec<Hit>>, error: Option<St
         return Task::done(m(Msg::Built(seq, None)));
     };
     let words = app.search.ran.clone().unwrap_or_default();
-    let work = move || Arc::new(build(seq, words, &hits, extra, &index));
+    let work = move || Arc::new(build(seq, words, &reply, &index));
     Task::perform(super::preferences::on_worker("search-results", work), move |r| m(Msg::Built(seq, r)))
 }
 
 /// The records for `hits` and the fursuits left out, from the library index
 /// (on a worker).
-fn build(seq: u64, words: String, hits: &[Hit], extra: Extra, index: &LibraryIndex) -> Results {
+fn build(seq: u64, words: String, reply: &Reply, index: &LibraryIndex) -> Results {
     use std::collections::HashMap;
     // Each day's files by path, made once per day the hits touch.
     let mut days: HashMap<NaiveDate, HashMap<&Path, &FileEntry>> = HashMap::new();
-    for h in hits.iter().chain(extra.fursuits.iter()) {
+    for h in reply.hits.iter().chain(reply.fursuits.iter()) {
         days.entry(h.day).or_insert_with(|| index.get(h.day).map(|d| d.files.iter().map(|f| (f.path.as_path(), f)).collect()).unwrap_or_default());
     }
-    let answer = res::Answer { fursuits: &extra.fursuits, animal: extra.animal.clone(), understood: (*extra.understood).clone() };
-    res::build(seq, words, hits, answer, |d, p| days.get(&d).and_then(|m| m.get(p)).map(|e| (*e).clone()))
+    let answer = res::Answer { fursuits: &reply.fursuits, animal: reply.animal.clone(), understood: (*reply.understood).clone() };
+    res::build(seq, words, &reply.hits, answer, |d, p| days.get(&d).and_then(|m| m.get(p)).map(|e| (*e).clone()))
 }
 
 fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Message> {
@@ -548,10 +553,6 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
-    // The things found grow with the index.
-    if old.indexed_shots != app.search.status.indexed_shots || app.search.things.is_empty() {
-        on_things(app, app.search.link.things());
-    }
     let st = &app.search.status;
     let mut tasks = Vec::new();
     if st.stopped.is_some() && old.stopped != st.stopped {
@@ -618,13 +619,8 @@ pub fn on_things(app: &mut App, things: Arc<Vec<Thing>>) {
 /// memory: the things found, the calendar's days, the recent searches.
 fn refresh_offer(app: &mut App) {
     let s = &mut app.search;
-    if let Some(ix) = app.calendar.index.as_ref() {
-        let at = Arc::as_ptr(ix) as usize;
-        if s.days.0 != at {
-            s.days = (at, res::DayCounts::from_days(ix.days.keys()));
-        }
-    }
-    s.offer = res::offer(&s.query, &s.things, &s.days.1, &app.settings.search_recent);
+    let days = app.calendar.index.as_ref().map(|ix| ix.days.keys());
+    s.offer = res::offer(&s.query, &s.things, days.into_iter().flatten(), &app.settings.search_recent);
     if s.hi.is_some_and(|h| h >= s.offer.picks.len()) {
         s.hi = None;
     }
@@ -970,8 +966,9 @@ pub enum Page {
     /// The model is downloading, or the first photos are being indexed.
     Preparing,
     Start,
-    /// Only a name was searched: names come later.
-    NamesLater,
+    /// Nothing to look for was typed (only a name, dates or words to leave
+    /// out): no search ran.
+    NoWords,
     Searching,
     Failed,
     NoResults,
@@ -996,7 +993,7 @@ pub fn page(app: &App) -> Page {
     }
     match (&s.ran, &s.results, &s.error) {
         (None, _, _) => Page::Start,
-        (Some(_), _, _) if s.names_only => Page::NamesLater,
+        (Some(_), _, _) if s.no_words.is_some() => Page::NoWords,
         (Some(_), _, Some(_)) => Page::Failed,
         (Some(_), None, None) => Page::Searching,
         (Some(_), Some(r), None) if r.found.is_empty() => Page::NoResults,
@@ -1029,7 +1026,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         Page::NotIndexed => invitation(app),
         Page::Preparing => preparing(app),
         Page::Start => start_page(app),
-        Page::NamesLater => names_later(app),
+        Page::NoWords => no_words(app),
         Page::Searching => container(Space::new()).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into(),
         Page::Failed => message_page(
             Glyph::Warning,
@@ -1469,14 +1466,21 @@ fn no_results(app: &App) -> Element<'_, Message> {
     quiet_page(title, body)
 }
 
-/// Only a name was searched, which search can't do yet: the page says so,
-/// plainly, and nothing ran.
-fn names_later(app: &App) -> Element<'_, Message> {
-    let name = app.search.ran.clone().unwrap_or_default();
-    quiet_page(
-        "Searching by name comes later".to_string(),
-        format!("“{name}” is a name. For now, search by what a photo shows, such as fireworks or a red car at night."),
-    )
+/// Nothing to look for was typed, so nothing ran: a name, which search
+/// can't find yet, or only dates or words to leave out.  The page says so,
+/// plainly.
+fn no_words(app: &App) -> Element<'_, Message> {
+    let s = &app.search;
+    let typed = s.ran.clone().unwrap_or_default();
+    let (title, body) = match &s.no_words {
+        Some(p) if !p.names.is_empty() => (
+            "Searching by name comes later".to_string(),
+            format!("“{typed}” is a name. For now, search by what a photo shows, such as fireworks or a red car at night."),
+        ),
+        Some(p) if p.dates.is_some() => ("Add what to look for".to_string(), format!("“{typed}” says when. Add a few words for what the photos show, such as fireworks {typed}.")),
+        _ => ("Add what to look for".to_string(), format!("“{typed}” says what to leave out. Add a few words for what the photos show, such as fireworks {typed}.")),
+    };
+    quiet_page(title, body)
 }
 
 /// A title and a line, centred on the photos' grey.
