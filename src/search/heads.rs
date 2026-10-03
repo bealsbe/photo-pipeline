@@ -1334,6 +1334,57 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// The memory the full-width vectors take at the library's expected
+    /// scale (the user's decision, 2026-10-03: f32, 1 536 wide, built only
+    /// when asked for).  Writes a scratch store of `PP_HEADS_ROWS` rows
+    /// (68 000 by default: ~1.6 heads in each of ~42 000 fursuit photos),
+    /// reads the process's resident size before and after the vectors
+    /// are built, and again with a regroup job's copy alive.  Ignored:
+    /// it writes ~200 MB and takes a while.
+    #[test]
+    #[ignore = "measures resident memory at library scale (PP_HEADS_ROWS)"]
+    fn resident_size_of_the_head_vectors_at_library_scale() {
+        fn rss_mb() -> f64 {
+            let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
+            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+        }
+        let rows: usize = std::env::var("PP_HEADS_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(68_000);
+        let dim = crate::ml::heads::DIM;
+        let d = scratch("rss");
+        let t = std::time::Instant::now();
+        {
+            let mut s = HeadStore::load(&d);
+            let mut v = vec![0f32; dim];
+            for i in 0..rows {
+                v.fill(0.0);
+                v[i % dim] = 1.0;
+                let mut k = [0u8; 16];
+                k[..8].copy_from_slice(&(i as u64).to_le_bytes());
+                s.add(Key(k), &[head(0.1, 200, &v)]).unwrap();
+            }
+        }
+        eprintln!("wrote {rows} rows in {:.1} s: {} MB on disk", t.elapsed().as_secs_f64(), HeadStore::bytes_in(&d) / 1_000_000);
+        let before = rss_mb();
+        let mut s = HeadStore::load(&d);
+        let opened = rss_mb();
+        let t = std::time::Instant::now();
+        let n = s.vectors().len();
+        let built = rss_mb();
+        let read_s = t.elapsed().as_secs_f64();
+        let file = SubjectsFile::default();
+        let job = step::job(&s, &file, 1);
+        let with_job = rss_mb();
+        eprintln!(
+            "{n} rows × {dim}: resident {before:.0} MB before, {opened:.0} MB with the store open (detections and tiles), {built:.0} MB with the vectors built in {read_s:.1} s (+{:.0} MB), {with_job:.0} MB with a regroup job's copy alive (+{:.0} MB)",
+            built - opened,
+            with_job - built
+        );
+        drop(job);
+        assert_eq!(n, rows);
+        assert!(built - opened > (rows * dim * 4) as f64 / 1_000_000.0 * 0.8, "the vectors are resident once built");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head

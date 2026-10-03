@@ -532,10 +532,12 @@ DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
 token) that tells one suit from another.  The head cache lives beside the
 index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
 by the user alone, vectors stored as f16); for grouping and the Fursuits
-tab the vectors are held in memory as f32, **about 420 MB for the ~68 000
-heads a library of 56 000 shots is expected to hold**, built only when
-that work needs it, never at start-up (the user's decision, 2026-10-03:
-full size, not the 768-wide CLS half that measured as well).
+tab the vectors are held in memory as f32: **measured 405 MB for the
+~68 000 heads a library of 56 000 shots is expected to hold** (and about
+400 MB more for the few seconds a regroup's copy lives on its worker),
+built only when that work needs it, never at start-up (the user's
+decision, 2026-10-03: full size, not the 768-wide CLS half that measured
+as well).
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the

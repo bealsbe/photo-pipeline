@@ -1922,10 +1922,14 @@ more*).
   days.  A suit seen on another day mostly comes through a Y in the
   review.
 - *Vector size:* **full size kept**, 1 536 wide, f32 rows for the
-  grouping: about 420 MB resident for the ~68 000 heads the library is
-  expected to hold (faces: ~40 MB).  Built only when the fursuit work
-  needs it (a regroup, the Fursuits tab), never at start-up; the real
-  resident size is to be reported once the engine wiring lands.  For
+  grouping: **measured at that scale** (`search::heads` ignored test,
+  68 000 synthetic rows × 1 536): the process grows from 40 MB with the
+  store open (detections and tiles) to 445 MB once the vectors are
+  built (+405 MB, read from the f16 file in 0.3 s), and to 843 MB while
+  a regroup job's f32 copy is alive on the worker (+399 MB for its few
+  seconds; the copy is the generic grouping's, shared with people).
+  Built only when the fursuit work needs it (a regroup, the Fursuits
+  tab, suggestions), never at start-up; the file on disk is 218 MB.  For
   the record, the CLS half alone (768 wide) scored as well on the same
   258 answers, slightly better in places (under 0.14: 24 of 26 asked;
   under 0.17: 46 of 67 = 69 %; cross-day under 0.14: 6 of 6; cluster
