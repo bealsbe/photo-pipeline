@@ -2449,6 +2449,23 @@ mod tests {
                 })
                 .collect())
         }
+        /// One head per photo whose name says fursuit, with the photo's
+        /// own axis vector (so photos named alike are one suit).
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            Ok(files
+                .iter()
+                .map(|(p, _)| {
+                    let stem = crate::util::stem(p);
+                    let key = Key::of(1, p.as_os_str().as_encoded_bytes());
+                    let heads = if stem.contains("fursuit") {
+                        vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score: 0.5, size: 300, sharpness: 0.2, vector: Axes::unit(&Axes::parts_of(&stem)), tile: Vec::new() }]
+                    } else {
+                        Vec::new()
+                    };
+                    crate::ml::heads::HeadsResult { path: p.clone(), result: Ok(crate::ml::heads::PhotoHeads { key, heads }) }
+                })
+                .collect())
+        }
         fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
             Ok(texts
                 .iter()
@@ -2483,6 +2500,64 @@ mod tests {
         let ix = crate::model::library_index::index_from_tree(&root, &scanned.tree, &store, &cancel).expect("an index");
         assert_eq!(ix.total_shots, files.len());
         (Arc::new(ix), d)
+    }
+
+    /// Decision 11 through the engine.  On the processor: the first
+    /// index's end puts the fursuit photos to the user (`Step::Asking`),
+    /// nothing scans on its own, a skip is remembered, and the tab's
+    /// catch-up starts and finds the heads; the snapshot then holds
+    /// fursuit groups of kind Fursuit and no people.  On the card the
+    /// scan starts unasked at the first index's end.
+    #[test]
+    fn the_head_step_asks_on_the_processor_and_starts_on_the_card() {
+        let files = [
+            ("2025/Mar-2025/12-Mar-2025", "0001-fursuit-90.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0002-fursuit-80.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0003-dog-60.JPG"),
+            ("2025/Mar-2025/13-Mar-2025", "0004-fursuit-70.JPG"),
+        ];
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library_of("heads-cpu", &files);
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Cpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        wait_for(&e, "the library", |s| s.library_shots == 4);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+        wait_for(&e, "the question", |s| matches!(s.heads.step, heads::Step::Asking(_)));
+        let s = e.status();
+        assert_eq!(s.heads.step, heads::Step::Asking(heads::Offer { photos: 3, why: HeadWhy::FirstIndex }), "the three fursuit photos, not the dog");
+        assert_eq!((s.heads.on, s.heads.models_installed, s.heads.tagged, s.heads.scanned), (true, true, 3, 0));
+        e.answer_heads(false);
+        wait_for(&e, "the skip", |s| s.heads.step == heads::Step::Idle);
+        assert_eq!(e.status().heads.skipped, 3);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((e.status().heads.step, e.status().heads.scanned), (heads::Step::Idle, 0), "nothing starts by itself");
+        e.find_heads();
+        wait_for(&e, "the catch-up", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
+        assert_eq!((e.status().heads.found, e.status().heads.skipped), (3, 0));
+        let started = Instant::now();
+        while e.subjects().groups.iter().all(|g| g.kind != Kind::Fursuit) {
+            assert!(started.elapsed() < Duration::from_secs(5), "fursuit groups never appeared: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let snap = e.subjects();
+        assert!(snap.groups.iter().all(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Cluster(_)) && g.name.is_none()), "{:?}", snap.groups);
+        assert_eq!(snap.groups.iter().map(|g| g.photos).sum::<usize>(), 3);
+        // The card: the scan follows the first index without a question.
+        let (bus2, _rx2) = crate::bus::channel();
+        let (lib2, d2) = library_of("heads-gpu", &files);
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d2.join("index")), subjects_path: None };
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e2.on_library(lib2);
+        wait_for(&e2, "the library", |s| s.library_shots == 4);
+        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        wait_for(&e2, "the scan after the first index", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
+        assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
     }
 
     /// The query syntax, the boost and the kinds rule, end to end: a real

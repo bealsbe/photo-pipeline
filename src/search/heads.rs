@@ -1207,6 +1207,7 @@ impl Fursuits {
                     eprintln!("heads: couldn't write the head cache: {e}");
                 }
             }
+            self.status.skipped = self.skipped.len();
         }
         if let Step::Scanning { why, .. } = self.status.step {
             self.status.step = Step::Scanning { why, done: batch.done, total: batch.total };
