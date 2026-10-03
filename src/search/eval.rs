@@ -777,13 +777,13 @@ fn fursuits_library() {
     let tile = engine.crop(&largest.cover, 128, Framing::Face).expect("a tile");
     let whole = engine.crop(&largest.cover, 300, Framing::Photo).expect("the photo");
     eprintln!("crop: tile {}x{} and photo {}x{} in {:.0} ms", tile.0, tile.1, whole.0, whole.1, t.elapsed().as_secs_f64() * 1000.0);
-    engine.name_group(largest.id.clone(), "Suit one".into());
-    let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| g.name.as_deref() == Some("Suit one")));
-    let named = snap.groups.iter().find(|g| g.name.as_deref() == Some("Suit one")).expect("named");
+    engine.name_group(largest.id.clone(), "Suitone".into());
+    let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| g.name.as_deref() == Some("Suitone")));
+    let named = snap.groups.iter().find(|g| g.name.as_deref() == Some("Suitone")).expect("named");
     assert_eq!(named.kind, Kind::Fursuit);
     eprintln!("named: {} photos on {} days, {} suggestions, undoable {:?}", named.photos, named.days, named.suggestions, snap.undoable);
     let t = Instant::now();
-    engine.query(10, "@Suit one", crate::search::CLOSENESS_DEFAULT, &[]);
+    engine.query(10, "@Suitone", crate::search::CLOSENESS_DEFAULT, &[]);
     let hits = rt.block_on(async {
         use iced::futures::StreamExt;
         let deadline = Instant::now() + Duration::from_secs(30);
