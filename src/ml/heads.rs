@@ -60,12 +60,10 @@ pub const DIM: usize = 1536;
 /// (WebGPU): 168 ms a photo one at a time against 852 ms each in fours.
 pub const CHUNK_GPU: usize = 1;
 pub const CHUNK_CPU: usize = 1;
-/// Crops per DINOv2 call on the processor (exact batches).
-const DINO_CHUNK_CPU: usize = 32;
-/// Crops per DINOv2 call on the card: every batch is padded to this, so
-/// the graph keeps one shape (WebGPU compiles its kernels anew for every
-/// new batch size, which cost more than the inference).
-const DINO_CHUNK_GPU: usize = 8;
+/// Crops per DINOv2 call, exact batches on either device.  Padding the
+/// card's batches to one shape was tried and cost more than it saved
+/// (477 ms a photo against 368 on the study's previews).
+const DINO_CHUNK: usize = 32;
 
 const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
@@ -117,8 +115,6 @@ pub struct Det {
 /// The two sessions.
 pub struct HeadModels {
     pub self_check: SelfCheck,
-    /// On the card: DINOv2 batches are padded to one shape.
-    fixed_batches: bool,
     owl: Session,
     dino: Session,
     ids: Vec<i64>,
@@ -141,7 +137,6 @@ impl HeadModels {
         let mut out = match device {
             Device::Cpu => HeadModels {
                 self_check: SelfCheck::NotRun,
-                fixed_batches: false,
                 owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?,
                 dino: cpu_session(&dino_path, threads).map_err(|e| Load::Other(format!("DINOv2: {e}")))?,
                 ids,
@@ -150,13 +145,12 @@ impl HeadModels {
             Device::Gpu => {
                 let owl = gpu_session(&owl_path).map_err(|e| Load::Card(card_failure(&e)))?;
                 let dino = gpu_session(&dino_path).map_err(|e| Load::Card(card_failure(&e)))?;
-                HeadModels { self_check: SelfCheck::NotRun, fixed_batches: true, owl, dino, ids, mask }
+                HeadModels { self_check: SelfCheck::NotRun, owl, dino, ids, mask }
             }
         };
         if device == Device::Gpu {
             let mut cpu = HeadModels {
                 self_check: SelfCheck::NotRun,
-                fixed_batches: false,
                 owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?,
                 dino: cpu_session(&dino_path, threads).map_err(|e| Load::Other(format!("DINOv2: {e}")))?,
                 ids: out.ids.clone(),
@@ -251,28 +245,23 @@ impl HeadModels {
     pub fn embed(&mut self, crops: &[Pixels]) -> ort::Result<Vec<Vec<f32>>> {
         let mut out = Vec::with_capacity(crops.len());
         let per = (3 * DINO_INPUT * DINO_INPUT) as usize;
-        let chunk_size = if self.fixed_batches { DINO_CHUNK_GPU } else { DINO_CHUNK_CPU };
-        for chunk in crops.chunks(chunk_size) {
+        for chunk in crops.chunks(DINO_CHUNK) {
             let n = chunk.len();
-            // One shape on the card: the batch is filled up with zeros and
-            // the extra rows dropped.
-            let batch = if self.fixed_batches { chunk_size } else { n };
-            let mut data = Vec::with_capacity(batch * per);
+            let mut data = Vec::with_capacity(n * per);
             for c in chunk {
                 data.extend(dino_input(c));
             }
-            data.resize(batch * per, 0.0);
             let name = self.dino.inputs()[0].name().to_string();
-            let outputs = self.dino.run(ort::inputs![name.as_str() => Tensor::from_array((vec![batch as i64, 3, DINO_INPUT as i64, DINO_INPUT as i64], data))?])?;
+            let outputs = self.dino.run(ort::inputs![name.as_str() => Tensor::from_array((vec![n as i64, 3, DINO_INPUT as i64, DINO_INPUT as i64], data))?])?;
             let (shape, hidden) = extract(&outputs, "last_hidden_state")?;
-            if shape.len() != 3 || shape[0] as usize != batch || shape[1] < 2 {
+            if shape.len() != 3 || shape[0] as usize != n || shape[1] < 2 {
                 return Err(ort::Error::new(format!("unexpected DINOv2 output shape {shape:?}")));
             }
             let (tokens, width) = (shape[1] as usize, shape[2] as usize);
             if 2 * width != DIM {
                 return Err(ort::Error::new(format!("DINOv2 gives {width}-wide tokens; the head vector is {DIM} long")));
             }
-            for row in hidden.chunks_exact(tokens * width).take(n) {
+            for row in hidden.chunks_exact(tokens * width) {
                 out.push(pool_tokens(row, tokens, width));
             }
         }
