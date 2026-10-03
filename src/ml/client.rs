@@ -13,7 +13,8 @@
 //! a new client is made (*Try the card again*); queries still work,
 //! through a text-only helper that never touches the card.  The client
 //! never starts a processor helper for image work unless the processor
-//! is the chosen device.
+//! is the chosen device.  Face work (phase 3) is image work: it follows
+//! the same path and the same rule.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -28,6 +29,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use super::models::ModelId;
 use super::worker::{self, Reply, Request};
 use super::{CardFailure, Device, SelfCheck};
 use crate::model::record::{FileType, ShotMeta};
@@ -41,8 +43,90 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Successful requests after which an earlier crash is forgotten.
 const FORGIVE_AFTER: u32 = 50;
 
+/// A face as the helper found it in a photo (phase 3): its place on the
+/// oriented preview, what the detector thought of it, how clear it is,
+/// the recognition model's vector and a small tile for the page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceFound {
+    /// `[x, y, width, height]` as fractions of the oriented preview.
+    pub bbox: [f32; 4],
+    /// Five landmarks as fractions of the preview (right eye, left eye,
+    /// nose, right and left mouth corner).
+    pub landmarks: [[f32; 2]; 5],
+    /// YuNet's score (at least the quality gate).
+    pub score: f32,
+    /// The longer box side in full-preview pixels.
+    pub size_px: f32,
+    /// Variance of the aligned crop's Laplacian.
+    pub sharpness: f32,
+    /// Unit length, the face model's width; empty if recognition failed.
+    pub vector: Vec<f32>,
+    /// A `worker::TILE_PX` square JPEG around the face.
+    pub tile: Vec<u8>,
+}
+
+/// A face already found, for recognising it again with another model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FaceSpot {
+    pub bbox: [f32; 4],
+    pub landmarks: [[f32; 2]; 5],
+    pub score: f32,
+}
+
+/// The known faces of one file in a batch.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownFaces {
+    pub path: PathBuf,
+    pub faces: Vec<FaceSpot>,
+}
+
+/// What face work a batch asks for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "faces", rename_all = "snake_case")]
+pub enum FaceAsk {
+    /// No faces.
+    #[default]
+    None,
+    /// Find the faces and recognise them.
+    Detect,
+    /// Recognise these faces again (a face-model change): no detection.
+    Known { files: Vec<KnownFaces> },
+}
+
+/// What a batch of photos should yield.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Want {
+    /// The search vector.
+    pub search: bool,
+    #[serde(flatten)]
+    pub faces: FaceAsk,
+}
+
+impl Want {
+    /// Search alone.
+    pub fn search() -> Want {
+        Want { search: true, faces: FaceAsk::None }
+    }
+
+    /// Search and faces in one read.
+    pub fn with_faces() -> Want {
+        Want { search: true, faces: FaceAsk::Detect }
+    }
+
+    /// Faces alone (the catch-up over photos already indexed).
+    pub fn faces_only() -> Want {
+        Want { search: false, faces: FaceAsk::Detect }
+    }
+
+    /// Known faces recognised again (a face-model change).
+    pub fn known(known: Vec<KnownFaces>) -> Want {
+        Want { search: false, faces: FaceAsk::Known { files: known } }
+    }
+}
+
 /// What the helper found in one photo: its content key and capture info
-/// (from the header it read for the preview) and the model's vector.
+/// (from the header it read for the preview), the model's vector and the
+/// faces, when asked for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Embedding {
     pub key: Key,
@@ -51,8 +135,12 @@ pub struct Embedding {
     /// The frame looks accidental (a lens cap, a pocket, the floor): kept
     /// in the index but left out of results.
     pub accidental: bool,
-    /// Unit-length, `dim` long.
+    /// Unit-length, `dim` long; empty when the search vector wasn't asked
+    /// for.
     pub vector: Vec<f32>,
+    /// The faces found (or recognised again), when asked for.
+    #[serde(default)]
+    pub faces: Vec<FaceFound>,
 }
 
 /// Why a photo couldn't be embedded.
@@ -99,8 +187,9 @@ pub enum HelperError {
 pub trait Embedder: Send + Sync {
     /// The adapter's name and the self-check, once known.
     fn device_report(&self) -> (Option<String>, SelfCheck);
-    /// Embed a batch of photos (a pair's JPG, else the file).
-    fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<ImageResult>, HelperError>;
+    /// Embed a batch of photos (a pair's JPG, else the file): the search
+    /// vector and the faces `want` asks for.
+    fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<ImageResult>, HelperError>;
     /// Encode query texts (always on the processor, whatever the device).
     fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError>;
     /// Stop the helper (the app is quitting, or the device changed).
@@ -116,11 +205,31 @@ pub enum StartError {
     Other(String),
 }
 
+/// What kind of helper to start.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spec {
+    /// The device for image work.
+    pub device: Device,
+    /// The text tower alone, on the processor, whatever the device
+    /// (queries after a card failure).
+    pub text_only: bool,
+    /// Load the face detector and this recognition model too.
+    pub face_model: Option<ModelId>,
+}
+
+impl Spec {
+    pub fn images(device: Device, face_model: Option<ModelId>) -> Spec {
+        Spec { device, text_only: false, face_model }
+    }
+
+    pub fn text_only() -> Spec {
+        Spec { device: Device::Cpu, text_only: true, face_model: None }
+    }
+}
+
 /// Makes an [`Embedder`]: the real helper in the app, a double in tests.
-/// `(device, text_only)`: the engine asks for image work on the chosen
-/// device only; with `text_only` the embedder runs the text tower alone,
-/// on the processor, whatever the device (queries after a card failure).
-pub type EmbedderFactory = Box<dyn Fn(Device, bool) -> Result<Arc<dyn Embedder>, StartError> + Send>;
+/// The engine asks for image work on the chosen device only.
+pub type EmbedderFactory = Box<dyn Fn(Spec) -> Result<Arc<dyn Embedder>, StartError> + Send>;
 
 /// The binary to start as the helper: the app itself.  `PP_HELPER_EXE`
 /// overrides it; a test binary (in `target/<profile>/deps/`) uses the app
@@ -154,16 +263,23 @@ struct Process {
 
 impl Process {
     /// Start `photo-pipeline --ml-worker` and wait for its first reply.
-    fn spawn(device: Device, text_only: bool) -> Result<(Process, Reply), StartError> {
+    fn spawn(spec: Spec) -> Result<(Process, Reply), StartError> {
         let exe = helper_exe().map_err(|e| StartError::Other(format!("can't find the app's own binary: {e}")))?;
         let dir = exe.parent().map(PathBuf::from).unwrap_or_default();
         let mut cmd = Command::new(&exe);
-        cmd.arg(worker::FLAG).arg("--device").arg(if device == Device::Gpu { "gpu" } else { "cpu" });
-        if text_only {
+        cmd.arg(worker::FLAG).arg("--device").arg(if spec.device == Device::Gpu { "gpu" } else { "cpu" });
+        if spec.text_only {
             cmd.arg("--text-only");
+        }
+        if let Some(m) = spec.face_model.filter(|_| !spec.text_only) {
+            let name = serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+            cmd.arg("--face-model").arg(name);
         }
         if let Some(models) = std::env::var_os("PP_MODEL_DIR") {
             cmd.arg("--models").arg(models);
+        }
+        if let Some(root) = std::env::var_os("PP_MODEL_ROOT") {
+            cmd.arg("--models-root").arg(root);
         }
         // libwebgpu_dawn.so sits beside the binary (ort's copy-dylibs); a
         // test binary lives one level down, in deps/.
@@ -217,7 +333,7 @@ impl Process {
                 })
                 .expect("spawn ml-client-reader");
         }
-        let proc = Process { child, stdin, pending, ended, text_only };
+        let proc = Process { child, stdin, pending, ended, text_only: spec.text_only };
         match first_rx.recv_timeout(START_TIMEOUT) {
             Ok(reply) => Ok((proc, reply)),
             Err(_) => {
@@ -281,38 +397,39 @@ struct Inner {
 
 /// The helper process as an [`Embedder`].
 pub struct Client {
-    device: Device,
+    spec: Spec,
     inner: Mutex<Inner>,
     next_id: AtomicU64,
 }
 
 impl Client {
-    /// Start a helper on `device` and wait for it to load the models and,
-    /// on the card, pass the self-check.  `PP_ML_FAKE_CARD` makes the card
-    /// fail for tests ([`super::fake_card_failure`]).
-    pub fn start(device: Device) -> Result<Client, StartError> {
+    /// Start a helper for image work on `device` (with the face models
+    /// when `face_model` is given) and wait for it to load the models
+    /// and, on the card, pass the self-check.  `PP_ML_FAKE_CARD` makes
+    /// the card fail for tests ([`super::fake_card_failure`]).
+    pub fn start(device: Device, face_model: Option<ModelId>) -> Result<Client, StartError> {
         if device == Device::Gpu {
             if let Some(f) = super::fake_card_failure() {
                 return Err(StartError::Card(f));
             }
         }
-        Client::spawn(device, false)
+        Client::spawn(Spec::images(device, face_model))
     }
 
     /// A helper for queries only: the text tower on the processor, no
     /// image work, nothing on the card.
     pub fn start_text_only() -> Result<Client, StartError> {
-        Client::spawn(Device::Cpu, true)
+        Client::spawn(Spec::text_only())
     }
 
-    fn spawn(device: Device, text_only: bool) -> Result<Client, StartError> {
-        let (proc, reply) = Process::spawn(device, text_only)?;
+    fn spawn(spec: Spec) -> Result<Client, StartError> {
+        let (proc, reply) = Process::spawn(spec)?;
         match reply {
             Reply::Ready { name, self_check, .. } => Ok(Client {
-                device,
+                spec,
                 inner: Mutex::new(Inner {
                     proc: Some(proc),
-                    card_failed: if text_only { Some(CardFailure::Failed("this helper runs queries only".into())) } else { None },
+                    card_failed: if spec.text_only { Some(CardFailure::Failed("this helper runs queries only".into())) } else { None },
                     crashes: 0,
                     since_crash: 0,
                     name,
@@ -328,8 +445,8 @@ impl Client {
 
     /// The factory the app uses.
     pub fn factory() -> EmbedderFactory {
-        Box::new(|device, text_only| {
-            let c = if text_only { Client::start_text_only() } else { Client::start(device) };
+        Box::new(|spec| {
+            let c = if spec.text_only { Client::start_text_only() } else { Client::start(spec.device, spec.face_model) };
             c.map(|c| Arc::new(c) as Arc<dyn Embedder>)
         })
     }
@@ -352,7 +469,7 @@ impl Client {
                 let text_only = p.text_only;
                 if !idled && !text_only {
                     // A crash.
-                    match self.device {
+                    match self.spec.device {
                         Device::Gpu => {
                             inner.crashes += 1;
                             inner.since_crash = 0;
@@ -373,9 +490,9 @@ impl Client {
         };
         if need_start {
             inner.proc = None;
-            let text_only = inner.card_failed.is_some() || (!images && self.device == Device::Gpu && inner.crashes > 1);
-            let device = if text_only { Device::Cpu } else { self.device };
-            match Process::spawn(device, text_only) {
+            let text_only = inner.card_failed.is_some() || (!images && self.spec.device == Device::Gpu && inner.crashes > 1);
+            let spec = if text_only { Spec::text_only() } else { self.spec };
+            match Process::spawn(spec) {
                 Ok((proc, Reply::Ready { name, self_check, .. })) => {
                     if !text_only {
                         inner.name = name;
@@ -427,7 +544,7 @@ impl Client {
     /// What a crash mid-request means for the caller.
     fn after_crash(&self) -> Result<Reply, HelperError> {
         let mut inner = self.inner.lock();
-        match self.device {
+        match self.spec.device {
             Device::Gpu => {
                 inner.crashes += 1;
                 inner.since_crash = 0;
@@ -455,9 +572,9 @@ impl Embedder for Client {
         (inner.name.clone(), inner.self_check.clone())
     }
 
-    fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<ImageResult>, HelperError> {
+    fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<ImageResult>, HelperError> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let rx = self.dispatch(Request::EmbedImages { id, files: files.to_vec() })?;
+        let rx = self.dispatch(Request::EmbedImages { id, files: files.to_vec(), want: want.clone() })?;
         match self.wait(rx)? {
             Reply::Images { results, .. } => Ok(results),
             Reply::Error { message, .. } => Err(HelperError::Broken(message)),
@@ -489,11 +606,23 @@ pub mod tests {
     #[test]
     fn a_fake_card_failure_stops_the_card_helper_before_it_starts() {
         temp_env("PP_ML_FAKE_CARD", "self-check", || {
-            assert!(matches!(Client::start(Device::Gpu), Err(StartError::Card(CardFailure::SelfCheckFailed { .. }))));
+            assert!(matches!(Client::start(Device::Gpu, None), Err(StartError::Card(CardFailure::SelfCheckFailed { .. }))));
         });
         temp_env("PP_ML_FAKE_CARD", "no-card", || {
-            assert_eq!(Client::start(Device::Gpu).err(), Some(StartError::Card(CardFailure::NoCard)));
+            assert_eq!(Client::start(Device::Gpu, Some(ModelId::AuraFace)).err(), Some(StartError::Card(CardFailure::NoCard)));
         });
+    }
+
+    #[test]
+    fn wants_serialise_flat() {
+        let w = Want::with_faces();
+        let json = serde_json::to_string(&w).unwrap();
+        assert_eq!(json, r#"{"search":true,"faces":"detect"}"#);
+        assert_eq!(serde_json::from_str::<Want>(&json).unwrap(), w);
+        assert_eq!(serde_json::to_string(&Want::search()).unwrap(), r#"{"search":true,"faces":"none"}"#);
+        let k = Want::known(vec![KnownFaces { path: "/x.JPG".into(), faces: vec![] }]);
+        assert_eq!(serde_json::from_str::<Want>(&serde_json::to_string(&k).unwrap()).unwrap(), k);
+        assert!(!Want::faces_only().search);
     }
 
     /// Run `f` with an environment variable set, restoring it after.

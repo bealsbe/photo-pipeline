@@ -20,9 +20,12 @@
 
 pub mod client;
 pub mod download;
+pub mod face;
 pub mod gpu;
 pub mod models;
+pub mod onnx_patch;
 pub mod prep;
+pub mod unzip;
 pub mod worker;
 
 use serde::{Deserialize, Serialize};

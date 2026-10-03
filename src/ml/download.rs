@@ -100,19 +100,19 @@ fn download_model(id: ModelId, cancel: &AtomicBool, report: &mut dyn FnMut(u64, 
         }
         let dest = dir.join(f.file);
         if std::fs::metadata(&dest).is_ok_and(|m| m.len() == f.bytes) {
-            done += f.bytes;
+            done += f.download_bytes();
             report(done, DownloadState::Downloading);
             continue;
         }
         let base = done;
         let state = fetch(f, &dest, cancel, &mut |step| match step {
             Step::Bytes(n) => report(base + n, DownloadState::Downloading),
-            Step::Checking => report(base + f.bytes, DownloadState::Checking),
+            Step::Checking => report(base + f.download_bytes(), DownloadState::Checking),
         });
         if state != DownloadState::Checked {
             return state;
         }
-        done += f.bytes;
+        done += f.download_bytes();
     }
     DownloadState::Checked
 }
@@ -166,24 +166,93 @@ pub fn fetch(f: &ModelFile, dest: &Path, cancel: &AtomicBool, report: &mut dyn F
         report(Step::Checking);
         file.sync_all().map_err(|e| DownloadState::Failed(format!("can't write {}: {e}", tmp.display())))?;
         drop(file);
-        if got != f.bytes {
-            return Err(DownloadState::Failed(format!("{} arrived with {got} bytes, not {}", f.file, f.bytes)));
+        let (expected_bytes, expected_sha) = match f.archive {
+            Some(a) => (a.bytes, a.sha256),
+            None => (f.bytes, f.sha256),
+        };
+        if got != expected_bytes {
+            return Err(DownloadState::Failed(format!("{} arrived with {got} bytes, not {expected_bytes}", f.file)));
         }
         let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
-        if digest != f.sha256 {
-            return Err(DownloadState::Mismatch { expected: f.sha256.to_string(), got: digest });
+        if digest != expected_sha {
+            return Err(DownloadState::Mismatch { expected: expected_sha.to_string(), got: digest });
         }
+        // An archive: take the one file out, check it too, and drop the
+        // archive (nothing of it is kept, §4.4).
+        let ready = if f.archive.is_some() { unpack(f, &tmp, cancel)? } else { tmp.clone() };
         let _ = std::fs::remove_file(dest);
-        fsutil::rename_noreplace(&tmp, dest).map_err(|e| DownloadState::Failed(format!("can't put {} in place: {e}", f.file)))?;
+        fsutil::rename_noreplace(&ready, dest).map_err(|e| DownloadState::Failed(format!("can't put {} in place: {e}", f.file)))?;
         fsutil::sync_parent(dest);
+        if f.archive.is_some() {
+            let _ = std::fs::remove_file(&tmp);
+        }
         Ok(DownloadState::Checked)
     })();
     match outcome {
         Ok(state) => state,
         Err(state) => {
             let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(member_path(&tmp));
             state
         }
+    }
+}
+
+/// Where an archive's member is inflated to, beside the archive.
+fn member_path(archive_tmp: &Path) -> PathBuf {
+    let mut name = archive_tmp.as_os_str().to_owned();
+    name.push(".member");
+    PathBuf::from(name)
+}
+
+/// Inflate `f.file` out of the checked archive at `archive` into a
+/// temporary file beside it, checking the member's size and digest.
+/// Returns the member's path, ready to rename into place.
+fn unpack(f: &ModelFile, archive: &Path, cancel: &AtomicBool) -> Result<PathBuf, DownloadState> {
+    let out_path = member_path(archive);
+    let _ = std::fs::remove_file(&out_path);
+    let mut out = std::fs::File::create(&out_path).map_err(|e| DownloadState::Failed(format!("can't write {}: {e}", out_path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut sink = HashingWriter { inner: &mut out, hasher: &mut hasher, cancel, cancelled: false };
+    let result = super::unzip::extract(archive, f.file, &mut sink, &mut |_| {});
+    let cancelled = sink.cancelled;
+    let written = match result {
+        Ok(n) => n,
+        Err(_) if cancelled => return Err(DownloadState::Cancelled),
+        Err(e) => return Err(DownloadState::Failed(format!("{}: {e}", f.file))),
+    };
+    out.sync_all().map_err(|e| DownloadState::Failed(format!("can't write {}: {e}", out_path.display())))?;
+    drop(out);
+    if written != f.bytes {
+        return Err(DownloadState::Failed(format!("{} came out of the archive {written} bytes long, not {}", f.file, f.bytes)));
+    }
+    let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if digest != f.sha256 {
+        return Err(DownloadState::Mismatch { expected: f.sha256.to_string(), got: digest });
+    }
+    Ok(out_path)
+}
+
+/// A writer that digests what passes through and stops on cancel.
+struct HashingWriter<'a> {
+    inner: &'a mut std::fs::File,
+    hasher: &'a mut Sha256,
+    cancel: &'a AtomicBool,
+    cancelled: bool,
+}
+
+impl Write for HashingWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.cancel.load(Ordering::Relaxed) {
+            self.cancelled = true;
+            return Err(std::io::Error::other("cancelled"));
+        }
+        self.hasher.update(buf);
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -255,7 +324,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let body: Vec<u8> = (0..300_000u32).map(|i| (i % 241) as u8).collect();
         let digest: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
-        let good = ModelFile { file: "good.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: body.len() as u64 };
+        let good = ModelFile { file: "good.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: body.len() as u64, archive: None };
         let mut seen = Vec::new();
         let state = fetch(&good, &d.join("good.bin"), &AtomicBool::new(false), &mut |s| seen.push(s));
         assert_eq!(state, DownloadState::Checked);
@@ -264,15 +333,15 @@ mod tests {
         assert!(seen.contains(&Step::Bytes(body.len() as u64)));
         assert!(!partial_path(&d.join("good.bin")).exists());
         // The wrong digest: deleted, nothing installed.
-        let bad = ModelFile { file: "bad.bin", url: leak(serve_once(body.clone())), sha256: leak("0".repeat(64)), bytes: body.len() as u64 };
+        let bad = ModelFile { file: "bad.bin", url: leak(serve_once(body.clone())), sha256: leak("0".repeat(64)), bytes: body.len() as u64, archive: None };
         let state = fetch(&bad, &d.join("bad.bin"), &AtomicBool::new(false), &mut |_| {});
         assert!(matches!(state, DownloadState::Mismatch { ref expected, ref got } if expected == &"0".repeat(64) && got == &digest), "{state:?}");
         assert!(!d.join("bad.bin").exists() && !partial_path(&d.join("bad.bin")).exists());
         // The wrong size.
-        let short = ModelFile { file: "short.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: 10 };
+        let short = ModelFile { file: "short.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: 10, archive: None };
         assert!(matches!(fetch(&short, &d.join("short.bin"), &AtomicBool::new(false), &mut |_| {}), DownloadState::Failed(_)));
         // Nobody listening: offline.
-        let gone = ModelFile { file: "gone.bin", url: "http://127.0.0.1:9/file.bin", sha256: leak(digest), bytes: 1 };
+        let gone = ModelFile { file: "gone.bin", url: "http://127.0.0.1:9/file.bin", sha256: leak(digest), bytes: 1, archive: None };
         assert_eq!(fetch(&gone, &d.join("gone.bin"), &AtomicBool::new(false), &mut |_| {}), DownloadState::Offline);
         let _ = std::fs::remove_dir_all(&d);
     }
