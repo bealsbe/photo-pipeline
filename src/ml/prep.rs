@@ -6,8 +6,8 @@
 //! [`INPUT_SIZE`] square (what SigLIP2's preprocessing does, so the whole
 //! frame is seen) and normalised to mean 0.5, std 0.5 in CHW order.
 //!
-//! With faces wanted, the same decode (at least ~740 px on its long side,
-//! about half the preview) also fills the face detector's canvas, and the
+//! With faces wanted, the same decode (at least ~1 000 px on its long
+//! side, filling the detector's canvas) also fills that canvas, and the
 //! preview's bytes are kept so the faces found can be cut from the full
 //! preview afterwards ([`FacePrep::full_pixels`]), one read per photo.
 //!
@@ -35,9 +35,9 @@ pub const INPUT_SIZE: u32 = 256;
 pub const PREVIEW_MIN_EDGE: u32 = 300;
 /// A RAW-only shot's preview for faces: at least this long (§7.3).
 pub const FACE_PREVIEW_MIN_EDGE: u32 = 1000;
-/// The decode for the detector keeps at least this on the long side
-/// (half a 1 616-px preview, which kept 29 of 30 faces in the study).
-pub const DETECT_MIN_LONG_EDGE: u32 = 740;
+/// The decode for the detector keeps at least this on the long side, so
+/// the canvas (`face::DET_SIZE`) is filled rather than upscaled into.
+pub const DETECT_MIN_LONG_EDGE: u32 = 1000;
 
 /// Everything one read of a photo gives the index.
 #[derive(Clone)]

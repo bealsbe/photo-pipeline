@@ -183,6 +183,8 @@ pub struct FaceModel {
     session: Session,
     input: String,
     norm: Norm,
+    /// Crops per call: [`FACE_BATCH`], or what a fixed input shape allows.
+    batch: usize,
 }
 
 /// The loaded sessions.
@@ -293,10 +295,16 @@ impl Models {
                 (det_gpu, rec_gpu)
             }
         };
-        let input = session.inputs().first().map(|i| i.name().to_string()).ok_or_else(|| Load::Other("face model: no input".into()))?;
+        let first = session.inputs().first().ok_or_else(|| Load::Other("face model: no input".into()))?;
+        let input = first.name().to_string();
+        // SFace's file declares a batch of one; the others are free.
+        let batch = match first.dtype() {
+            ValueType::Tensor { shape, .. } if shape.first().is_some_and(|&n| n > 0) => shape[0] as usize,
+            _ => FACE_BATCH,
+        };
         let dim = output_dim(&session).unwrap_or(0);
         self.detector = Some(detector);
-        self.face = Some(FaceModel { id, dim, session, input, norm: norm_of(id) });
+        self.face = Some(FaceModel { id, dim, session, input, norm: norm_of(id), batch });
         Ok(())
     }
 
@@ -385,7 +393,7 @@ impl Models {
     pub fn recognise(&mut self, crops: &[&Pixels]) -> ort::Result<Vec<Vec<f32>>> {
         let fm = self.face.as_mut().ok_or_else(|| ort::Error::new("this helper has no face model"))?;
         let mut out = Vec::with_capacity(crops.len());
-        for batch in crops.chunks(FACE_BATCH) {
+        for batch in crops.chunks(fm.batch.max(1)) {
             let n = batch.len();
             let data: Vec<f32> = batch.iter().flat_map(|c| face::face_input(c, fm.norm)).collect();
             let shape = vec![n as i64, 3, ALIGNED as i64, ALIGNED as i64];

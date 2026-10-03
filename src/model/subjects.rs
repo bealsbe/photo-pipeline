@@ -574,6 +574,246 @@ pub fn private_dir(path: &Path) {
     }
 }
 
+// ---- Grouping (pure) ------------------------------------------------------
+
+/// How far (cosine distance, 1 − cosine) a face may be from a group's
+/// prototype and still belong, per face model: the study's cut-offs
+/// (AuraFace 0.6, SFace 0.5; InsightFace as Immich's 0.5), to be moved by
+/// phase 0's comparison.
+pub fn cutoff_for(model: crate::ml::models::ModelId) -> f32 {
+    match model {
+        crate::ml::models::ModelId::AuraFace => 0.6,
+        crate::ml::models::ModelId::SFace => 0.5,
+        _ => 0.5,
+    }
+}
+
+/// *Find more*'s stricter cut-off: a share of the model's.
+pub const STRICT_SHARE: f32 = 0.75;
+
+/// Vectors the grouping reads: `dim` floats per row, unit length.
+pub struct Rows<'a> {
+    pub dim: usize,
+    pub data: &'a [f32],
+}
+
+impl Rows<'_> {
+    pub fn len(&self) -> usize {
+        if self.dim == 0 { 0 } else { self.data.len() / self.dim }
+    }
+
+    pub fn row(&self, i: usize) -> &[f32] {
+        &self.data[i * self.dim..(i + 1) * self.dim]
+    }
+}
+
+/// An automatic group of rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cluster {
+    /// Row indices, in the order they joined (clearest first).
+    pub members: Vec<usize>,
+    /// The unit mean of the members' vectors.
+    pub centroid: Vec<f32>,
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn unit(mut v: Vec<f32>) -> Vec<f32> {
+    let n = dot(&v, &v).sqrt();
+    if n > 0.0 {
+        v.iter_mut().for_each(|x| *x /= n);
+    }
+    v
+}
+
+/// The nearest prototype to `v`: (index, cosine distance).
+pub fn nearest(prototypes: &[Vec<f32>], v: &[f32]) -> Option<(usize, f32)> {
+    use rayon::prelude::*;
+    if prototypes.len() < 256 {
+        prototypes.iter().enumerate().map(|(i, p)| (i, 1.0 - dot(p, v))).min_by(|a, b| a.1.total_cmp(&b.1))
+    } else {
+        prototypes.par_iter().enumerate().map(|(i, p)| (i, 1.0 - dot(p, v))).min_by(|a, b| a.1.total_cmp(&b.1))
+    }
+}
+
+/// Group rows: each row, in `order` (clearest first), joins the nearest
+/// cluster within `cutoff` or starts one; then clusters whose centroids
+/// lie within `cutoff` of each other are merged, until none do.  Rows
+/// outside `order` (confirmed to a subject) take no part.  Pure.
+pub fn cluster(rows: &Rows<'_>, order: &[usize], cutoff: f32) -> Vec<Cluster> {
+    let mut clusters: Vec<Cluster> = Vec::new();
+    let mut sums: Vec<Vec<f32>> = Vec::new();
+    for &i in order {
+        if i >= rows.len() {
+            continue;
+        }
+        let v = rows.row(i);
+        let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
+        match nearest(&centroids, v) {
+            Some((k, d)) if d <= cutoff => {
+                clusters[k].members.push(i);
+                for (s, x) in sums[k].iter_mut().zip(v) {
+                    *s += x;
+                }
+                clusters[k].centroid = unit(sums[k].clone());
+            }
+            _ => {
+                clusters.push(Cluster { members: vec![i], centroid: v.to_vec() });
+                sums.push(v.to_vec());
+            }
+        }
+    }
+    merge_close(&mut clusters, rows, cutoff);
+    clusters.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then_with(|| a.members.first().cmp(&b.members.first())));
+    clusters
+}
+
+/// Merge clusters whose centroids lie within `cutoff`, repeatedly.
+fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
+    for _ in 0..4 {
+        let n = clusters.len();
+        if n < 2 {
+            return;
+        }
+        // Union-find over close pairs.
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], i: usize) -> usize {
+            let mut r = i;
+            while p[r] != r {
+                r = p[r];
+            }
+            let mut c = i;
+            while p[c] != r {
+                let next = p[c];
+                p[c] = r;
+                c = next;
+            }
+            r
+        }
+        let mut merged = false;
+        for a in 0..n {
+            for b in a + 1..n {
+                if 1.0 - dot(&clusters[a].centroid, &clusters[b].centroid) <= cutoff {
+                    let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
+                    if ra != rb {
+                        parent[rb.max(ra)] = ra.min(rb);
+                        merged = true;
+                    }
+                }
+            }
+        }
+        if !merged {
+            return;
+        }
+        let mut groups: std::collections::BTreeMap<usize, Vec<usize>> = std::collections::BTreeMap::new();
+        for i in 0..n {
+            let r = find(&mut parent, i);
+            groups.entry(r).or_default().extend(clusters[i].members.iter().copied());
+        }
+        *clusters = groups
+            .into_values()
+            .map(|members| {
+                let mut sum = vec![0f32; rows.dim];
+                for &m in &members {
+                    for (s, x) in sum.iter_mut().zip(rows.row(m)) {
+                        *s += x;
+                    }
+                }
+                Cluster { members, centroid: unit(sum) }
+            })
+            .collect();
+    }
+}
+
+/// Add rows to existing clusters as they arrive (the pass): each joins
+/// the nearest cluster within `cutoff` or starts one.  The full
+/// [`cluster`] runs later to tidy up.
+pub fn assign(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutoff: f32) {
+    for &i in new {
+        if i >= rows.len() {
+            continue;
+        }
+        let v = rows.row(i);
+        let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
+        match nearest(&centroids, v) {
+            Some((k, d)) if d <= cutoff => {
+                let c = &mut clusters[k];
+                let n = c.members.len() as f32;
+                let mut sum: Vec<f32> = c.centroid.iter().map(|x| x * n).collect();
+                for (s, x) in sum.iter_mut().zip(v) {
+                    *s += x;
+                }
+                c.members.push(i);
+                c.centroid = unit(sum);
+            }
+            _ => clusters.push(Cluster { members: vec![i], centroid: v.to_vec() }),
+        }
+    }
+}
+
+/// How sure a face's membership is, 0..1: 1 at the prototype, 0 at the
+/// cut-off and beyond.
+pub fn sureness(distance: f32, cutoff: f32) -> f32 {
+    (1.0 - distance / cutoff.max(1e-6)).clamp(0.0, 1.0)
+}
+
+/// The smallest distance from `v` to any of `members`' rows (a subject's
+/// prototypes are its confirmed faces).
+pub fn distance_to_members(rows: &Rows<'_>, members: &[usize], v: &[f32]) -> Option<f32> {
+    members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - dot(rows.row(m), v)).min_by(f32::total_cmp)
+}
+
+/// Candidates for a subject's review: rows in `pool` within `cutoff` of
+/// any of `members`, as (row, distance), nearest first.
+pub fn candidates(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f32) -> Vec<(usize, f32)> {
+    use rayon::prelude::*;
+    let mut out: Vec<(usize, f32)> = pool
+        .par_iter()
+        .filter_map(|&i| {
+            if i >= rows.len() {
+                return None;
+            }
+            let d = distance_to_members(rows, members, rows.row(i))?;
+            (d <= cutoff).then_some((i, d))
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    out
+}
+
+/// One suggestion per burst (UI 6): `items` nearest first, each with its
+/// burst (`None`: a frame on its own); frames of one burst are gathered
+/// under the first (nearest) of them, keeping their order.
+pub fn per_burst<T>(items: Vec<(T, Option<u64>)>) -> Vec<Vec<T>> {
+    let mut out: Vec<Vec<T>> = Vec::new();
+    let mut slot: HashMap<u64, usize> = HashMap::new();
+    for (item, burst) in items {
+        match burst {
+            Some(b) => match slot.get(&b) {
+                Some(&i) => out[i].push(item),
+                None => {
+                    slot.insert(b, out.len());
+                    out.push(vec![item]);
+                }
+            },
+            None => out.push(vec![item]),
+        }
+    }
+    out
+}
+
+/// A stable id for a cluster: its clearest member's reference, hashed.
+pub fn cluster_id(cover: &FaceRef) -> u64 {
+    let mut bytes = Vec::with_capacity(24);
+    bytes.extend_from_slice(&cover.key.0);
+    for t in cover.thousandths() {
+        bytes.extend_from_slice(&t.to_le_bytes());
+    }
+    crate::model::binfile::fnv1a(&bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,5 +933,94 @@ mod tests {
         assert_eq!(Refused::MixedKinds.to_string(), "people, fursuits and pets are never combined");
         assert_eq!(Kind::Person.noun(), "person");
         assert_eq!(Kind::Fursuit.plural(), "Fursuits");
+    }
+
+    /// Three people's faces as unit vectors around three directions, with
+    /// a little noise; `n` faces per person, then `loners` far from all.
+    fn people_rows(n: usize, loners: usize) -> (Vec<f32>, usize) {
+        let dim = 16;
+        let mut data = Vec::new();
+        let mut seed = 7u64;
+        let mut noise = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed % 1000) as f32 / 1000.0 - 0.5) * 0.3
+        };
+        for person in 0..3 {
+            for _ in 0..n {
+                let mut v = vec![0f32; dim];
+                v[person] = 1.0;
+                for x in v.iter_mut() {
+                    *x += noise();
+                }
+                let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                data.extend(v.iter().map(|x| x / norm));
+            }
+        }
+        for k in 0..loners {
+            let mut v = vec![0f32; dim];
+            v[5 + k] = 1.0;
+            data.extend(v);
+        }
+        (data, dim)
+    }
+
+    #[test]
+    fn clustering_finds_the_people_and_leaves_loners_alone() {
+        let (data, dim) = people_rows(8, 3);
+        let rows = Rows { dim, data: &data };
+        assert_eq!(rows.len(), 27);
+        let order: Vec<usize> = (0..rows.len()).collect();
+        let clusters = cluster(&rows, &order, 0.5);
+        let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+        assert_eq!(sizes, [8, 8, 8, 1, 1, 1], "{sizes:?}");
+        for c in &clusters[..3] {
+            let people: HashSet<usize> = c.members.iter().map(|&m| m / 8).collect();
+            assert_eq!(people.len(), 1, "one person per group: {:?}", c.members);
+            assert!((dot(&c.centroid, &c.centroid) - 1.0).abs() < 1e-4, "unit centroid");
+        }
+        // Rows left out of the order (confirmed to a subject) take no part.
+        let partial: Vec<usize> = (8..27).collect();
+        let without = cluster(&rows, &partial, 0.5);
+        assert!(without.iter().all(|c| c.members.iter().all(|&m| m >= 8)));
+        // Incremental assignment puts a new face of person 0 with its group.
+        let mut live = cluster(&rows, &partial, 0.5);
+        assign(&mut live, &rows, &[0, 1, 2], 0.5);
+        let with0: Vec<&Cluster> = live.iter().filter(|c| c.members.contains(&0)).collect();
+        assert_eq!(with0.len(), 1);
+        assert!(with0[0].members.contains(&1) && with0[0].members.contains(&2) && with0[0].members.len() == 3, "{:?}", with0[0].members);
+        assert!(assign_is_merged_by_full_cluster(&rows));
+        // Sureness and candidates.
+        assert_eq!(sureness(0.0, 0.5), 1.0);
+        assert_eq!(sureness(0.5, 0.5), 0.0);
+        assert!((sureness(0.25, 0.5) - 0.5).abs() < 1e-6);
+        let members = [0usize, 1];
+        let pool: Vec<usize> = (2..27).collect();
+        let cands = candidates(&rows, &members, &pool, 0.5);
+        assert_eq!(cands.len(), 6, "the rest of person 0: {cands:?}");
+        assert!(cands.iter().all(|&(i, d)| i < 8 && d <= 0.5));
+        assert!(cands.windows(2).all(|w| w[0].1 <= w[1].1), "nearest first");
+        assert!(candidates(&rows, &members, &pool, 0.5 * STRICT_SHARE).len() <= 6);
+        assert_eq!(distance_to_members(&rows, &[], rows.row(0)), None);
+        // One suggestion per burst, in order of arrival.
+        let grouped = per_burst(vec![("a", Some(1)), ("b", None), ("c", Some(2)), ("d", Some(1)), ("e", Some(2))]);
+        assert_eq!(grouped, [vec!["a", "d"], vec!["b"], vec!["c", "e"]]);
+        let id = cluster_id(&FaceRef::new(Key([1; 16]), [0.1, 0.2, 0.3, 0.4]));
+        assert_eq!(id, cluster_id(&FaceRef::new(Key([1; 16]), [0.1001, 0.2, 0.3, 0.4])), "stable within rounding");
+        assert_ne!(id, cluster_id(&FaceRef::new(Key([2; 16]), [0.1, 0.2, 0.3, 0.4])));
+        assert!(cutoff_for(crate::ml::models::ModelId::AuraFace) > cutoff_for(crate::ml::models::ModelId::SFace));
+    }
+
+    /// Two clusters of one person started apart (a split order) are merged
+    /// by the full clustering's merge pass.
+    fn assign_is_merged_by_full_cluster(rows: &Rows<'_>) -> bool {
+        let (a, b): (Vec<usize>, Vec<usize>) = (0..8).partition(|i| i % 2 == 0);
+        let mut c = cluster(rows, &a, 0.5);
+        let before = c.len();
+        c.extend(cluster(rows, &b, 0.5));
+        let order: Vec<usize> = (0..8).collect();
+        let merged = cluster(rows, &order, 0.5);
+        before == 1 && merged.len() == 1 && merged[0].members.len() == 8
     }
 }

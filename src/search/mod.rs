@@ -36,6 +36,7 @@ pub mod index;
 pub mod parse;
 pub mod pass;
 pub mod query;
+pub mod step;
 pub mod tags;
 pub mod vocab;
 
