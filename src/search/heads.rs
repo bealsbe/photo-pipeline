@@ -46,8 +46,9 @@ use crate::ml::{CardFailure, Device};
 use crate::model::binfile::{Reader, Writer};
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::FileType;
-use crate::model::subjects::{FaceRef, private_dir, private_file};
+use crate::model::subjects::{self, Cutoffs, Face, FaceRef, GroupId, Kind, Refused, Rows, SubjectsFile, private_dir, private_file};
 use crate::ops::fsutil;
+use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
 
 /// Seconds per fursuit photo for the head step (OWLv2 to find heads, then
 /// DINOv2 on each head): the study's 0.12 s on the card (about 1.4 hours
@@ -422,7 +423,8 @@ pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
     pub scanned: HashMap<Key, Vec<HeadDetection>>,
-    vectors: Option<HeadVectors>,
+    /// In memory only once asked for ([`HeadStore::vectors`]).
+    pub(crate) vectors: Option<HeadVectors>,
     tiles: Arc<Mutex<HeadTiles>>,
 }
 
@@ -760,6 +762,36 @@ impl HeadStore {
     }
 }
 
+/// The step the generic grouping runs over (`search::step`): refs and
+/// rows are the vectors **in memory**, so a caller builds them first
+/// ([`HeadStore::vectors`]); before that the step is empty, never a
+/// read behind the grouping's back.  Rows are f32, full width (the
+/// user's decision, 2026-10-03).
+impl KindStep for HeadStore {
+    fn kind(&self) -> Kind {
+        Kind::Fursuit
+    }
+
+    fn refs(&self) -> &[FaceRef] {
+        self.vectors.as_ref().map_or(&[], |v| v.refs.as_slice())
+    }
+
+    fn rows(&self) -> Rows<'_> {
+        match &self.vectors {
+            Some(v) => Rows::F32 { dim: v.dim, data: &v.data },
+            None => Rows::F32 { dim: 0, data: &[] },
+        }
+    }
+
+    fn clarity(&self, r: &FaceRef) -> f32 {
+        self.detection(r).map_or(0.0, HeadDetection::clarity)
+    }
+
+    fn cutoffs(&self) -> Cutoffs {
+        subjects::cutoff_for(VECTOR_MODEL)
+    }
+}
+
 // ---- the scan ---------------------------------------------------------
 
 /// Photos per request to the helper.
@@ -943,6 +975,10 @@ pub enum Decision {
 pub struct Fursuits {
     pub store: Option<HeadStore>,
     pub status: HeadsStatus,
+    /// The fursuits' clusters and sureness, from the last regroup and
+    /// the heads assigned since (this kind's rows only).
+    pub grouped: Grouped,
+    generation: u64,
     /// Photos the user skipped a scan of (this session): offered again
     /// only from the tab, as a catch-up.
     skipped: HashSet<Key>,
@@ -955,7 +991,7 @@ pub struct Fursuits {
 #[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl Default for Fursuits {
     fn default() -> Fursuits {
-        Fursuits { store: None, status: HeadsStatus::default(), skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
+        Fursuits { store: None, status: HeadsStatus::default(), grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
     }
 }
 
@@ -969,9 +1005,149 @@ impl Fursuits {
 
     pub fn close(&mut self) {
         self.store = None;
+        self.grouped = Grouped::default();
         self.waiting.clear();
         self.status.step = Step::Idle;
         self.refresh();
+    }
+
+    // ---- grouping (the generic machinery over this kind's rows) ----
+
+    /// The store with its vectors in memory: built now if they weren't
+    /// (only the fursuit work asks for this; opening the library doesn't).
+    pub fn step(&mut self) -> Option<&HeadStore> {
+        self.load_vectors();
+        self.store.as_ref()
+    }
+
+    /// Build the vector memory now, if the store is open.
+    fn load_vectors(&mut self) {
+        if let Some(store) = self.store.as_mut() {
+            store.vectors();
+        }
+    }
+
+    /// A regroup's input for the worker, stamped with the next
+    /// generation; `file` is the user's subjects file (every kind; the
+    /// job counts fursuits only).
+    pub fn regroup_job(&mut self, file: &SubjectsFile) -> Option<RegroupJob> {
+        self.load_vectors();
+        let store = self.store.as_ref()?;
+        if store.refs().is_empty() {
+            return None;
+        }
+        let generation = self.generation + 1;
+        self.generation = generation;
+        Some(step::job(store, file, generation))
+    }
+
+    /// Take a regroup's result (an older generation's, or another
+    /// kind's, is dropped), then assign the heads that arrived meanwhile.
+    pub fn apply_regroup(&mut self, r: Regrouped, file: &SubjectsFile) -> bool {
+        if r.generation != self.generation || r.kind != Kind::Fursuit {
+            return false;
+        }
+        self.load_vectors();
+        let Some(store) = self.store.as_ref() else { return false };
+        self.grouped.apply(r, store.refs(), &|f| store.clarity(f));
+        self.grouped.assign_new(store, file);
+        true
+    }
+
+    /// Heads that arrived since the last regroup join the clusters.
+    pub fn assign_new(&mut self, file: &SubjectsFile) {
+        self.load_vectors();
+        if let Some(store) = self.store.as_ref() {
+            self.grouped.assign_new(store, file);
+        }
+    }
+
+    /// The grouping starts over (the cache was emptied).
+    pub fn reset_grouping(&mut self) {
+        self.grouped = Grouped::default();
+        self.generation += 1;
+    }
+
+    /// The generation the current cluster ids belong to.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// A cluster's heads for the current generation (none: stale,
+    /// unknown, or a subject's id).
+    pub fn cluster_members(&self, id: &GroupId) -> Option<Vec<FaceRef>> {
+        let GroupId::Cluster(id) = id else { return None };
+        let store = self.store.as_ref()?;
+        let c = self.grouped.cluster(*id)?;
+        Some(c.members.iter().filter_map(|&m| store.refs().get(m).copied()).collect())
+    }
+
+    /// The automatic groups for the *Fursuits* tab: each cluster's id
+    /// and members, in cluster order (the snapshot builder makes
+    /// `Group`s of them, kind Fursuit).
+    pub fn clusters(&self) -> Vec<(u64, Vec<FaceRef>)> {
+        let Some(store) = &self.store else { return Vec::new() };
+        let refs = store.refs();
+        self.grouped.clusters.iter().zip(&self.grouped.ids).map(|(c, &id)| (id, c.members.iter().filter_map(|&m| refs.get(m).copied()).collect())).collect()
+    }
+
+    /// Suggestions waiting for a fursuit subject, from the last regroup.
+    pub fn suggestion_count(&self, id: &subjects::SubjectId) -> usize {
+        self.grouped.suggestion_counts.get(id).copied().unwrap_or(0)
+    }
+
+    /// Suggestions for review (UI 6): for a fursuit subject, the heads
+    /// within the cut-off (the strict one with `strict`: *Find more*) of
+    /// its confirmed members that are confirmed nowhere and not rejected
+    /// for it, nearest first, one entry per burst; for a cluster, its own
+    /// members to check.  A subject of another kind gets nothing: never
+    /// a face among heads.
+    pub fn suggestions(&mut self, file: &SubjectsFile, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>, strict: bool) -> Result<Vec<Vec<Face>>, Refused> {
+        self.load_vectors();
+        let Some(store) = self.store.as_ref() else { return Ok(Vec::new()) };
+        let grouped = &self.grouped;
+        let refs = store.refs();
+        let rows = store.rows();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let ordered: Vec<(usize, f32)> = match id {
+            GroupId::Subject(sid) => {
+                let s = file.get(sid).ok_or_else(|| Refused::NoSuchSubject(sid.clone()))?;
+                if s.kind != Kind::Fursuit {
+                    return Ok(Vec::new());
+                }
+                let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
+                let confirmed = file.confirmed(Kind::Fursuit);
+                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+                let cutoffs = store.cutoffs();
+                subjects::candidates(&rows, &members, &pool, if strict { cutoffs.strict } else { cutoffs.suggest })
+            }
+            GroupId::Cluster(cid) => {
+                let c = grouped.cluster(*cid).ok_or(Refused::StaleGroup)?;
+                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
+                v.sort_by(|a, b| a.1.total_cmp(&b.1));
+                v
+            }
+        };
+        let heads: Vec<(Face, Option<u64>)> = ordered
+            .iter()
+            .filter_map(|&(i, _)| resolve(refs.get(i)?))
+            .map(|f| {
+                let b = f.burst;
+                (f, b)
+            })
+            .collect();
+        Ok(subjects::per_burst(heads))
+    }
+
+    /// A head's clarity (UI 12): how clear a view it is and, once the
+    /// vectors are in memory, how sure its membership is.
+    pub fn clarity_with_sureness(&self, r: &FaceRef) -> f32 {
+        let Some(store) = &self.store else { return 0.0 };
+        let visual = store.clarity(r);
+        match store.vectors.as_ref().and_then(|v| v.by_ref.get(r)) {
+            Some(&row) => self.grouped.clarity_of(row, visual),
+            None => 0.5 * visual,
+        }
     }
 
     /// Index row `row` (key `key`) is one the step looks at: tagged
@@ -1147,6 +1323,7 @@ mod store_tests {
     use crate::ml::client::ImageResult;
     use crate::ml::heads::HeadsResult;
     use crate::ml::{SelfCheck, client::Want};
+    use crate::ml::models::ModelId;
 
     fn key(n: u8) -> Key {
         Key([n; 16])
@@ -1277,6 +1454,9 @@ mod store_tests {
         assert!(f.status.scanning());
         f.stop();
         // The processor: an offer, every time, even after an earlier yes.
+        // Why::FirstIndex with `on` (the first-index dialog's "Find
+        // fursuit heads" ticked) is not a go-ahead either (the user,
+        // 2026-10-03): the scan asks when it would start.
         for why in [Why::FirstIndex, Why::NewExports] {
             let d = f.consider(jobs(5), why, Device::Cpu, false);
             assert_eq!(d, Decision::Ask(Offer { photos: 5, why }));
@@ -1297,6 +1477,53 @@ mod store_tests {
         f.stop();
         f.status.on = false;
         assert_eq!(f.consider(jobs(4), Why::CatchUp, Device::Gpu, true), Decision::Nothing);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Kinds never mix in the fursuit grouping: the step is Kind::Fursuit,
+    /// a person named over the same refs counts for nothing here, a
+    /// fursuit subject does; suggestions for a person's id are empty; and
+    /// the vectors are built only when the grouping asks.
+    #[test]
+    fn a_fursuit_regroup_sees_its_own_kind_only_and_builds_memory_on_demand() {
+        let d = scratch("ownkind");
+        let mut f = Fursuits::default();
+        f.open(&d);
+        {
+            let store = f.store.as_mut().unwrap();
+            for (n, v) in [(1u8, [1.0f32, 0.0]), (2, [1.0, 0.0]), (3, [0.0, 1.0]), (4, [0.0, 1.0])] {
+                store.add(key(n), &[head(0.1, 300, &v)]).unwrap();
+            }
+            assert!(!store.vectors_loaded(), "opening and writing build no vector memory");
+        }
+        let refs: Vec<FaceRef> = (1..=4u8).map(|n| f.store.as_ref().unwrap().heads_of(&key(n))[0].head_ref(key(n))).collect();
+        let mut file = SubjectsFile::default();
+        let person = file.create(Kind::Person, Some("Someone".into()), vec![refs[0], refs[1]]);
+        assert!(f.regroup_job(&file).is_some() && f.store.as_ref().unwrap().vectors_loaded(), "the regroup builds the memory");
+        assert_eq!(f.store.as_ref().unwrap().kind(), Kind::Fursuit);
+        let job = f.regroup_job(&file).unwrap();
+        assert_eq!((job.kind, job.dim, job.refs.len()), (Kind::Fursuit, 2, 4));
+        assert_eq!(job.cutoffs, subjects::cutoff_for(ModelId::Dinov2));
+        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.14, 0.17, 0.14), "the measured cut-offs");
+        let r = step::regroup(&job);
+        assert!(!r.suggestion_counts.contains_key(&person), "a person is not counted among fursuits");
+        assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 4, "the person's refs are not confirmed here");
+        assert!(f.apply_regroup(r, &file));
+        assert_eq!(f.clusters().len(), 2, "two suits of two heads");
+        // A regroup of the wrong kind or an old generation is dropped.
+        let stale = Regrouped { kind: Kind::Person, generation: f.generation(), ..Regrouped::default() };
+        assert!(!f.apply_regroup(stale, &file));
+        // A fursuit subject with one confirmed head gets its twin suggested; a person's id gets nothing.
+        let suit = file.create(Kind::Fursuit, Some("Suit".into()), vec![refs[2]]);
+        let resolve = |r: &FaceRef| Some(Face { face: *r, jpg: None, raw: None, day: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(), capture: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap().and_hms_opt(10, 0, 0).unwrap(), burst: None, clarity: 0.5, confirmed: false });
+        let s = f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap();
+        assert_eq!(s.iter().flatten().map(|x| x.face).collect::<Vec<_>>(), [refs[3]], "the strict cut finds the identical head");
+        assert!(f.suggestions(&file, &GroupId::Subject(person.clone()), &resolve, false).unwrap().is_empty(), "a person's suggestions are not answered from heads");
+        assert_eq!(f.suggestions(&file, &GroupId::Cluster(999), &resolve, false), Err(Refused::StaleGroup));
+        assert!(f.clarity_with_sureness(&refs[0]) > 0.0);
+        f.forget_all();
+        f.reset_grouping();
+        assert!(f.clusters().is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 

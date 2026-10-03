@@ -589,13 +589,20 @@ pub struct Cutoffs {
     pub strict: f32,
 }
 
-/// The cut-offs per face model: the study's (AuraFace 0.6, SFace 0.5;
-/// InsightFace as Immich's 0.5), to be moved by phase 0's comparison;
-/// *Find more* at three quarters of it.  Phase 4 adds its head model's.
+/// The cut-offs per model.  Faces: the study's (AuraFace 0.6, SFace
+/// 0.5; InsightFace as Immich's 0.5), to be moved by phase 0's
+/// comparison; *Find more* at three quarters of it.  Fursuit heads
+/// (DINOv2, phase 4): **measured on the user's 258 pairwise answers**
+/// over two event days (plan, "As built — phase 4"): under 0.14 a pair
+/// was the same suit 23 times in 26 asked, under 0.17 47 in 78, and
+/// between 0.17 and 0.20 only 12 in 65; so groups and *Find more* at
+/// 0.14, suggestions for the Y/N review at 0.17, nothing beyond.
 pub fn cutoff_for(model: crate::ml::models::ModelId) -> Cutoffs {
+    use crate::ml::models::ModelId;
     let c = match model {
-        crate::ml::models::ModelId::AuraFace => 0.6,
-        crate::ml::models::ModelId::SFace => 0.5,
+        ModelId::Dinov2 => return Cutoffs { group: 0.14, suggest: 0.17, strict: 0.14 },
+        ModelId::AuraFace => 0.6,
+        ModelId::SFace => 0.5,
         _ => 0.5,
     };
     Cutoffs { group: c, suggest: c, strict: c * STRICT_SHARE }
