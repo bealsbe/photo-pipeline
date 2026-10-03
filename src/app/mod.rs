@@ -2142,7 +2142,7 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects: _ } => {
+                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects: _, also_fursuits: _ } => {
                     tasks.push(search::on_results(self, seq, search::Reply { hits, error, understood, fursuits, animal }))
                 }
                 BgEvent::SearchThings(things) => search::on_things(self, things),

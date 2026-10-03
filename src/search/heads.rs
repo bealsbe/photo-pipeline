@@ -382,10 +382,11 @@ impl HeadTiles {
 
 /// The head cache of one library: detections per photo looked at, a
 /// vector per head, a tile per head.  The vectors (1 536 wide, f32 in
-/// memory: about 420 MB for the ~68 000 heads a library of 56 000 shots
-/// is expected to hold) are read only when the fursuit work asks for
-/// them ([`HeadStore::vectors`]), never when the library opens, and can
-/// be let go ([`HeadStore::release_vectors`]).
+/// memory: 405 MB measured for the ~68 000 heads a library of 56 000
+/// shots is expected to hold) are read only when the fursuit work asks
+/// for them ([`HeadStore::vectors`]), never when the library opens, and
+/// are let go again once that work is quiet ([`Fursuits::release_if_idle`];
+/// the user's choice: full size, freed after use).
 pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
@@ -436,11 +437,15 @@ impl HeadStore {
         self.vectors.as_ref().expect("just loaded")
     }
 
-    /// Whether the vectors are in memory (dropping the store lets them
-    /// go; the library closing does that).
-    #[cfg(test)]
+    /// Whether the vectors are in memory.
     pub fn vectors_loaded(&self) -> bool {
         self.vectors.is_some()
+    }
+
+    /// Let the vectors go (read again from the file when next asked for,
+    /// about 0.3 s at library scale).
+    pub fn release_vectors(&mut self) {
+        self.vectors = None;
     }
 
     fn read_vectors(dir: &Path) -> HeadVectors {
@@ -926,6 +931,9 @@ pub enum Decision {
 pub struct Fursuits {
     pub store: Option<HeadStore>,
     pub status: HeadsStatus,
+    /// When fursuit work last needed the vectors (a regroup, suggestions,
+    /// new heads joining the clusters); none since they were last built.
+    last_use: Option<Instant>,
     /// The fursuits' clusters and sureness, from the last regroup and
     /// the heads assigned since (this kind's rows only).
     pub grouped: Grouped,
@@ -941,7 +949,7 @@ pub struct Fursuits {
 
 impl Default for Fursuits {
     fn default() -> Fursuits {
-        Fursuits { store: None, status: HeadsStatus::default(), grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
+        Fursuits { store: None, status: HeadsStatus::default(), last_use: None, grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
     }
 }
 
@@ -975,11 +983,40 @@ impl Fursuits {
         self.store.as_ref()
     }
 
-    /// Build the vector memory now, if the store is open.
+    /// Build the vector memory now, if the store is open, and note the use.
     fn load_vectors(&mut self) {
         if let Some(store) = self.store.as_mut() {
             store.vectors();
+            self.last_use = Some(Instant::now());
         }
+    }
+
+    /// Fursuit work has been quiet this long: the built vectors (and
+    /// with them the memory) are let go, to be read again on the next
+    /// request.  The user's choice (2026-10-03): full size, freed after
+    /// use.
+    pub const VECTORS_IDLE: Duration = Duration::from_secs(120);
+
+    /// Let the vectors go when nothing fursuit-shaped has needed them for
+    /// [`Fursuits::VECTORS_IDLE`] and no scan is running (a scan's batches
+    /// keep joining the clusters).  Returns whether they were released.
+    pub fn release_if_idle(&mut self, now: Instant) -> bool {
+        let Some(store) = self.store.as_mut() else { return false };
+        if !store.vectors_loaded() || self.status.scanning() {
+            return false;
+        }
+        let idle = self.last_use.map_or(true, |t| now.duration_since(t) >= Self::VECTORS_IDLE);
+        if idle {
+            store.release_vectors();
+            self.last_use = None;
+        }
+        idle
+    }
+
+    /// Whether the vectors are in memory right now.
+    #[cfg(test)]
+    pub fn vectors_resident(&self) -> bool {
+        self.store.as_ref().is_some_and(HeadStore::vectors_loaded)
     }
 
     /// A regroup's input for the worker, stamped with the next
@@ -1380,8 +1417,13 @@ mod store_tests {
             with_job - built
         );
         drop(job);
+        let after_job = rss_mb();
+        s.release_vectors();
+        let released = rss_mb();
+        eprintln!("{after_job:.0} MB with the job gone, {released:.0} MB with the vectors released (freed after use)");
         assert_eq!(n, rows);
         assert!(built - opened > (rows * dim * 4) as f64 / 1_000_000.0 * 0.8, "the vectors are resident once built");
+        assert!(released < opened + 60.0, "released: back near the store-open size ({released:.0} vs {opened:.0} MB)");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -1531,6 +1573,20 @@ mod store_tests {
         assert!(f.suggestions(&file, &GroupId::Subject(person.clone()), &resolve, false).unwrap().is_empty(), "a person's suggestions are not answered from heads");
         assert_eq!(f.suggestions(&file, &GroupId::Cluster(999), &resolve, false), Err(Refused::StaleGroup));
         assert!(f.clarity_with_sureness(&refs[0]) > 0.0);
+        // Freed after use: quiet for VECTORS_IDLE → the vectors go; the
+        // next request builds them again; a running scan keeps them.
+        let now = std::time::Instant::now();
+        assert!(f.vectors_resident());
+        assert!(!f.release_if_idle(now), "just used: kept");
+        assert!(f.release_if_idle(now + Fursuits::VECTORS_IDLE), "idle: released");
+        assert!(!f.vectors_resident());
+        assert!(f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap().is_empty(), "nothing built: nothing answered until step()");
+        f.step();
+        assert!(f.vectors_resident(), "the next request rebuilds");
+        assert_eq!(f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap().iter().flatten().count(), 1);
+        f.status.step = Step::Scanning { why: Why::CatchUp, done: 0, total: 1 };
+        assert!(!f.release_if_idle(now + 2 * Fursuits::VECTORS_IDLE), "a scan keeps them");
+        f.status.step = Step::Idle;
         f.forget_all();
         f.reset_grouping();
         assert!(f.clusters().is_empty());

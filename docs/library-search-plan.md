@@ -1929,7 +1929,12 @@ more*).
   a regroup job's f32 copy is alive on the worker (+399 MB for its few
   seconds; the copy is the generic grouping's, shared with people).
   Built only when the fursuit work needs it (a regroup, the Fursuits
-  tab, suggestions), never at start-up; the file on disk is 218 MB.  For
+  tab, suggestions), never at start-up, and **freed after use** (the
+  user's final choice): once no fursuit request has needed the vectors
+  for `Fursuits::VECTORS_IDLE` (2 minutes) and no scan runs, the engine
+  lets them go on its own tick and the process is back near the
+  store-open size; the next request reads them again (0.3 s).  The file
+  on disk is 218 MB.  For
   the record, the CLS half alone (768 wide) scored as well on the same
   258 answers, slightly better in places (under 0.14: 24 of 26 asked;
   under 0.17: 46 of 67 = 69 %; cross-day under 0.14: 6 of 6; cluster
@@ -1976,6 +1981,14 @@ failure ends the step `Failed`; `card_back` makes it idle again.  Costs:
 `estimate::head_catch_up_seconds` (0.12 s a photo on the card, 1.3 s on
 the processor, from the study; the helper's own numbers follow from the
 ignored `ml::heads` test on the real models).
+
+**A name shared across kinds** (the user, 2026-10-03: "the one you
+picked"): a chip carries its `GroupId`, so a picked chip searches that
+subject alone.  `@Alex` typed, when a person and a fursuit both have the
+name, resolves to the person; the fursuit comes beside the results as
+`SearchResults.also_fursuits: Vec<(String, GroupId)>` for the page to
+offer ("also a fursuit called Alex"), and its photos are never in the
+list (tested: `a_name_shared_across_kinds_never_unions_results`).
 
 Kinds never mix: a head is a `FaceRef` of `Kind::Fursuit` subjects only;
 its vectors are 1 536 wide where faces are 512; its files, requests and

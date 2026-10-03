@@ -500,6 +500,7 @@ impl Fake {
                     fursuits: Arc::new(fursuits),
                     animal,
                     subjects: Arc::new(Vec::new()),
+                    also_fursuits: Arc::new(Vec::new()),
                 });
             })
             .ok();

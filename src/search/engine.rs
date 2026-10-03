@@ -587,6 +587,9 @@ struct HeadScan {
 const TEXT_CACHE: usize = 64;
 /// While a pass runs, *Things* is sent at most this often.
 const THINGS_EVERY: Duration = Duration::from_secs(2);
+/// How often the idle engine looks whether built memory can go (the
+/// fursuit vectors after [`Fursuits::VECTORS_IDLE`]).
+const IDLE_TICK: Duration = Duration::from_secs(15);
 
 impl Worker {
     fn run(mut self) {
@@ -602,6 +605,7 @@ impl Worker {
                         }
                         None
                     }
+                    default(IDLE_TICK) => { self.idle_tick(); None }
                 }
             } else if let Some(sc) = &self.scan {
                 crossbeam_channel::select! {
@@ -613,11 +617,16 @@ impl Worker {
                         }
                         None
                     }
+                    default(IDLE_TICK) => { self.idle_tick(); None }
                 }
             } else {
-                match self.rx.recv() {
+                match self.rx.recv_timeout(IDLE_TICK) {
                     Ok(c) => Some(c),
-                    Err(_) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        self.idle_tick();
+                        None
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             };
             let Some(cmd) = cmd else { continue };
@@ -992,6 +1001,14 @@ impl Worker {
             }
         };
         let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
+    }
+
+    /// Nothing asked for a while: built memory that fursuit work no
+    /// longer needs is let go (the user's choice: freed after use).
+    fn idle_tick(&mut self) {
+        if self.fursuits.release_if_idle(Instant::now()) && std::env::var_os("PP_PROFILE").is_some() {
+            eprintln!("subjects: fursuit vectors released after {:?} idle", Fursuits::VECTORS_IDLE);
+        }
     }
 
     /// The two head models are in place.
@@ -1754,11 +1771,20 @@ impl Worker {
         for g in subjects {
             narrow(self.people.photos_of(g).unwrap_or_default());
         }
+        // A typed name is one kind's: the person when a person has it,
+        // else the fursuit; a fursuit of the same name as a person is
+        // reported beside the results, never searched with them (a picked
+        // chip carries its own GroupId and so its kind).
+        let mut also_fursuits: Vec<(String, GroupId)> = Vec::new();
         for name in &parsed.names {
-            // A name of either kind; a person and a fursuit never share a
-            // group, each is its own.
-            let mut named = self.people.named(Kind::Person, name);
-            named.extend(self.people.named(Kind::Fursuit, name));
+            let people = self.people.named(Kind::Person, name);
+            let suits = self.people.named(Kind::Fursuit, name);
+            let named = if people.is_empty() {
+                suits
+            } else {
+                also_fursuits.extend(suits.into_iter().map(|g| (name.clone(), g)));
+                people
+            };
             let mut keys = HashSet::new();
             for g in &named {
                 keys.extend(self.people.photos_of(g).unwrap_or_default());
@@ -1768,6 +1794,7 @@ impl Worker {
         }
         groups.dedup();
         let groups = Arc::new(groups);
+        let also_fursuits = Arc::new(also_fursuits);
         let bus = self.bus.clone();
         let answer = |hits: Vec<Hit>, fursuits: Vec<Hit>, error: Option<String>| {
             let _ = bus.unbounded_send(BgEvent::SearchResults {
@@ -1779,6 +1806,7 @@ impl Worker {
                 fursuits: Arc::new(fursuits),
                 animal: animal.clone(),
                 subjects: groups.clone(),
+                also_fursuits: also_fursuits.clone(),
             });
         };
         // Subjects with no words and no dates: their photos, clearest
@@ -2082,6 +2110,12 @@ mod tests {
 
         /// The answer to query `seq`.
         fn results(&mut self, seq: u64) -> Answer {
+            self.results_with_also(seq).0
+        }
+
+        /// The answer, with the fursuits of a typed name that a person
+        /// has too ("also a fursuit called …").
+        fn results_with_also(&mut self, seq: u64) -> (Answer, Vec<(String, GroupId)>) {
             let stream = &mut self.stream;
             self.rt.block_on(async {
                 use iced::futures::StreamExt;
@@ -2089,9 +2123,9 @@ mod tests {
                 while Instant::now() < deadline {
                     let Some(batch) = stream.next().await else { break };
                     for ev in batch {
-                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal, subjects: _ } = ev {
+                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal, subjects: _, also_fursuits } = ev {
                             if s == seq {
-                                return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
+                                return (((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal), (*also_fursuits).clone());
                             }
                         }
                     }
@@ -2558,6 +2592,55 @@ mod tests {
         assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// A name shared by a person and a fursuit (the user, 2026-10-03: "the
+    /// one you picked").  Typed, `@Alex` is the person; the fursuit of
+    /// that name comes beside the results for the page to offer, and its
+    /// photos are never in the list.  A picked chip is its own GroupId:
+    /// the fursuit's chip searches the fursuit alone.
+    #[test]
+    fn a_name_shared_across_kinds_never_unions_results() {
+        let files = [
+            ("2025/Mar-2025/12-Mar-2025", "0001-fursuit-90.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0002-fursuit-80.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0003-dog-60.JPG"),
+        ];
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library_of("shared-name", &files);
+        let key_of = |day: &str, file: &str| Key::of(1, lib.root.join(day).join("JPG").join(file).as_os_str().as_encoded_bytes());
+        let person_ref = FaceRef::new(key_of(files[2].0, files[2].1), [0.1, 0.1, 0.2, 0.2]);
+        let suit_ref = FaceRef::new(key_of(files[0].0, files[0].1), [0.3, 0.2, 0.3, 0.4]);
+        let mut file = crate::model::subjects::SubjectsFile::default();
+        file.create(Kind::Person, Some("Alex".into()), vec![person_ref]);
+        let suit = file.create(Kind::Fursuit, Some("Alex".into()), vec![suit_ref]);
+        let path = d.join("subjects.json");
+        file.save(&path).unwrap();
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(path) };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 3);
+        e.start_first_index(&[ModelId::Siglip2]);
+        wait_for(&e, "the first index", |s| s.indexed_shots == 3 && s.pass.is_none());
+        let mut ev = Events::new(&rx);
+        let names = |hits: &[Hit]| hits.iter().map(|h| crate::util::stem(h.jpg.as_deref().or(h.raw.as_deref()).unwrap())[..4].to_string()).collect::<Vec<_>>();
+        // Typed: the person, and the fursuit beside.
+        e.query(1, "@Alex", super::super::CLOSENESS_DEFAULT, &[]);
+        let ((hits, _, error, understood, ..), also) = ev.results_with_also(1);
+        assert!(error.is_none() && understood.names == ["Alex"]);
+        assert_eq!(names(&hits), ["0003"], "the person's photo only");
+        assert_eq!(also, [("Alex".to_string(), GroupId::Subject(suit.clone()))], "the fursuit is offered, not searched");
+        // Picked: the fursuit's chip is the fursuit alone, nothing beside.
+        e.query(2, "", super::super::CLOSENESS_DEFAULT, &[GroupId::Subject(suit.clone())]);
+        let ((hits, ..), also) = ev.results_with_also(2);
+        assert_eq!(names(&hits), ["0001"], "the suit's photo only");
+        assert!(also.is_empty());
+        // Both chips picked: an AND of their photos, which share none.
+        e.query(3, "", super::super::CLOSENESS_DEFAULT, &[GroupId::Subject(suit.clone()), GroupId::Subject(file.subjects[0].id.clone())]);
+        let ((hits, ..), _) = ev.results_with_also(3);
+        assert!(hits.is_empty(), "never a union: {hits:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The query syntax, the boost and the kinds rule, end to end: a real

@@ -535,9 +535,10 @@ by the user alone, vectors stored as f16); for grouping and the Fursuits
 tab the vectors are held in memory as f32: **measured 405 MB for the
 ~68 000 heads a library of 56 000 shots is expected to hold** (and about
 400 MB more for the few seconds a regroup's copy lives on its worker),
-built only when that work needs it, never at start-up (the user's
-decision, 2026-10-03: full size, not the 768-wide CLS half that measured
-as well).
+built only when that work needs it, never at start-up, and let go again
+once fursuit work has been quiet for two minutes (the next request reads
+them back in 0.3 s): the user's decision, 2026-10-03, full size, freed
+after use, not the 768-wide CLS half that measured as well.
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the
