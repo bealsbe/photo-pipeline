@@ -53,6 +53,12 @@ pub struct Prepared {
     pub faces: Option<FacePrep>,
 }
 
+impl std::fmt::Debug for Prepared {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Prepared").field("key", &self.key).field("capture", &self.capture).field("accidental", &self.accidental).field("faces", &self.faces.is_some()).finish()
+    }
+}
+
 /// What the face step needs from a photo.
 #[derive(Clone)]
 pub struct FacePrep {

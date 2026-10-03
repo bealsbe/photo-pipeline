@@ -22,7 +22,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use super::faces::People;
+use super::faces::{FaceStore, People};
 use super::index::{Index, Key, PathEntry, Record};
 use super::parse::{self, Parsed};
 use super::tags::{Tags, VocabVectors};
@@ -74,9 +74,13 @@ enum Cmd {
 /// call [`storage`] on a worker).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Storage {
+    /// The search index's files (the face files apart).
     pub index_bytes: u64,
     pub index_shots: usize,
     pub models_bytes: u64,
+    /// The faces found, their vectors and tiles (the *People* row; the
+    /// user's names live elsewhere and aren't counted).
+    pub faces_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -91,6 +95,8 @@ struct Shared {
     things: Mutex<Arc<Vec<Thing>>>,
     /// The *Subjects* page's state, as last built.
     subjects: Mutex<Arc<Subjects>>,
+    /// The face tiles' index, for `Engine::crop` on any thread.
+    tiles: Mutex<Option<Arc<Mutex<super::faces::TileIndex>>>>,
 }
 
 /// What the engine is built on; tests swap the pieces that touch the
@@ -127,7 +133,7 @@ impl Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
         let faces = FacesStatus { on: find_faces, model: Some(face_model), ..FacesStatus::default() };
         let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, faces, ..Status::default() };
-        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())) });
+        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())), tiles: Mutex::new(None) });
         let s = shared.clone();
         let me = tx.clone();
         let Config { factory, installed, index_dir, subjects_path } = config;
@@ -163,6 +169,8 @@ impl Engine {
                     face_model,
                     people: People::load(subjects_path),
                     restrict: None,
+                    face_pass_pending: None,
+                    subjects_sent: None,
                 }
                 .run()
             })
@@ -305,7 +313,11 @@ impl Engine {
     /// reads the cached tile, else the photo's preview; call it on a
     /// worker, never the UI thread.
     pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
-        super::faces::crop_from_photo(face, px, framing)
+        let tiles = self.shared.tiles.lock().clone();
+        match tiles {
+            Some(t) => super::faces::crop(Some(&t.lock()), face, px, framing),
+            None => super::faces::crop(None, face, px, framing),
+        }
     }
 }
 
@@ -383,6 +395,8 @@ pub fn storage(library_root: Option<&Path>) -> Storage {
     if let Some(dir) = library_root.and_then(super::index::dir_for) {
         out.index_bytes = dir_bytes(&dir);
         out.index_shots = super::index::count_rows(&dir);
+        out.faces_bytes = FaceStore::bytes_in(&dir);
+        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes);
     }
     if let Some(dir) = models::models_dir() {
         out.models_bytes = dir_bytes(&dir);
@@ -473,6 +487,11 @@ struct Worker {
     /// The photos the running query is narrowed to (its subjects), while
     /// it runs.
     restrict: Option<HashSet<Key>>,
+    /// A face pass waiting for its models: the catch-up (`false`) or a
+    /// model change (`true`).
+    face_pass_pending: Option<bool>,
+    /// When the *Subjects* snapshot was last sent (throttled in a pass).
+    subjects_sent: Option<Instant>,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -508,11 +527,21 @@ impl Worker {
                     self.download = None;
                     self.vocab_tried = false;
                     self.refresh_installed();
+                    // A helper started without the face models loads them
+                    // only when started again.
+                    if ok.iter().any(|m| m.is_face_model() || *m == ModelId::Yunet) {
+                        self.drop_embedder();
+                    }
                     if self.first_index_pending && ok.contains(&ModelId::Siglip2) {
                         self.first_index_pending = false;
                         self.start_pass(PassKind::FirstIndex);
                     } else {
                         self.first_index_pending = false;
+                    }
+                    if let Some(change) = self.face_pass_pending.take() {
+                        if self.faces_ready() {
+                            self.start_face_pass(change);
+                        }
                     }
                 }
                 Cmd::StopIndexing => {
@@ -565,6 +594,12 @@ impl Worker {
                     if let Some(ix) = &mut self.index {
                         let _ = ix.clear();
                     }
+                    // Unnamed detections are cache and go with it (§10);
+                    // the user's file stays.
+                    if let Some(store) = &mut self.people.store {
+                        store.forget_all();
+                    }
+                    self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
@@ -584,6 +619,10 @@ impl Worker {
                         ix.set_first_index_asked();
                         let _ = ix.save_paths();
                     }
+                    if let Some(store) = &mut self.people.store {
+                        store.forget_all();
+                    }
+                    self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
@@ -613,17 +652,24 @@ impl Worker {
                 }
                 Cmd::SetFaceModel(model) => {
                     if models::face_models().any(|m| m.id == model) && model != self.face_model {
+                        // The faces found and the user's work stay; the
+                        // vectors are made again with the new model.
+                        if matches!(self.pass.as_ref().map(|p| p.kind), Some(PassKind::Faces)) {
+                            self.cancel_pass();
+                        }
                         self.face_model = model;
+                        if let Some(store) = &mut self.people.store {
+                            store.set_model(model);
+                        }
+                        self.drop_embedder();
                         self.update(|s| s.faces.model = Some(model));
                         self.refresh_installed();
+                        self.refresh_counts();
+                        self.publish_subjects();
+                        self.face_pass_or_download(true);
                     }
                 }
-                Cmd::FindFaces => {
-                    // The catch-up pass comes with the face cache; for now
-                    // the models it needs are fetched.
-                    let wanted = models::models_for(Some(self.face_model));
-                    self.download_missing(&wanted);
-                }
+                Cmd::FindFaces => self.face_pass_or_download(false),
                 Cmd::NameGroup(id, name) => {
                     let r = self.people.name_group(&id, name);
                     self.after_edit(r.map(|_| ()));
@@ -720,8 +766,18 @@ impl Worker {
         self.publish_subjects();
     }
 
+    /// While a pass runs, the snapshot is rebuilt at most every
+    /// [`THINGS_EVERY`]; `now` forces it (the pass ended).
+    fn publish_subjects_throttled(&mut self, now: bool) {
+        if !now && self.subjects_sent.is_some_and(|t| t.elapsed() < THINGS_EVERY) {
+            return;
+        }
+        self.publish_subjects();
+    }
+
     /// Rebuild the *Subjects* snapshot and send it.
     fn publish_subjects(&mut self) {
+        self.subjects_sent = Some(Instant::now());
         self.ensure_resolver();
         let snapshot = self.people.build_snapshot(&|f| self.resolve_face(f));
         self.people.set_snapshot(snapshot.clone());
@@ -739,7 +795,7 @@ impl Worker {
         let rec = self.index.as_ref().and_then(|ix| ix.vectors.by_key.get(&f.key).map(|&i| &ix.vectors.records[i]));
         let capture = rec.and_then(|rec| rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64))).unwrap_or(shot.mtime);
         let confirmed = self.people.file.member_of(Kind::Person, f).is_some();
-        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: 0.0, confirmed })
+        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: self.people.clarity(f), confirmed })
     }
 
     fn publish(&self) {
@@ -782,16 +838,26 @@ impl Worker {
         let root_changed = self.index.as_ref().is_none_or(|ix| ix.root != lib.root);
         if root_changed {
             self.cancel_pass();
-            self.index = self.index_dir.clone().or_else(|| super::index::dir_for(&lib.root)).map(|dir| Index::load(&lib.root, &dir, models::info(ModelId::Siglip2)));
+            let dir = self.index_dir.clone().or_else(|| super::index::dir_for(&lib.root));
+            self.index = dir.as_ref().map(|dir| Index::load(&lib.root, dir, models::info(ModelId::Siglip2)));
+            // The face cache lives beside the index.
+            let store = dir.as_ref().map(|dir| FaceStore::load(dir, self.face_model));
+            *self.shared.tiles.lock() = store.as_ref().map(FaceStore::tiles);
+            self.people.store = store;
             self.resolver = None;
         }
         let live: HashSet<PathBuf> = lib.days.values().flat_map(|d| d.files.iter().map(|f| pass::rel_path(&lib.root, &f.path))).collect();
         if let Some(ix) = &mut self.index {
             ix.retain_paths(&live);
+            if let Some(store) = &mut self.people.store {
+                let keys: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
+                store.retain(&keys);
+            }
         }
         self.library = Some(lib);
         self.resolver = None;
         self.refresh_counts();
+        self.publish_subjects();
         if root_changed {
             self.vocab_tried = false;
         }
@@ -874,11 +940,85 @@ impl Worker {
     fn refresh_counts(&self) {
         let (indexed, asked) = self.index.as_ref().map_or((0, false), |ix| (ix.len(), ix.paths.first_index_asked));
         let shots = self.library.as_ref().map_or(0, |l| l.total_shots);
+        let (looked_at, found, unrecognised) = self.people.store.as_ref().map_or((0, 0, 0), |s| (s.looked_at(), s.found(), s.unrecognised()));
         self.update(|s| {
             s.library_shots = shots;
             s.indexed_shots = indexed;
             s.first_index_asked = asked;
+            s.faces.looked_at = looked_at;
+            s.faces.found = found;
+            s.faces.unrecognised = unrecognised;
         });
+    }
+
+    /// The jobs of a face pass over photos already indexed: for the
+    /// catch-up, every indexed shot not looked at yet; for a model
+    /// change, every shot whose faces lack vectors, carrying them.
+    fn face_jobs(&self, change: bool) -> Vec<pass::Job> {
+        let (Some(lib), Some(ix), Some(store)) = (&self.library, &self.index, &self.people.store) else { return Vec::new() };
+        let needing: HashMap<Key, Vec<crate::ml::client::FaceSpot>> = if change { store.needing_vectors().into_iter().collect() } else { HashMap::new() };
+        let mut jobs = Vec::new();
+        for day in lib.days.values().rev() {
+            for shot in day.shots() {
+                let rep = shot.iter().find(|&&i| day.files[i].file_type == FileType::Jpg).or(shot.first());
+                let Some(&i) = rep else { continue };
+                let fe = &day.files[i];
+                let rel = pass::rel_path(&lib.root, &fe.path);
+                let Some(key) = ix.paths.key_for(&rel, fe.size, &fe.mtime) else { continue };
+                if !ix.vectors.contains(&key) {
+                    continue;
+                }
+                let known = if change {
+                    match needing.get(&key) {
+                        Some(spots) => Some(spots.clone()),
+                        None => continue,
+                    }
+                } else {
+                    if store.scanned.contains_key(&key) {
+                        continue;
+                    }
+                    None
+                };
+                jobs.push(pass::Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date, known });
+            }
+        }
+        jobs
+    }
+
+    /// A face pass (`PassKind::Faces`) over photos already indexed: the
+    /// catch-up (`change` false) or the vectors again after a model
+    /// change.  Only ever started by a command, never by a pass's end, so
+    /// it can't start itself over.
+    fn start_face_pass(&mut self, change: bool) {
+        if self.pass.is_some() || !self.faces_ready() {
+            return;
+        }
+        let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
+        let jobs = self.face_jobs(change);
+        if jobs.is_empty() {
+            self.refresh_counts();
+            return;
+        }
+        let Some(embedder) = self.image_embedder() else { return };
+        let (tx, rx) = crossbeam_channel::unbounded::<pass::Batch>();
+        let total = jobs.len();
+        let req = pass::Request { root, jobs, total, want: Want::faces_only() };
+        let handle = pass::start(req, embedder, 0, move |b| drop(tx.send(b)));
+        self.pass = Some(Running { handle, kind: PassKind::Faces, batches: rx });
+        self.update(|s| {
+            s.pass = Some(PassProgress { kind: PassKind::Faces, done: 0, total, oldest_day: None });
+            s.stopped = None;
+        });
+    }
+
+    /// A face pass wants its models first: start it when they arrive.
+    fn face_pass_or_download(&mut self, change: bool) {
+        if self.faces_ready() {
+            self.start_face_pass(change);
+        } else {
+            self.face_pass_pending = Some(change);
+            self.download_missing(&models::models_for(Some(self.face_model)));
+        }
     }
 
     /// The library against the index: what is to be indexed, less what
@@ -1035,7 +1175,7 @@ impl Worker {
         let total = plan.total;
         // Done before this pass: indexed, and skipped as unreadable.
         let already = plan.unchanged + plan.unreadable;
-        let want = Want::with_faces(self.find_faces && self.faces_ready());
+        let want = if self.find_faces && self.faces_ready() { Want::with_faces() } else { Want::search() };
         let req = pass::Request { root, jobs: plan.jobs, total, want };
         let handle = pass::start(req, embedder, already, move |b| drop(tx.send(b)));
         self.pass = Some(Running { handle, kind, batches: rx });
@@ -1055,6 +1195,10 @@ impl Worker {
         let kind = p.kind;
         self.absorb(&batch);
         self.refresh_tags();
+        if batch.faces_scanned {
+            self.refresh_counts();
+            self.publish_subjects_throttled(batch.finished.is_some());
+        }
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
             self.pass = None;
@@ -1111,6 +1255,17 @@ impl Worker {
                 eprintln!("search: couldn't write the index: {e}");
             }
             self.resolver = None;
+        }
+        // The faces found (or recognised again) go into the face cache.
+        if batch.faces_scanned {
+            if let Some(store) = &mut self.people.store {
+                for (job, e) in &batch.embedded {
+                    let r = if job.known.is_some() { store.add_vectors(e.key, &e.faces) } else { store.add(e.key, &e.faces) };
+                    if let Err(err) = r {
+                        eprintln!("faces: couldn't write the face cache: {err}");
+                    }
+                }
+            }
         }
         // What couldn't be embedded isn't tried again at this pass's end;
         // a file whose own content is the trouble is remembered, so it
