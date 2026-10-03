@@ -14,8 +14,9 @@
 //! writes no file.  `PP_SEARCH_FAKE=indexed` starts it with the library
 //! indexed.  It answers phase 2's questions too: made-up Things (the
 //! vocabulary's objects and scenes, with counts that grow with the index),
-//! the query's dates and `-word`s applied to its hits, and, for an animal
-//! word, a share of the hits handed back as fursuits left out.
+//! the query's dates and `-word`s applied to its hits (dates alone answer
+//! with every shot from them, oldest first), and, for an animal word, a
+//! share of the hits handed back as fursuits left out.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -467,9 +468,15 @@ impl Fake {
             .spawn(move || {
                 let parsed = crate::search::parse(&words);
                 let animal = vocab::animal_in(&parsed.words).map(|w| w.word.to_string());
-                let mut hits = index.map(|ix| made_up_hits(&ix, &parsed.words, closeness, indexed)).unwrap_or_default();
-                if parsed.is_empty() {
+                // Dates alone: every shot from them, in the order taken.
+                let every = parsed.is_empty() && parsed.dates.is_some();
+                let words = if every { "everything" } else { parsed.words.as_str() };
+                let mut hits = index.map(|ix| made_up_hits(&ix, words, closeness, indexed)).unwrap_or_default();
+                if parsed.is_empty() && !every {
                     hits.clear();
+                }
+                if every {
+                    hits.sort_by(|a, b| a.capture.cmp(&b.capture));
                 }
                 if let Some(d) = parsed.dates {
                     hits.retain(|h| d.contains(h.day));

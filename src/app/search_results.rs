@@ -15,6 +15,7 @@ use chrono::{NaiveDate, NaiveDateTime};
 use crate::model::bursts::RunMark;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::library_index::FileEntry;
+use crate::search::parse::DateRange;
 use crate::search::{Hit, Parsed, Thing, parse};
 use crate::ui::grid::Section;
 
@@ -192,7 +193,7 @@ impl Layout {
 /// The results' lists: the best matches, and the fursuits left out after
 /// them when `fursuits` is on (a section of their own, never mixed in).
 pub fn parts(r: &Results, fursuits: bool) -> Vec<Part<'_>> {
-    let mut parts = vec![Part { found: &r.found, date: RESULTS_DAY, label: "Best matches first".into() }];
+    let mut parts = vec![Part { found: &r.found, date: RESULTS_DAY, label: results_heading(&r.understood).into() }];
     if fursuits && !r.fursuits.is_empty() {
         parts.push(Part { found: &r.fursuits, date: FURSUITS_DAY, label: fursuits_heading(r.animal.as_deref()) });
     }
@@ -461,11 +462,72 @@ pub fn apply(typed: &str, pick: &Pick) -> String {
 }
 
 /// What the engine applied besides the words, in a few plain words each:
-/// "Only Jun 2024", "Leaving out crowd and stage".
+/// "Only Jun 2024" (or "Every photo from Jun 2024" when there are no
+/// words), "Leaving out crowd and stage".
 pub fn understood_lines(p: &Parsed) -> (Option<String>, Option<String>) {
-    let dates = p.dates.map(|d| format!("Only {}", d.label()));
+    let dates = match every_photo(p) {
+        Some(d) => Some(format!("Every photo from {}", d.label())),
+        None => p.dates.map(|d| format!("Only {}", d.label())),
+    };
     let leave = (!p.exclude.is_empty()).then(|| format!("Leaving out {}", and_list(&p.exclude)));
     (dates, leave)
+}
+
+/// Dates and no words ("jun 2026", "jun 2026 -crowd"): the engine answers
+/// with every photo from those dates in the order they were taken, not by
+/// how well they match.  The dates, when so.
+pub fn every_photo(p: &Parsed) -> Option<DateRange> {
+    p.dates.filter(|_| p.words.trim().is_empty())
+}
+
+/// The results' heading: by match, or in the order taken for dates alone.
+pub fn results_heading(p: &Parsed) -> &'static str {
+    if every_photo(p).is_some() { "In the order they were taken" } else { "Best matches first" }
+}
+
+/// The count beside the field: "46 photos", or "312 photos from Jun 2026"
+/// for dates alone; `so_far` while indexing still reaches older days.
+pub fn count_caption(p: &Parsed, n: usize, so_far: bool) -> String {
+    let mut s = crate::util::plural(n as u64, "photo");
+    if let Some(d) = every_photo(p) {
+        s = format!("{s} from {}", d.label());
+    }
+    if so_far {
+        s.push_str(" so far");
+    }
+    s
+}
+
+/// The empty page's title and line, when nothing came back; `so_far` is
+/// how many photos search has while the first index still runs.
+pub fn nothing_found(r: &Results, so_far: Option<usize>) -> (String, String) {
+    let p = &r.understood;
+    let words = r.looks_like();
+    let n = so_far.map(|n| crate::util::thousands(n as u64));
+    match (every_photo(p), p.dates, n) {
+        (Some(d), _, Some(n)) => (format!("None of the {n} photos indexed so far are from {}", d.label()), "Results fill in as indexing reaches older days.".into()),
+        (Some(d), _, None) if !p.exclude.is_empty() => {
+            (format!("No photos from {} without {}", d.label(), and_list(&p.exclude)), "Try other dates, or leave fewer words out.".into())
+        }
+        (Some(d), _, None) => (format!("No photos from {}", d.label()), "The library has none from those dates. Try other dates.".into()),
+        (None, _, Some(n)) => (format!("Nothing in the {n} photos indexed so far looks like “{words}”"), "Results fill in as indexing reaches older days. Or try another word.".into()),
+        (None, Some(d), None) => (format!("Nothing from {} looks like “{words}”", d.label()), "Try other dates, another word, or fewer words.".into()),
+        (None, None, None) => (
+            format!("Nothing in the library looks like “{words}”"),
+            "Try another word, or fewer words. Search goes by what a photo shows, not by file names or folder names.".into(),
+        ),
+    }
+}
+
+/// The line after the last result, and a quieter one under it.
+pub fn end_lines(r: &Results) -> (String, &'static str) {
+    const CLOSENESS: &str = "Preferences ▸ Search sets how close a match must be.";
+    let p = &r.understood;
+    match (every_photo(p), p.dates) {
+        (Some(d), _) => (format!("That's every photo from {}.", d.label()), "Accidental frames, such as empty or dark ones, are left out."),
+        (None, Some(d)) => (format!("That's everything from {} that looks like “{}”.", d.label(), r.looks_like()), CLOSENESS),
+        (None, None) => (format!("That's everything that looks like “{}”.", r.looks_like()), CLOSENESS),
+    }
 }
 
 /// "a", "a and b", "a, b and c".
@@ -665,6 +727,57 @@ mod tests {
         assert_eq!(leave.as_deref(), Some("Leaving out crowd and stage"));
         assert_eq!(understood_lines(&parse("fireworks")), (None, None));
         assert_eq!(and_list(&["a".into(), "b".into(), "c".into()]), "a, b and c");
+    }
+
+    /// Results for `query` with `n` photos found (none of them built: only
+    /// the words matter here).
+    fn answered(query: &str, n: usize) -> Results {
+        let found = (0..n as RecordId).map(|i| f(i, 0.5, when(1, i as i64), None)).collect();
+        Results {
+            seq: 1,
+            words: query.into(),
+            coll: Arc::new(Collection::new()),
+            found,
+            fursuits: Vec::new(),
+            animal: None,
+            understood: parse(query),
+            missing: 0,
+        }
+    }
+
+    #[test]
+    fn dates_alone_are_every_photo_from_them_in_the_order_taken() {
+        let r = answered("jun 2026", 312);
+        assert_eq!(every_photo(&r.understood).map(|d| d.label()).as_deref(), Some("Jun 2026"));
+        assert_eq!(understood_lines(&r.understood).0.as_deref(), Some("Every photo from Jun 2026"));
+        assert_eq!(count_caption(&r.understood, 312, false), "312 photos from Jun 2026");
+        assert_eq!(count_caption(&r.understood, 312, true), "312 photos from Jun 2026 so far");
+        let l = layout(&parts(&r, false), |_| true);
+        assert_eq!(l.sections[0].label, "In the order they were taken");
+        let (end, quiet) = end_lines(&r);
+        assert_eq!(end, "That's every photo from Jun 2026.");
+        // Nothing says these are matches, best first.
+        for line in [&l.sections[0].label, &end, quiet, &count_caption(&r.understood, 312, false)] {
+            assert!(!line.to_lowercase().contains("best") && !line.to_lowercase().contains("looks like"), "{line}");
+        }
+        // With words left out, still every photo from the dates, but those.
+        let r = answered("jun 2026 -crowds", 0);
+        assert_eq!(understood_lines(&r.understood), (Some("Every photo from Jun 2026".into()), Some("Leaving out crowds".into())));
+        assert_eq!(nothing_found(&r, None).0, "No photos from Jun 2026 without crowds");
+        assert_eq!(nothing_found(&answered("jun 2026", 0), None).0, "No photos from Jun 2026");
+        assert_eq!(nothing_found(&answered("jun 2026", 0), Some(1200)).0, "None of the 1,200 photos indexed so far are from Jun 2026");
+        // Words and dates: matches, best first, within the dates.
+        let r = answered("fireworks jun 2026", 4);
+        assert_eq!(every_photo(&r.understood), None);
+        assert_eq!(understood_lines(&r.understood).0.as_deref(), Some("Only Jun 2026"));
+        assert_eq!(count_caption(&r.understood, 4, false), "4 photos");
+        assert_eq!(layout(&parts(&r, false), |_| true).sections[0].label, "Best matches first");
+        assert_eq!(end_lines(&r).0, "That's everything from Jun 2026 that looks like “fireworks”.");
+        assert_eq!(nothing_found(&r, None).0, "Nothing from Jun 2026 looks like “fireworks”");
+        // A name alone, or words to leave out alone, are no dates: nothing
+        // to show every photo of.
+        assert_eq!(every_photo(&parse("@Alice")), None);
+        assert_eq!(every_photo(&parse("-crowds")), None);
     }
 
     #[test]

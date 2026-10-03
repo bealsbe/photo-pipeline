@@ -17,7 +17,8 @@
 //!   rank of its best frame, as in the grid: G or its tab opens it, Shift+G
 //!   every one.  ← → move, Space is quick look, Enter the viewer.  A strip
 //!   says what was applied besides the words (dates, words left out, a
-//!   name it can't search yet).
+//!   name it can't search yet).  Dates alone show every photo from them in
+//!   the order taken, and the heading, count and end line say so.
 //! - **Animal words** (decision 12b): the fursuits the engine left out are
 //!   counted at the end, with *Show fursuits too*; shown, they are a list
 //!   of their own after the real animals, never mixed in, with *Hide
@@ -143,9 +144,9 @@ pub struct Search {
     pub pending: Option<(u64, bool)>,
     /// The words of the results shown (or on their way).
     pub ran: Option<String>,
-    /// What was searched has no words to look for (only a name, which
-    /// phase 2 can't search, or only dates or words to leave out): no
-    /// query ran, and this says why.
+    /// What was searched has nothing to look for (only a name, which
+    /// phase 2 can't search, or only words to leave out): no query ran,
+    /// and this says why.
     pub no_words: Option<Parsed>,
     pub results: Option<Arc<Results>>,
     /// The fursuits an animal word left out are shown, as their own list.
@@ -170,8 +171,9 @@ pub struct Search {
     pub thumb_size: f32,
     /// When the shown search last ran, and on how many indexed photos.
     last_run: (Instant, usize),
-    /// The line after the last result.
+    /// The line after the last result, and a quieter one under it.
     pub end_line: String,
+    end_quiet: &'static str,
     /// "12 fursuits that look like dogs are left out.", while they are.
     pub left_out_line: String,
     /// Thumbnails pending, as last told to the engine.
@@ -264,6 +266,7 @@ impl Search {
             thumb_size: 180.0,
             last_run: (Instant::now(), 0),
             end_line: String::new(),
+            end_quiet: "",
             left_out_line: String::new(),
             busy_sent: 0,
             dialog: None,
@@ -317,10 +320,7 @@ impl Search {
             self.layout = Layout::default();
             return;
         };
-        self.end_line = match r.understood.dates {
-            Some(d) => format!("That's everything from {} that looks like “{}”.", d.label(), r.looks_like()),
-            None => format!("That's everything that looks like “{}”.", r.looks_like()),
-        };
+        (self.end_line, self.end_quiet) = res::end_lines(&r);
         self.left_out_line = if r.fursuits.is_empty() { String::new() } else { res::fursuits_left_out(r.fursuits.len(), r.animal.as_deref()) };
         let new = res::layout(&res::parts(&r, self.fursuits_shown), |k| self.stacked(k));
         let old = std::mem::replace(&mut self.layout, new);
@@ -426,11 +426,11 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     if s.status.indexed_shots == 0 {
         return app.show_status("Nothing is indexed yet, so there is nothing to search.", 5000);
     }
-    // No words to look for (only a name, which phase 2 can't search, or
-    // only dates or words to leave out): nothing runs, and the page says
-    // why.
+    // Nothing to look for (only a name, which phase 2 can't search, or only
+    // words to leave out): nothing runs, and the page says why.  Dates
+    // alone do run: every photo from them, in the order taken.
     let parsed = crate::search::parse(&words);
-    if parsed.is_empty() {
+    if parsed.is_empty() && parsed.dates.is_none() {
         s.no_words = Some(parsed);
         s.ran = Some(words);
         s.results = None;
@@ -1063,14 +1063,10 @@ fn header(app: &App) -> Element<'_, Message> {
     let p = page(app);
     let caption = if s.pending.is_some_and(|p| !p.1) || p == Page::Searching {
         "Searching…".to_string()
-    } else if matches!(p, Page::Results) {
-        // The count alone: the list's heading already says "Best matches
-        // first".
-        let n = s.photos();
-        match coverage(&s.status) {
-            Coverage::Whole => util::plural(n as u64, "photo"),
-            _ => format!("{} so far", util::plural(n as u64, "photo")),
-        }
+    } else if let (Page::Results, Some(r)) = (p, s.results.as_ref()) {
+        // The count (and the dates, for dates alone): the list's heading
+        // already says in what order.
+        res::count_caption(&r.understood, s.photos(), coverage(&s.status) != Coverage::Whole)
     } else {
         String::new()
     };
@@ -1323,7 +1319,7 @@ fn results_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     // The end note: the fursuits left out (with the way to show them), then
     // that this is everything, once search sees the whole library.
     let note = (!r.fursuits.is_empty() && !s.fursuits_shown).then_some((s.left_out_line.as_str(), "Show fursuits too"));
-    let end = (coverage(&s.status) == Coverage::Whole).then_some((s.end_line.as_str(), "Preferences ▸ Search sets how close a match must be."));
+    let end = (coverage(&s.status) == Coverage::Whole).then_some((s.end_line.as_str(), s.end_quiet));
     let footer = (note.is_some() || end.is_some()).then_some(grid::Footer { note, end });
     let data = GridData {
         sections: &s.layout.sections,
@@ -1386,8 +1382,8 @@ fn word_button<'a>(words: &str, count: Option<usize>) -> Element<'a, Message> {
 const START_THINGS: usize = 24;
 
 /// An example search, as a key cap on the photos' grey, and what it shows.
-fn example<'a>(words: &'a str, about: &'a str) -> Element<'a, Message> {
-    let chip = button(text(words).size(t::T_SMALL).font(paint::MEDIUM))
+fn example<'a>(words: String, about: String) -> Element<'a, Message> {
+    let chip = button(text(words.clone()).size(t::T_SMALL).font(paint::MEDIUM))
         .padding(Padding::from([2.0, 7.0]))
         .style(|_t, status| {
             let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
@@ -1398,7 +1394,7 @@ fn example<'a>(words: &'a str, about: &'a str) -> Element<'a, Message> {
                 ..button::Style::default()
             }
         })
-        .on_press(m(Msg::Run(words.to_string())));
+        .on_press(m(Msg::Run(words)));
     row![container(chip).width(170), text(about).size(t::T_BODY).color(t::PHOTO_INK2)].align_y(Alignment::Center).into()
 }
 
@@ -1427,10 +1423,15 @@ fn start_page(app: &App) -> Element<'_, Message> {
         col = col.push(words_block(words));
     }
     col = col.push(photo_heading("Ways to search", ""));
+    // Dates from the library's newest month, so the examples find something.
+    let newest = app.calendar.index.as_ref().and_then(|ix| ix.days.keys().next_back().copied());
+    let (year, m0) = newest.map_or((2024, 5), |d| (d.year(), d.month0()));
+    let month = crate::search::parse::date_text(year, Some(m0 + 1));
     let examples = column![
-        example("red car at night", "Photos that look like the words, best match first"),
-        example("fireworks -crowd", "Leave a word out: fireworks, without the crowd"),
-        example("fireworks 2024", "Only those dates: 2024, jun 2024, apr–jun 2024"),
+        example("red car at night".into(), "Photos that look like the words, best match first".into()),
+        example("fireworks -crowd".into(), "Leave a word out: fireworks, without the crowd".into()),
+        example(format!("fireworks {year}"), format!("Only those dates: {year}, {month}, apr–jun {year}")),
+        example(month.clone(), "Every photo from those dates, in the order they were taken".into()),
     ]
     .spacing(10)
     .padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
@@ -1449,27 +1450,14 @@ fn start_page(app: &App) -> Element<'_, Message> {
 
 fn no_results(app: &App) -> Element<'_, Message> {
     let s = &app.search;
-    let words = s.results.as_ref().map(|r| r.looks_like().to_string()).unwrap_or_default();
-    let dates = s.results.as_ref().and_then(|r| r.understood.dates);
-    let (title, body) = if coverage(&s.status) != Coverage::Whole {
-        (
-            format!("Nothing in the {} photos indexed so far looks like “{words}”", util::thousands(s.status.indexed_shots as u64)),
-            "Results fill in as indexing reaches older days. Or try another word.".to_string(),
-        )
-    } else if let Some(d) = dates {
-        (format!("Nothing from {} looks like “{words}”", d.label()), "Try other dates, another word, or fewer words.".to_string())
-    } else {
-        (
-            format!("Nothing in the library looks like “{words}”"),
-            "Try another word, or fewer words. Search goes by what a photo shows, not by file names or folder names.".to_string(),
-        )
-    };
+    let Some(r) = s.results.as_ref() else { return Space::new().into() };
+    let so_far = (coverage(&s.status) != Coverage::Whole).then_some(s.status.indexed_shots);
+    let (title, body) = res::nothing_found(r, so_far);
     quiet_page(title, body)
 }
 
 /// Nothing to look for was typed, so nothing ran: a name, which search
-/// can't find yet, or only dates or words to leave out.  The page says so,
-/// plainly.
+/// can't find yet, or only words to leave out.  The page says so, plainly.
 fn no_words(app: &App) -> Element<'_, Message> {
     let s = &app.search;
     let typed = s.ran.clone().unwrap_or_default();
@@ -1478,7 +1466,6 @@ fn no_words(app: &App) -> Element<'_, Message> {
             "Searching by name comes later".to_string(),
             format!("“{typed}” is a name. For now, search by what a photo shows, such as fireworks or a red car at night."),
         ),
-        Some(p) if p.dates.is_some() => ("Add what to look for".to_string(), format!("“{typed}” says when. Add a few words for what the photos show, such as fireworks {typed}.")),
         _ => ("Add what to look for".to_string(), format!("“{typed}” says what to leave out. Add a few words for what the photos show, such as fireworks {typed}.")),
     };
     quiet_page(title, body)

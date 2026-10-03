@@ -372,12 +372,15 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 - **Words, `-word` and dates.**  Type what the photos show (*red car at
   night*).  `-crowd` leaves a word out: photos must look more like the
   rest than like it.  `2024`, `jun 2024` or `apr–jun 2024` keeps to those
-  dates.  A strip over the results says quietly what was applied besides
-  the words ("Only Jun 2024", "Leaving out crowd"), so you can see why
-  they look as they do.  Names (`@name`) come later, with people,
+  dates.  Dates alone (`jun 2026`, or `jun 2026 -crowd`) show every photo
+  from them, in the order they were taken rather than best first ("312
+  photos from Jun 2026"), accidental frames left out.  A strip over the
+  results says quietly what was applied besides the words ("Only Jun
+  2024", "Every photo from Jun 2026", "Leaving out crowd"), so you can
+  see why they look as they do.  Names (`@name`) come later, with people,
   fursuits and pets: one in the query is left out and the strip says so,
-  and a query with nothing but a name (or only dates) searches nothing
-  and the page says why.
+  and a query with nothing but a name, or only words to leave out,
+  searches nothing and the page says why.
 - **The start page** (nothing searched): your recent searches, *Things in
   your photos* (the objects and scenes search found most, with their
   counts; a click searches one; never people, fursuits or pets), and a few
