@@ -44,10 +44,10 @@ pub enum Link {
 
 impl Link {
     /// The engine, or the stand-in when `PP_SEARCH_FAKE` is set.
-    pub fn new(bus: Bus, device: Device, index_exports: bool) -> Link {
+    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: crate::ml::models::ModelId) -> Link {
         match std::env::var("PP_SEARCH_FAKE") {
             Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed")),
-            Err(_) => Link::Engine(Engine::new(bus, device, index_exports)),
+            Err(_) => Link::Engine(Engine::new(bus, device, index_exports, find_faces, face_model)),
         }
     }
 
@@ -161,7 +161,7 @@ impl Link {
 
     pub fn query(&self, seq: u64, text: &str, closeness: f32) {
         match self {
-            Link::Engine(e) => e.query(seq, text, closeness),
+            Link::Engine(e) => e.query(seq, text, closeness, &[]),
             Link::Fake(f) => f.query(seq, text, closeness),
         }
     }
@@ -499,6 +499,7 @@ impl Fake {
                     understood: Arc::new(parsed),
                     fursuits: Arc::new(fursuits),
                     animal,
+                    subjects: Arc::new(Vec::new()),
                 });
             })
             .ok();

@@ -492,8 +492,8 @@ fn library_queries() {
     let lib = Arc::new(library_index::index_from_tree(&root, &scanned.tree, &store, &cancelled).unwrap());
     eprintln!("library: {} shots in {} days", lib.total_shots, lib.len());
     let (bus, rx) = crate::bus::channel();
-    let config = Config { factory: Client::factory(), models_ready: Box::new(|| true), index_dir: Some(out.join("index")) };
-    let engine = Engine::with_config(bus, device, true, config);
+    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: None };
+    let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
     engine.start_first_index(&[crate::ml::models::ModelId::Siglip2]);
@@ -535,7 +535,7 @@ fn library_queries() {
     });
     for (seq, q) in queries.iter().enumerate() {
         let t = Instant::now();
-        engine.query(seq as u64, q, crate::search::CLOSENESS_DEFAULT);
+        engine.query(seq as u64, q, crate::search::CLOSENESS_DEFAULT, &[]);
         let got = rt.block_on(async {
             use iced::futures::StreamExt;
             loop {
