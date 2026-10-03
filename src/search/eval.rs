@@ -509,7 +509,7 @@ fn people_library() {
     let subjects_path = out.join("subjects.json");
     let _ = std::fs::remove_file(&subjects_path);
     let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()) };
-    let engine = Engine::with_config(bus, device, true, true, face_model, config);
+    let engine = Engine::with_config(bus, device, true, true, face_model, false, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
     engine.start_first_index(&models::models_for(Some(face_model)));
@@ -657,7 +657,7 @@ fn library_queries() {
     eprintln!("library: {} shots in {} days", lib.total_shots, lib.len());
     let (bus, rx) = crate::bus::channel();
     let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: None };
-    let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, config);
+    let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, false, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
     engine.start_first_index(&[crate::ml::models::ModelId::Siglip2]);

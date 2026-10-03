@@ -107,14 +107,14 @@ pub fn face_model_change_seconds(shots_with_faces: usize, faces: usize, device: 
 /// a half times the study's PyTorch figure, so the library's ~42 000
 /// fursuit photos are about 50 hours there (decision 11: it asks every
 /// time).
-#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+#[allow(dead_code)] // Phase 4 UI: the Fursuits tab's invitation; called when the pages land.
 pub const HEAD_SECONDS_PER_PHOTO_GPU: f64 = 0.3;
-#[allow(dead_code)] // Phase 4: as above.
+#[allow(dead_code)] // Phase 4 UI: the Fursuits tab's invitation; called when the pages land.
 pub const HEAD_SECONDS_PER_PHOTO_CPU: f64 = 4.5;
 
 /// Seconds to look for heads in `photos` fursuit photos on `device`,
 /// beyond reading them.
-#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+#[allow(dead_code)] // Phase 4 UI: the Fursuits tab's invitation; called when the pages land.
 pub fn head_seconds(photos: usize, device: Device) -> f64 {
     photos as f64
         * match device {
@@ -127,7 +127,7 @@ pub fn head_seconds(photos: usize, device: Device) -> f64 {
 /// (a catch-up, or new exports): the previews are read again and the two
 /// models run; inference dominates on both devices.  This is the number
 /// the Fursuits tab and the processor's question quote (decision 11).
-#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+#[allow(dead_code)] // Phase 4 UI: the Fursuits tab's invitation; called when the pages land.
 pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
     let read = photos as f64 * SECONDS_PER_SHOT_GPU;
     let work = head_seconds(photos, device);

@@ -198,7 +198,6 @@ pub trait Embedder: Send + Sync {
     /// A helper started without the head models answers with an error.
     ///
     /// [`embed_images`]: Embedder::embed_images
-    #[allow(dead_code)] // Phase 4: the head step calls it when it lands in the engine.
     fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<HeadsResult>, HelperError> {
         let _ = files;
         Err(HelperError::Broken("this helper has no head step".into()))
@@ -236,7 +235,6 @@ impl Spec {
     }
 
     /// The same helper with the head models loaded (or not).
-    #[allow(dead_code)] // Phase 4: the engine asks for the head models when its step lands.
     pub fn with_heads(self, heads: bool) -> Spec {
         Spec { heads: heads && !self.text_only, ..self }
     }

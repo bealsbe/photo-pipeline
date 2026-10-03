@@ -81,7 +81,6 @@ impl ModelId {
 
 /// The fursuit head step's models (phase 4): the detector and the
 /// embedding, both or neither.
-#[allow(dead_code)] // Phase 4: the download dialog's Fursuits pair; used when the step lands.
 pub const FURSUIT_MODELS: [ModelId; 2] = [ModelId::Owlv2, ModelId::Dinov2];
 
 /// The face detector every face model uses.
@@ -435,14 +434,13 @@ pub fn face_model_in(ids: &[ModelId]) -> Option<ModelId> {
 }
 
 /// The fursuit head step's rows (the dialog's *Fursuits* pair, phase 4).
-#[allow(dead_code)] // Phase 4: the download dialog; used when the step lands.
+#[allow(dead_code)] // Phase 4 UI: the download dialog's Fursuits pair; called when the pages land.
 pub fn fursuit_models() -> impl Iterator<Item = &'static ModelInfo> {
     ALL.iter().filter(|m| m.id.is_fursuit_model())
 }
 
 /// The dialog asked for fursuit heads: both of the step's models are among
 /// `ids`.
-#[allow(dead_code)] // Phase 4: the download dialog; used when the step lands.
 pub fn fursuits_in(ids: &[ModelId]) -> bool {
     FURSUIT_MODELS.iter().all(|m| ids.contains(m))
 }

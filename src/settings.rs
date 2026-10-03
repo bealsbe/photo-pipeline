@@ -94,6 +94,11 @@ pub struct Settings {
     /// (decision 10); changing it recomputes the face vectors and keeps
     /// names, members and rejections.
     pub face_model: crate::ml::models::ModelId,
+    // Fursuits (phase 4, decision 11).
+    /// *Find fursuit heads* (on by default): heads are looked for in the
+    /// photos the index tags as fursuits, after the search step.  With the
+    /// processor chosen every scan asks first, whatever this says.
+    pub find_heads: bool,
     /// *Smallest group to show*: clusters with fewer photos fold under
     /// *Smaller groups* (3, 5 or 10; §10 says 5).
     pub people_min_photos: usize,
@@ -151,6 +156,7 @@ impl Default for Settings {
             search_recent: Vec::new(),
             find_faces: true,
             face_model: crate::ml::models::FACE_MODEL_DEFAULT,
+            find_heads: true,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
     }

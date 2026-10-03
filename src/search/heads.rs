@@ -169,7 +169,6 @@ pub fn photos_to_look_at(h: &HeadsStatus, shots: usize) -> usize {
 /// Whether a head scan may start without asking: only on the graphics
 /// card.  On the processor every scan asks first, with its cost (decision
 /// 11, "each time").
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub fn starts_unasked(device: Device) -> bool {
     device == Device::Gpu
 }
@@ -225,48 +224,30 @@ mod tests {
 
 // ---- the head cache ---------------------------------------------------
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const HEADS_MAGIC: &[u8; 8] = b"PPHEADD\0";
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const HEADS_VERSION: u32 = 1;
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const HVECS_MAGIC: &[u8; 8] = b"PPHEADV\0";
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const HVECS_VERSION: u32 = 1;
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const HTILE_MAGIC: u32 = 0x5050_4854;
 /// OWLv2 and the decode rule the detections were made with (the prompt,
 /// the score floor, the overlap and size gates); a change means the
 /// photos are looked at again.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub const DETECTOR_VERSION: u32 = 1;
 /// The vector model: one, not a choice (decision 11).
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub const VECTOR_MODEL: ModelId = ModelId::Dinov2;
 /// Dropped entries beyond this share get the files rewritten on load.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const COMPACT_SHARE: f64 = 0.1;
 /// The word in the vocabulary that gates the step: a photo is looked at
 /// for heads only when the index tags it with it (decision 8, 11).
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub const GATE_WORD: &str = "fursuit";
 
-/// The cut-offs on DINOv2 cosine distance between two heads, **measured
-/// on the user's 258 pairwise answers** over two event days (2026-10-03;
-/// plan, "As built — phase 4").  Under [`STRICT_CUT`] a pair is the same
-/// suit 23 times in 26 asked (99 % counting what transitivity implies):
-/// *Find more* adds these.  Under [`SUGGEST_CUT`] 47 of 78 asked (91 %
-/// with transitivity): offered for review, answered Y or N.  Between 0.17
-/// and 0.20 only 12 of 65 were the same suit, so the study's provisional
-/// 0.20 is not used; nothing beyond [`SUGGEST_CUT`] is offered.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
-pub const STRICT_CUT: f32 = 0.14;
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
-pub const SUGGEST_CUT: f32 = 0.17;
+// The cut-offs on DINOv2 cosine distance between two heads live in
+// `subjects::cutoff_for(ModelId::Dinov2)`, measured on the user's 258
+// pairwise answers (plan, "As built — phase 4"): groups and *Find more*
+// at 0.14, suggestions for the review at 0.17, nothing beyond.
 
 /// A head as the detector found it, kept per photo.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadDetection {
     pub bbox: [f32; 4],
     pub score: f32,
@@ -274,7 +255,6 @@ pub struct HeadDetection {
     pub sharpness: f32,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl HeadDetection {
     pub fn head_ref(&self, key: Key) -> FaceRef {
         FaceRef::new(key, self.bbox)
@@ -294,7 +274,6 @@ impl HeadDetection {
 /// The head vectors in memory: unit rows of the vector model's width,
 /// f32 for the grouping (f16 on disk).
 #[derive(Default)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadVectors {
     pub dim: usize,
     pub refs: Vec<FaceRef>,
@@ -303,14 +282,9 @@ pub struct HeadVectors {
     pub data: Vec<f32>,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl HeadVectors {
     pub fn len(&self) -> usize {
         self.refs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.refs.is_empty()
     }
 
     pub fn row(&self, i: usize) -> &[f32] {
@@ -377,13 +351,11 @@ impl HeadVectors {
 /// Where each head's tile lies in `headtiles.bin`, for reading one at a
 /// time from any thread (`Engine::crop`).
 #[derive(Default)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadTiles {
     path: PathBuf,
     offsets: HashMap<FaceRef, (u64, u32)>,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl HeadTiles {
     /// A head's tile (JPEG bytes), read from the file.
     pub fn read(&self, r: &FaceRef) -> Option<Vec<u8>> {
@@ -393,10 +365,6 @@ impl HeadTiles {
         let mut buf = vec![0u8; len as usize];
         f.read_exact_at(&mut buf, offset).ok()?;
         Some(buf)
-    }
-
-    pub fn has(&self, r: &FaceRef) -> bool {
-        self.offsets.contains_key(r)
     }
 
     fn entry(r: &FaceRef, jpeg: &[u8]) -> Vec<u8> {
@@ -418,7 +386,6 @@ impl HeadTiles {
 /// is expected to hold) are read only when the fursuit work asks for
 /// them ([`HeadStore::vectors`]), never when the library opens, and can
 /// be let go ([`HeadStore::release_vectors`]).
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
@@ -428,7 +395,6 @@ pub struct HeadStore {
     tiles: Arc<Mutex<HeadTiles>>,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl HeadStore {
     fn heads_file(dir: &Path) -> PathBuf {
         dir.join("heads.bin")
@@ -470,14 +436,11 @@ impl HeadStore {
         self.vectors.as_ref().expect("just loaded")
     }
 
-    /// Whether the vectors are in memory.
+    /// Whether the vectors are in memory (dropping the store lets them
+    /// go; the library closing does that).
+    #[cfg(test)]
     pub fn vectors_loaded(&self) -> bool {
         self.vectors.is_some()
-    }
-
-    /// Let the vectors go (they are read again when next asked for).
-    pub fn release_vectors(&mut self) {
-        self.vectors = None;
     }
 
     fn read_vectors(dir: &Path) -> HeadVectors {
@@ -795,19 +758,15 @@ impl KindStep for HeadStore {
 // ---- the scan ---------------------------------------------------------
 
 /// Photos per request to the helper.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub const BATCH: usize = 16;
 /// Batches are handed over at least this often while work goes on.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const EMIT_MS: u64 = 700;
 /// This many failed reads in a row make the pass check the library.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 const FAILURE_RUN: usize = 8;
 
 /// One photo to look at: the shot's representative file (its JPG, else
 /// the RAW) and its index key.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadJob {
     pub path: PathBuf,
     pub file_type: FileType,
@@ -816,7 +775,6 @@ pub struct HeadJob {
 
 /// Part of a scan's results.
 #[derive(Default)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadBatch {
     pub found: Vec<(HeadJob, PhotoHeads)>,
     pub failed: Vec<(HeadJob, FileError)>,
@@ -828,7 +786,6 @@ pub struct HeadBatch {
 
 /// How a scan ended.
 #[derive(Debug, Clone, Default, PartialEq)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadsFinished {
     /// Every job was tried (none means stopped early).
     pub complete: bool,
@@ -839,13 +796,11 @@ pub struct HeadsFinished {
 }
 
 /// A running scan.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct ScanHandle {
     cancel: Arc<AtomicBool>,
     busy: Arc<AtomicUsize>,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl ScanHandle {
     pub fn cancel(&self) {
         self.cancel.store(true, Ordering::Relaxed);
@@ -859,7 +814,6 @@ impl ScanHandle {
 }
 
 /// Run a scan on its own thread, handing batches to `emit`.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub fn start(root: PathBuf, jobs: Vec<HeadJob>, embedder: Arc<dyn Embedder>, emit: impl FnMut(HeadBatch) + Send + 'static) -> ScanHandle {
     let cancel = Arc::new(AtomicBool::new(false));
     let busy = Arc::new(AtomicUsize::new(0));
@@ -878,7 +832,6 @@ pub fn start(root: PathBuf, jobs: Vec<HeadJob>, embedder: Arc<dyn Embedder>, emi
 /// a card failure stops it and is reported; a helper restarted on the
 /// processor is sent the chunk again; a run of unreadable files makes it
 /// check whether the library is away.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub fn execute(root: &Path, jobs: &[HeadJob], embedder: &dyn Embedder, cancel: &AtomicBool, busy: &AtomicUsize, emit: &mut dyn FnMut(HeadBatch)) -> HeadsFinished {
     let started = Instant::now();
     let mut fin = HeadsFinished::default();
@@ -959,7 +912,6 @@ pub fn execute(root: &Path, jobs: &[HeadJob], embedder: &dyn Embedder, cancel: &
 
 /// What [`Fursuits::consider`] decided about photos that want a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub enum Decision {
     /// Start now (the card; or the user said so).
     Start,
@@ -971,7 +923,6 @@ pub enum Decision {
 
 /// The fursuit step's state on the engine's thread: the cache, the gate,
 /// what waits for the user, and the status the pages read.
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct Fursuits {
     pub store: Option<HeadStore>,
     pub status: HeadsStatus,
@@ -988,15 +939,19 @@ pub struct Fursuits {
     gate: Option<usize>,
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl Default for Fursuits {
     fn default() -> Fursuits {
         Fursuits { store: None, status: HeadsStatus::default(), grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
     }
 }
 
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 impl Fursuits {
+    /// The step as the engine starts it: the preference's switch, no
+    /// cache yet.
+    pub fn new(on: bool) -> Fursuits {
+        Fursuits { status: HeadsStatus { on, ..HeadsStatus::default() }, ..Fursuits::default() }
+    }
+
     /// Open the cache in `dir` (the library's index folder).
     pub fn open(&mut self, dir: &Path) {
         self.store = Some(HeadStore::load(dir));
@@ -1068,20 +1023,6 @@ impl Fursuits {
         self.generation += 1;
     }
 
-    /// The generation the current cluster ids belong to.
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// A cluster's heads for the current generation (none: stale,
-    /// unknown, or a subject's id).
-    pub fn cluster_members(&self, id: &GroupId) -> Option<Vec<FaceRef>> {
-        let GroupId::Cluster(id) = id else { return None };
-        let store = self.store.as_ref()?;
-        let c = self.grouped.cluster(*id)?;
-        Some(c.members.iter().filter_map(|&m| store.refs().get(m).copied()).collect())
-    }
-
     /// The automatic groups for the *Fursuits* tab: each cluster's id
     /// and members, in cluster order (the snapshot builder makes
     /// `Group`s of them, kind Fursuit).
@@ -1101,9 +1042,9 @@ impl Fursuits {
     /// its confirmed members that are confirmed nowhere and not rejected
     /// for it, nearest first, one entry per burst; for a cluster, its own
     /// members to check.  A subject of another kind gets nothing: never
-    /// a face among heads.
-    pub fn suggestions(&mut self, file: &SubjectsFile, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>, strict: bool) -> Result<Vec<Vec<Face>>, Refused> {
-        self.load_vectors();
+    /// a face among heads.  The vectors must be in memory ([`Fursuits::step`]
+    /// builds them); before that the answer is empty.
+    pub fn suggestions(&self, file: &SubjectsFile, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>, strict: bool) -> Result<Vec<Vec<Face>>, Refused> {
         let Some(store) = self.store.as_ref() else { return Ok(Vec::new()) };
         let grouped = &self.grouped;
         let refs = store.refs();
@@ -1139,6 +1080,34 @@ impl Fursuits {
         Ok(subjects::per_burst(heads))
     }
 
+    /// Whether a group is this kind's: a fursuit subject, or one of the
+    /// current fursuit clusters.
+    pub fn is_fursuit_group(&self, file: &SubjectsFile, id: &GroupId) -> bool {
+        match id {
+            GroupId::Subject(s) => file.get(s).is_some_and(|s| s.kind == Kind::Fursuit),
+            GroupId::Cluster(c) => self.grouped.cluster(*c).is_some(),
+        }
+    }
+
+    /// Add this kind's part to the *Subjects* snapshot the people state
+    /// built: the fursuit subjects' suggestion counts, and the fursuit
+    /// clusters as groups to name (kind Fursuit); then the order again.
+    pub fn extend_snapshot(&self, s: &mut subjects::Subjects, resolve: &dyn Fn(&FaceRef) -> Option<Face>) {
+        for g in &mut s.groups {
+            if let (Kind::Fursuit, GroupId::Subject(id)) = (g.kind, &g.id) {
+                g.suggestions = self.suggestion_count(id);
+            }
+        }
+        for (id, members) in self.clusters() {
+            let heads: Vec<Face> = members.iter().filter_map(resolve).collect();
+            let Some(cover) = heads.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)) else { continue };
+            let photos = heads.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
+            let days = heads.iter().map(|f| f.day).collect::<HashSet<_>>().len();
+            s.groups.push(subjects::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: None, hidden: false, photos, days, cover, suggestions: 0 });
+        }
+        s.groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
+    }
+
     /// A head's clarity (UI 12): how clear a view it is and, once the
     /// vectors are in memory, how sure its membership is.
     pub fn clarity_with_sureness(&self, r: &FaceRef) -> f32 {
@@ -1148,13 +1117,6 @@ impl Fursuits {
             Some(&row) => self.grouped.clarity_of(row, visual),
             None => 0.5 * visual,
         }
-    }
-
-    /// Index row `row` (key `key`) is one the step looks at: tagged
-    /// fursuit, not looked at yet.
-    pub fn wants(&self, key: &Key, tags: &Tags, row: usize) -> bool {
-        let Some(w) = self.gate else { return false };
-        tags.has(row, w) && !self.store.as_ref().is_some_and(|s| s.scanned.contains_key(key))
     }
 
     /// The photos to look at: every indexed shot the tags call a fursuit
@@ -1298,16 +1260,11 @@ impl Fursuits {
         self.status.found = found;
     }
 
-    /// A head's clarity, for the page's order (UI 12).
-    pub fn clarity(&self, r: &FaceRef) -> f32 {
-        self.store.as_ref().and_then(|s| s.detection(r)).map_or(0.0, HeadDetection::clarity)
-    }
 }
 
 /// A head's pixels for a tile or the review: its cached tile when there
 /// is one (decoded and resized), else none (the caller falls back to the
 /// photo).
-#[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub fn tile_pixels(tiles: &HeadTiles, r: &FaceRef, px: u32) -> Option<(u32, u32, Vec<u8>)> {
     use crate::imaging::decode;
     let jpeg = tiles.read(r)?;
@@ -1355,10 +1312,10 @@ mod store_tests {
         let v = again.vectors();
         assert_eq!((v.len(), v.dim), (2, 2));
         assert_eq!(v.row(v.by_ref[&r]), &[1.0, 0.0]);
-        again.release_vectors();
-        assert!(!again.vectors_loaded());
+        let mut again = HeadStore::load(&d);
         again.add(key(3), &[head(0.3, 150, &[0.0, 1.0])]).unwrap();
-        assert_eq!(again.vectors().len(), 3, "a row written while released is read with the rest");
+        assert!(!again.vectors_loaded(), "a write builds no memory");
+        assert_eq!(again.vectors().len(), 3, "a row written before the vectors were read is read with the rest");
         assert_eq!(again.tiles().lock().read(&r).unwrap(), vec![0xFF, 0xD8, 0xFF, 0xD9]);
         assert!(again.detection(&r).unwrap().clarity() > again.heads_of(&key(1))[1].clarity(), "the larger head is clearer");
         for f in ["heads.bin", "headvecs-dinov2-base.bin", "headtiles.bin"] {
@@ -1511,11 +1468,12 @@ mod store_tests {
         assert!(f.apply_regroup(r, &file));
         assert_eq!(f.clusters().len(), 2, "two suits of two heads");
         // A regroup of the wrong kind or an old generation is dropped.
-        let stale = Regrouped { kind: Kind::Person, generation: f.generation(), ..Regrouped::default() };
+        let stale = Regrouped { kind: Kind::Person, generation: job.generation, ..Regrouped::default() };
         assert!(!f.apply_regroup(stale, &file));
         // A fursuit subject with one confirmed head gets its twin suggested; a person's id gets nothing.
         let suit = file.create(Kind::Fursuit, Some("Suit".into()), vec![refs[2]]);
         let resolve = |r: &FaceRef| Some(Face { face: *r, jpg: None, raw: None, day: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap(), capture: chrono::NaiveDate::from_ymd_opt(2026, 9, 20).unwrap().and_hms_opt(10, 0, 0).unwrap(), burst: None, clarity: 0.5, confirmed: false });
+        f.step();
         let s = f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap();
         assert_eq!(s.iter().flatten().map(|x| x.face).collect::<Vec<_>>(), [refs[3]], "the strict cut finds the identical head");
         assert!(f.suggestions(&file, &GroupId::Subject(person.clone()), &resolve, false).unwrap().is_empty(), "a person's suggestions are not answered from heads");
@@ -1542,7 +1500,6 @@ mod store_tests {
         }
         assert!(over && f.status.step == Step::Idle);
         assert_eq!((f.status.scanned, f.status.found), (3, 3));
-        assert!(f.wants(&key(b'z'), &Tags::default(), 0) == false, "an untagged row is never wanted");
         let mut fin = HeadBatch::default();
         fin.finished = Some(HeadsFinished { stopped: Some(Stopped::Card(CardFailure::Crashed)), ..HeadsFinished::default() });
         f.status.step = Step::Scanning { why: Why::CatchUp, done: 0, total: 1 };
