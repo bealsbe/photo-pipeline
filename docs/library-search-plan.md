@@ -1765,6 +1765,17 @@ photos in all (anything clearly visible counted, background included).
   a6000 frames without that look, which only the user can decide and is
   not built.
 
+**Open — revisit later (the user, 2026-10-02): infrared recall.**  The
+"infrared" word is precise (88 % at the default; the top 10 all infrared)
+but finds only half the frames from the infrared body (14 of 28; AP 0.71).
+The misses rank near zero and don't look infrared, so the word catches
+the *look*, not the body.  The test set is small (28 frames, 15 more
+sources unresolved after renames).  Options when this is picked up:
+check the 14 missed frames by eye (if they don't look infrared, the word
+is doing its job); a looser floor for "infrared" alone (more found, some
+ordinary photos let in); or a Preferences setting naming the infrared
+body (exact for that camera, if every frame from it is infrared).
+
 ### Queries (§7.2) as applied
 
 - `search::parse` is pure and shared with the page: words, quotes

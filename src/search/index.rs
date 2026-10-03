@@ -11,7 +11,10 @@
 //! library root>/`:
 //! - `paths.bin`: the path map, (library-relative path, size, mtime) →
 //!   key, written whole with `fsutil::atomic_write`, so a check after an
-//!   export reads nothing for files that haven't changed;
+//!   export reads nothing for files that haven't changed; after the
+//!   entries, the files the helper couldn't read, with the size and mtime
+//!   they had, so they aren't read again until they change (a file
+//!   written before this trailer existed reads as none failed);
 //! - `vectors-<model>.bin`: a sealed header block (magic, version, model
 //!   id, weights SHA-256, preprocessing version, dimension), then sealed
 //!   blocks of rows (key, capture info, flags, f16 vector) appended as
@@ -128,8 +131,18 @@ impl PathEntry {
     }
 }
 
+/// A file the helper couldn't read (empty, damaged, not a photo), as it
+/// was then: it isn't read again until its size or mtime changes, or the
+/// index is rebuilt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Failed {
+    pub size: u64,
+    /// `MTime::timestamp` bits.
+    pub mtime: u64,
+}
+
 /// The path map: files of the library (relative paths) → keys, as last
-/// seen.
+/// seen, and the files that couldn't be read.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PathMap {
     pub root: PathBuf,
@@ -137,6 +150,8 @@ pub struct PathMap {
     /// own from then on).
     pub first_index_asked: bool,
     pub entries: HashMap<PathBuf, PathEntry>,
+    /// Files the helper couldn't read, at the size and mtime they had.
+    pub failed: HashMap<PathBuf, Failed>,
 }
 
 impl PathMap {
@@ -145,8 +160,13 @@ impl PathMap {
         self.entries.get(rel).filter(|e| e.holds_for(size, mtime)).map(|e| e.key)
     }
 
+    /// Whether `rel` is remembered as unreadable at this size and mtime.
+    pub fn is_failed(&self, rel: &Path, size: u64, mtime: &MTime) -> bool {
+        self.failed.get(rel).is_some_and(|f| f.size == size && f.mtime == mtime.timestamp.to_bits())
+    }
+
     fn encode(&self) -> Vec<u8> {
-        let mut w = Writer(Vec::with_capacity(64 + self.entries.len() * 80));
+        let mut w = Writer(Vec::with_capacity(64 + self.entries.len() * 80 + self.failed.len() * 64));
         w.0.extend_from_slice(PATHS_MAGIC);
         w.u32(PATHS_VERSION);
         w.path(&self.root);
@@ -161,6 +181,16 @@ impl PathMap {
             w.u64(e.size);
             w.u64(e.mtime);
             w.0.extend_from_slice(&e.key.0);
+        }
+        // The trailer: files that couldn't be read.
+        w.u32(self.failed.len() as u32);
+        let mut keys: Vec<&PathBuf> = self.failed.keys().collect();
+        keys.sort();
+        for k in keys {
+            let f = &self.failed[k];
+            w.path(k);
+            w.u64(f.size);
+            w.u64(f.mtime);
         }
         w.seal()
     }
@@ -187,7 +217,18 @@ impl PathMap {
             let key = Key(r.take(16)?.try_into().ok()?);
             entries.insert(p, PathEntry { file_type, size, mtime, key });
         }
-        r.done().then_some(PathMap { root: root.to_path_buf(), first_index_asked: flags & FLAG_FIRST_ASKED != 0, entries })
+        // The trailer came later: a file without one has nothing failed.
+        let mut failed = HashMap::new();
+        if !r.done() {
+            let n = r.count(4 + 8 + 8)?;
+            failed.reserve(n);
+            for _ in 0..n {
+                let p = r.path()?;
+                let (size, mtime) = (r.u64()?, r.u64()?);
+                failed.insert(p, Failed { size, mtime });
+            }
+        }
+        r.done().then_some(PathMap { root: root.to_path_buf(), first_index_asked: flags & FLAG_FIRST_ASKED != 0, entries, failed })
     }
 }
 
@@ -389,13 +430,15 @@ impl Index {
     }
 
     /// Add embedded shots: rows with new keys are appended to the vectors
-    /// file; every path is mapped.  Returns how many rows were added.
+    /// file; every path is mapped (and no longer remembered as
+    /// unreadable).  Returns how many rows were added.
     pub fn add(&mut self, rows: Vec<(PathBuf, PathEntry, Record, Vec<f32>)>) -> io::Result<usize> {
         let mut new_rows = Vec::new();
         for (rel, entry, rec, v) in rows {
             if !self.vectors.contains(&rec.key) && !new_rows.iter().any(|(r, _): &(Record, Vec<f32>)| r.key == rec.key) {
                 new_rows.push((rec, v));
             }
+            self.paths.failed.remove(&rel);
             self.paths.entries.insert(rel, entry);
             self.paths_dirty = true;
         }
@@ -424,12 +467,25 @@ impl Index {
         }
     }
 
+    /// Remember that the helper couldn't read `rel` as it is now: it isn't
+    /// read again until its size or mtime changes, or the index is
+    /// rebuilt.  Any mapping it had is stale and goes.
+    pub fn note_failed(&mut self, rel: PathBuf, size: u64, mtime: &MTime) {
+        let failed = Failed { size, mtime: mtime.timestamp.to_bits() };
+        let had_entry = self.paths.entries.remove(&rel).is_some();
+        let changed = self.paths.failed.insert(rel, failed) != Some(failed);
+        if had_entry || changed {
+            self.paths_dirty = true;
+        }
+    }
+
     /// Forget paths no longer in the library (their rows go at the next
-    /// compaction).
+    /// compaction), and failures of files that are gone.
     pub fn retain_paths(&mut self, live: &HashSet<PathBuf>) {
-        let before = self.paths.entries.len();
+        let before = (self.paths.entries.len(), self.paths.failed.len());
         self.paths.entries.retain(|p, _| live.contains(p));
-        if self.paths.entries.len() != before {
+        self.paths.failed.retain(|p, _| live.contains(p));
+        if (self.paths.entries.len(), self.paths.failed.len()) != before {
             self.paths_dirty = true;
         }
     }
@@ -647,6 +703,65 @@ pub mod tests {
         assert!(back.is_empty() && !back.paths.first_index_asked);
         assert_eq!(back.bytes(), 0);
         assert!(!d.exists() || fs::read_dir(&d).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A `paths.bin` from before failures were remembered (it ends after
+    /// the entries) loads with nothing failed; failures round-trip, hold
+    /// for the size and mtime they were noted at only, go with a success
+    /// or the file, and a mapping the failed file had goes.
+    #[test]
+    fn an_old_path_map_loads_and_failures_are_remembered_until_the_file_changes() {
+        let d = scratch("oldpaths");
+        let root = Path::new("/mnt/nas/library");
+        let model = models::info(ModelId::Siglip2);
+        let mut w = Writer(Vec::new());
+        w.0.extend_from_slice(PATHS_MAGIC);
+        w.u32(PATHS_VERSION);
+        w.path(root);
+        w.u8(FLAG_FIRST_ASKED);
+        w.u32(2);
+        for n in 1..=2u8 {
+            let (rel, e, ..) = row(n, 4);
+            w.path(&rel);
+            w.u8(e.file_type as u8);
+            w.u64(e.size);
+            w.u64(e.mtime);
+            w.0.extend_from_slice(&e.key.0);
+        }
+        fs::write(Index::paths_file(&d), w.seal()).unwrap();
+        let mut ix = Index::load(root, &d, model);
+        assert_eq!(ix.paths.entries.len(), 2, "the old file was read");
+        assert!(ix.paths.first_index_asked && ix.paths.failed.is_empty());
+
+        let mt = MTime::from_unix(1_700_000_000, 0);
+        let bad = PathBuf::from("2025/Mar-2025/12-Mar-2025/JPG/bad.JPG");
+        ix.note_failed(bad.clone(), 0, &mt);
+        assert!(ix.paths.is_failed(&bad, 0, &mt));
+        assert!(!ix.paths.is_failed(&bad, 1, &mt), "another size is tried again");
+        assert!(!ix.paths.is_failed(&bad, 0, &MTime::from_unix(1_700_000_001, 0)), "another mtime is tried again");
+        ix.save_paths().unwrap();
+        let back = Index::load(root, &d, model);
+        assert_eq!(back.paths, ix.paths, "the failure round-trips");
+        assert!(back.paths.is_failed(&bad, 0, &mt));
+
+        // A mapped file that fails loses its stale mapping.
+        let (mapped, ..) = row(1, 4);
+        ix.note_failed(mapped.clone(), 5, &mt);
+        assert!(!ix.paths.entries.contains_key(&mapped) && ix.paths.failed.contains_key(&mapped));
+        // Embedding it forgets the failure.
+        let mut ok = row(3, 4);
+        ok.0 = bad.clone();
+        assert_eq!(ix.add(vec![ok]).unwrap(), 1);
+        assert!(!ix.paths.failed.contains_key(&bad) && ix.paths.entries.contains_key(&bad));
+        // A file that left the library takes its failure with it.
+        ix.retain_paths(&HashSet::from([bad.clone()]));
+        assert!(ix.paths.failed.is_empty());
+        assert_eq!(ix.paths.entries.len(), 1);
+        // Clearing (a rebuild) forgets everything.
+        ix.note_failed(mapped, 5, &mt);
+        ix.clear().unwrap();
+        assert!(ix.paths.failed.is_empty() && ix.paths.entries.is_empty());
         let _ = fs::remove_dir_all(&d);
     }
 
