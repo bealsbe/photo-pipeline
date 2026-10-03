@@ -378,10 +378,16 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   names too).  Dates alone (`jun 2026`, or `jun 2026 -fursuit`: all of
   June but what a search for *fursuit* would find) show every photo from
   them, in the order they were taken rather than best first ("312 photos
-  from Jun 2026"), accidental frames left out.  `@Name` is for a person,
-  fursuit or pet you have named, which comes in a later phase: for now
-  the strip says so and the other words are searched; a name or a
-  `-word` on its own searches nothing, and the page says why.
+  from Jun 2026"), accidental frames left out.  `-word` on its own
+  searches nothing, and the page says why.
+- **`@name`: someone you named.**  Typing `@` lists the people you have
+  named, with their faces and how many photos; Enter or Tab takes one, and
+  it becomes a chip in the field (× or Backspace in an empty field removes
+  it; up to three).  A chip alone shows that person's photos, clearest
+  first; words beside it rank their photos best first (*@Name beach*).  A
+  name no one has ("No one is named "…"") finds nothing, and the page says
+  so.  Recent searches keep the chips as `@"Name"`.  Fursuits and pets
+  come later.
 - **What was understood.**  A quiet strip over the results says what was
   applied besides the words ("Only Jun 2024", "Every photo from Jun
   2026", "Leaving out crowd"), so you can see why they look as they do.
@@ -389,7 +395,8 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   knows the library holds (*cameras 96*, *fireworks 24*, *food 21*), most
   photos first; a click searches one.  The list holds objects and scenes
   only: people, fursuits and pets never appear in it, or in the list
-  under the field; they get pages of their own later.  Photos that
+  under the field; people have a page of their own (below), and fursuits
+  and pets come later.  Photos that
   plainly show the thing you searched for come first, then the rest by
   similarity.  The start page also shows your recent searches and a few
   ways to search.
@@ -418,6 +425,9 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   with its size, its licence in plain words and its publisher, with the
   sources and SHA-256 checksums a click away, then shows the download.  A
   file that doesn't match its checksum is deleted and the dialog says so.
+  *Find people's faces* is ticked there by default, with the face model to
+  pick (see *People* below); untick it and only the search model is
+  fetched.
 - **Indexing** runs in the background, newest days first: the status bar
   shows how far it has got, with × to stop (what is indexed is kept) and a
   click for its steps.  A search while it runs looks at the photos indexed
@@ -435,9 +445,73 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   against the processor first, or the processor, with what each costs),
   *How close matches must be* (a slider from closer to looser, with a reset
   to the default, good matches), *Index new exports*, the search model, and
-  the recent searches.
+  the recent searches.  **Preferences ▸ People:** *Find people's faces*
+  (on by default; turning it off asks whether to keep or forget the faces
+  already found), *Face model* with *Change…*, *Smallest group to show*
+  (3, 5 or 10 photos) and *Forget all…*.
 - **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
   explaining itself.
+
+### People
+
+**People, fursuits and pets** (Ctrl+4, on the side rail under Search, or in
+the View menu) is where the faces found while indexing are grouped, so you
+can name the people you want to find.  Its header has *People | Fursuits |
+Pets*; only People works in this phase, and the other two tabs say they
+come later.  A tab shows one kind only, so a merge, a move or a suggestion
+never crosses kinds.  Nothing is ever named for you.
+
+- **The People tab** shows the people you named, then *Groups to name*,
+  largest first: each a round face crop with its name (or "Unnamed") and
+  how many photos.  Groups of fewer photos than *Smallest group to show*
+  (5 by default) fold away under *Smaller groups*, so an event's strangers
+  stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
+  move between groups, Enter opens one, F2 names it.
+- **Picking several:** *Select* (S), or Ctrl+click, picks groups; a strip
+  says how many with *Merge…* and *Hide*.  Merging asks which name to
+  keep (the named one by default).  Ctrl+Z takes back the last change to
+  people (a name, a merge, a move, an answer), and the status bar says
+  what it undid.
+- **A person's page is a search for them.**  Their chip sits in the
+  field, so words typed beside it rank their photos best first; with no
+  words, their photos come clearest first, in the results grid with dates
+  under them and bursts stacked (G opens one).  Read-only, like search: P,
+  M and U do nothing.  *Open day ›* shows the selected photo's day in the
+  calendar, whose back button returns to the person.
+- **The band** under the header holds the person: their name (a click or
+  F2 renames; an unnamed group opens with its name field ready, and a name
+  that already exists offers *Merge into …* first), how many photos and
+  how many more may show them, *Photos | Faces*, *Review N suggestions*
+  (Y), and ⋯ for *Merge into…*, *Hide* and *Forget this person…*.
+- **Faces** shows every face in the group, clearest first; pick the wrong
+  ones and *Move to…* someone else, a new group, or out (*Not this
+  person*), which also stops them being suggested again.
+- **"Same person?": the review.**  One suggestion at a time, large,
+  between the person's confirmed faces and the whole photo with the face
+  outlined.  **Y** and **N** answer, in the keep and prune colours; the
+  answer is stamped on the crop the way marks are and, with *Advance after
+  marking* on, the next comes after the same short beat as in the viewer.
+  One answer covers a whole burst.  No moves the photo out of the person
+  when it was in.  ← → (A D) step, Enter opens the photo, Ctrl+Z takes the
+  last answer back, Esc stops.  An unnamed group can be checked the same
+  way (*Check this group*).
+- **Before faces were looked for** (a library indexed before this
+  phase), the tab says what finding them costs (what is downloaded, read
+  and how long it takes) and runs it only when asked; it goes through the
+  indexed library newest days first, in the background, with its own line
+  in the status bar.
+- **The face model** is picked in the download dialog and changed in
+  Preferences ▸ People.  AuraFace (Apache-2.0, the most accurate in tests
+  here) is picked by default; SFace (Apache-2.0) is the smallest and
+  fastest; InsightFace's model, the one Immich uses, has the best
+  published scores but is for non-commercial research only, which the
+  dialog says in plain words.  YuNet finds the faces for whichever model
+  you pick.  Changing the model recognises every face again; the names
+  you gave and the faces you confirmed are kept.
+- **Forget:** *Forget this person…* removes one name and its answers (their
+  faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
+  deletes every face found and every name, behind a plain confirmation.
+  Your photos are never changed, and nothing is written into the library.
 
 ### How it works
 

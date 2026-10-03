@@ -836,7 +836,10 @@ fn header(app: &App) -> Element<'_, Message> {
     let caption = match kind {
         Kind::Person => {
             let a = arrange(&s.all, kind, app.settings.people_min_photos());
-            if a.named.is_empty() && !a.to_name.is_empty() {
+            if !app.search.status.faces.on && has_groups(app, kind) {
+                // Kept from before it was turned off: say why no more come.
+                "Finding faces is off, so new photos aren't looked at. Preferences ▸ People turns it on.".to_string()
+            } else if a.named.is_empty() && !a.to_name.is_empty() {
                 "Faces were found while indexing. Name the people you want to find.".to_string()
             } else if a.named.is_empty() && a.to_name.is_empty() {
                 String::new()
@@ -937,7 +940,7 @@ fn overview(app: &App) -> Element<'_, Message> {
                 Some(("Index the library…", m(Msg::IndexLibrary))),
                 None,
             ),
-            State::Off => message(Glyph::Person, "Finding faces is off", "Turn it on in Preferences ▸ Search to find the people in your photos.".into(), Some(("Open Preferences", m(Msg::OpenPrefs))), None),
+            State::Off => message(Glyph::Person, "Finding faces is off", "Turn it on in Preferences ▸ People to find the people in your photos.".into(), Some(("Open Preferences", m(Msg::OpenPrefs))), None),
             State::CatchUp => catch_up(app),
             State::Looking => looking(app),
             State::NoFaces => message(Glyph::Person, "No faces found yet", "No one was found in the photos indexed. New exports are looked at as they are added.".into(), None, None),
@@ -1058,7 +1061,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         row![icons::view(Glyph::Person, 26.0, t::INK), text("Find the people in your photos").size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
         text(about).size(t::T_BODY).color(t::INK2),
         container(group).width(Length::Fill).style(style::group()),
-        text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ Search.").size(t::T_SMALL).color(t::INK3),
+        text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ People.").size(t::T_SMALL).color(t::INK3),
         action,
     ]
     .spacing(14)
@@ -1203,7 +1206,7 @@ fn groups(app: &App) -> Element<'_, Message> {
     if !a.small.is_empty() {
         folds = folds.push(tip(
             disclose("Smaller groups", a.small.len(), s.small_open, m(Msg::Small(!s.small_open))),
-            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ Search sets the size.", app.settings.people_min_photos()),
+            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ People sets the size.", app.settings.people_min_photos()),
             true,
         ));
         any = true;

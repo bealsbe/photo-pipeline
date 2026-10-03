@@ -1850,3 +1850,111 @@ date_completions}`.
   start ever feels slow with the full library, cache them by generation.
 - "Searching the photos indexed so far" during the first index already
   carries tags for the rows done.
+
+## As built — phase 3 (UI): people
+
+The page follows §7a.5–7a.9; what differs, and what phase 4 builds on.
+
+### Where it lives
+
+- `Cmd::Subjects`, Ctrl+4, the side rail under Search and the View menu,
+  labelled *People, fursuits and pets* (*Subjects* is only the code's
+  name).  The page remembers its tab (`settings.subjects_tab`).
+- `src/app/subjects.rs` (the tabs, the overview, merge and forget
+  dialogs, the catch-up page, the crop cache), `subjects_person.rs` (a
+  subject's page and band, *Faces*, naming), `subjects_review.rs` (the
+  review), `people.rs` (the backend's types re-exported, the words for
+  each kind, and the stand-in `FakePeople`), `results_pane.rs` (the
+  results grid, shared by the search page and a subject's page),
+  `src/ui/subject_tile.rs` (round and rounded crops, tiles, the Y/N
+  stamps, the photo with its box outlined).  Glyphs in `ui/icons.rs`:
+  Subjects, Person, Fursuit, Paw, Merge, Split, Hide, Pencil, More,
+  Plus.
+- **Kind-generic where it was cheap:** a tab's state comes from
+  `subjects::state(app, kind)`, the words from `people::KindWords`
+  (`title`, `one`, `crops`), the shape from `Kind` (round for people,
+  rounded squares otherwise), `search::NAMED_KINDS` lists the kinds `@`
+  completes.  Fursuits and Pets show `State::Later` until their phase
+  plugs in.
+
+### As designed, with these differences
+
+- **Overview:** named, then *Groups to name* largest first, *Smaller
+  groups* (under `people_min_photos`, folded) and *Hidden* (with
+  *Show*).  An unnamed tile reads "Unnamed" (the mockup's "Name this
+  person" read as a button on a grid of 20 of them); its tooltip says
+  "Open to name this person (F2)".  *Select* is always in the header,
+  greyed with no groups, so the tabs don't move.
+- **A subject's page** queries through `search_link::query_in` with the
+  subject as a chip; its sequence numbers start at `SEQ_BASE` (2^40) so
+  its results never land on the search page.  Quick look and the viewer
+  read the same pane (`Place::Person`); *Open day ›* returns to it
+  (`calendar.back_to`).
+- **⋯** holds *Merge into…*, *Hide* and *Forget this person…*.  *Change
+  the cover* and *Show where* are not built: the backend has no cover
+  call, and the review's outlined photo covers *Show where* for now.
+- **Hiding** says so in the status bar ("Person A is hidden.  Their
+  photos still come up when you search for them by name."); Ctrl+Z
+  undoes it, as every change to people (the backend's `undoable` names
+  it), but there is no *Undo* button in the status line.
+- **The review** is as drawn: Y and N in `KEEP`/`REJECT`, the stamp on
+  the crop, the beat from `viewer_advance::BEAT_MS` when *Advance after
+  marking* is on, one answer per press, the strip with stamps, the end
+  page with *Find more* and *Back to …*.  Checking an unnamed group's own
+  faces asks "Same person as this group?" and No moves the face out.
+- **The download dialog** builds the face rows from the registry
+  (`models::face_models()`): radio, *Recommended*, size, speed from
+  `estimate::face_seconds` on the chosen device, licence line in `WARN`
+  when `restricted`.  Unticking *Find people's faces* leaves only the
+  search model.  The same dialog in a faces-only form serves the
+  catch-up (`Dialog::faces_only`).
+- **Preferences:** a *People* section of its own after *Search*: *Find
+  people's faces* (turning it off offers *Keep them* / *Forget them*
+  inline), *Face model* with *Change…* (the chooser, the time from
+  `estimate::face_model_change_seconds`, names and confirmed faces
+  kept), *Smallest group to show* (3, 5, 10), and *People found* with
+  *Forget all…*.  §7a.8 put *Forget all…* under *Storage*; it sits with
+  the other people rows here, since it is not a cache (open question 2
+  below).
+- **`@name`:** typing `@` completes named people only, each kind under
+  its own heading (`search_results::offer`, in memory); the pick becomes
+  a chip (up to three; Backspace in an empty field or × removes one);
+  the query goes as `query_in(text, chips)`.  A name no one has is
+  `Results.unknown`: "No one is named "…"".  Recent searches store the
+  chips as `@"Name"`.  "Fursuits and pets come later." sits under the
+  completions.
+- **Faces passes** keep apart from search's: the status bar says
+  *Finding faces* / *Recognising faces again*, search's coverage strip
+  and its end message ignore them, and the People tab shows its own
+  progress strip.
+
+### The stand-in
+
+The stand-in engine (`PP_SEARCH_FAKE`) takes `search fake people`
+(named and unnamed groups, smaller and hidden ones), `people-first` (none
+named yet), `faces-catchup` (indexed before faces), `faces-off` and
+`faces-running [n]` from a test script.  `FakePeople` keeps
+the backend's shapes (`GroupId`, `FaceRef`, `Subjects`) and rules: kinds
+never merge, a name is unique within its kind, No removes and never
+suggests again, one undo step per change.  Its crops are grey
+silhouettes drawn in code: no face, real or generated, is in the tree.
+
+### Checked
+
+- `cargo test --release`: 333 passed, zero warnings (people, chips,
+  completions, kind separation, the stand-in's rules).
+- Headless with the stand-in (`subjects …`, `search dlg faces|face N`,
+  `prefs find-faces|face-model|forget-people|…` in `src/app/testing.rs`):
+  every state above shot and read; `PP_PROFILE=1` over a review run
+  showed no slow update (max 0.9 ms) and no slow draw.
+
+### Open
+
+1. **Unnamed tiles:** "Unnamed" (as built) or the mockup's "Name this
+   person".
+2. **Forget all:** Preferences ▸ People (as built) or Preferences ▸
+   Storage (§7a.8).
+3. **The catch-up pass:** `Engine::find_faces()` fetches the missing
+   face models (as the faces-only dialog expects); the pass over the
+   indexed library itself comes with the backend's face cache, and the
+   page shows it through `PassKind::Faces` as the stand-in does.
