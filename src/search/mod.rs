@@ -134,6 +134,9 @@ pub struct Status {
     pub stopped: Option<Stopped>,
     /// New exports waiting because indexing is stopped (the card failed).
     pub waiting: usize,
+    /// Shots whose file the helper couldn't read (empty, damaged, not a
+    /// photo): skipped until the file changes or the index is rebuilt.
+    pub unreadable: usize,
     /// Times the helper stopped on the processor and was started again;
     /// the status bar notes each increase.
     pub helper_restarts: u32,

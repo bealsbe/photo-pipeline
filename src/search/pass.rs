@@ -17,9 +17,10 @@ use chrono::NaiveDate;
 
 use super::index::{PathMap, Vectors};
 use super::Stopped;
-use crate::ml::client::{Embedder, Embedding, HelperError};
+use crate::ml::client::{Embedder, Embedding, FileError, HelperError, Want};
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, MTime};
+use crate::ops::netfs::{self, Failure};
 
 /// Photos per request to the helper.
 pub const BATCH: usize = 32;
@@ -51,13 +52,17 @@ pub struct Plan {
     /// returns a known key (one preview read, one inference, no new row).
     /// Shots already indexed and unchanged.
     pub unchanged: usize,
+    /// Shots whose file the helper couldn't read, unchanged since: skipped
+    /// until the file changes or the index is rebuilt.
+    pub unreadable: usize,
     /// Shots in the library.
     pub total: usize,
 }
 
 /// Compare the library with the path map and the vectors: every shot
 /// whose representative file is not mapped unchanged to a key the
-/// vectors hold becomes a job.  Days come newest first.
+/// vectors hold becomes a job, unless the file is remembered as
+/// unreadable at its current size and mtime.  Days come newest first.
 pub fn plan(index: &LibraryIndex, paths: &PathMap, vectors: &Vectors) -> Plan {
     let mut out = Plan::default();
     for day in index.days.values().rev() {
@@ -71,10 +76,23 @@ pub fn plan(index: &LibraryIndex, paths: &PathMap, vectors: &Vectors) -> Plan {
                 out.unchanged += 1;
                 continue;
             }
+            if paths.is_failed(&rel, fe.size, &fe.mtime) {
+                out.unreadable += 1;
+                continue;
+            }
             out.jobs.push(Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date });
         }
     }
     out
+}
+
+/// Whether a failure is the file's own (empty, damaged, not a photo, no
+/// permission), so it is remembered and the file isn't read again until
+/// it changes, rather than the share's (a network error, the file gone)
+/// or the model's, which pass.  The helper reports a model failure for
+/// every file of its chunk as `model: …` (`ml::worker`).
+pub fn is_files_own(err: &FileError) -> bool {
+    matches!(netfs::classify_errno(err.errno), Failure::Other) && !err.message.starts_with("model: ")
 }
 
 /// A path relative to the library root (absolute when outside it).
@@ -87,13 +105,18 @@ pub struct Request {
     pub jobs: Vec<Job>,
     /// Shots in the library, for the progress line.
     pub total: usize,
+    /// What the helper gives for each shot: the search vector, and the
+    /// faces when they are on (phase 3).
+    pub want: Want,
 }
 
 /// Part of a pass's results.
 #[derive(Debug, Default)]
 pub struct Batch {
     pub embedded: Vec<(Job, Embedding)>,
-    pub failed: Vec<(Job, String)>,
+    /// With why, and the errno when it was the OS's (see
+    /// [`is_files_own`]).
+    pub failed: Vec<(Job, FileError)>,
     /// Shots done (embedded or failed) plus those already indexed, of
     /// `total`.
     pub done: usize,
@@ -172,7 +195,7 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
         }
         let chunk = &req.jobs[i..(i + BATCH).min(req.jobs.len())];
         let files: Vec<(PathBuf, FileType)> = chunk.iter().map(|j| (j.path.clone(), j.file_type)).collect();
-        let results = match embedder.embed_images(&files) {
+        let results = match embedder.embed_images(&files, &req.want) {
             Ok(r) => r,
             Err(HelperError::Restarted) => {
                 batch.restarted = true;
@@ -197,7 +220,7 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
                 Err(e) => {
                     failures += 1;
                     fin.failed += 1;
-                    batch.failed.push((job.clone(), e.message));
+                    batch.failed.push((job.clone(), e));
                     if failures >= FAILURE_RUN && stopped.is_none() {
                         if let Err(err) = std::fs::metadata(&req.root) {
                             let why = crate::ops::netfs::describe_errno(err.raw_os_error()).unwrap_or("it can't be read");
@@ -242,15 +265,30 @@ pub mod tests {
         pub device: Device,
         pub calls: std::sync::atomic::AtomicUsize,
         pub fail_paths_containing: Option<String>,
+        /// How those fail: the file's own trouble (no errno, the default)
+        /// or an OS error such as `EIO`, as a share that went away gives.
+        pub fail_errno: Option<i32>,
         pub card_fails_after: Option<usize>,
         pub restart_once: std::sync::atomic::AtomicBool,
         /// Every text encoded, for tests of the device rule.
         pub texts: parking_lot::Mutex<Vec<String>>,
+        /// How long each image request takes (so a pass can be stopped
+        /// part-way).
+        pub delay: Duration,
     }
 
     impl Fake {
         pub fn new(device: Device) -> Fake {
-            Fake { device, calls: AtomicUsize::new(0), fail_paths_containing: None, card_fails_after: None, restart_once: AtomicBool::new(false), texts: parking_lot::Mutex::new(Vec::new()) }
+            Fake {
+                device,
+                calls: AtomicUsize::new(0),
+                fail_paths_containing: None,
+                fail_errno: None,
+                card_fails_after: None,
+                restart_once: AtomicBool::new(false),
+                texts: parking_lot::Mutex::new(Vec::new()),
+                delay: Duration::ZERO,
+            }
         }
 
         /// A unit vector from the path's bytes (64-d, pseudo-random), so
@@ -281,13 +319,16 @@ pub mod tests {
         fn device_report(&self) -> (Option<String>, SelfCheck) {
             (Some(format!("Fake {}", self.device.label())), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
         }
-        fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<ImageResult>, HelperError> {
+        fn embed_images(&self, files: &[(PathBuf, FileType)], _want: &Want) -> Result<Vec<ImageResult>, HelperError> {
             let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
             if self.card_fails_after.is_some_and(|n| calls > n) {
                 return Err(HelperError::Card(CardFailure::Crashed));
             }
             if self.restart_once.swap(false, Ordering::Relaxed) {
                 return Err(HelperError::Restarted);
+            }
+            if !self.delay.is_zero() {
+                std::thread::sleep(self.delay);
             }
             Ok(files
                 .iter()
@@ -296,7 +337,7 @@ pub mod tests {
                     ImageResult {
                         path: p.clone(),
                         result: if bad {
-                            Err(FileError { message: "can't be read".into(), errno: Some(libc::EIO) })
+                            Err(FileError { message: "can't be read".into(), errno: self.fail_errno })
                         } else {
                             // Frames 200 ms apart on one camera: a burst, as
                             // the grid would find it.
@@ -304,7 +345,7 @@ pub mod tests {
                             let base = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap().and_hms_opt(14, 30, 0).unwrap();
                             let capture = base + chrono::Duration::milliseconds(n * 200);
                             let meta = ShotMeta { subsec_ms: Some(((n * 200) % 1000) as u16), sequence: None, focus: None, camera: 7 };
-                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: Some(capture), meta, accidental: false, vector: Fake::vector_for(p) })
+                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: Some(capture), meta, accidental: false, vector: Fake::vector_for(p), faces: Vec::new() })
                         },
                     }
                 })
@@ -341,7 +382,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..70).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.fail_paths_containing = Some("0007".into());
-        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 70 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 70, want: Want::search() }, &fake);
         assert!(fin.complete && fin.stopped.is_none(), "{fin:?}");
         assert_eq!((fin.embedded, fin.failed), (69, 1));
         assert_eq!(fake.calls.load(Ordering::Relaxed), 3, "32 + 32 + 6");
@@ -357,7 +398,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..100).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.card_fails_after = Some(1);
-        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 100 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 100, want: Want::search() }, &fake);
         assert!(!fin.complete);
         assert_eq!(fin.stopped, Some(Stopped::Card(CardFailure::Crashed)));
         assert_eq!(fin.embedded, 32, "what was done is kept");
@@ -371,12 +412,26 @@ pub mod tests {
         let jobs: Vec<Job> = (0..10).map(|n| job(n, day)).collect();
         let fake = Fake::new(Device::Cpu);
         fake.restart_once.store(true, Ordering::Relaxed);
-        let (batches, fin) = run(Request { root: "/".into(), jobs: jobs.clone(), total: 10 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs: jobs.clone(), total: 10, want: Want::search() }, &fake);
         assert!(fin.complete && fin.embedded == 10);
         assert!(batches.iter().any(|b| b.restarted));
         let cancel = AtomicBool::new(true);
-        let fin = execute(Request { root: "/".into(), jobs, total: 10 }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
+        let fin = execute(Request { root: "/".into(), jobs, total: 10, want: Want::search() }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
         assert_eq!(fin.stopped, Some(Stopped::Cancelled));
         assert_eq!(fin.embedded, 0);
+    }
+
+    /// Only a file's own trouble is remembered: a share that went away,
+    /// a file that is gone and a model that failed all pass.
+    #[test]
+    fn a_failure_is_the_files_own_unless_the_share_or_the_model_failed() {
+        let err = |message: &str, errno: Option<i32>| FileError { message: message.into(), errno };
+        assert!(is_files_own(&err("not a readable JPEG", None)));
+        assert!(is_files_own(&err("RAW: unsupported file format", None)));
+        assert!(is_files_own(&err("Permission denied", Some(libc::EACCES))));
+        assert!(!is_files_own(&err("Input/output error", Some(libc::EIO))));
+        assert!(!is_files_own(&err("Host is down", Some(libc::EHOSTDOWN))));
+        assert!(!is_files_own(&err("No such file or directory", Some(libc::ENOENT))));
+        assert!(!is_files_own(&err("model: the card stopped", None)));
     }
 }

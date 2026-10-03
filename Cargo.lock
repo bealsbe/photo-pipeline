@@ -3254,6 +3254,7 @@ dependencies = [
  "dirs",
  "fast_image_resize",
  "filetime",
+ "flate2",
  "half",
  "iced",
  "jpeg-encoder",

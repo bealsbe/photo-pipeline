@@ -94,7 +94,7 @@ fn vectors(previews: &[PathBuf], root: &Path, out: &Path, client: &dyn Fn() -> C
         let t = Instant::now();
         let mut failed = 0;
         for chunk in todo.chunks(64) {
-            let results = c.embed_images(chunk).expect("the helper answers");
+            let results = c.embed_images(chunk, &crate::ml::client::Want::search()).expect("the helper answers");
             for r in results {
                 match r.result {
                     Ok(e) => {
