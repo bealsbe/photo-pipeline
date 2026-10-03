@@ -512,15 +512,14 @@ impl Fake {
     /// Change the people (an edit the page asked for), then say so; a
     /// refusal is printed (the page checks first, as the engine does).
     fn people(&self, f: impl FnOnce(&mut FakePeople, &Subjects) -> Result<(), String>) {
-        {
-            let mut s = self.state.lock();
+        // The counts in the status (named, found) change with the groups.
+        self.change(|s| {
             let snap = s.subjects.clone();
             if let Err(e) = f(&mut s.people, &snap) {
                 eprintln!("[people] refused: {e}");
             }
             s.refresh_people();
-        }
-        self.publish_people();
+        });
     }
 
     fn publish(&self, s: &FakeState) {
@@ -746,6 +745,7 @@ impl Fake {
                 "faces-catchup" => {
                     s.faces = FacesStatus { on: true, model: None, installed: false, ..FacesStatus::default() };
                     st.people.forget_all();
+                    st.people.name_first = false;
                     st.refresh_people();
                 }
                 "faces-off" => {

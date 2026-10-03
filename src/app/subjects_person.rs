@@ -811,7 +811,9 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
             };
             r = r.push(column![input, text(about).size(t::T_SMALL).color(t::INK2)].spacing(4).width(Length::Fill));
             if g.name.is_none() {
-                r = r.push(kit::btn(format!("Check this group  Y"), style::secondary(), Some(pm(Msg::Review))));
+                let label = row![text("Check this group").size(t::T_BODY).font(paint::MEDIUM), quiet_keycap("Y")].spacing(8).align_y(Alignment::Center);
+                let b = button(container(label).center_y(Length::Fill)).height(t::CONTROL_H).padding(Padding::from([0.0, t::S4])).style(style::secondary().style()).on_press(pm(Msg::Review));
+                r = r.push(tip(b, format!("One face at a time: Y if it's the same {one}, N if not"), true));
             }
         }
         None => {
@@ -843,6 +845,11 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     }
     r = r.push(more);
     container(r.padding(Padding::from([10.0, 12.0]))).height(BAND_H).center_y(BAND_H).width(Length::Fill).style(style::fill(t::MOUNT)).into()
+}
+
+/// A key on a secondary button.
+fn quiet_keycap<'a>(k: &'a str) -> Element<'a, Message> {
+    container(text(k).size(11).font(paint::MEDIUM).color(t::INK2)).padding(Padding::from([0.0, 4.0])).style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, 4.0), ..Default::default() }).into()
 }
 
 /// A key on a primary button: a quiet outline in the button's ink.
@@ -979,7 +986,12 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         Menu::MoveTo => {
             let mut rows = vec![menu_row(icons::view(Glyph::Plus, 15.0, t::INK2), format!("A new {one}"), String::new(), Some(pm(Msg::MoveTo(None))))];
             rows.extend(other_groups(app, p, |id| pm(Msg::MoveTo(Some(id)))));
-            (menu_panel(Some(format!("Move {} to", util::plural(p.picked.len() as u64, "face"))), rows, 280.0), page_w - 280.0 - 220.0, subj::HEADER_H + BAND_H + 2.0 + 44.0, 280.0)
+            // Under *Move to…*: its right edge is left of "Not …" and ×.
+            let name = subj::label(s, &p.group);
+            let not = if name == "the unnamed group" { "Not this one".to_string() } else { format!("Not {name}") };
+            let not_w = 12.0 + 16.0 + 8.0 + paint::text_width(&not, t::T_BODY, paint::MEDIUM).ceil() + 12.0;
+            let right = page_w - 8.0 - t::CONTROL_H - t::S3 - not_w - t::S3;
+            (menu_panel(Some(format!("Move {} to", util::plural(p.picked.len() as u64, "face"))), rows, 280.0), right - 280.0, subj::HEADER_H + 1.0 + BAND_H + 1.0 + 40.0, 280.0)
         }
     };
     let _ = w;

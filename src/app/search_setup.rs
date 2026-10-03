@@ -290,9 +290,10 @@ fn face_row<'a>(app: &App, mi: &models::ModelInfo, on: bool, enabled: bool, inst
     top = top.push(Space::new().width(Length::Fill));
     top = top.push(text(if installed { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(ink(t::INK2)));
     let licence = format!("Licence: {}: {}. From {}, its publisher.", capital(mi.licence), mi.licence_plain, mi.publisher);
+    let what = mi.what.split_whitespace().collect::<Vec<_>>().join(" ");
     let col = column![
         top,
-        text(format!("{} {speed}", mi.what)).size(t::T_SMALL).color(ink(t::INK2)),
+        text(format!("{what} {speed}")).size(t::T_SMALL).color(ink(t::INK2)),
         text(licence).size(t::T_SMALL).color(ink(if mi.restricted { t::WARN } else { t::INK3 })),
     ]
     .spacing(2)
@@ -627,7 +628,12 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
                 row![words("Adding new photos to search".into()), text(of).size(t::T_SMALL).color(t::INK2), b].spacing(t::S2).align_y(Alignment::Center).into()
             }
             kind => {
-                let label = if kind == PassKind::Rebuild { "Rebuilding the search index" } else { "Indexing" };
+                let label = match kind {
+                    PassKind::Rebuild => "Rebuilding the search index",
+                    PassKind::Faces if st.faces.unrecognised > 0 => "Recognising faces again",
+                    PassKind::Faces => "Finding faces",
+                    _ => "Indexing",
+                };
                 let content =
                     row![words(label.into()), text(of).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK), bar(frac, Some(56.0))].spacing(t::S2).align_y(Alignment::Center);
                 let b = button(content).padding(Padding::from([0.0, 6.0])).style(style::ghost().style()).on_press(m(Msg::Steps(!s.steps)));
@@ -660,9 +666,16 @@ pub fn steps_layer(app: &App) -> Option<Element<'_, Message>> {
     let frac = if p.total == 0 { 0.0 } else { p.done as f32 / p.total as f32 };
     let left = estimate::describe_seconds(estimate::seconds(p.total.saturating_sub(p.done), s.status.device.chosen));
     let detail = format!("{} of {} photos, newest first. {} left.", util::thousands(p.done as u64), util::thousands(p.total as u64), capital(&left));
+    // The first index finds faces in the same pass; a faces pass of its
+    // own is the one step.
+    let (glyph, what) = match p.kind {
+        PassKind::Faces => (Glyph::Person, if s.status.faces.unrecognised > 0 { "Faces, with the new model" } else { "Faces" }),
+        PassKind::FirstIndex if s.status.faces.on => (Glyph::Search, "Search and faces"),
+        _ => (Glyph::Search, "Search"),
+    };
     let step = row![
-        icons::view(Glyph::Search, 16.0, t::INK3),
-        column![text("Search").size(t::T_BODY).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
+        icons::view(glyph, 16.0, t::INK3),
+        column![text(what).size(t::T_BODY).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
         bar(frac, Some(80.0)),
     ]
     .spacing(t::S3)

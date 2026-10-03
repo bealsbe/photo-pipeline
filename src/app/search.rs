@@ -134,7 +134,8 @@ pub enum Coverage {
 
 pub fn coverage(st: &Status) -> Coverage {
     match &st.pass {
-        Some(p) if p.kind != PassKind::NewExports => Coverage::Growing,
+        // A faces pass reads photos already indexed: search sees them all.
+        Some(p) if matches!(p.kind, PassKind::FirstIndex | PassKind::Rebuild) => Coverage::Growing,
         None if st.stopped.is_some() && st.first_index_asked && st.indexed_shots < st.library_shots => Coverage::Stopped,
         _ => Coverage::Whole,
     }
@@ -592,7 +593,8 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
         tasks.push(app.show_status("The graphics card passed its check. Indexing carries on.", 6000));
     }
     let st = &app.search.status;
-    if let (Some(p), None, None) = (&old.pass, &st.pass, &st.stopped) {
+    // (A faces pass's end is the People page's to say.)
+    if let (Some(p), None, None) = (old.pass.as_ref().filter(|p| p.kind != PassKind::Faces), &st.pass, &st.stopped) {
         let text = match p.kind {
             PassKind::NewExports => format!("Search has the {} new {}.", util::thousands(p.total as u64), if p.total == 1 { "photo" } else { "photos" }),
             _ if st.indexed_shots >= st.library_shots => format!("Indexed {}. Search has the whole library.", util::plural(st.library_shots as u64, "photo")),
