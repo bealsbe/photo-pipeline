@@ -723,7 +723,12 @@ impl People {
                 let s = self.file.get(s).ok_or_else(|| Refused::NoSuchSubject(s.clone()))?;
                 Ok((s.kind, s.members.clone()))
             }
-            GroupId::Cluster(_) => self.cluster_members(id).map(|m| (Kind::Person, m)).ok_or(Refused::StaleGroup),
+            // A cluster's kind is whichever step published it (people's
+            // own, or another kind's through `other_clusters`).
+            GroupId::Cluster(_) => match (self.kind_of(id), self.cluster_members(id)) {
+                (Some(kind), Some(m)) => Ok((kind, m)),
+                _ => Err(Refused::StaleGroup),
+            },
         }
     }
 
@@ -1242,6 +1247,30 @@ mod tests {
 
     /// Decision 12 through the people state: merging or moving across
     /// kinds is refused and leaves no undo step.
+    /// Another kind's cluster, published through `other_clusters`, keeps
+    /// its kind through every operation: naming it makes a subject of
+    /// that kind, merging it into a person is refused, and its members
+    /// are found (phase 4 found the opposite on a real run).
+    #[test]
+    fn another_kinds_cluster_keeps_its_kind() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)])]);
+        let cluster = GroupId::Cluster(7);
+        assert_eq!(p.members(&cluster), Ok((Kind::Fursuit, vec![face(1), face(2)])));
+        let person = GroupId::Subject(p.file.create(Kind::Person, Some("Someone".into()), vec![face(3)]));
+        assert_eq!(p.merge(&person, &[cluster.clone()]), Err(Refused::MixedKinds), "a fursuit cluster never joins a person");
+        assert_eq!(p.move_faces(&cluster, vec![face(1)], Some(&person)), Err(Refused::MixedKinds));
+        let id = p.name_group(&cluster, "Suit".into()).unwrap();
+        let s = p.file.get(&id).unwrap();
+        assert_eq!((s.kind, s.name.as_deref(), s.members.len()), (Kind::Fursuit, Some("Suit"), 2));
+        assert_eq!(p.named(Kind::Fursuit, "suit"), [GroupId::Subject(id.clone())]);
+        assert!(p.named(Kind::Person, "suit").is_empty());
+        // A stale or unknown cluster id is refused, not taken for a person.
+        p.set_other_clusters(Kind::Fursuit, Vec::new());
+        assert_eq!(p.name_group(&cluster, "Again".into()), Err(Refused::StaleGroup));
+        assert_eq!(p.undo().as_deref(), Some("Named a group Suit"));
+    }
+
     #[test]
     fn people_fursuits_and_pets_never_merge() {
         let mut p = People::load(None);
