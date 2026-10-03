@@ -1958,3 +1958,200 @@ silhouettes drawn in code: no face, real or generated, is in the tree.
    face models (as the faces-only dialog expects); the pass over the
    indexed library itself comes with the backend's face cache, and the
    page shows it through `PassKind::Faces` as the stand-in does.
+
+## As built — phase 3 (backend): people
+
+*Written as the backend landed (2026-10-03).  The page's side is above.*
+
+### Models (§4.4, decisions 10 and 13)
+
+- **Pinned** (`ml/models.rs`): YuNet 2023 March (OpenCV Zoo, MIT,
+  0.2 MB, an LFS file fetched through GitHub's media endpoint), AuraFace
+  v1 (`glintr100.onnx` alone, 261 MB, Apache-2.0, recommended), SFace
+  2021 December (39 MB, Apache-2.0), InsightFace `buffalo_l`'s
+  `w600k_r50.onnx` (174 MB, "non-commercial research purposes only").
+  The digests are the study's.
+- **InsightFace comes as an archive** from its own v0.7 release
+  (`buffalo_l.zip`, 289 MB): `ModelFile.archive` pins the archive's
+  digest and size; the download checks the archive, inflates the one
+  member (`ml/unzip.rs`, a small reader of the format; `flate2`), checks
+  the member's digest and size, renames it into place and deletes the
+  archive.  Never re-hosted; never pre-selected; `restricted` marks its
+  row for the dialog's warning tone.
+- **YuNet's file declares a 640 × 640 input** although the network is
+  fully convolutional (its reshapes are `[1, −1, k]`; OpenCV ignores the
+  declared shape).  The helper makes the batch, height and width dims
+  symbolic in memory after the digest check (`ml/onnx_patch.rs`, a
+  protobuf walk of the few messages involved); the file on disk stays
+  the publisher's.  Measured first in Python: the patched graph runs at
+  832 × 832 and in batches, its outputs flattened in batch order.
+- **Inputs:** the detector takes BGR 0–255 (OpenCV's blob of a BGR
+  `Mat`); AuraFace and InsightFace `(v − 127.5) / 127.5` RGB; SFace RGB
+  0–255 as OpenCV feeds it.  SFace's file fixes its batch at one, which
+  the helper honours; the others take any batch.
+
+### Faces in the helper (§3.3, §5.2)
+
+- **Canvas, not full size.**  The detector runs on a fixed square canvas
+  the preview is scaled to fit and padded on, so every photo has one
+  tensor shape and a chunk is batched on the card (eight canvases a
+  call).  Measured on 200 of the study's previews (score ≥ 0.9, ≥ 40 px
+  on the full preview): a 640 canvas found 49 faces, 832 55, **1 024
+  61**, 1 280 64 at twice the processor cost, the full preview 59
+  (large faces score lower).  1 024 is the knee.  Over the 1 010
+  previews it finds 140 faces in 119 photos; the study, at full size,
+  found 145.
+- **One read, two decodes.**  The search input and the accident rule keep
+  their small DCT-reduced decode; the canvas comes from a second decode
+  of the same bytes at ≥ 1 000 px on the long side.  Measuring accidents
+  on the large decode had cost more than the detector.  Faces found are
+  cut from a third decode at full preview size (only for the photos with
+  faces, about a quarter), aligned to the ArcFace template by a
+  similarity transform from YuNet's five landmarks (`ml/face.rs`),
+  recognised, and given a 128-px JPEG tile for the page.  RAW-only shots
+  take a preview of at least 1 000 px for faces (§7.3).
+- **Fixed batch shapes.**  The card compiles its kernels per tensor
+  shape: a chunk whose face count was new had cost 6–12 s.  Detector and
+  face batches are always full (padded with black), so compilation
+  happens once per helper start: 10–30 s with AuraFace.  That cost
+  returns at every helper start (the idle exit after three minutes), a
+  thing to keep in mind if new-export passes feel slow to begin.
+- **Self-checks** run per session on the card: the detector and the face
+  model are each checked against the processor on a fixed input
+  (`worker::check_session`); measured cosine 0.99997–1.000000, largest
+  difference ≤ 1e-6.  A failure is a `CardFailure::SelfCheckFailed`, as
+  for search.
+- **Protocol:** `Request::EmbedImages { files, want: Want { search,
+  faces } }` with `FaceAsk::{None, Detect, Known { files }}`;
+  `Embedding.faces: Vec<FaceFound>` (box and landmarks as fractions of
+  the oriented preview, score, size, sharpness, vector, tile).  `Known`
+  recognises stored landmarks again (a model change): no detection.  The
+  helper takes `--face-model <id>` and `--models-root`; `Spec { device,
+  text_only, face_model }` replaces the factory's two flags.
+- **A deadlock, found by the processor timing:** faces were cut on the
+  reader pool while that pool's threads were all blocked handing
+  prepared photos to the inference thread (the processor's chunks of 8
+  fill the channel).  Faces are cut on the global pool now.
+
+### The cache and the user's file (§6)
+
+- **Beside the index** (`search/faces.rs`), files 0600 in a 0700
+  folder: `faces.bin` (per photo looked at, the detections, maybe none;
+  sealed blocks like the vectors file; a detector version in the
+  header), `facevecs-<model>.bin` (a `FaceRef` and an f16 vector per
+  face, one file per model so a change keeps the old one), `tiles.bin`
+  (an offset index in memory; `Engine::crop` reads one tile from any
+  thread).  Rows are compacted away when more than a tenth of the photos
+  left the library; a torn tail loses its last block.  *Clear* drops
+  everything of the cache (unnamed detections are cache, §10); *Forget
+  all* the user's file too.
+- **`FaceRef`** is a photo's content key and the box in thousandths of
+  the oriented preview: the identity the user's decisions point at, the
+  same whichever model recognised the face.  The file is §6.5's JSON
+  (`SubjectsFile`), one file for every kind; its operations check kinds
+  (`Refused::MixedKinds`), confirming a face to one subject takes it
+  from any other of that kind, No puts it in `rejected` and takes it out
+  of the members.  Fifty undo steps are kept in memory, each the whole
+  file before the edit with what the edit was ("Merged 2 groups into
+  …"); `BgEvent::SubjectsUndone` says it.
+- **Catch-up and model change** are `PassKind::Faces` passes planned from
+  the index's keys, never from `pass::plan`, and started only by a
+  command (`find_faces`, `set_face_model`), never by a pass's end: a
+  pass that has nothing left starts nothing.  **The catch-up covers every
+  indexed photo not yet looked at for faces, new exports indexed while
+  face finding was off included** (the user, 2026-10-03; a test holds
+  it).  A model change switches the vectors file, starts the helper
+  again with the new model, and recognises the stored landmarks again
+  for the photos whose faces lack vectors; names, members, rejections
+  and covers are untouched.
+- `Storage.faces_bytes` is the *People* row; the index row no longer
+  counts the face files.
+
+### Grouping (§5.1, §6.5, UI 6, UI 12)
+
+- **Pure, in `model/subjects.rs`:** rows join the nearest cluster within
+  the cut-off or start one, clearest first, then clusters whose centroids
+  lie within the cut-off merge until none do; new rows are assigned
+  incrementally as batches arrive and the full grouping runs on a worker
+  thread when a pass ends or a decision changes (`Cmd::Regrouped`).
+  Faces confirmed to a subject take no part in the clusters.  Cluster ids
+  are the clearest member's `FaceRef` hashed, so an id lives as long as
+  its cover does; a stale one is `Refused::StaleGroup`.
+- **The per-kind step** (`search/step.rs`): a `KindStep` supplies refs,
+  rows (f32 or f16 bits), each detection's visual clarity and its
+  cut-offs; `step::regroup` and `Grouped` are written once for every
+  kind and never see another kind's rows or subjects (tested).  Phase 4
+  implements it for fursuits with its own cache and cut-offs
+  (`Cutoffs { group, suggest, strict }`: its head model wants groups
+  stricter than suggestions).
+- **Suggestions** for a subject: faces within the cut-off of any of its
+  confirmed members, confirmed nowhere, not rejected for it, nearest
+  first, **one entry per burst** (the resolver's burst id); *Find more*
+  is the same at the strict cut-off.  For a cluster: its own members,
+  surest first, per burst.  Counts per subject come from the regroup.
+- **Clearest first:** a face's clarity is half its own (size over 200 px,
+  sharpness as the Laplacian's variance, the detection score) and half
+  how sure its membership is (one minus its distance over the cut-off,
+  to its cluster's centroid or to its subject's other members); a
+  subject's page with no words orders photos by their clearest face.
+- **`@name`:** resolved against the named subjects of `Kind::Person`
+  (two subjects with one name count as either), narrowing the query's
+  photos; a name nobody has narrows to nothing, and
+  `SearchResults.subjects` carries the groups applied so the page can
+  tell.
+
+### The face-model comparison (phase 0's last item)
+
+On the card, over the 1 010 previews of sample L, the three models see the
+same 140 faces (the detector is shared), and run at the same speed within
+noise, since reading and decoding dominate: **AuraFace 15.4 ms a photo,
+SFace 15.9, InsightFace 17.3**.  Average-linkage groups of their vectors,
+judged by eye on scratch sheets (never published):
+
+| | AuraFace (0.6) | SFace (0.5) | InsightFace (0.5 / 0.6) |
+|---|---|---|---|
+| Groups of ≥ 3 faces | 7 (38 faces) | 9 (50) | 9 (57) / 9 (67) |
+| Of ≥ 5 | 2 (21) | 3 (30) | 4 (40) / 4 (50) |
+| The 14 largest, by eye | all one person each; no junk group | one group of 9 non-faces (foliage, blur), the rest one person each | a group of 14 / 20 non-faces, one person-group with a stranger in it |
+
+YuNet's false detections at score ≥ 0.9 (leaves, bokeh, a hat) are the
+difference: SFace and InsightFace give them similar vectors and gather
+them into the largest "person"; AuraFace spreads them apart.  So
+**AuraFace stays pre-selected** and `subjects::cutoff_for` keeps 0.6 for
+it and 0.5 for the other two.  A later improvement: a junk filter on the
+crop (variance, a second detector score) before recognition.
+
+**The processor** (eight threads, 200 previews, 61 faces, search off):
+SFace 11.8 ms a photo, InsightFace 13.3, AuraFace 15.3; so finding faces
+costs about 11.5 ms a photo on the processor whichever the model (the
+larger decode, the canvas, YuNet, the full decode of photos with faces)
+and recognition about 12 ms a face for AuraFace, 5 for InsightFace, 1 for
+SFace.  (A first timing gave 57 ms a photo for AuraFace: the processor
+was running the card's padded batches of 32; it now runs what there is.)
+`estimate::face_*` carries these numbers: a catch-up over the library is
+about 10 minutes on the card, 11–14 on the processor, within the plan's
++7–14.  InsightFace's real size and speed, which the plan left to measure:
+174 MB kept of 289 downloaded, and in the middle of the three.
+
+### Checked on a scratch library (`eval::people_library`, read only)
+
+634 shots in six days (an event day and phase 1's five), symlinks into the
+archive, the card: the first index with faces took 50 s (the share bound;
+each photo's preview decoded twice, those with faces three times); 56
+faces in 35 clusters (8, 6, 4, 3, 3 photos, then pairs and singles);
+naming the largest; `@Someone` answered its 8 photos clearest first in
+7 ms, `@Nobody` nothing; a tile from the cache in 10 ms, the whole
+preview in the same call; undo; *Forget all* removed the subjects file.
+Nothing under the archive was written.
+
+### Not built, and open
+
+- A junk-face filter (above).
+- The regroup is leader clustering with a merge pass, not the study's
+  average linkage; on 20 k faces it is seconds on the worker.  Average
+  linkage over the library's faces would be minutes and is not needed
+  while the groups read clean.
+- The helper's kernel compilation on each start (10–30 s with AuraFace);
+  a persistent shader cache would be Dawn's to offer.
+- *Change the cover* has no engine call yet (the cover is the clearest
+  member).

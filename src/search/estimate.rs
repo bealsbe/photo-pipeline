@@ -38,20 +38,24 @@ pub fn seconds(shots: usize, device: Device) -> f64 {
 /// 56 710 shots (plan §3.3, sample L at YuNet score ≥ 0.9 gives ~0.14;
 /// event days hold more).
 pub const FACES_PER_SHOT: f64 = 0.25;
-/// Seconds of detection per shot on each device, beyond the read the
-/// search step already pays (YuNet at half size: 3.2 ms on the processor;
-/// a batch on the card is far cheaper).
-pub const DETECT_SECONDS_PER_SHOT_CPU: f64 = 0.0035;
-pub const DETECT_SECONDS_PER_SHOT_GPU: f64 = 0.0005;
+/// Seconds of finding faces per shot on each device, beyond the read the
+/// search step already pays: the larger decode for the detector's canvas,
+/// the canvas, YuNet, and the full decode of the photos with faces.
+/// Measured on 200 previews (phase 3): 11.8 ms a photo on the processor
+/// with SFace (whose recognition is nearly free), ~10 ms on the card
+/// (15.4 ms with faces against 5.6 without).
+pub const DETECT_SECONDS_PER_SHOT_CPU: f64 = 0.0115;
+pub const DETECT_SECONDS_PER_SHOT_GPU: f64 = 0.010;
 
-/// Seconds per face for a face model on the processor (plan §3.3:
-/// AuraFace 30 ms, SFace 3–4 ms, InsightFace about half AuraFace's work)
-/// and on the card (about a tenth).
+/// Seconds per face for a face model on the processor (measured, phase
+/// 3, over the detection cost: AuraFace 12 ms, InsightFace 5 ms, SFace
+/// about 1 ms, at eight threads and batches of up to 32) and on the card
+/// (about a tenth).
 pub fn face_seconds_per_face(device: Device, model: ModelId) -> f64 {
     let cpu = match model {
-        ModelId::AuraFace => 0.030,
-        ModelId::InsightFace => 0.015,
-        ModelId::SFace => 0.0035,
+        ModelId::AuraFace => 0.012,
+        ModelId::InsightFace => 0.005,
+        ModelId::SFace => 0.001,
         _ => 0.0,
     };
     match device {
@@ -145,22 +149,24 @@ mod tests {
         assert_eq!(describe_seconds(15.0 * 3600.0), "about 15 hours");
     }
 
-    /// Plan §3.7: faces add a few minutes on the card and 4–15 on the
-    /// processor; a catch-up is bound by reading the previews again.
+    /// Measured in phase 3: a catch-up over the library is about ten
+    /// minutes on the card (the extra decodes outweigh the read) and
+    /// 11–14 minutes on the processor; the plan's +7–14 minutes held.
     #[test]
-    fn face_estimates_follow_the_plan() {
+    fn face_estimates_follow_the_measurements() {
         let n = 56_710;
-        assert_eq!(describe_seconds(face_catch_up_seconds(n, Device::Gpu, ModelId::AuraFace)), "about 7 minutes", "read-bound on the card");
-        assert_eq!(describe_seconds(face_catch_up_seconds(n, Device::Gpu, ModelId::SFace)), "about 7 minutes");
+        assert_eq!(describe_seconds(face_catch_up_seconds(n, Device::Gpu, ModelId::AuraFace)), "about 10 minutes");
+        assert_eq!(describe_seconds(face_catch_up_seconds(n, Device::Gpu, ModelId::SFace)), "about 9 minutes");
         let cpu_aura = face_seconds(n, Device::Cpu, ModelId::AuraFace);
         let cpu_sface = face_seconds(n, Device::Cpu, ModelId::SFace);
-        assert!((7.0 * 60.0..=15.0 * 60.0).contains(&cpu_aura), "{cpu_aura}");
-        assert!((3.0 * 60.0..=5.0 * 60.0).contains(&cpu_sface), "{cpu_sface}");
+        assert!((12.0 * 60.0..=15.0 * 60.0).contains(&cpu_aura), "{cpu_aura}");
+        assert!((10.0 * 60.0..=12.0 * 60.0).contains(&cpu_sface), "{cpu_sface}");
         assert!(face_seconds(n, Device::Cpu, ModelId::InsightFace) < cpu_aura);
-        assert!(face_seconds(n, Device::Gpu, ModelId::AuraFace) < cpu_aura / 5.0);
+        assert!(face_seconds(n, Device::Gpu, ModelId::AuraFace) < cpu_aura);
         assert_eq!(face_seconds_per_face(Device::Cpu, ModelId::Siglip2), 0.0, "not a face model");
-        // A model change over a quarter of the library with 14 k faces.
+        // A model change over a quarter of the library with 14 k faces:
+        // read-bound on the card, a few minutes on the processor.
         assert_eq!(describe_seconds(face_model_change_seconds(14_000, 14_000, Device::Gpu, ModelId::AuraFace)), "about 2 minutes");
-        assert!(face_model_change_seconds(14_000, 14_000, Device::Cpu, ModelId::AuraFace) > 5.0 * 60.0);
+        assert!(face_model_change_seconds(14_000, 14_000, Device::Cpu, ModelId::AuraFace) > 4.0 * 60.0);
     }
 }

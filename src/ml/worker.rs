@@ -355,16 +355,19 @@ impl Models {
     /// Run the detector over canvases (in batches of [`DETECT_BATCH`]):
     /// the faces found on each, best first.
     pub fn detect(&mut self, canvases: &[&face::Canvas]) -> ort::Result<Vec<Vec<face::Detected>>> {
+        let pad = self.device == Device::Gpu;
         let session = self.detector.as_mut().ok_or_else(|| ort::Error::new("this helper has no face detector"))?;
         let name = session.inputs()[0].name().to_string();
         let mut out = Vec::with_capacity(canvases.len());
         for batch in canvases.chunks(DETECT_BATCH) {
             let n = batch.len();
-            // Always a full batch (black canvases at the end), so the
-            // card sees one tensor shape and compiles its kernels once.
+            // On the card, always a full batch (black canvases at the
+            // end), so it sees one tensor shape and compiles its kernels
+            // once; the processor has no such cost and runs what there is.
+            let size = if pad { DETECT_BATCH } else { n };
             let mut data: Vec<f32> = batch.iter().flat_map(|c| c.planes.iter().map(|&b| b as f32)).collect();
-            data.resize(DETECT_BATCH * CANVAS_LEN, 0.0);
-            let shape = vec![DETECT_BATCH as i64, 3, DET_SIZE as i64, DET_SIZE as i64];
+            data.resize(size * CANVAS_LEN, 0.0);
+            let shape = vec![size as i64, 3, DET_SIZE as i64, DET_SIZE as i64];
             let outputs = session.run(ort::inputs![name.as_str() => Tensor::from_array((shape, data))?])?;
             // Each output is flattened over the batch: image i's cells are
             // the i-th block of `cells(stride)`.
@@ -394,14 +397,17 @@ impl Models {
     /// Recognise aligned crops (in batches of [`FACE_BATCH`]): unit
     /// vectors, one per crop.
     pub fn recognise(&mut self, crops: &[&Pixels]) -> ort::Result<Vec<Vec<f32>>> {
+        let pad = self.device == Device::Gpu;
         let fm = self.face.as_mut().ok_or_else(|| ort::Error::new("this helper has no face model"))?;
         let mut out = Vec::with_capacity(crops.len());
-        let size = fm.batch.max(1);
+        let per_call = fm.batch.max(1);
         let per = (3 * ALIGNED * ALIGNED) as usize;
-        for batch in crops.chunks(size) {
+        for batch in crops.chunks(per_call) {
             let n = batch.len();
-            // A full batch every time (blank crops at the end): one shape
-            // for the card.
+            // On the card a full batch every time (blank crops at the
+            // end): one shape to compile for.  The processor runs what
+            // there is.
+            let size = if pad { per_call } else { n };
             let mut data: Vec<f32> = batch.iter().flat_map(|c| face::face_input(c, fm.norm)).collect();
             data.resize(size * per, 0.0);
             let shape = vec![size as i64, 3, ALIGNED as i64, ALIGNED as i64];

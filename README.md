@@ -661,10 +661,15 @@ the engine does underneath (`src/search/faces.rs`, `src/search/step.rs`,
   exports.  *Clear* (the search index) drops the unnamed detections;
   Preferences ▸ Storage ▸ *Forget all* drops everything, the names
   included.
-- **Measured** (this machine, the card): on 1 010 of the study's previews
-  YuNet at 1 024 px finds 140 faces in 119 photos (the study found 145
-  at full size); on a scratch library of 634 shots read from the share,
-  the first index with faces took 50 s and gave 56 faces in 35 groups.
+- **Measured** (this machine): on 1 010 of the study's previews YuNet at
+  1 024 px finds 140 faces in 119 photos (the study found 145 at full
+  size); with faces on, the card takes about 15 ms a photo whichever
+  model, the processor 12–15 (SFace, InsightFace, AuraFace in that
+  order); on a scratch library of 634 shots read from the share, the
+  first index with faces took 50 s and gave 56 faces in 35 groups.  Of
+  the three models, AuraFace gave the cleanest groups on the sample (no
+  group of the detector's false faces among its largest), so it stays
+  the recommended one.
 
 ## File safety
 
