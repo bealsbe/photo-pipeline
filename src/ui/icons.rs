@@ -89,6 +89,8 @@ pub enum Glyph {
     GraphicsCard,
     /// A clock: what is done so far, or a wait.
     Clock,
+    /// A word left out of a search: a ring with a bar across.
+    LeaveOut,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -534,6 +536,10 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.circle(12.0, 12.0, 8.5);
             p.line(&[(12.0, 7.5), (12.0, 12.0), (15.0, 14.0)]);
         }
+        LeaveOut => {
+            p.circle(12.0, 12.0, 8.5);
+            p.line(&[(8.0, 12.0), (16.0, 12.0)]);
+        }
     }
 }
 
@@ -561,7 +567,7 @@ mod tests {
             Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
-            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock,
+            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");

@@ -91,7 +91,15 @@
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
-//!                             # takes the recent search ↑ ↓ chose)
+//!                             # takes the completion ↑ ↓ chose; Tab
+//!                             # takes it, or the first)
+//! search take 2               # click the 3rd completion under the field
+//! search complete             # print what the completions offer
+//! search things               # print the start page's Things (and what
+//!                             # the engine sent that isn't offered)
+//! search thing 0              # click the start page's 1st Thing
+//! search fursuits show|hide   # Show fursuits too (the end note's link) /
+//!                             # Hide fursuits (their heading's link)
 //! search run red car          # type and search
 //! search esc|clear|back       # Esc on the page, the field's ×, ‹ back
 //! search key right|left|space|enter|g|shift+g   # keys on the results
@@ -960,6 +968,27 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
             None => Task::none(),
         },
         "openday" => app.update(s(Msg::OpenDay)),
+        "take" => app.update(s(Msg::Take(rest.parse().unwrap_or(0)))),
+        "complete" => {
+            eprintln!("[search] complete {}", super::search::debug_offer(app));
+            Task::none()
+        }
+        "things" => {
+            eprintln!("[search] things {}", super::search::debug_things(app));
+            Task::none()
+        }
+        "thing" => {
+            let word = super::search_results::offered(&app.search.things).nth(rest.parse().unwrap_or(0)).map(|t| t.word.clone());
+            match word {
+                Some(word) => app.update(s(Msg::Run(word))),
+                None => Task::none(),
+            }
+        }
+        "fursuits" => match rest {
+            "show" => app.update(s(Msg::Grid(GridEvent::FooterLink))),
+            "hide" => app.update(s(Msg::Grid(GridEvent::SectionLink(super::search_results::FURSUITS_DAY)))),
+            _ => Task::none(),
+        },
         "index" => app.update(s(Msg::IndexLibrary)),
         "dlg" => {
             let m = match rest {

@@ -1067,7 +1067,7 @@ fn on_day_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
             }
         }
         // The library's day grid shows no bursts.
-        GridEvent::Chip(_) | GridEvent::SelectDone | GridEvent::Scrolled(_) | GridEvent::ToggleBurst(_) => {}
+        GridEvent::Chip(_) | GridEvent::SectionLink(_) | GridEvent::FooterLink | GridEvent::SelectDone | GridEvent::Scrolled(_) | GridEvent::ToggleBurst(_) => {}
         GridEvent::ZoomStep(step) => {
             cal.day_thumb = ((cal.day_thumb + step as f32 * 20.0) / 20.0).floor() * 20.0;
             cal.day_thumb = cal.day_thumb.clamp(grid::MIN_SIZE, grid::MAX_SIZE);
@@ -1190,6 +1190,7 @@ fn paint_day(cal: &Calendar, r: &mut paint::Renderer, bounds: Rectangle, date: N
         restack: None,
         label: grid::CellLabel::Name,
         footer: None,
+        links: &[],
     };
     let open = |d: NaiveDate| if cal.day_collapsed.contains(&d) { 0.0 } else { 1.0 };
     let ps = grid::PaintState::snapshot(0.0, cal.day_thumb, alpha, &open);
@@ -1217,6 +1218,7 @@ fn day_grid(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         restack: None,
         label: grid::CellLabel::Name,
         footer: None,
+        links: &[],
     };
     Grid::new(gd, cal.day_thumb, |e| Message::Calendar(Msg::Grid(e)))
         .keyboard(keyboard_ok)

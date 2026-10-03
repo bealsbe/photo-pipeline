@@ -346,3 +346,245 @@ fn score_labels() {
 fn mean(v: &[f64]) -> f64 {
     if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
 }
+
+// ── phase 2: the hidden tags and the query syntax ───────────────────────────
+
+/// The tag thresholds against the labels: for each vocabulary word, how
+/// many previews carry it at each probability floor, and for the words
+/// the user labelled, how many of those are right (precision) and how
+/// many of the right ones are found (recall within the labelled pool).
+/// Needs the `candidates` run (the cached vectors) and `PP_EVAL_LABELS`.
+#[test]
+#[ignore = "phase 2: needs the candidates run and PP_EVAL_LABELS"]
+fn tag_thresholds() {
+    use crate::search::tags::{DEFAULT_THRESHOLD, VocabVectors};
+    use crate::search::vocab::{self, VOCABULARY};
+    let s = setup();
+    let labels: HashMap<String, Vec<String>> = serde_json::from_str(&std::fs::read_to_string(need("PP_EVAL_LABELS")).expect("labels file")).expect("labels JSON");
+    let index_of: HashMap<&Path, usize> = s.paths.iter().enumerate().map(|(i, p)| (p.as_path(), i)).collect();
+    let t = Instant::now();
+    let rows = s.encode(&VocabVectors::prompts());
+    let vocab = VocabVectors::from_rows(&rows).expect("every word encoded");
+    eprintln!("{} vocabulary words encoded in {:.0} ms", VOCABULARY.len(), t.elapsed().as_secs_f64() * 1000.0);
+    let floors = [0.005f32, 0.01, 0.02, 0.03, 0.05, 0.1, 0.3];
+    // probs[j][i]: the match probability of preview i for word j.
+    let t = Instant::now();
+    let probs: Vec<Vec<f32>> = (0..VOCABULARY.len()).map(|j| s.scores(vocab.row(j)).into_iter().map(query::match_probability).collect()).collect();
+    eprintln!("{} previews × {} words in {:.1} ms", s.paths.len(), VOCABULARY.len(), t.elapsed().as_secs_f64() * 1000.0);
+    eprintln!("{:>18} {:>7}  {}", "word", "top", floors.iter().map(|f| format!("{f:>6}")).collect::<Vec<_>>().join(" "));
+    for (j, w) in VOCABULARY.iter().enumerate() {
+        let p = &probs[j];
+        let top = p.iter().copied().fold(0f32, f32::max);
+        let counts: Vec<String> = floors.iter().map(|&f| format!("{:>6}", p.iter().filter(|&&x| x >= f).count())).collect();
+        eprintln!("{:>18} {top:>7.3}  {}", w.word, counts.join(" "));
+    }
+    eprintln!("\nlabelled words (tagged / right / of labelled; precision, recall) at each floor; default {DEFAULT_THRESHOLD}");
+    let mut rows_out: Vec<(String, Vec<(usize, usize, usize)>)> = Vec::new();
+    for (q, right) in &labels {
+        let Some(j) = vocab::find(q) else { continue };
+        let rel: HashSet<usize> = right.iter().filter_map(|p| index_of.get(Path::new(p)).copied()).collect();
+        if rel.is_empty() {
+            continue;
+        }
+        let per: Vec<(usize, usize, usize)> = floors
+            .iter()
+            .map(|&f| {
+                let tagged: Vec<usize> = (0..s.paths.len()).filter(|&i| probs[j][i] >= f).collect();
+                (tagged.len(), tagged.iter().filter(|i| rel.contains(i)).count(), rel.len())
+            })
+            .collect();
+        rows_out.push((q.clone(), per));
+    }
+    rows_out.sort();
+    for (q, per) in &rows_out {
+        let cells: Vec<String> = per.iter().map(|(n, r, of)| format!("{n:>3}/{r:>3}/{of:>3}")).collect();
+        eprintln!("{q:>18}  {}", cells.join("  "));
+    }
+    for (k, f) in floors.iter().enumerate() {
+        let (mut ps, mut rs) = (Vec::new(), Vec::new());
+        for (_, per) in &rows_out {
+            let (n, r, of) = per[k];
+            ps.push(if n == 0 { 1.0 } else { r as f64 / n as f64 });
+            rs.push(r as f64 / of as f64);
+        }
+        eprintln!("  floor {f:<5}: mean precision {:.3}, mean recall {:.3}", mean(&ps), mean(&rs));
+    }
+    // At the floor under study (`PP_EVAL_TAG_FLOOR`, else the default):
+    // every word with photos, how many of them "fursuit" beats, and the
+    // Things list as the page would show it; the top photos per word go
+    // to `PP_EVAL_OUT/tags.json` for contact sheets.
+    let floor: f32 = env("PP_EVAL_TAG_FLOOR").and_then(|f| f.parse().ok()).unwrap_or(DEFAULT_THRESHOLD);
+    let fursuit = vocab::find("fursuit").unwrap();
+    eprintln!("\nat floor {floor}: tagged, of which fursuit beats the word (* = a Thing)");
+    let mut doc = serde_json::Map::new();
+    let mut things: Vec<(usize, &str)> = Vec::new();
+    for (j, w) in VOCABULARY.iter().enumerate() {
+        let f = w.threshold.unwrap_or(floor);
+        let mut tagged: Vec<usize> = (0..s.paths.len()).filter(|&i| probs[j][i] >= f).collect();
+        if tagged.is_empty() {
+            continue;
+        }
+        tagged.sort_by(|&a, &b| probs[j][b].total_cmp(&probs[j][a]));
+        let beaten = tagged.iter().filter(|&&i| probs[fursuit][i] > probs[j][i]).count();
+        let thing = !w.kind.is_subject();
+        eprintln!("{:>18}{} {:>4} tagged, {beaten:>4} look more like fursuits", w.word, if thing { "*" } else { " " }, tagged.len());
+        if thing {
+            things.push((tagged.len(), w.plural));
+        }
+        let items: Vec<serde_json::Value> = tagged.iter().take(48).map(|&i| serde_json::json!([s.paths[i].to_string_lossy(), probs[j][i], probs[fursuit][i]])).collect();
+        doc.insert(w.word.to_string(), serde_json::Value::Array(items));
+    }
+    things.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    eprintln!("things by the floor alone: {}", things.iter().map(|(n, w)| format!("{w} {n}")).collect::<Vec<_>>().join(", "));
+    let any: usize = (0..s.paths.len()).filter(|&i| vocab::things().any(|(j, w)| probs[j][i] >= w.threshold.unwrap_or(floor))).count();
+    eprintln!("previews carrying any Thing: {any} of {}", s.paths.len());
+    // The app's own derivation (the contrast included) at the default
+    // floor, through `Tags::sync` on the sample as f16 rows.
+    let mut vectors = crate::search::index::Vectors { dim: vocab.dim, ..Default::default() };
+    for (i, v) in s.vectors.iter().enumerate() {
+        let key = crate::search::index::Key::of(i as u64, s.paths[i].as_os_str().as_encoded_bytes());
+        vectors.by_key.insert(key, i);
+        vectors.records.push(crate::search::index::Record { key, capture: None, meta: Default::default(), accidental: false });
+        vectors.data.extend(v.iter().map(|&x| query::f32_to_f16(x)));
+    }
+    let mut tags = crate::search::tags::Tags::default();
+    let t = Instant::now();
+    tags.sync(&vectors, 1, &vocab);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let list = tags.things(|_| true);
+    eprintln!("things as the app derives them (default floor, the fursuit contrast; {ms:.1} ms): {}", list.iter().map(|t| format!("{} {}", t.word, t.photos)).collect::<Vec<_>>().join(", "));
+    let counts = tags.counts(|_| true);
+    for w in ["fursuit", "cosplay", "dog", "stuffed animal", "person"] {
+        eprintln!("  {w}: {}", counts[vocab::find(w).unwrap()]);
+    }
+    std::fs::write(s.out.join("tags.json"), serde_json::to_string(&doc).unwrap()).unwrap();
+    s.client.shutdown();
+}
+
+/// The engine on a scratch library (symlinks into the archive are fine:
+/// it only reads): the first index on the card, then the example
+/// queries of the phase 2 round with their hit counts, the fursuits
+/// left out and the Things list.  The index goes in `PP_EVAL_OUT/index`.
+///
+/// ```text
+/// PP_MODEL_DIR=<models> PP_EVAL_LIBRARY=<library root> PP_EVAL_OUT=<scratch> \
+///     cargo test --release -- --ignored --nocapture --exact search::eval::library_queries
+/// ```
+#[test]
+#[ignore = "phase 2: needs PP_MODEL_DIR, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
+fn library_queries() {
+    use crate::bus::BgEvent;
+    use crate::model::library_cache::{self, Store};
+    use crate::model::library_index;
+    use crate::search::engine::{Config, Engine};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let root = PathBuf::from(need("PP_EVAL_LIBRARY"));
+    let out = PathBuf::from(need("PP_EVAL_OUT"));
+    need("PP_MODEL_DIR");
+    let device = match env("PP_EVAL_DEVICE").as_deref() {
+        Some("cpu") => Device::Cpu,
+        _ => Device::Gpu,
+    };
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let scanned = library_cache::scan(&root, None, true, &cancelled, &|_| {}).unwrap().unwrap();
+    let store = parking_lot::Mutex::new(Store::new(root.clone()));
+    let lib = Arc::new(library_index::index_from_tree(&root, &scanned.tree, &store, &cancelled).unwrap());
+    eprintln!("library: {} shots in {} days", lib.total_shots, lib.len());
+    let (bus, rx) = crate::bus::channel();
+    let config = Config { factory: Client::factory(), models_ready: Box::new(|| true), index_dir: Some(out.join("index")) };
+    let engine = Engine::with_config(bus, device, true, config);
+    engine.on_library(lib.clone());
+    let t = Instant::now();
+    engine.start_first_index(&[crate::ml::models::ModelId::Siglip2]);
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let status = loop {
+        let s = engine.status();
+        if s.stopped.is_some() || (s.first_index_asked && s.pass.is_none() && s.indexed_shots > 0) {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "the index didn't finish: {s:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.stopped.is_none(), "{:?}", status.stopped);
+    eprintln!("indexed {} shots in {:.1} s on {:?} (self-check {:?})", status.indexed_shots, t.elapsed().as_secs_f64(), status.device.name, status.device.self_check);
+    let mut stream = Box::pin(crate::bus::stream(&rx));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    // Things arrive once the tags are derived.
+    let things = rt.block_on(async {
+        use iced::futures::StreamExt;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        let mut latest = engine.things();
+        while latest.is_empty() && Instant::now() < deadline {
+            let Some(batch) = stream.next().await else { break };
+            for ev in batch {
+                if let BgEvent::SearchThings(t) = ev {
+                    latest = t;
+                }
+            }
+        }
+        latest
+    });
+    eprintln!("things ({}): {}", things.len(), things.iter().map(|t| format!("{} {}", t.word, t.photos)).collect::<Vec<_>>().join(", "));
+    assert!(things.iter().all(|t| !t.kind.is_subject()), "Things holds a subject kind: {things:?}");
+    let queries: Vec<String> = env("PP_EVAL_QUERIES").map(|q| q.split(';').map(|s| s.trim().to_string()).collect()).unwrap_or_else(|| {
+        ["dog", "dog fursuit", "fursuit", "cat", "bird", "fireworks", "fireworks -crowd", "camera", "camera 2026", "cameras", "car", "food", "\"a photo of a camera.\"", "@Someone", "@Someone camera", "crowd -fursuit", "2026", "stage", "sunset jun 2026"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    });
+    for (seq, q) in queries.iter().enumerate() {
+        let t = Instant::now();
+        engine.query(seq as u64, q, crate::search::CLOSENESS_DEFAULT);
+        let got = rt.block_on(async {
+            use iced::futures::StreamExt;
+            loop {
+                let Some(batch) = stream.next().await else { return None };
+                for ev in batch {
+                    if let BgEvent::SearchResults { seq: s, hits, error, understood, fursuits, animal, .. } = ev {
+                        if s as usize == seq {
+                            return Some((hits, error, understood, fursuits, animal));
+                        }
+                    }
+                }
+            }
+        });
+        let Some((hits, error, understood, fursuits, animal)) = got else { panic!("no answer for {q:?}") };
+        let tagged = hits.iter().filter(|h| h.tagged).count();
+        let days: BTreeMap<String, usize> = hits.iter().fold(BTreeMap::new(), |mut m, h| {
+            *m.entry(h.day.format("%Y-%m").to_string()).or_default() += 1;
+            m
+        });
+        let top = hits.iter().chain(fursuits.iter()).map(|h| h.score).fold(f32::MIN, f32::max);
+        let plain = hits.iter().filter(|h| query::match_probability(h.score) >= crate::search::tags::DEFAULT_THRESHOLD).count();
+        eprintln!(
+            "{q:>24}: {:>4} hits ({tagged} tagged first, {plain} at the tag floor, top p {:.3}), {:>3} fursuits left out{}; {:.0} ms; understood words={:?} exact={} exclude={:?} dates={:?} names={:?}; error={error:?}; months {days:?}",
+            hits.len(),
+            if top > f32::MIN { query::match_probability(top) } else { 0.0 },
+            fursuits.len(),
+            animal.as_ref().map(|a| format!(" (animal {a})")).unwrap_or_default(),
+            t.elapsed().as_secs_f64() * 1000.0,
+            understood.words,
+            understood.exact,
+            understood.exclude,
+            understood.dates.map(|d| d.label()),
+            understood.names,
+        );
+        // `PP_EVAL_LIST=<query>`: that query's files, tagged ones marked,
+        // for a look by eye.
+        if env("PP_EVAL_LIST").as_deref() == Some(q.as_str()) {
+            for h in hits.iter().chain(fursuits.iter()) {
+                eprintln!("  {} {:.3} {}", if h.tagged { "T" } else { " " }, query::match_probability(h.score), h.jpg.as_deref().or(h.raw.as_deref()).map(|p| p.display().to_string()).unwrap_or_default());
+            }
+        }
+        let in_hits: HashSet<u64> = hits.iter().map(|h| h.id).collect();
+        assert!(fursuits.iter().all(|f| !in_hits.contains(&f.id)), "{q}: a fursuit is in both lists");
+        assert!(animal.is_some() || fursuits.is_empty(), "{q}: fursuits without an animal word");
+        assert!(hits.iter().take(tagged).all(|h| h.tagged) && hits.iter().skip(tagged).all(|h| !h.tagged), "{q}: tagged first");
+        if let Some(d) = understood.dates {
+            assert!(hits.iter().chain(fursuits.iter()).all(|h| d.contains(h.day)), "{q}: a hit outside the dates");
+        }
+    }
+    engine.shutdown();
+    std::thread::sleep(Duration::from_millis(200));
+}

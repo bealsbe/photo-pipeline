@@ -76,10 +76,36 @@ pub enum BgEvent {
     /// Library search: everything the views show about it changed
     /// (`crate::search::Engine`).
     SearchStatus(Arc<crate::search::Status>),
-    /// A query's answer: hits best first, already cut by closeness, and
-    /// how many shots were searched.  `error` is set when the query
-    /// couldn't run (no helper, no index); `hits` is then empty.
-    SearchResults { seq: u64, hits: Arc<Vec<crate::search::Hit>>, indexed: usize, error: Option<String> },
+    /// A query's answer: hits best first (those carrying the query word
+    /// as a hidden tag first, then by similarity), already cut by
+    /// closeness, and how many shots were searched.  `error` is set when
+    /// the query couldn't run (no helper, no index); `hits` is then
+    /// empty.  `understood` is the query as the engine applied it (its
+    /// words, exclusions, dates; `names` are recognised and not searched
+    /// in phase 2: with no words beside them nothing runs and `hits` is
+    /// empty without an error).  Dates with no words browse the period:
+    /// every indexed shot of those days in shooting order, oldest first,
+    /// `score` 0, minus what a search for each `-word` would show.  When
+    /// the query names a real animal and
+    /// not fursuits (`animal` is that word, singular), the fursuits the
+    /// contrast left out come in `fursuits`, best first, never
+    /// overlapping `hits` (the page's *Show fursuits too* section needs
+    /// no second query); otherwise `fursuits` is empty and `animal`
+    /// `None`.
+    SearchResults {
+        seq: u64,
+        hits: Arc<Vec<crate::search::Hit>>,
+        indexed: usize,
+        error: Option<String>,
+        understood: Arc<crate::search::Parsed>,
+        fursuits: Arc<Vec<crate::search::Hit>>,
+        animal: Option<String>,
+    },
+    /// *Things in your photos*: the hidden tags' objects and scenes with
+    /// their photo counts, most first; sent when the index loads and
+    /// whenever the tags change (`crate::search::Engine::things` reads
+    /// the latest at any time).
+    SearchThings(Arc<Vec<crate::search::Thing>>),
     /// A model download's progress (`crate::ml::download`).
     ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
 }
@@ -121,6 +147,7 @@ impl BgEvent {
             BgEvent::Analysis { .. } => "Analysis",
             BgEvent::SearchStatus(_) => "SearchStatus",
             BgEvent::SearchResults { .. } => "SearchResults",
+            BgEvent::SearchThings(_) => "SearchThings",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }
     }

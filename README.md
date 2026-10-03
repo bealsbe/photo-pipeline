@@ -74,7 +74,8 @@ src/app/               the application: state, update, views
   viewer.rs            the image viewer window (crop tool, EXIF panel)
   calendar.rs          library calendar state and views
   search.rs            the search page: field, start page, results, Open day
-  search_results.rs    results from hits (no I/O), burst stacks, recent searches
+  search_results.rs    results from hits (no I/O), burst stacks, the fursuits' list,
+                       completions, recent searches
   search_setup.rs      the download dialog, indexing in the status bar, banners
   search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
@@ -358,11 +359,40 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   its back button names where it returns ("‹ Grid", "‹ Jul 2026").  Ctrl+F
   brings it back with the field ready to type into (its text selected).  Esc
   closes the list under the field and never leaves the page.
-- **The field.**  While you type, it offers your recent searches (the last
-  10) that have a word starting with what you typed; ↑ ↓ choose one, Enter
-  or Tab takes it, Enter alone searches what you typed and moves to the
-  results.  With nothing typed, the page shows the recent searches and a
-  few ways to search.  Preferences ▸ Search ▸ *Forget them* clears them.
+- **The field.**  While you type, a list under it offers *Things* search
+  found in your photos (with how many photos show each), *Dates* (months
+  and years with photos, with how many days), and your recent searches
+  (the last 10) that have a word starting with what you typed.  ↑ ↓ choose
+  one; Enter or Tab takes it (Tab with none chosen takes the first): a
+  thing or a date goes into the field in place of the word you were
+  typing, ready for the next, and a recent search runs.  Enter alone
+  searches what you typed and moves to the results.  The list's footer
+  shows the syntax: `-word` and dates.  Preferences ▸ Search ▸ *Forget
+  them* clears the recent searches.
+- **What you can write.**  Plain words (*red car at night*) find photos
+  that look like them.  Everything else is optional and combines with
+  AND: `"a red car at night"` in quotes sends the words exactly as typed;
+  `-crowd` keeps only photos more like your words than like *crowd*
+  (*fireworks -crowd*); a date narrows to those days — `2024`, `jun 2024`,
+  `apr–jun 2024` or `2023–2024` (`-` and `..` work as the dash; full month
+  names too).  Dates alone (`jun 2026`, or `jun 2026 -fursuit`: all of
+  June but what a search for *fursuit* would find) show every photo from
+  them, in the order they were taken rather than best first ("312 photos
+  from Jun 2026"), accidental frames left out.  `@Name` is for a person,
+  fursuit or pet you have named, which comes in a later phase: for now
+  the strip says so and the other words are searched; a name or a
+  `-word` on its own searches nothing, and the page says why.
+- **What was understood.**  A quiet strip over the results says what was
+  applied besides the words ("Only Jun 2024", "Every photo from Jun
+  2026", "Leaving out crowd"), so you can see why they look as they do.
+- **Things in your photos.**  The start page lists the things the index
+  knows the library holds (*cameras 96*, *fireworks 24*, *food 21*), most
+  photos first; a click searches one.  The list holds objects and scenes
+  only: people, fursuits and pets never appear in it, or in the list
+  under the field; they get pages of their own later.  Photos that
+  plainly show the thing you searched for come first, then the rest by
+  similarity.  The start page also shows your recent searches and a few
+  ways to search.
 - **Results, best first.**  One list in the grid of a library day, on the
   same grey, with each photo's date under it (hover for the date and time
   to the second, and where the file is).  A burst is one stacked tile at
@@ -371,6 +401,14 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   move, Space is quick look, Enter or a double-click opens the viewer.
   Results are read-only, like the calendar's days: P, M and U do nothing
   here.
+- **Animal words.**  Here, "dog" also looks like the canine fursuits, so a
+  search for a real animal (dog, cat, fox, bird…) leaves fursuits out:
+  a quiet line at the end says how many ("26 fursuits that look like dogs
+  are left out") with *Show fursuits too*.  Shown, they are a list of their
+  own after the real animals, "Fursuits that look like dogs", never mixed
+  into theirs; *Hide fursuits* on its heading puts them away again.  The
+  viewer steps through one list at a time.  "dog fursuit" or "fursuits"
+  asks for suits.
 - **Open day ›** shows the selected photo's day in the calendar with the
   photo selected; that page's back button reads "‹ Search" (as does Esc)
   and returns to the same results.
@@ -435,9 +473,25 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   only the plainest; the default (0.3 %) keeps empty and dark frames out
   while a thing most of the library shows comes back whole.  A setting
   saved by an earlier build on another scale falls back to the default.
-- **Nothing is written into the library**, no sidecar, no XMP; the index and
-  the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
-  and clears them).  Queries read no photos.
+- **Hidden tags.**  A vocabulary of a couple of hundred generic words
+  (`src/search/vocab.rs`: objects, scenes, people, fursuits, animals) is
+  encoded once by the text tower and kept beside the index; each indexed
+  photo is then tagged, from its stored vector alone, with the words whose
+  match probability reaches 2 % (a plain match; the search default is
+  0.3 %).  Words fursuits are taken for — the animals, a stuffed animal —
+  count only where the word beats *fursuit*.  Tags are never shown on a
+  photo: they make *Things in your photos*, the completions and the
+  ranking boost (a photo tagged with what you typed comes first).
+  Tagging is arithmetic on vectors already in memory, on the engine's
+  thread, as photos are indexed.
+- **`-word` and animal words** are the same measured contrast: a photo
+  counts only where its similarity to your words beats its similarity to
+  the word left out (or to *fursuit*).  Dates go by the day the shot was
+  taken, as the calendar files it.
+- **Nothing is written into the library**, no sidecar, no XMP; the index,
+  the vocabulary's vectors and the models live in
+  `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows and clears
+  them).  Queries read no photos.
 
 ### Models
 
@@ -571,7 +625,11 @@ These are deliberate:
   Tests that need the models are ignored and take `PP_MODEL_DIR=<folder
   with the SigLIP2 files>`; the phase 0 harness (`src/search/eval.rs`) also
   takes `PP_EVAL_PREVIEWS` and `PP_EVAL_OUT`, and `PP_EVAL_LABELS` to score
-  hand labels.  `bench::bench_search_index` indexes a library through the
+  hand labels; phase 2's `tag_thresholds` sweeps the hidden tags' floor
+  against those labels, and `library_queries` indexes a scratch library
+  (`PP_EVAL_LIBRARY`) and prints the example queries with their hit
+  counts, the fursuits left out and the Things list (`PP_EVAL_QUERIES`
+  overrides the queries, `;`-separated).  `bench::bench_search_index` indexes a library through the
   real helper (`PP_BENCH_LIBRARY`, `PP_MODEL_DIR`, `PP_BENCH_DEVICE`) into a
   temporary folder and times queries.  `PP_ML_FAKE_CARD=no-card|self-check|crash`
   makes the graphics card fail without touching a device, for UI tests of
@@ -589,9 +647,13 @@ These are deliberate:
   Use scratch copies of photos and a throwaway `HOME` for anything that
   writes.  `PP_SEARCH_FAKE=1` (or `=indexed`, to start indexed) puts a
   stand-in in the search engine's place: made-up hits from the library
-  index, downloads and indexing on a timer, and every failure the page
-  shows on request (`search fake …`).  It downloads, reads and writes
-  nothing.
+  index (with the query's dates and `-word`s applied, and a share of an
+  animal word's hits handed back as fursuits left out), made-up Things,
+  downloads and indexing on a timer, and every failure the page shows on
+  request (`search fake …`).  It downloads, reads and writes nothing.
+  `search complete`, `search things` and `search fursuits show|hide`
+  drive and print the completions, the start page's Things and the
+  fursuits' list.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with
