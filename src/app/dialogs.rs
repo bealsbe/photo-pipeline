@@ -1,4 +1,4 @@
-//! Modal dialogs (Export, Copy Marked RAWs, Sort, Prune Review and the
+//! Modal dialogs (Export, Copy Marked Photos, Sort, Prune Review and the
 //! confirm / info boxes) and the Keyboard Shortcuts window.
 //!
 //! Dialogs are in-window overlays over a dimmed backdrop.  Every file
@@ -21,7 +21,7 @@ use super::{App, FolderTarget, Message};
 use crate::bus::{BgEvent, SortResult};
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
-use crate::ops::edit_copy::{self, CopyReport, EditCopyPlan, MarkedRaws};
+use crate::ops::edit_copy::{self, CopyReport, EditCopyPlan, MarkedFiles};
 use crate::ops::library::{self, ExportReport, LibraryPlan, Mode, Resolution};
 use crate::ops::separate::{SeparationPlan, Strategy};
 use crate::ops::trash;
@@ -73,6 +73,8 @@ pub enum Msg {
     ExOpenLibrary,
     // edit copy
     EcSubfolder(bool),
+    EcRaws(bool),
+    EcJpgs(bool),
     EcChange,
     EcGo,
     EcStop,
@@ -238,7 +240,9 @@ enum EcGoAction {
 }
 
 pub struct EditCopy {
-    sel: MarkedRaws,
+    sel: MarkedFiles,
+    raws: bool,
+    jpgs: bool,
     working: Option<PathBuf>,
     base: Option<PathBuf>,
     subfolder: bool,
@@ -257,7 +261,7 @@ impl EditCopy {
             EcGoAction::None
         } else if self.done.is_some() || plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0) {
             EcGoAction::OpenFolder
-        } else if self.base.is_none() && !self.sel.raws.is_empty() {
+        } else if self.base.is_none() && !self.sel.files.is_empty() {
             EcGoAction::ChooseFolder
         } else if plan.is_some_and(|p| p.to_copy_count() > 0) {
             EcGoAction::Copy
@@ -269,6 +273,30 @@ impl EditCopy {
     /// The primary button (Copy / Choose folder / Open folder) is clickable.
     fn go_enabled(&self) -> bool {
         self.go() != EcGoAction::None
+    }
+
+    /// For the dialog's subtitle: "The RAW", "The JPG" or "The RAW and JPG".
+    fn which(&self) -> &'static str {
+        match (self.raws, self.jpgs) {
+            (true, false) => "The RAW",
+            (false, true) => "The JPG",
+            _ => "The RAW and JPG",
+        }
+    }
+
+    /// What is being copied, for counts: "RAW file", "JPG file" or "file".
+    fn noun(&self) -> &'static str {
+        match (self.raws, self.jpgs) {
+            (true, false) => "RAW file",
+            (false, true) => "JPG file",
+            _ => "file",
+        }
+    }
+
+    /// The choice of RAWs and JPGs changed: pick the files again and plan.
+    fn reselect(&mut self, coll: &crate::model::collection::Collection) {
+        self.sel = edit_copy::select_marked(coll, self.raws, self.jpgs);
+        self.plan = self.dest_dir().map(|d| EditCopyPlan::new(&self.sel.files, coll, &d));
     }
 
     fn dest_dir(&self) -> Option<PathBuf> {
@@ -284,8 +312,10 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
     if app.coll.is_empty() {
         return info(app, "No working folder", "Open a folder of photos first (Ctrl+O).");
     }
-    let sel = edit_copy::select_marked_raws(&app.coll);
-    if sel.raws.is_empty() && sel.jpg_only.is_empty() {
+    let (raws, jpgs) = (app.settings.edit_copy_raws, app.settings.edit_copy_jpgs);
+    let (raws, jpgs) = if raws || jpgs { (raws, jpgs) } else { (true, false) };
+    let sel = edit_copy::select_marked(&app.coll, raws, jpgs);
+    if sel.files.is_empty() && sel.missing.is_empty() {
         return info(
             app,
             "Nothing marked",
@@ -296,6 +326,8 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
     let base = (!app.settings.edit_copy_folder.is_empty() && last.is_dir()).then_some(last);
     let mut ec = EditCopy {
         sel,
+        raws,
+        jpgs,
         working: app.folder.clone(),
         base,
         subfolder: app.settings.edit_copy_subfolder && app.folder.is_some(),
@@ -305,7 +337,7 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
         cancel: Arc::new(AtomicBool::new(false)),
         done: None,
     };
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.raws, &app.coll, &d));
+    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
     app.modal = Some(Modal { kind: Kind::EditCopy(Box::new(ec)), confirm: None });
     Task::none()
 }
@@ -320,7 +352,7 @@ pub fn edit_copy_base(app: &App) -> Option<PathBuf> {
 pub fn edit_copy_folder_changed(app: &mut App, path: PathBuf) {
     let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
     ec.base = Some(path.clone());
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.raws, &app.coll, &d));
+    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
     app.settings.edit_copy_folder = path.to_string_lossy().into_owned();
     app.settings.edit_copy_subfolder = ec.subfolder;
     let _ = app.settings.save();
@@ -340,7 +372,7 @@ pub fn edit_copy_settings_changed(app: &mut App) {
         ec.base = base;
     }
     ec.subfolder = subfolder && ec.working.is_some();
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.raws, &app.coll, &d));
+    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
 }
 
 pub fn on_copy_progress(app: &mut App, f: usize, ft: usize, b: u64, bt: u64) {
@@ -350,13 +382,15 @@ pub fn on_copy_progress(app: &mut App, f: usize, ft: usize, b: u64, bt: u64) {
 }
 
 pub fn on_copy_done(app: &mut App, report: Arc<CopyReport>) -> Task<Message> {
+    let mut noun = "file";
     if let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal {
         ec.running = None;
         ec.stopping = false;
         ec.done = Some(report.clone());
+        noun = ec.noun();
     }
     let n = report.copied.len();
-    let mut msg = format!("{n} RAW file{} copied for editing", s(n));
+    let mut msg = format!("{n} {noun}{} copied for editing", s(n));
     if !report.failed.is_empty() {
         msg.push_str(&format!("  ({} failed)", report.failed.len()));
     }
@@ -623,12 +657,24 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             match msg {
                 Msg::EcSubfolder(v) => {
                     ec.subfolder = v;
-                    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.raws, &app.coll, &d));
+                    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
                     if let Some(b) = &ec.base {
                         app.settings.edit_copy_folder = b.to_string_lossy().into_owned();
                         app.settings.edit_copy_subfolder = v;
                         let _ = app.settings.save();
                     }
+                }
+                Msg::EcRaws(v) => {
+                    ec.raws = v;
+                    ec.reselect(&app.coll);
+                    app.settings.edit_copy_raws = v;
+                    let _ = app.settings.save();
+                }
+                Msg::EcJpgs(v) => {
+                    ec.jpgs = v;
+                    ec.reselect(&app.coll);
+                    app.settings.edit_copy_jpgs = v;
+                    let _ = app.settings.save();
                 }
                 Msg::EcChange => {
                     app.modal = Some(Modal { kind: Kind::EditCopy(ec), confirm });
@@ -648,7 +694,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     EcGoAction::Copy => {
                         if let Some(dest) = ec.dest_dir() {
                             // Re-plan: the folder may have changed while the dialog sat open.
-                            let plan = EditCopyPlan::new(&ec.sel.raws, &app.coll, &dest);
+                            let plan = EditCopyPlan::new(&ec.sel.files, &app.coll, &dest);
                             if plan.to_copy_count() > 0 {
                                 ec.running = Some((0, plan.to_copy_count(), 0, plan.total_bytes()));
                                 ec.cancel = Arc::new(AtomicBool::new(false));
@@ -1213,6 +1259,24 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         column![
             path_row(Glyph::Folder, "Working folder", ec.working.as_ref(), None),
             path_row(Glyph::Folder, "Copy to", dest.as_ref(), (!locked).then_some(Msg::EcChange)),
+            row![
+                checkbox(ec.raws)
+                    .label("RAW files")
+                    .size(16)
+                    .text_size(t::T_BODY)
+                    .spacing(t::S2)
+                    .style(style::check(t::SIGNAL))
+                    .on_toggle_maybe((!locked && (ec.jpgs || !ec.raws)).then_some(|v| d(Msg::EcRaws(v)))),
+                checkbox(ec.jpgs)
+                    .label("JPG files")
+                    .size(16)
+                    .text_size(t::T_BODY)
+                    .spacing(t::S2)
+                    .style(style::check(t::SIGNAL))
+                    .on_toggle_maybe((!locked && (ec.raws || !ec.jpgs)).then_some(|v| d(Msg::EcJpgs(v)))),
+            ]
+            .spacing(t::S4)
+            .padding(Padding { top: t::S1, bottom: t::S1, left: 0.0, right: 0.0 }),
             container(
                 checkbox(ec.subfolder)
                     .label(format!("Put them in a subfolder named “{shoot}”"))
@@ -1229,22 +1293,23 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
 
     // What will happen (once copied: what did)
     let sel = &ec.sel;
-    let marked_raws = || sel.raws.iter().filter_map(|&i| app.coll.get(i));
+    let noun = ec.noun();
+    let marked = || sel.files.iter().filter_map(|&i| app.coll.get(i));
     let (n, bytes) = match &ec.plan {
         Some(plan) => (plan.to_copy_count(), plan.total_bytes()),
-        None => (sel.raws.len(), marked_raws().map(|r| r.file_size).sum()),
+        None => (sel.files.len(), marked().map(|r| r.file_size).sum()),
     };
     let (renamed, cropped) = match (&ec.done, &ec.plan) {
         (Some(report), _) => (report.copied.iter().filter(|o| o.renamed()).count(), report.copied.iter().filter(|o| o.is_cropped()).count()),
         (None, Some(plan)) => (plan.renamed_count(), plan.cropped_count()),
-        (None, None) => (0, marked_raws().filter(|r| r.is_cropped()).count()),
+        (None, None) => (0, marked().filter(|r| r.is_cropped() && r.file_type == FileType::Raw).count()),
     };
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
     chips = chips.push(if let Some(report) = &ec.done {
         let copied: u64 = report.copied.iter().map(|o| o.file_size).sum();
-        chip(format!("{} copied, {}", plural(report.copied.len() as u64, "RAW file"), util::fmt_bytes(copied)), t::RAW)
+        chip(format!("{} copied, {}", plural(report.copied.len() as u64, noun), util::fmt_bytes(copied)), t::RAW)
     } else if n > 0 {
-        chip(format!("{} to copy, {}", plural(n as u64, "RAW file"), util::fmt_bytes(bytes)), t::RAW)
+        chip(format!("{} to copy, {}", plural(n as u64, noun), util::fmt_bytes(bytes)), t::RAW)
     } else {
         chip("Nothing to copy".into(), t::INK2)
     });
@@ -1265,15 +1330,16 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             false,
         ));
     }
+    let (missing_kind, held_kind) = if ec.raws { ("RAW", "JPG") } else { ("JPG", "RAW") };
     if sel.matched_by_name > 0 {
         chips = chips.push(kit::tip(
             chip(format!("{} matched by name", sel.matched_by_name), t::INK2),
-            "Marked JPGs whose RAW was found by its name, in the same folder.",
+            "Marked files whose RAW or JPG was found by its name, in the same folder.",
             false,
         ));
     }
-    if !sel.jpg_only.is_empty() {
-        chips = chips.push(chip(format!("⚠ {} with no RAW", plural(sel.jpg_only.len() as u64, "JPG")), t::WARN));
+    if !sel.missing.is_empty() {
+        chips = chips.push(chip(format!("⚠ {} with no {missing_kind}", plural(sel.missing.len() as u64, held_kind)), t::WARN));
     }
     if sel.pruned > 0 {
         chips = chips.push(kit::tip(
@@ -1321,7 +1387,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             container(
                 row![
                     icons::view(if tone == t::KEEP { Glyph::Check } else { Glyph::Warning }, 18.0, tone),
-                    text(format!("{} copied", plural(report.copied.len() as u64, "RAW file"))).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+                    text(format!("{} copied", plural(report.copied.len() as u64, noun))).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
                     kit::secondary(extra.join(", ")),
                 ]
                 .spacing(t::S2)
@@ -1356,8 +1422,8 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             }
         }
     } else {
-        if sel.raws.is_empty() {
-            list = list.push(container(kit::secondary("No RAW files are marked. Mark shots with M in the grid or the viewer first.")).padding(t::S3));
+        if sel.files.is_empty() {
+            list = list.push(container(kit::secondary(format!("No {noun}s to copy. Mark shots with M in the grid or the viewer first."))).padding(t::S3));
         } else if let Some(plan) = &ec.plan {
             let (have, new): (Vec<_>, Vec<_>) = plan.ops.iter().partition(|op| op.exists);
             if !new.is_empty() {
@@ -1373,17 +1439,17 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
                 }
             }
         } else {
-            let mut raws: Vec<_> = marked_raws().collect();
+            let mut raws: Vec<_> = marked().collect();
             raws.sort_by(|a, b| a.shot_time().cmp(&b.shot_time()).then_with(|| a.name_lower.cmp(&b.name_lower)));
             list = list.push(group("To copy", raws.len()));
             for r in raws {
                 list = list.push(file_row(r.filename(), r.is_cropped(), None, r.file_size, false));
             }
         }
-        if !sel.jpg_only.is_empty() {
-            let mut jpgs: Vec<_> = sel.jpg_only.iter().filter_map(|&i| app.coll.get(i)).collect();
+        if !sel.missing.is_empty() {
+            let mut jpgs: Vec<_> = sel.missing.iter().filter_map(|&i| app.coll.get(i)).collect();
             jpgs.sort_by(|a, b| a.name_lower.cmp(&b.name_lower));
-            list = list.push(group("Marked, but no RAW to copy", jpgs.len()));
+            list = list.push(group(&format!("Marked, but no {missing_kind} to copy"), jpgs.len()));
             for r in jpgs {
                 list = list.push(file_row(r.filename(), false, None, r.file_size, true));
             }
@@ -1391,7 +1457,10 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     }
 
     let mut col = column![
-        header("Copy marked RAWs for editing", Some("The RAW of each marked shot is copied into one folder to edit from. The originals stay put.".into())),
+        header(
+            "Copy marked photos for editing",
+            Some(format!("{} of each marked shot {} copied into one folder to edit from. The originals stay put.", ec.which(), if ec.raws && ec.jpgs { "are" } else { "is" })),
+        ),
         card,
         chips,
         list_box(list.into()),
@@ -1415,7 +1484,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         _ if running => "Copying…".to_string(),
         EcGoAction::OpenFolder => "Open folder".into(),
         EcGoAction::ChooseFolder => "Choose folder…".into(),
-        EcGoAction::Copy => format!("Copy {}", plural(n as u64, "RAW file")),
+        EcGoAction::Copy => format!("Copy {}", plural(n as u64, noun)),
         EcGoAction::None => "Copy".into(),
     };
     // Nothing left to do: there is nothing to cancel either.
@@ -1631,7 +1700,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Ctrl+O", "Open a working folder"),
             ("Ctrl+R", "Review pruned files"),
             ("Ctrl+E", "Export to the library"),
-            ("Ctrl+Shift+E", "Copy marked RAWs to a folder for editing"),
+            ("Ctrl+Shift+E", "Copy marked photos to a folder for editing"),
             ("Ctrl+Shift+S", "Sort into RAW and JPG folders"),
             ("Ctrl+2", "Grid view"),
             ("Ctrl+3", "Library calendar"),

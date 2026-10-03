@@ -58,7 +58,7 @@ impl Cmd {
         match self {
             Cmd::Open => "Open working folder…",
             Cmd::Export => "Export to library…",
-            Cmd::EditCopy => "Copy marked RAWs for editing…",
+            Cmd::EditCopy => "Copy marked photos for editing…",
             Cmd::Review => "Review pruned files…",
             Cmd::Sort => "Sort into RAW and JPG folders…",
             Cmd::GridView => "Grid",
@@ -132,7 +132,7 @@ impl Cmd {
         match self {
             Cmd::Open => "Open a working folder",
             Cmd::Export => "Copy or move photos into the library, filed by date",
-            Cmd::EditCopy => "Copy the RAW of every marked shot into one folder to edit from",
+            Cmd::EditCopy => "Copy the RAWs, the JPGs or both of every marked shot into one folder to edit from",
             Cmd::Review => "Review pruned files, then move them to the Trash",
             Cmd::Sort => "Move files into RAW and JPG subfolders",
             Cmd::GridView => "Show files as a grid",
