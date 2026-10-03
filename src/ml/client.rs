@@ -90,7 +90,7 @@ pub enum FaceAsk {
     /// Find the faces and recognise them.
     Detect,
     /// Recognise these faces again (a face-model change): no detection.
-    Known(Vec<KnownFaces>),
+    Known { files: Vec<KnownFaces> },
 }
 
 /// What a batch of photos should yield.
@@ -108,9 +108,9 @@ impl Want {
         Want { search: true, faces: FaceAsk::None }
     }
 
-    /// Search, and faces when `faces`.
-    pub fn with_faces(faces: bool) -> Want {
-        Want { search: true, faces: if faces { FaceAsk::Detect } else { FaceAsk::None } }
+    /// Search and faces in one read.
+    pub fn with_faces() -> Want {
+        Want { search: true, faces: FaceAsk::Detect }
     }
 
     /// Faces alone (the catch-up over photos already indexed).
@@ -120,7 +120,7 @@ impl Want {
 
     /// Known faces recognised again (a face-model change).
     pub fn known(known: Vec<KnownFaces>) -> Want {
-        Want { search: false, faces: FaceAsk::Known(known) }
+        Want { search: false, faces: FaceAsk::Known { files: known } }
     }
 }
 
@@ -615,7 +615,7 @@ pub mod tests {
 
     #[test]
     fn wants_serialise_flat() {
-        let w = Want::with_faces(true);
+        let w = Want::with_faces();
         let json = serde_json::to_string(&w).unwrap();
         assert_eq!(json, r#"{"search":true,"faces":"detect"}"#);
         assert_eq!(serde_json::from_str::<Want>(&json).unwrap(), w);

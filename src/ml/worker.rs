@@ -827,7 +827,7 @@ fn faces_in(models: &mut Models, pool: &rayon::ThreadPool, ready: &[(usize, Prep
             let detected = models.detect(&canvases)?;
             detected.iter().zip(&preps).map(|(d, p)| face::place(d, p.canvas.scale, p.width, p.height)).collect()
         }
-        FaceAsk::Known(known) => ready
+        FaceAsk::Known { files: known } => ready
             .iter()
             .zip(&preps)
             .map(|((i, _), p)| {
@@ -885,7 +885,7 @@ mod tests {
             assert_eq!(serde_json::from_str::<Reply>(&line).unwrap(), rep);
         }
         // A known-faces request names the files and their landmarks.
-        let known = FaceAsk::Known(vec![super::super::client::KnownFaces { path: PathBuf::from("/x/a.JPG"), faces: vec![super::super::client::FaceSpot { bbox: [0.1, 0.1, 0.2, 0.2], landmarks: [[0.15, 0.15]; 5], score: 0.95 }] }]);
+        let known = FaceAsk::Known { files: vec![super::super::client::KnownFaces { path: PathBuf::from("/x/a.JPG"), faces: vec![super::super::client::FaceSpot { bbox: [0.1, 0.1, 0.2, 0.2], landmarks: [[0.15, 0.15]; 5], score: 0.95 }] }] };
         let req = Request::EmbedImages { id: 8, files: vec![(PathBuf::from("/x/a.JPG"), FileType::Jpg)], want: Want { search: false, faces: known } };
         assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&req).unwrap()).unwrap(), req);
     }

@@ -17,7 +17,7 @@ use chrono::NaiveDate;
 
 use super::index::{PathMap, Vectors};
 use super::Stopped;
-use crate::ml::client::{Embedder, Embedding, FileError, HelperError, Want};
+use crate::ml::client::{Embedder, Embedding, FaceSpot, FileError, HelperError, KnownFaces, Want};
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, MTime};
 use crate::ops::netfs::{self, Failure};
@@ -40,6 +40,9 @@ pub struct Job {
     pub size: u64,
     pub mtime: MTime,
     pub day: NaiveDate,
+    /// Faces already found in it, to recognise again with the chosen
+    /// model (a face-model change, phase 3); `None` in every other pass.
+    pub known: Option<Vec<FaceSpot>>,
 }
 
 /// What a check of the library against the index found.
@@ -80,7 +83,7 @@ pub fn plan(index: &LibraryIndex, paths: &PathMap, vectors: &Vectors) -> Plan {
                 out.unreadable += 1;
                 continue;
             }
-            out.jobs.push(Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date });
+            out.jobs.push(Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date, known: None });
         }
     }
     out
@@ -124,7 +127,20 @@ pub struct Batch {
     pub oldest_day: Option<NaiveDate>,
     /// The helper stopped on the processor and was started again.
     pub restarted: bool,
+    /// The embedded shots were looked at for faces (the request asked):
+    /// a shot with none found still counts as scanned.
+    pub faces_scanned: bool,
     pub finished: Option<Finished>,
+}
+
+/// What a chunk of jobs asks the helper for: the pass's want, except
+/// that jobs carrying known faces ask for those to be recognised again.
+pub fn want_for(chunk: &[Job], want: &Want) -> Want {
+    if chunk.iter().any(|j| j.known.is_some()) {
+        Want::known(chunk.iter().filter_map(|j| j.known.as_ref().map(|k| KnownFaces { path: j.path.clone(), faces: k.clone() })).collect())
+    } else {
+        want.clone()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -195,7 +211,9 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
         }
         let chunk = &req.jobs[i..(i + BATCH).min(req.jobs.len())];
         let files: Vec<(PathBuf, FileType)> = chunk.iter().map(|j| (j.path.clone(), j.file_type)).collect();
-        let results = match embedder.embed_images(&files, &req.want) {
+        let want = want_for(chunk, &req.want);
+        batch.faces_scanned = want.faces != crate::ml::client::FaceAsk::None;
+        let results = match embedder.embed_images(&files, &want) {
             Ok(r) => r,
             Err(HelperError::Restarted) => {
                 batch.restarted = true;
@@ -240,7 +258,8 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
         if batch.embedded.len() + batch.failed.len() >= BATCH || last.elapsed() >= Duration::from_millis(EMIT_MS) {
             let done = batch.done;
             let oldest = batch.oldest_day;
-            emit(std::mem::replace(&mut batch, Batch { total: req.total, done, oldest_day: oldest, ..Batch::default() }));
+            let scanned = batch.faces_scanned;
+            emit(std::mem::replace(&mut batch, Batch { total: req.total, done, oldest_day: oldest, faces_scanned: scanned, ..Batch::default() }));
             last = Instant::now();
         }
     }
@@ -367,7 +386,7 @@ pub mod tests {
 
     pub fn job(n: usize, day: NaiveDate) -> Job {
         let path = PathBuf::from(format!("/mnt/nas/lib/{day}/JPG/{n:04}.JPG"));
-        Job { rel: path.strip_prefix("/mnt/nas/lib").unwrap().to_path_buf(), path, file_type: FileType::Jpg, size: 100 + n as u64, mtime: MTime::from_unix(1_700_000_000, 0), day }
+        Job { rel: path.strip_prefix("/mnt/nas/lib").unwrap().to_path_buf(), path, file_type: FileType::Jpg, size: 100 + n as u64, mtime: MTime::from_unix(1_700_000_000, 0), day, known: None }
     }
 
     fn run(req: Request, fake: &Fake) -> (Vec<Batch>, Finished) {
