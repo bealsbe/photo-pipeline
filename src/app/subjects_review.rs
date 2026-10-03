@@ -24,7 +24,7 @@ use iced::widget::{Space, button, column, container, row, scrollable, stack, tex
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, GroupId, Kind};
+use super::people::{self, Face, FaceRef, Framing, GroupId, Kind, KindWords};
 use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::viewer_advance::BEAT_MS;
@@ -134,14 +134,14 @@ pub enum Msg {
 
 /// Start reviewing `group`: its suggestions (a named person) or its own
 /// faces (an unnamed group).
-pub fn start(app: &mut App, group: GroupId) -> Task<Message> {
+pub fn start(app: &mut App, group: &GroupId) -> Task<Message> {
     let Some(g) = app.subjects.group(group).cloned() else { return Task::none() };
     let checking = g.name.is_none();
     if !checking && g.suggestions == 0 {
         return app.show_status(format!("No photos wait to be checked against {} now.", g.name.unwrap_or_default()), 5000);
     }
     let (seq, refs_seq) = (app.subjects.next_seq(), app.subjects.next_seq());
-    app.subjects.review = Some(Review { group, kind: g.kind, checking, list: None, seq, refs: Vec::new(), refs_seq, at: 0, answers: Vec::new(), order: Vec::new(), beat: 0, stamp: None });
+    app.subjects.review = Some(Review { group: group.clone(), kind: g.kind, checking, list: None, seq, refs: Vec::new(), refs_seq, at: 0, answers: Vec::new(), order: Vec::new(), beat: 0, stamp: None });
     app.quicklook = None;
     app.search.link.suggestions(seq, group);
     app.search.link.faces(refs_seq, group);
@@ -155,7 +155,7 @@ pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec
     }
     if list.is_empty() {
         let first = r.list.is_none();
-        let name = subj::label(&app.subjects, group);
+        let name = subj::label(&app.subjects, &group);
         if first {
             app.subjects.review = None;
             return app.show_status(format!("No photos wait to be checked against {name} now."), 5000);
@@ -179,26 +179,26 @@ pub fn on_faces(app: &mut App, seq: u64, faces: &[Face]) -> bool {
     true
 }
 
-pub fn wanted(app: &App) -> Vec<(FaceRef, u32, Framing)> {
+pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
     let Some(r) = s.review.as_ref() else { return Vec::new() };
     let mut v = Vec::new();
-    if let Some(g) = s.group(r.group) {
-        v.push((g.cover.face, subj::px(app, REF), Framing::Face));
+    if let Some(g) = s.group(&r.group) {
+        v.push((g.cover.clone(), subj::px(app, REF), Framing::Face));
     }
-    v.extend(r.refs.iter().skip(1).take(6).map(|f| (f.face, subj::px(app, REF_SMALL), Framing::Face)));
+    v.extend(r.refs.iter().skip(1).take(6).map(|f| (f.clone(), subj::px(app, REF_SMALL), Framing::Face)));
     if let Some(list) = &r.list {
         if let Some(cur) = list.get(r.at).and_then(|e| e.first()) {
-            v.push((cur.face, subj::px(app, BIG), Framing::Face));
-            v.push((cur.face, subj::px(app, PHOTO_W), Framing::Photo));
+            v.push((cur.clone(), subj::px(app, BIG), Framing::Face));
+            v.push((cur.clone(), subj::px(app, PHOTO_W), Framing::Photo));
         }
         // The next one too, so it is there when the beat is over.
         if let Some(next) = list.get(r.at + 1).and_then(|e| e.first()) {
-            v.push((next.face, subj::px(app, BIG), Framing::Face));
-            v.push((next.face, subj::px(app, PHOTO_W), Framing::Photo));
+            v.push((next.clone(), subj::px(app, BIG), Framing::Face));
+            v.push((next.clone(), subj::px(app, PHOTO_W), Framing::Photo));
         }
         let first = strip_start(r);
-        v.extend(list.iter().skip(first).take(STRIP_N).filter_map(|e| e.first()).map(|f| (f.face, subj::px(app, STRIP), Framing::Face)));
+        v.extend(list.iter().skip(first).take(STRIP_N).filter_map(|e| e.first()).map(|f| (f.clone(), subj::px(app, STRIP), Framing::Face)));
     }
     v
 }
@@ -244,11 +244,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
             let seq = app.subjects.seq + 1;
             app.subjects.seq = seq;
-            let group = r.group;
+            let group = r.group.clone();
             if let Some(r) = app.subjects.review.as_mut() {
                 r.seq = seq;
             }
-            app.search.link.suggestions(seq, group);
+            app.search.link.suggestions(seq, &group);
             app.show_status("Looking again, from everything confirmed so far.", 4000)
         }
         Msg::Done => done(app),
@@ -261,16 +261,16 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
     if r.at_end() {
         return Task::none();
     }
-    let group = r.group;
+    let group = r.group.clone();
     let Some((faces, before)) = r.answer(yes) else { return Task::none() };
     if before == Some(yes) {
         return Task::none();
     }
     // A changed answer takes the old one back first.
     if before.is_some() {
-        app.search.link.answer(group, &faces, None);
+        app.search.link.answer(&group, &faces, None);
     }
-    app.search.link.answer(group, &faces, Some(yes));
+    app.search.link.answer(&group, &faces, Some(yes));
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
     r.beat += 1;
     if !advance {
@@ -283,12 +283,12 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
 /// Ctrl+Z in the review: the last answer, taken back.
 pub fn take_back(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
-    let group = r.group;
+    let group = r.group.clone();
     let Some((_, faces)) = r.take_back() else {
         return app.show_status("No answer to take back.", 3000);
     };
     r.beat += 1;
-    app.search.link.answer(group, &faces, None);
+    app.search.link.answer(&group, &faces, None);
     let t = app.show_status("Took the last answer back.", 3000);
     Task::batch([t, subj::refresh_crops(app)])
 }
@@ -297,7 +297,7 @@ pub fn take_back(app: &mut App) -> Task<Message> {
 fn done(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.review.take() else { return Task::none() };
     let (yes, no) = r.counts();
-    let name = subj::label(&app.subjects, r.group);
+    let name = subj::label(&app.subjects, &r.group);
     let text = match (yes, no, r.checking) {
         (0, 0, _) => String::new(),
         (y, n, false) => {
@@ -375,7 +375,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             let main = row![reference(app, r), suggestion(app, r, list), photo(app, r, list)].spacing(40).align_y(Alignment::Center);
             let centre = container(main).width(Length::Fill).height(Length::Fill).center(Length::Fill).padding(Padding { top: 10.0, left: 24.0, right: 24.0, bottom: 0.0 });
             let stamp = r.stamp.map(|(yes, at)| {
-                let name = subj::label(s, r.group);
+                let name = subj::label(s, &r.group);
                 let (g, label, tone) = if yes { (Glyph::Keep, format!("Added to {name}"), t::KEEP) } else { (Glyph::Prune, format!("Not {name}"), t::REJECT) };
                 crate::ui::stamp::Stamp::new(Some(at), g, label, tone)
             });
@@ -403,7 +403,7 @@ fn quiet<'a>(title: String, body: String) -> Element<'a, Message> {
 
 fn header<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     let s = &app.subjects;
-    let name = s.group(r.group).and_then(|g| g.name.clone());
+    let name = s.group(&r.group).and_then(|g| g.name.clone());
     let one = r.kind.one();
     let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, name.clone().unwrap_or_else(|| "Unnamed group".into()), t::INK2, style::secondary(), Some(rm(Msg::Done))), "Stop the review  (Esc)", true);
     let title = if r.checking { format!("Same {one} as this group?") } else { format!("Same {one}?") };
@@ -447,7 +447,7 @@ fn header<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
 fn reference<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     let s = &app.subjects;
     let shape = subj::shape(r.kind);
-    let Some(g) = s.group(r.group) else { return Space::new().into() };
+    let Some(g) = s.group(&r.group) else { return Space::new().into() };
     let caption = match &g.name {
         Some(n) => format!("{n}, from {}", util::plural(g.photos as u64, "photo")),
         None => "This group".to_string(),
@@ -547,7 +547,7 @@ fn strip<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element<'a, 
 }
 
 fn footer<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
-    let name = subj::label(&app.subjects, r.group);
+    let name = subj::label(&app.subjects, &r.group);
     let note = if r.checking { "Answers go to this group at once, and Ctrl+Z takes one back. A burst takes one answer.".to_string() } else { format!("Answers go to {name} at once, and Ctrl+Z takes one back. A burst takes one answer.") };
     let key = |k: &'a str, what: &'a str| row![text(k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4);
     let keys = row![key("Y", "Yes"), key("N", "No"), key("← →", "Step"), key("Enter", "Open photo"), key("Esc", "Done")].spacing(16);
@@ -563,9 +563,9 @@ fn end_page<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     let shape = subj::shape(r.kind);
     let n = r.len();
     let (yes, no) = r.counts();
-    let name = s.group(r.group).and_then(|g| g.name.clone());
+    let name = s.group(&r.group).and_then(|g| g.name.clone());
     let who = name.clone().unwrap_or_else(|| "this group".into());
-    let cover = s.group(r.group).map(|g| tile::crop(s.crops.get(&g.cover.face, subj::px(app, REF), Framing::Face), 72.0, shape)).unwrap_or_else(|| Space::new().into());
+    let cover = s.group(&r.group).map(|g| tile::crop(s.crops.get(&g.cover.face, subj::px(app, REF), Framing::Face), 72.0, shape)).unwrap_or_else(|| Space::new().into());
     let line = if r.checking {
         format!("{} confirmed in {who}. {} taken out.", util::plural(yes as u64, "photo"), util::plural(no as u64, "photo"))
     } else {
@@ -601,7 +601,7 @@ pub fn debug_state(app: &App) -> String {
     let entries: Vec<usize> = r.list.as_ref().map(|l| l.iter().map(Vec::len).collect()).unwrap_or_default();
     format!(
         "review=[group={} checking={} list={:?} at={} answers={:?} yes={yes} no={no} end={} refs={} advance={}]",
-        r.group,
+        people::short(&r.group),
         r.checking,
         entries,
         r.at,

@@ -18,12 +18,11 @@
 //! with every shot from them, oldest first), and, for an animal word, a
 //! share of the hits handed back as fursuits left out.
 //!
-//! Phase 3 adds people (`super::people`): the groups of faces found, a
-//! group's faces and suggestions, naming, merging, moving faces, answers,
-//! the faces switch and model, and a search within a person's photos.  The
-//! engine's side of these lands with the backend's subjects API; until
-//! then its calls here do nothing and the stand-in answers them, with grey
-//! silhouettes for faces.
+//! Phase 3 adds people (`crate::model::subjects`): the groups of faces
+//! found, a group's faces and suggestions, naming, merging, moving faces,
+//! answers, the faces switch and model, and a search within a person's
+//! photos.  The stand-in answers them too (`super::people::FakePeople`),
+//! with grey silhouettes for faces, never a real one.
 
 use std::collections::{BTreeMap, HashMap};
 use std::hash::{Hash, Hasher};
@@ -34,7 +33,7 @@ use std::time::Duration;
 use chrono::{Duration as Span, NaiveDateTime};
 use parking_lot::Mutex;
 
-use super::people::{self, Event as PeopleEvent, Face, FaceModel, FaceRef, FacesPass, FacesPassKind, FacesStatus, FakePeople, Framing, GroupId, Subjects};
+use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Subjects};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
@@ -42,20 +41,21 @@ use crate::ml::{CardFailure, Device, DeviceStatus, SelfCheck};
 use crate::model::library_index::{self, LibraryIndex};
 use crate::model::record::FileType;
 use crate::search::index::Key;
-use crate::search::{Engine, Hit, PassKind, PassProgress, Status, Stopped, Thing, vocab};
+use crate::search::{Engine, FacesStatus, Hit, PassKind, PassProgress, Status, Stopped, Thing, vocab};
 use crate::util;
 
 pub enum Link {
-    Engine(Engine),
+    /// Shared with the crop workers (`Cropper`).
+    Engine(Arc<Engine>),
     Fake(Fake),
 }
 
 impl Link {
     /// The engine, or the stand-in when `PP_SEARCH_FAKE` is set.
-    pub fn new(bus: Bus, device: Device, index_exports: bool) -> Link {
+    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: crate::ml::models::ModelId) -> Link {
         match std::env::var("PP_SEARCH_FAKE") {
-            Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed")),
-            Err(_) => Link::Engine(Engine::new(bus, device, index_exports)),
+            Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed", find_faces, face_model)),
+            Err(_) => Link::Engine(Arc::new(Engine::new(bus, device, index_exports, find_faces, face_model))),
         }
     }
 
@@ -82,12 +82,13 @@ impl Link {
         }
     }
 
-    /// The first index, finding faces with `faces` in the same pass (or
-    /// not, when unticked in the dialog).
-    pub fn start_first_index(&self, models: &[ModelId], faces: Option<FaceModel>) {
+    /// The first index, with the models it needs: search's, and the face
+    /// detector and model when faces are found in the same pass
+    /// (`models::models_for`).
+    pub fn start_first_index(&self, models: &[ModelId]) {
         match self {
             Link::Engine(e) => e.start_first_index(models),
-            Link::Fake(f) => f.start_first_index(models, faces),
+            Link::Fake(f) => f.start_first_index(models),
         }
     }
 
@@ -169,184 +170,201 @@ impl Link {
         }
     }
 
-    pub fn query(&self, seq: u64, text: &str, closeness: f32) {
-        self.query_in(seq, text, closeness, &[]);
-    }
-
     /// A search within the photos of `subjects` (all of them together): no
     /// words, clearest first; words, best first among those photos.
     pub fn query_in(&self, seq: u64, text: &str, closeness: f32, subjects: &[GroupId]) {
         match self {
-            Link::Engine(e) => e.query(seq, text, closeness),
+            Link::Engine(e) => e.query(seq, text, closeness, subjects),
             Link::Fake(f) => f.query(seq, text, closeness, subjects),
         }
     }
 
     // ── people ──────────────────────────────────────────────────────────────
 
-    /// Faces: on or off, the model, how far they were looked for.
-    pub fn faces_status(&self) -> FacesStatus {
-        match self {
-            Link::Engine(_) => FacesStatus::default(),
-            Link::Fake(f) => f.state.lock().faces.clone(),
-        }
-    }
-
-    /// Every group of every kind, as last reported.
+    /// Every group of every kind, as last reported (a cheap clone).
     pub fn subjects(&self) -> Arc<Subjects> {
         match self {
-            Link::Engine(_) => Arc::new(Subjects::default()),
+            Link::Engine(e) => e.subjects(),
             Link::Fake(f) => f.state.lock().subjects.clone(),
         }
     }
 
-    /// Name a group, or rename a subject.
-    pub fn name_group(&self, id: GroupId, name: &str) {
-        if let Link::Fake(f) = self {
-            f.people(|p, _| p.name_group(id, name).map(|_| ()));
+    /// Name a group (a cluster becomes a subject), or rename a subject.
+    pub fn name_group(&self, id: &GroupId, name: &str) {
+        match self {
+            Link::Engine(e) => match id {
+                GroupId::Subject(s) => e.rename(s.clone(), name.to_string()),
+                GroupId::Cluster(_) => e.name_group(id.clone(), name.to_string()),
+            },
+            Link::Fake(f) => f.people(|p, _| p.name_group(id, name).map(|_| ())),
         }
     }
 
     /// Merge `others` into `into` (one kind only; refused otherwise).
-    pub fn merge(&self, into: GroupId, others: &[GroupId]) {
-        if let Link::Fake(f) = self {
-            f.people(|p, subjects| {
-                let kinds = |g: GroupId| subjects.get(g).map(|x| x.kind);
+    pub fn merge(&self, into: &GroupId, others: &[GroupId]) {
+        match self {
+            Link::Engine(e) => e.merge(into.clone(), others.to_vec()),
+            Link::Fake(f) => f.people(|p, subjects| {
+                let kinds = |g: &GroupId| subjects.group(g).map(|x| x.kind);
                 p.merge(into, others, kinds)
-            });
+            }),
         }
     }
 
-    pub fn set_hidden(&self, id: GroupId, hidden: bool) {
-        if let Link::Fake(f) = self {
-            f.people(|p, _| {
+    pub fn set_hidden(&self, id: &GroupId, hidden: bool) {
+        match self {
+            Link::Engine(e) => e.set_hidden(id.clone(), hidden),
+            Link::Fake(f) => f.people(|p, _| {
                 p.set_hidden(id, hidden);
                 Ok(())
-            });
+            }),
         }
     }
 
     /// Forget a named subject: the name and what was confirmed.
-    pub fn forget(&self, id: GroupId) {
-        if let Link::Fake(f) = self {
-            f.people(|p, _| {
+    pub fn forget(&self, id: &GroupId) {
+        match self {
+            Link::Engine(e) => {
+                if let GroupId::Subject(s) = id {
+                    e.forget(s.clone());
+                }
+            }
+            Link::Fake(f) => f.people(|p, _| {
                 p.forget(id);
                 Ok(())
-            });
+            }),
         }
     }
 
     /// Forget every face found and every name given.
     pub fn forget_all(&self) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.forget_all(),
+            Link::Fake(f) => f.change(|s| {
                 s.people.forget_all();
-                s.faces.looked_at = 0;
-                s.faces.pass = None;
+                s.status.faces.looked_at = 0;
+                if s.status.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
+                    s.status.pass = None;
+                }
                 s.refresh_people();
-            });
-            f.publish_people();
+            }),
         }
     }
 
-    /// A group's faces, clearest first (`people::Event::Faces`).
-    pub fn faces(&self, seq: u64, id: GroupId) {
-        if let Link::Fake(f) = self {
-            let faces = Arc::new(f.state.lock().people.faces(id));
-            f.send(PeopleEvent::Faces { seq, group: id, faces });
+    /// A group's faces, clearest first (`BgEvent::SubjectFaces`).
+    pub fn faces(&self, seq: u64, id: &GroupId) {
+        match self {
+            Link::Engine(e) => e.faces(seq, id.clone()),
+            Link::Fake(f) => {
+                let faces = Arc::new(f.state.lock().people.faces(id));
+                let _ = f.bus.unbounded_send(BgEvent::SubjectFaces { seq, group: id.clone(), faces });
+            }
         }
     }
 
     /// Move faces out of `from`: to `to`, or a new group of their own.
-    pub fn move_faces(&self, from: GroupId, faces: &[FaceRef], to: Option<GroupId>) {
-        if let Link::Fake(f) = self {
-            f.people(|p, _| p.move_faces(from, faces, to));
+    pub fn move_faces(&self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) {
+        match self {
+            Link::Engine(e) => e.move_faces(from.clone(), faces.to_vec(), to.cloned()),
+            Link::Fake(f) => f.people(|p, _| p.move_faces(from, faces, to)),
         }
     }
 
     /// Yes, No (not this one: out, and never suggested again), or take the
     /// answer back (`None`).
-    pub fn answer(&self, id: GroupId, faces: &[FaceRef], yes: Option<bool>) {
-        if let Link::Fake(f) = self {
-            f.people(|p, _| {
+    pub fn answer(&self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>) {
+        match self {
+            Link::Engine(e) => e.answer(id.clone(), faces.to_vec(), yes),
+            Link::Fake(f) => f.people(|p, _| {
                 p.answer(id, faces, yes);
                 Ok(())
-            });
+            }),
         }
     }
 
-    /// What the review offers for a group (`people::Event::Suggestions`).
-    pub fn suggestions(&self, seq: u64, id: GroupId) {
-        if let Link::Fake(f) = self {
-            let list = Arc::new(f.state.lock().people.suggestions(id));
-            f.send(PeopleEvent::Suggestions { seq, group: id, list });
+    /// What the review offers for a group (`BgEvent::Suggestions`).
+    pub fn suggestions(&self, seq: u64, id: &GroupId) {
+        match self {
+            Link::Engine(e) => e.suggestions(seq, id.clone()),
+            Link::Fake(f) => {
+                let list = Arc::new(f.state.lock().people.suggestions(id));
+                let _ = f.bus.unbounded_send(BgEvent::Suggestions { seq, group: id.clone(), list });
+            }
         }
     }
 
-    /// Take back the last edit to people (`people::Event::Undone`).
+    /// Take back the last edit to people (`BgEvent::SubjectsUndone`, then
+    /// a fresh `Subjects`).
     pub fn undo_subjects(&self) {
-        if let Link::Fake(f) = self {
-            let what = {
-                let mut s = f.state.lock();
-                let what = s.people.undo();
-                s.refresh_people();
-                what
-            };
-            f.publish_people();
-            if let Some(w) = what {
-                f.send(PeopleEvent::Undone(w));
+        match self {
+            Link::Engine(e) => e.undo(),
+            Link::Fake(f) => {
+                let what = {
+                    let mut s = f.state.lock();
+                    let what = s.people.undo();
+                    s.refresh_people();
+                    what
+                };
+                if let Some(w) = what {
+                    let _ = f.bus.unbounded_send(BgEvent::SubjectsUndone(w));
+                }
+                f.publish_people();
             }
         }
     }
 
     /// Preferences ▸ *Find people's faces*.
     pub fn set_find_faces(&self, on: bool) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
-                s.faces.on = on;
-                if !on {
-                    s.faces.pass = None;
+        match self {
+            Link::Engine(e) => e.set_find_faces(on),
+            Link::Fake(f) => f.change(|s| {
+                s.status.faces.on = on;
+                if !on && s.status.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
+                    s.status.pass = None;
                 }
-            });
-            f.publish_people();
+            }),
         }
     }
 
     /// Another face model: the faces found are recognised again with it
     /// (names, confirmed photos and answers are kept).
-    pub fn set_face_model(&self, model: FaceModel) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
-                s.faces.model = Some(model);
-                if s.faces.looked_at > 0 {
-                    let total = s.faces.found.max(1);
-                    s.faces.pass = Some(FacesPass { kind: FacesPassKind::NewModel, done: 0, total });
+    pub fn set_face_model(&self, model: ModelId) {
+        match self {
+            Link::Engine(e) => e.set_face_model(model),
+            Link::Fake(f) => f.change(|s| {
+                let changed = s.status.faces.model != Some(model);
+                s.status.faces.model = Some(model);
+                s.status.faces.installed = true;
+                if changed && s.status.faces.looked_at > 0 {
+                    let total = s.people.photos_with_faces().max(1);
+                    s.status.faces.unrecognised = total;
+                    s.status.pass = Some(PassProgress { kind: PassKind::Faces, done: 0, total, oldest_day: None });
                 }
-            });
-            f.publish_people();
+            }),
         }
     }
 
     /// Find faces in the library indexed before faces were looked for
-    /// (only when asked: it reads every photo again).
-    pub fn find_faces(&self, model: FaceModel) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
-                s.faces.on = true;
-                s.faces.model = Some(model);
-                s.faces.model_installed = true;
+    /// (only when asked: it reads every photo again), with the face model
+    /// set by [`Link::set_face_model`].
+    pub fn find_faces(&self) {
+        match self {
+            Link::Engine(e) => e.find_faces(),
+            Link::Fake(f) => f.change(|s| {
+                s.status.faces.on = true;
+                s.status.faces.installed = true;
                 let total = s.status.indexed_shots;
-                s.faces.pass = Some(FacesPass { kind: FacesPassKind::CatchUp, done: 0, total });
-            });
-            f.publish_people();
+                s.status.faces.unrecognised = 0;
+                s.status.pass = Some(PassProgress { kind: PassKind::Faces, done: s.people.looked_at, total, oldest_day: None });
+            }),
         }
     }
 
     /// What draws crops: on a worker, never the UI thread.
     pub fn cropper(&self) -> Cropper {
         match self {
-            Link::Engine(_) => Cropper { fake: None },
-            Link::Fake(f) => Cropper { fake: Some(f.state.clone()) },
+            Link::Engine(e) => Cropper { engine: Some(e.clone()), fake: None },
+            Link::Fake(f) => Cropper { engine: None, fake: Some(f.state.clone()) },
         }
     }
 
@@ -403,12 +421,12 @@ struct FakeState {
     ticking: bool,
     /// Indexed in full once the library's size is known.
     start_indexed: bool,
-    /// Made-up people, from the library's shots.
+    /// Made-up people, from the library's shots (their status is
+    /// `status.faces`).
     people: FakePeople,
-    faces: FacesStatus,
     subjects: Arc<Subjects>,
-    /// What was last sent of them (sent again only when it changes).
-    sent_people: Option<(u64, FacesStatus)>,
+    /// The generation of the groups last sent (sent again on a change).
+    sent_people: Option<u64>,
 }
 
 impl FakeState {
@@ -425,16 +443,16 @@ impl FakeState {
     }
 
     fn busy(&self) -> bool {
-        let faces = self.faces.pass.is_some() && self.status.stopped.is_none();
-        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()) || faces)
+        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()))
     }
 
     /// The groups and the faces counts, after the people changed.
     fn refresh_people(&mut self) {
         let snap = self.people.snapshot();
-        self.faces.found = snap.faces_found;
-        self.faces.named = self.people.named();
-        self.faces.looked_at = self.people.looked_at;
+        let f = &mut self.status.faces;
+        f.found = snap.faces_found;
+        f.named = self.people.named();
+        f.looked_at = self.people.looked_at;
         if *self.subjects != snap {
             self.subjects = Arc::new(snap);
         }
@@ -442,7 +460,7 @@ impl FakeState {
 }
 
 impl Fake {
-    fn new(bus: Bus, device: Device, index_exports: bool, indexed: bool) -> Fake {
+    fn new(bus: Bus, device: Device, index_exports: bool, indexed: bool, find_faces: bool, face_model: ModelId) -> Fake {
         let mut status = Status {
             index_exports,
             device: DeviceStatus { chosen: device, name: (device == Device::Gpu).then(|| FAKE_CARD.to_string()), self_check: SelfCheck::NotRun },
@@ -462,7 +480,7 @@ impl Fake {
                 status.stopped = Some(Stopped::Card(f));
             }
         }
-        let faces = FacesStatus { on: true, model: indexed.then(people::recommended), model_installed: indexed, ..FacesStatus::default() };
+        status.faces = FacesStatus { on: find_faces, model: indexed.then_some(face_model), installed: indexed, ..FacesStatus::default() };
         let people = FakePeople::new(true);
         let state = FakeState {
             status,
@@ -474,7 +492,6 @@ impl Fake {
             ticking: false,
             start_indexed: indexed,
             people,
-            faces,
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
         };
@@ -482,10 +499,6 @@ impl Fake {
         fake.publish(&fake.state.lock());
         fake.publish_people();
         fake
-    }
-
-    fn send(&self, e: PeopleEvent) {
-        let _ = self.bus.unbounded_send(BgEvent::People(e));
     }
 
     /// The groups and the faces status, as they are now.
@@ -553,15 +566,14 @@ impl Fake {
         self.keep_ticking(&mut s);
     }
 
-    /// The people and the faces status, when either changed since sent.
+    /// The groups, when they changed since sent (the faces status goes
+    /// with the search status).
     fn publish_people_if_changed(&self, s: &mut FakeState) {
-        let now = (s.subjects.generation, s.faces.clone());
-        if s.sent_people.as_ref() == Some(&now) {
+        if s.sent_people == Some(s.subjects.generation) {
             return;
         }
-        s.sent_people = Some(now);
-        self.send(PeopleEvent::Subjects(s.subjects.clone()));
-        self.send(PeopleEvent::Status(s.faces.clone()));
+        s.sent_people = Some(s.subjects.generation);
+        let _ = self.bus.unbounded_send(BgEvent::Subjects(s.subjects.clone()));
     }
 
     fn keep_ticking(&self, s: &mut FakeState) {
@@ -618,12 +630,13 @@ impl Fake {
         });
     }
 
-    fn start_first_index(&self, ids: &[ModelId], faces: Option<FaceModel>) {
+    fn start_first_index(&self, ids: &[ModelId]) {
+        let faces = models::face_model_in(ids);
         self.change(|s| {
-            s.faces.on = faces.is_some();
+            s.status.faces.on = faces.is_some();
             if faces.is_some() {
-                s.faces.model = faces;
-                s.faces.model_installed = true;
+                s.status.faces.model = faces;
+                s.status.faces.installed = true;
             }
             s.status.first_index_asked = true;
             s.status.stopped = None;
@@ -723,28 +736,32 @@ impl Fake {
                 // library indexed before faces were looked for, faces
                 // off, a catch-up running, or found with two named.
                 "people-first" | "people" => {
+                    let indexed = s.indexed_shots;
+                    s.faces = FacesStatus { on: true, model: Some(models::FACE_MODEL_DEFAULT), installed: true, ..FacesStatus::default() };
                     st.people.forget_all();
                     st.people.name_first = word == "people";
-                    st.people.look_at(s.indexed_shots);
-                    st.faces = FacesStatus { on: true, model: Some(people::recommended()), model_installed: true, ..FacesStatus::default() };
+                    st.people.look_at(indexed);
                     st.refresh_people();
                 }
                 "faces-catchup" => {
+                    s.faces = FacesStatus { on: true, model: None, installed: false, ..FacesStatus::default() };
                     st.people.forget_all();
-                    st.faces = FacesStatus { on: true, model: None, model_installed: false, ..FacesStatus::default() };
                     st.refresh_people();
                 }
                 "faces-off" => {
-                    st.faces.on = false;
-                    st.faces.pass = None;
+                    s.faces.on = false;
+                    if s.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
+                        s.pass = None;
+                    }
                 }
                 "faces-running" => {
-                    st.people.forget_all();
-                    st.people.name_first = false;
                     let total = s.indexed_shots;
                     let done = if n > 0 { n.min(total) } else { total / 4 };
+                    s.faces = FacesStatus { on: true, model: Some(models::FACE_MODEL_DEFAULT), installed: true, ..FacesStatus::default() };
+                    s.pass = Some(PassProgress { kind: PassKind::Faces, done, total, oldest_day: None });
+                    st.people.forget_all();
+                    st.people.name_first = false;
                     st.people.look_at(done);
-                    st.faces = FacesStatus { on: true, model: Some(people::recommended()), model_installed: true, pass: Some(FacesPass { kind: FacesPassKind::CatchUp, done, total }), ..FacesStatus::default() };
                     st.refresh_people();
                 }
                 _ => eprintln!("[search] unknown fake state {what:?}"),
@@ -753,8 +770,34 @@ impl Fake {
     }
 
     fn query(&self, seq: u64, text: &str, closeness: f32, subjects: &[GroupId]) {
-        if !subjects.is_empty() {
-            return self.query_people(seq, text, subjects);
+        // `@name`s written in the text narrow to whom they name, as the
+        // engine's do; a name that names nobody narrows to nothing.
+        let names = crate::search::parse(text).names;
+        if !subjects.is_empty() || !names.is_empty() {
+            let all = self.state.lock().subjects.clone();
+            let mut within: Vec<GroupId> = subjects.to_vec();
+            let mut unknown = false;
+            for n in &names {
+                match super::people::by_name(&all, super::people::Kind::Person, n) {
+                    Some(g) => within.push(g.id.clone()),
+                    None => unknown = true,
+                }
+            }
+            if unknown {
+                let indexed = self.state.lock().status.indexed_shots;
+                let _ = self.bus.unbounded_send(BgEvent::SearchResults {
+                    seq,
+                    hits: Arc::new(Vec::new()),
+                    indexed,
+                    error: None,
+                    understood: Arc::new(crate::search::parse(text)),
+                    fursuits: Arc::new(Vec::new()),
+                    animal: None,
+                    subjects: Arc::new(within),
+                });
+                return;
+            }
+            return self.query_people(seq, text, &within);
         }
         let (index, indexed) = {
             let s = self.state.lock();
@@ -797,6 +840,7 @@ impl Fake {
                     understood: Arc::new(parsed),
                     fursuits: Arc::new(fursuits),
                     animal,
+                    subjects: Arc::new(Vec::new()),
                 });
             })
             .ok();
@@ -810,7 +854,7 @@ impl Fake {
         let (faces, indexed) = {
             let s = self.state.lock();
             let mut keep: Option<std::collections::HashSet<Key>> = None;
-            for &g in subjects {
+            for g in subjects {
                 let m = s.people.members(g);
                 keep = Some(match keep {
                     None => m,
@@ -818,7 +862,7 @@ impl Fake {
                 });
             }
             let keep = keep.unwrap_or_default();
-            let faces: Vec<Face> = s.people.faces(subjects[0]).into_iter().filter(|f| keep.contains(&f.face.key)).collect();
+            let faces: Vec<Face> = s.people.faces(&subjects[0]).into_iter().filter(|f| keep.contains(&f.face.key)).collect();
             (faces, s.status.indexed_shots)
         };
         let parsed = crate::search::parse(text);
@@ -854,6 +898,7 @@ impl Fake {
             understood: Arc::new(parsed),
             fursuits: Arc::new(Vec::new()),
             animal: None,
+            subjects: Arc::new(subjects.to_vec()),
         });
     }
 }
@@ -862,16 +907,19 @@ impl Fake {
 /// of the previews, or the stand-in's grey silhouettes.
 #[derive(Clone)]
 pub struct Cropper {
+    engine: Option<Arc<Engine>>,
     fake: Option<Arc<Mutex<FakeState>>>,
 }
 
 impl Cropper {
     /// `face` framed as asked, fitted in `px` × `px`: (width, height,
     /// RGBA).  Blocking: call it on a worker.
-    pub fn crop(&self, face: &FaceRef, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
-        let fake = self.fake.as_ref()?;
-        let person = fake.lock().people.look_of(face);
-        Some(people::silhouette(person, face, px, framing))
+    pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
+        if let Some(fake) = &self.fake {
+            let person = fake.lock().people.look_of(&face.face);
+            return Some(super::people::silhouette(person, &face.face, px, framing));
+        }
+        self.engine.as_ref()?.crop(face, px, framing)
     }
 }
 
@@ -917,14 +965,16 @@ fn step(s: &mut FakeState) {
     }
     // A faces pass on its own: the catch-up reads the photos indexed, a new
     // model only recognises the faces found.
-    if let Some(p) = s.faces.pass.as_mut() {
+    if let Some(p) = s.status.pass.as_mut().filter(|p| p.kind == PassKind::Faces) {
         p.done = (p.done + (p.total / 30).max(1)).min(p.total);
-        let (kind, done, total) = (p.kind, p.done, p.total);
-        if kind == FacesPassKind::CatchUp {
+        let (done, total) = (p.done, p.total);
+        if s.status.faces.unrecognised > 0 {
+            s.status.faces.unrecognised = total - done;
+        } else {
             s.people.look_at(done);
         }
         if done >= total {
-            s.faces.pass = None;
+            s.status.pass = None;
         }
         s.refresh_people();
         return;
@@ -937,7 +987,7 @@ fn step(s: &mut FakeState) {
             s.status.indexed_shots = done;
         }
         // Faces are found in the same pass, on the photos it reaches.
-        if s.faces.on && s.faces.model.is_some() && kind == PassKind::FirstIndex {
+        if s.status.faces.on && s.status.faces.model.is_some() && kind == PassKind::FirstIndex {
             s.people.look_at(done);
             s.refresh_people();
         }

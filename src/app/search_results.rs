@@ -16,6 +16,7 @@ use crate::model::bursts::RunMark;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::library_index::FileEntry;
 use crate::search::parse::DateRange;
+use super::people::{GroupId, Kind, KindWords};
 use crate::search::{Hit, Parsed, Thing, parse};
 use crate::ui::grid::Section;
 
@@ -56,9 +57,12 @@ pub struct Results {
     pub animal: Option<String>,
     /// What the engine understood of the words, and applied.
     pub understood: Parsed,
-    /// The people the search is within (their chips), by name: their
-    /// photos, clearest first with no words, else best first.
+    /// The people the search is within (their chips, and the `@name`s
+    /// that named someone), by name: their photos, clearest first with no
+    /// words, else best first.
     pub who: Vec<String>,
+    /// `@name`s that named nobody: the search narrowed to nothing.
+    pub unknown: Vec<String>,
     /// Hits whose files the library index doesn't hold (moved since).
     pub missing: usize,
 }
@@ -132,7 +136,7 @@ pub fn build(seq: u64, words: String, hits: &[Hit], answer: Answer<'_>, lookup: 
     let fursuits = take(answer.fursuits);
     coll.build_pairs();
     let animal = answer.animal.filter(|_| !fursuits.is_empty());
-    Results { seq, words, coll: Arc::new(coll), found, fursuits, animal, understood: answer.understood, who: Vec::new(), missing }
+    Results { seq, words, coll: Arc::new(coll), found, fursuits, animal, understood: answer.understood, who: Vec::new(), unknown: Vec::new(), missing }
 }
 
 /// What the grid shows of the results.
@@ -364,6 +368,8 @@ pub enum Pick {
     Date { label: String, text: String, days: usize, replace: usize },
     /// A recent search, run as it is.
     Recent(String),
+    /// Someone named, after `@`: taken, they become a chip in the field.
+    Name { kind: Kind, id: GroupId, name: String, photos: usize },
 }
 
 impl Pick {
@@ -374,6 +380,7 @@ impl Pick {
             Pick::Thing { minus: true, .. } => "Leave out",
             Pick::Date { .. } => "Dates",
             Pick::Recent(_) => "Recent searches",
+            Pick::Name { kind, .. } => kind.title(),
         }
     }
 }
@@ -385,9 +392,41 @@ pub struct Offer {
     /// The word being typed (lower case, without a leading `-`): set
     /// heavier in each thing and date.
     pub stem: String,
-    /// The word being typed starts with `@`: names come later.
-    pub names_later: bool,
+    /// The word being typed starts with `@`: a name (only names are
+    /// offered then).
+    pub naming: bool,
 }
+
+/// Someone the field can offer after `@`: named, not hidden, of a kind
+/// whose step exists.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Nameable {
+    pub kind: Kind,
+    pub id: GroupId,
+    pub name: String,
+    pub photos: usize,
+}
+
+/// The named groups the field offers after `@`, from every group: named
+/// and not hidden, of the kinds in `kinds` only, each kind's in its own
+/// list (most photos first), the kinds in `kinds`' order.  Never an
+/// unnamed group.
+pub fn nameable(all: &super::people::Subjects, kinds: &[Kind]) -> Vec<Nameable> {
+    let mut out = Vec::new();
+    for &k in kinds {
+        let mut v: Vec<Nameable> = all
+            .named(k)
+            .filter(|g| !g.hidden)
+            .map(|g| Nameable { kind: k, id: g.id.clone(), name: g.name.clone().unwrap_or_default(), photos: g.photos })
+            .collect();
+        v.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.name.cmp(&b.name)));
+        out.extend(v);
+    }
+    out
+}
+
+/// At most this many names of each kind while typing.
+const MAX_NAMES: usize = 6;
 
 /// At most this many of each group while typing.
 const MAX_THINGS: usize = 5;
@@ -403,7 +442,7 @@ pub fn offered(things: &[Thing]) -> impl Iterator<Item = &Thing> {
 /// What to offer while `typed` is in the field, from the things found, the
 /// days with photos and the recent searches.  The last word is the one
 /// being typed; a space after it means none is.
-pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &'a NaiveDate>, recent: &[String]) -> Offer {
+pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &'a NaiveDate>, recent: &[String], names: &[Nameable]) -> Offer {
     let mut o = Offer::default();
     if typed.trim().is_empty() {
         o.picks = recent.iter().map(|r| Pick::Recent(r.clone())).collect();
@@ -412,8 +451,26 @@ pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &
     let tokens: Vec<&str> = typed.split_whitespace().collect();
     let open = !typed.ends_with(char::is_whitespace);
     let last = if open { tokens.last().copied().unwrap_or("") } else { "" };
-    if last.starts_with('@') {
-        o.names_later = true;
+    if let Some(stem) = last.strip_prefix('@') {
+        // Names only: each kind's under its own heading, never mixed.
+        o.naming = true;
+        let stem = stem.trim_matches('"').to_lowercase();
+        o.stem = stem.clone();
+        // The kinds in the order they first come; each kind's names
+        // together, so a heading is never interrupted by another kind.
+        let mut kinds: Vec<Kind> = Vec::new();
+        for n in names {
+            if !kinds.contains(&n.kind) {
+                kinds.push(n.kind);
+            }
+        }
+        for k in kinds {
+            let matching = names.iter().filter(|n| n.kind == k).filter(|n| {
+                let low = n.name.to_lowercase();
+                stem.is_empty() || low.starts_with(&stem) || low.contains(&format!(" {stem}"))
+            });
+            o.picks.extend(matching.take(MAX_NAMES).map(|n| Pick::Name { kind: n.kind, id: n.id.clone(), name: n.name.clone(), photos: n.photos }));
+        }
         return o;
     }
     let minus = last.starts_with('-');
@@ -451,6 +508,14 @@ pub fn offer<'a>(typed: &str, things: &[Thing], days: impl IntoIterator<Item = &
 pub fn apply(typed: &str, pick: &Pick) -> String {
     let (text, replace) = match pick {
         Pick::Recent(r) => return r.clone(),
+        // A name becomes a chip: the `@…` being typed goes.
+        Pick::Name { .. } => {
+            let tokens: Vec<&str> = typed.split_whitespace().collect();
+            let open = !typed.ends_with(char::is_whitespace);
+            let keep = if open && tokens.last().is_some_and(|t| t.starts_with('@')) { tokens.len() - 1 } else { tokens.len() };
+            let rest = tokens[..keep].join(" ");
+            return if rest.is_empty() { String::new() } else { format!("{rest} ") };
+        }
         // Two words left out stay together: -"parking lots".
         Pick::Thing { word, minus: true, .. } if word.contains(' ') => (format!("-\"{word}\""), 1),
         Pick::Thing { word, minus, .. } => (if *minus { format!("-{word}") } else { word.clone() }, 1),
@@ -523,6 +588,14 @@ pub fn nothing_found(r: &Results, so_far: Option<usize>) -> (String, String) {
     let p = &r.understood;
     let words = r.looks_like();
     let n = so_far.map(|n| crate::util::thousands(n as u64));
+    if !r.unknown.is_empty() {
+        let names: Vec<String> = r.unknown.iter().map(|x| format!("“{x}”")).collect();
+        let one = r.unknown.len() == 1;
+        return (
+            format!("No one is named {}", and_list(&names)),
+            format!("A name after @ finds someone you named on the People tab.{}", if one { " Check the spelling, or name them first." } else { "" }),
+        );
+    }
     if !r.who.is_empty() {
         let who = and_list(&r.who);
         return match (clearest(p, &r.who), p.dates) {
@@ -607,6 +680,7 @@ mod tests {
             animal: Some("dog".into()),
             understood: parse("dogs"),
             who: Vec::new(),
+            unknown: Vec::new(),
             missing: 0,
         }
     }
@@ -684,19 +758,20 @@ mod tests {
                 Pick::Thing { word, photos, minus } => format!("{}{word} {photos}", if *minus { "-" } else { "" }),
                 Pick::Date { label, days, .. } => format!("{label} ({days})"),
                 Pick::Recent(r) => format!("recent {r}"),
+                Pick::Name { name, .. } => format!("@{name}"),
             })
             .collect()
     }
 
     #[test]
     fn things_offered_are_objects_and_scenes_never_people_fursuits_or_animals() {
-        let o = offer("fo", &vocab(), NO_DAYS, &[]);
+        let o = offer("fo", &vocab(), NO_DAYS, &[], &[]);
         assert_eq!(labels(&o), ["food 60", "forests 10"], "no fursuits, no foxes");
         assert_eq!(o.stem, "fo");
         // A singular finds the plural the list shows.
-        assert_eq!(labels(&offer("forest", &vocab(), NO_DAYS, &[])), ["forests 10"]);
-        assert!(offer("peo", &vocab(), NO_DAYS, &[]).picks.is_empty(), "people are never a thing");
-        assert!(offer("fox", &vocab(), NO_DAYS, &[]).picks.is_empty(), "nor animals");
+        assert_eq!(labels(&offer("forest", &vocab(), NO_DAYS, &[], &[])), ["forests 10"]);
+        assert!(offer("peo", &vocab(), NO_DAYS, &[], &[]).picks.is_empty(), "people are never a thing");
+        assert!(offer("fox", &vocab(), NO_DAYS, &[], &[]).picks.is_empty(), "nor animals");
         // The start page's list follows the same rule.
         let v = vocab();
         let shown: Vec<&str> = offered(&v).map(|t| t.word.as_str()).collect();
@@ -705,10 +780,10 @@ mod tests {
 
     #[test]
     fn a_minus_offers_things_to_leave_out() {
-        let o = offer("fireworks -", &vocab(), &days(), &[]);
+        let o = offer("fireworks -", &vocab(), &days(), &[], &[]);
         assert_eq!(labels(&o), ["-food 60", "-flowers 40", "-forests 10", "-crowds 70"], "fireworks is already in the query; no dates after a minus");
         assert_eq!(o.picks[0].group(), "Leave out");
-        assert_eq!(labels(&offer("fireworks -cr", &vocab(), &days(), &[])), ["-crowds 70"]);
+        assert_eq!(labels(&offer("fireworks -cr", &vocab(), &days(), &[], &[])), ["-crowds 70"]);
         assert_eq!(apply("fireworks -cr", &o.picks[3]), "fireworks -crowds ");
         // Two words left out stay together, and the parser reads them so.
         let lots = Pick::Thing { word: "parking lots".into(), photos: 3, minus: true };
@@ -718,42 +793,92 @@ mod tests {
         assert_eq!(parse(&typed).words, "cars");
         // Once in the query, a thing of two words isn't offered again.
         let things = vec![thing("parking lots", 3, Kind::Scene), thing("parks", 9, Kind::Scene)];
-        assert_eq!(labels(&offer(&format!("{typed}pa"), &things, NO_DAYS, &[])), ["parks 9"]);
+        assert_eq!(labels(&offer(&format!("{typed}pa"), &things, NO_DAYS, &[], &[])), ["parks 9"]);
     }
 
     #[test]
     fn dates_offer_months_and_years_with_photos() {
         // Years with their days, the most first.
-        assert_eq!(labels(&offer("cake 202", &[], &days(), &[])), ["2024 (3)", "2025 (2)", "2023 (1)"]);
+        assert_eq!(labels(&offer("cake 202", &[], &days(), &[], &[])), ["2024 (3)", "2025 (2)", "2023 (1)"]);
         // A month's name: every year it has photos.
-        let o = offer("cake ju", &[], &days(), &[]);
+        let o = offer("cake ju", &[], &days(), &[], &[]);
         assert_eq!(labels(&o), ["June 2024 (2)", "July 2024 (1)", "June 2023 (1)"]);
         assert_eq!(apply("cake ju", &o.picks[0]), "cake jun 2024 ");
         // A month then the start of a year: both words are replaced.
-        let o = offer("cake jun 20", &[], &days(), &[]);
+        let o = offer("cake jun 20", &[], &days(), &[], &[]);
         assert_eq!(labels(&o), ["June 2024 (2)", "June 2023 (1)"]);
         assert_eq!(apply("cake jun 20", &o.picks[0]), "cake jun 2024 ");
-        assert!(offer("cake 1999", &[], &days(), &[]).picks.is_empty(), "no photos then");
-        assert!(offer("cake ju ", &[], &days(), &[]).picks.is_empty(), "a space ends the word: nothing is being typed");
+        assert!(offer("cake 1999", &[], &days(), &[], &[]).picks.is_empty(), "no photos then");
+        assert!(offer("cake ju ", &[], &days(), &[], &[]).picks.is_empty(), "a space ends the word: nothing is being typed");
     }
 
     #[test]
     fn recent_searches_follow_things_and_dates_and_fill_an_empty_field() {
         let recent: Vec<String> = ["fireworks 2024", "food trucks", "red car"].iter().map(|s| s.to_string()).collect();
-        let o = offer("f", &vocab(), &days(), &recent);
+        let o = offer("f", &vocab(), &days(), &recent, &[]);
         let groups: Vec<&str> = o.picks.iter().map(Pick::group).collect();
         assert_eq!(groups, ["Things", "Things", "Things", "Things", "Dates", "Recent searches", "Recent searches"]);
-        assert_eq!(labels(&offer("", &vocab(), &days(), &recent)), ["recent fireworks 2024", "recent food trucks", "recent red car"]);
+        assert_eq!(labels(&offer("", &vocab(), &days(), &recent, &[])), ["recent fireworks 2024", "recent food trucks", "recent red car"]);
         assert_eq!(apply("f", &Pick::Recent("food trucks".into())), "food trucks");
         // After a word is taken, the space ends it: recent searches that
         // carry on from it.
-        assert_eq!(labels(&offer("fireworks ", &vocab(), &days(), &recent)), ["recent fireworks 2024"]);
+        assert_eq!(labels(&offer("fireworks ", &vocab(), &days(), &recent, &[])), ["recent fireworks 2024"]);
+    }
+
+    use crate::app::people::Kind as SKind;
+
+    fn nameables() -> Vec<Nameable> {
+        let n = |kind, id, name: &str, photos| Nameable { kind, id: GroupId::Cluster(id), name: name.into(), photos };
+        vec![n(SKind::Person, 1, "Alex Doe", 312), n(SKind::Person, 2, "Sam", 40), n(SKind::Fursuit, 3, "Alpine", 90), n(SKind::Person, 4, "Al", 5)]
     }
 
     #[test]
-    fn a_name_is_not_offered_yet() {
-        let o = offer("@al", &vocab(), &days(), &["alpine".into()]);
-        assert!(o.names_later && o.picks.is_empty());
+    fn at_offers_named_people_only_under_their_own_heading() {
+        let names = nameables();
+        // "@al": the people whose name (or a word of it) starts so, and
+        // the fursuit under its own heading, never one list.
+        let o = offer("camera @al", &vocab(), &days(), &["alpine".into()], &names);
+        assert!(o.naming);
+        let picks: Vec<(String, &str)> = o.picks.iter().map(|p| match p {
+            Pick::Name { name, .. } => (name.clone(), p.group()),
+            _ => (String::new(), ""),
+        }).collect();
+        assert_eq!(picks, [("Alex Doe".to_string(), "People"), ("Al".to_string(), "People"), ("Alpine".to_string(), "Fursuits")]);
+        assert!(o.picks.iter().all(|p| matches!(p, Pick::Name { .. })), "no things, dates or recent searches after @");
+        // Only the kinds whose step exists are offered: the page passes
+        // people alone in this phase.
+        let people_only = nameable(&crate::app::people::Subjects {
+            generation: 1,
+            groups: vec![],
+            faces_found: 0,
+            undoable: None,
+        }, &[SKind::Person]);
+        assert!(people_only.is_empty());
+        // "@" alone offers everyone named; a word start counts ("@doe").
+        assert_eq!(offer("@", &[], NO_DAYS, &[], &names).picks.len(), 4);
+        assert_eq!(offer("@doe", &[], NO_DAYS, &[], &names).picks.len(), 1);
+        assert!(offer("@zed", &[], NO_DAYS, &[], &names).picks.is_empty());
+        // Taken, the name leaves the text (it becomes a chip).
+        assert_eq!(apply("camera @al", &o.picks[0]), "camera ");
+        assert_eq!(apply("@al", &o.picks[0]), "");
+    }
+
+    #[test]
+    fn nameable_keeps_kinds_apart_and_leaves_out_hidden_and_unnamed() {
+        use crate::app::people::{Face, FaceRef, Group, Subjects};
+        let day = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
+        let cover = Face { face: FaceRef::new(crate::search::index::Key([1; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
+        let g = |id, kind, name: Option<&str>, hidden, photos| Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden, photos, days: 1, cover: cover.clone(), suggestions: 0 };
+        let all = Subjects {
+            generation: 1,
+            groups: vec![g(1, SKind::Person, Some("B"), false, 3), g(2, SKind::Person, Some("A"), false, 30), g(3, SKind::Person, None, false, 90), g(4, SKind::Person, Some("H"), true, 9), g(5, SKind::Fursuit, Some("F"), false, 9)],
+            faces_found: 0,
+            undoable: None,
+        };
+        let v = nameable(&all, &[SKind::Person]);
+        assert_eq!(v.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["A", "B"], "most photos first; no unnamed, hidden or fursuit");
+        let both = nameable(&all, &[SKind::Person, SKind::Fursuit]);
+        assert_eq!(both.last().map(|n| n.kind), Some(SKind::Fursuit), "each kind's after the last's, never mixed");
     }
 
     #[test]
@@ -778,6 +903,7 @@ mod tests {
             animal: None,
             understood: parse(query),
             who: Vec::new(),
+            unknown: Vec::new(),
             missing: 0,
         }
     }

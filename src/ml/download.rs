@@ -255,7 +255,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let body: Vec<u8> = (0..300_000u32).map(|i| (i % 241) as u8).collect();
         let digest: String = Sha256::digest(&body).iter().map(|b| format!("{b:02x}")).collect();
-        let good = ModelFile { file: "good.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: body.len() as u64 };
+        let good = ModelFile { file: "good.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: body.len() as u64, archive: None };
         let mut seen = Vec::new();
         let state = fetch(&good, &d.join("good.bin"), &AtomicBool::new(false), &mut |s| seen.push(s));
         assert_eq!(state, DownloadState::Checked);
@@ -264,15 +264,15 @@ mod tests {
         assert!(seen.contains(&Step::Bytes(body.len() as u64)));
         assert!(!partial_path(&d.join("good.bin")).exists());
         // The wrong digest: deleted, nothing installed.
-        let bad = ModelFile { file: "bad.bin", url: leak(serve_once(body.clone())), sha256: leak("0".repeat(64)), bytes: body.len() as u64 };
+        let bad = ModelFile { file: "bad.bin", url: leak(serve_once(body.clone())), sha256: leak("0".repeat(64)), bytes: body.len() as u64, archive: None };
         let state = fetch(&bad, &d.join("bad.bin"), &AtomicBool::new(false), &mut |_| {});
         assert!(matches!(state, DownloadState::Mismatch { ref expected, ref got } if expected == &"0".repeat(64) && got == &digest), "{state:?}");
         assert!(!d.join("bad.bin").exists() && !partial_path(&d.join("bad.bin")).exists());
         // The wrong size.
-        let short = ModelFile { file: "short.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: 10 };
+        let short = ModelFile { file: "short.bin", url: leak(serve_once(body.clone())), sha256: leak(digest.clone()), bytes: 10, archive: None };
         assert!(matches!(fetch(&short, &d.join("short.bin"), &AtomicBool::new(false), &mut |_| {}), DownloadState::Failed(_)));
         // Nobody listening: offline.
-        let gone = ModelFile { file: "gone.bin", url: "http://127.0.0.1:9/file.bin", sha256: leak(digest), bytes: 1 };
+        let gone = ModelFile { file: "gone.bin", url: "http://127.0.0.1:9/file.bin", sha256: leak(digest), bytes: 1, archive: None };
         assert_eq!(fetch(&gone, &d.join("gone.bin"), &AtomicBool::new(false), &mut |_| {}), DownloadState::Offline);
         let _ = std::fs::remove_dir_all(&d);
     }

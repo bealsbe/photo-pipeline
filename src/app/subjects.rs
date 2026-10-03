@@ -32,13 +32,15 @@ use iced::widget::{Space, button, column, container, opaque, row, scrollable, st
 use iced::{Alignment, Background, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{self, Event, FaceModel, FaceRef, FacesPassKind, FacesStatus, Framing, Group, GroupId, Kind, Subjects as Found};
+use super::people::{self, Face, FaceRef, Framing, Group, GroupId, KINDS, Kind, KindWords, Subjects as Found};
 use super::results_pane::Pane;
 use super::style;
 use super::subjects_person::{self as person, Person};
 use super::subjects_review::{self as review, Review};
 use super::{App, Message, View};
 use crate::ml::Device;
+use crate::ml::models::ModelId;
+use crate::search::PassKind;
 use crate::search::estimate;
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
@@ -81,7 +83,6 @@ pub struct Subjects {
     pub tab: Kind,
     /// Every group of every kind, as last reported.
     pub all: Arc<Found>,
-    pub faces: FacesStatus,
     /// Groups picked on the tab (S or Ctrl+click), in the order picked.
     pub picked: Vec<GroupId>,
     pub select_mode: bool,
@@ -101,9 +102,8 @@ pub struct Subjects {
 impl Subjects {
     pub fn new(app_tab: u8, link: &super::search_link::Link) -> Subjects {
         Subjects {
-            tab: Kind::from_index(app_tab),
+            tab: people::kind_from_index(app_tab),
             all: link.subjects(),
-            faces: link.faces_status(),
             picked: Vec::new(),
             select_mode: false,
             focus: None,
@@ -140,8 +140,8 @@ impl Subjects {
         self.person.as_mut().map(|p| &mut p.pane)
     }
 
-    pub fn group(&self, id: GroupId) -> Option<&Group> {
-        self.all.get(id)
+    pub fn group(&self, id: &GroupId) -> Option<&Group> {
+        self.all.group(id)
     }
 
     pub(super) fn next_seq(&mut self) -> u64 {
@@ -188,12 +188,12 @@ pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
 impl Arranged<'_> {
     /// The tiles the arrow keys step through, in the page's order.
     pub fn order(&self, small_open: bool, hidden_open: bool) -> Vec<GroupId> {
-        let mut v: Vec<GroupId> = self.named.iter().chain(&self.to_name).map(|g| g.id).collect();
+        let mut v: Vec<GroupId> = self.named.iter().chain(&self.to_name).map(|g| g.id.clone()).collect();
         if small_open {
-            v.extend(self.small.iter().map(|g| g.id));
+            v.extend(self.small.iter().map(|g| g.id.clone()));
         }
         if hidden_open {
-            v.extend(self.hidden.iter().map(|g| g.id));
+            v.extend(self.hidden.iter().map(|g| g.id.clone()));
         }
         v
     }
@@ -201,8 +201,9 @@ impl Arranged<'_> {
 
 // ── crops: decoded off the UI thread, kept by bytes ────────────────────────
 
-/// A crop as cached: the face, its size in pixels, its framing.
-pub type CropKey = ((crate::search::index::Key, [u16; 4]), u32, Framing);
+/// A crop as cached: the face, its size in pixels, and whether it is the
+/// whole photo (else the face, framed).
+pub type CropKey = (FaceRef, u32, bool);
 
 /// Decoded crops, the least recently wanted dropped first past the cap.
 pub struct Crops {
@@ -228,7 +229,7 @@ impl Crops {
     }
 
     pub fn key(face: &FaceRef, px: u32, framing: Framing) -> CropKey {
-        (face.id(), px, framing)
+        (*face, px, framing == Framing::Photo)
     }
 
     /// The crop, if decoded (`None` too when the photo couldn't be read).
@@ -243,10 +244,10 @@ impl Crops {
 
     /// Of `wanted`, the ones not decoded nor on their way; they are marked
     /// on their way.  The ones decoded count as just used.
-    pub fn missing(&mut self, wanted: impl IntoIterator<Item = (FaceRef, u32, Framing)>) -> Vec<(CropKey, FaceRef)> {
+    pub fn missing(&mut self, wanted: impl IntoIterator<Item = (Face, u32, Framing)>) -> Vec<(CropKey, Face)> {
         let mut out = Vec::new();
         for (f, px, fr) in wanted {
-            let k = Crops::key(&f, px, fr);
+            let k = Crops::key(&f.face, px, fr);
             if let Some(e) = self.map.get_mut(&k) {
                 self.tick += 1;
                 e.3 = self.tick;
@@ -301,7 +302,7 @@ impl Crops {
 }
 
 /// Draw the crops `wanted` that aren't decoded yet, on workers.
-pub fn fetch(app: &mut App, wanted: Vec<(FaceRef, u32, Framing)>) -> Task<Message> {
+pub fn fetch(app: &mut App, wanted: Vec<(Face, u32, Framing)>) -> Task<Message> {
     let missing = app.subjects.crops.missing(wanted);
     if missing.is_empty() {
         return Task::none();
@@ -314,7 +315,7 @@ pub fn fetch(app: &mut App, wanted: Vec<(FaceRef, u32, Framing)>) -> Task<Messag
             // A few threads: on the share each crop is a preview read.
             let mut out: Vec<(CropKey, Option<(u32, u32, Vec<u8>)>)> = Vec::with_capacity(chunk.len());
             std::thread::scope(|s| {
-                let handles: Vec<_> = chunk.chunks(chunk.len().div_ceil(4).max(1)).map(|part| s.spawn(|| part.iter().map(|(k, f)| (*k, cropper.crop(f, k.1, k.2))).collect::<Vec<_>>())).collect();
+                let handles: Vec<_> = chunk.chunks(chunk.len().div_ceil(4).max(1)).map(|part| s.spawn(|| part.iter().map(|(k, f)| (*k, cropper.crop(f, k.1, if k.2 { Framing::Photo } else { Framing::Face }))).collect::<Vec<_>>())).collect();
                 for h in handles {
                     out.extend(h.join().unwrap_or_default());
                 }
@@ -332,21 +333,21 @@ pub fn px(app: &App, logical: f32) -> u32 {
 }
 
 /// The crops the page shows now.
-fn wanted(app: &App) -> Vec<(FaceRef, u32, Framing)> {
+fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
     match s.page() {
         Page::Overview => {
-            let a = arrange(&s.all, s.tab, app.settings.smallest_group());
+            let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
             let (big, small) = (px(app, tile::TILE_CROP), px(app, tile::SMALL_CROP));
-            let mut v: Vec<(FaceRef, u32, Framing)> = a.named.iter().chain(&a.to_name).map(|g| (g.cover.face, big, Framing::Face)).collect();
+            let mut v: Vec<(Face, u32, Framing)> = a.named.iter().chain(&a.to_name).map(|g| (g.cover.clone(), big, Framing::Face)).collect();
             if s.small_open {
-                v.extend(a.small.iter().map(|g| (g.cover.face, small, Framing::Face)));
+                v.extend(a.small.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
             }
             if s.hidden_open {
-                v.extend(a.hidden.iter().map(|g| (g.cover.face, small, Framing::Face)));
+                v.extend(a.hidden.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
             }
             if let Some(mg) = &s.merge {
-                v.extend(mg.groups.iter().filter_map(|&id| s.group(id)).map(|g| (g.cover.face, px(app, 40.0), Framing::Face)));
+                v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, 40.0), Framing::Face)));
             }
             v
         }
@@ -422,10 +423,12 @@ pub fn arriving(app: &mut App) -> Task<Message> {
 /// Back to the tab's groups.
 pub fn to_overview(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    let from = s.person.as_ref().map(|p| p.group);
+    let from = s.person.as_ref().map(|p| p.group.clone());
     s.review = None;
     s.person = None;
-    s.focus = from.or(s.focus);
+    if from.is_some() {
+        s.focus = from;
+    }
     app.quicklook = None;
     refresh_crops(app)
 }
@@ -437,39 +440,43 @@ pub fn open_viewer(app: &mut App, id: crate::model::collection::RecordId) -> Tas
 
 // ── events ──────────────────────────────────────────────────────────────────
 
-pub fn on_event(app: &mut App, e: Event) -> Task<Message> {
-    match e {
-        Event::Subjects(all) => on_subjects(app, all),
-        Event::Status(st) => {
-            let was = std::mem::replace(&mut app.subjects.faces, st);
-            let now = &app.subjects.faces;
-            if let (Some(p), None) = (was.pass, now.pass) {
-                let text = match p.kind {
-                    FacesPassKind::CatchUp => format!("Found {} in the library.", util::plural(now.found as u64, "face")),
-                    FacesPassKind::NewModel => "The faces were recognised again with the new model. Names were kept.".to_string(),
-                };
-                return app.show_status(text, 8000);
-            }
-            Task::none()
-        }
-        Event::Faces { seq, group, faces } => {
-            if review::on_faces(app, seq, &faces) {
-                return refresh_crops(app);
-            }
-            person::on_faces(app, seq, group, faces)
-        }
-        Event::Suggestions { seq, group, list } => {
-            let t = person::on_suggestions(app, seq, group, list.clone());
-            Task::batch([t, review::on_suggestions(app, seq, group, list)])
-        }
-        Event::Undone(what) => {
-            let t = app.show_status(format!("Undone: {}.", what.trim_end_matches('.')), 6000);
-            Task::batch([t, person::after_change(app)])
-        }
-    }
+/// Ctrl+Z took a change to people back: say what (a fresh `Subjects`
+/// follows).
+pub fn on_undone(app: &mut App, what: String) -> Task<Message> {
+    let t = app.show_status(format!("Undone: {}.", what.trim_end_matches('.')), 6000);
+    Task::batch([t, person::after_change(app)])
 }
 
-fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
+/// A group's faces arrived: the review's reference faces, or a subject's
+/// page's split view.
+pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) -> Task<Message> {
+    if review::on_faces(app, seq, &faces) {
+        return refresh_crops(app);
+    }
+    person::on_faces(app, seq, group, faces)
+}
+
+pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec<Face>>>) -> Task<Message> {
+    review::on_suggestions(app, seq, group, list)
+}
+
+/// The search status changed: say when a faces pass of its own ended.
+pub fn on_status(app: &mut App, old: &crate::search::Status) -> Task<Message> {
+    let now = &app.search.status;
+    let was_faces = old.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces);
+    let is_faces = now.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces);
+    if was_faces && !is_faces && now.stopped.is_none() {
+        let text = if old.faces.unrecognised > 0 {
+            "The faces were recognised again with the new model. Names were kept.".to_string()
+        } else {
+            format!("Found {} in the library.", util::plural(now.faces.found as u64, "face"))
+        };
+        return app.show_status(text, 8000);
+    }
+    Task::none()
+}
+
+pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     if all.generation == app.subjects.all.generation && *all == *app.subjects.all {
         return Task::none();
     }
@@ -480,10 +487,10 @@ fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     s.all = all;
     // Picks and the focus of groups that went (merged, or regrouped).
     let all = s.all.clone();
-    s.picked.retain(|&id| all.get(id).is_some());
-    s.focus = s.focus.filter(|&id| all.get(id).is_some());
+    s.picked.retain(|id| all.group(id).is_some());
+    s.focus = s.focus.take().filter(|id| all.group(id).is_some());
     if let Some(mg) = &s.merge {
-        if mg.groups.iter().any(|&id| all.get(id).is_none()) {
+        if mg.groups.iter().any(|id| all.group(id).is_none()) {
             s.merge = None;
         }
     }
@@ -514,8 +521,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 toggle_pick(s, id);
                 return Task::none();
             }
-            s.focus = Some(id);
-            person::open(app, id, false)
+            s.focus = Some(id.clone());
+            person::open(app, &id, false)
         }
         Msg::Pick(id) => {
             toggle_pick(&mut app.subjects, id);
@@ -540,18 +547,18 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             refresh_crops(app)
         }
         Msg::Unhide(id) => {
-            let name = label(&app.subjects, id);
-            app.search.link.set_hidden(id, false);
+            let name = label(&app.subjects, &id);
+            app.search.link.set_hidden(&id, false);
             app.show_status(format!("{name} is back on the tab."), 5000)
         }
         Msg::MergeAsk => {
             let s = &mut app.subjects;
-            let groups: Vec<GroupId> = s.picked.iter().copied().filter(|&id| s.all.get(id).is_some_and(|g| g.kind == s.tab)).collect();
+            let groups: Vec<GroupId> = s.picked.iter().filter(|id| s.all.group(id).is_some_and(|g| g.kind == s.tab)).cloned().collect();
             if groups.len() < 2 {
                 return Task::none();
             }
             // The named one keeps its name by default.
-            let keep = groups.iter().copied().find(|&id| s.all.get(id).is_some_and(|g| g.name.is_some())).unwrap_or(groups[0]);
+            let keep = groups.iter().find(|id| s.all.group(id).is_some_and(|g| g.name.is_some())).unwrap_or(&groups[0]).clone();
             s.merge = Some(MergeAsk { groups, keep });
             refresh_crops(app)
         }
@@ -569,26 +576,26 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let s = &mut app.subjects;
             let Some(mg) = s.merge.take() else { return Task::none() };
             // One kind only: the tab's.
-            if mg.groups.iter().any(|&id| s.all.get(id).is_none_or(|g| g.kind != s.tab)) {
+            if mg.groups.iter().any(|id| s.all.group(id).is_none_or(|g| g.kind != s.tab)) {
                 return app.show_status("Only groups of one kind can be merged.", 5000);
             }
-            let others: Vec<GroupId> = mg.groups.iter().copied().filter(|&id| id != mg.keep).collect();
-            let name = label(s, mg.keep);
+            let others: Vec<GroupId> = mg.groups.iter().filter(|id| **id != mg.keep).cloned().collect();
+            let name = label(s, &mg.keep);
             s.picked.clear();
             s.select_mode = false;
-            s.focus = Some(mg.keep);
-            app.search.link.merge(mg.keep, &others);
+            s.focus = Some(mg.keep.clone());
+            app.search.link.merge(&mg.keep, &others);
             app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo))
         }
         Msg::HidePicked => {
             let s = &mut app.subjects;
             let ids: Vec<GroupId> = std::mem::take(&mut s.picked);
             s.select_mode = false;
-            for &id in &ids {
+            for id in &ids {
                 app.search.link.set_hidden(id, true);
             }
             let text = if ids.len() == 1 {
-                format!("{} is hidden. Its photos still come up when you search for it by name.", label(&app.subjects, ids[0]))
+                format!("{} is hidden. Its photos still come up when you search for it by name.", label(&app.subjects, &ids[0]))
             } else {
                 format!("{} hidden. Find them under Hidden.", util::plural(ids.len() as u64, "group"))
             };
@@ -611,8 +618,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::ForgetGo => {
             let Some(id) = app.subjects.forget.take() else { return Task::none() };
-            let name = label(&app.subjects, id);
-            app.search.link.forget(id);
+            let name = label(&app.subjects, &id);
+            app.search.link.forget(&id);
             let t = to_overview(app);
             let s = app.show_status_action(format!("Forgot {name}: the name and the photos you confirmed. Its faces went back to the groups to name."), "Undo", m(Msg::Undo));
             Task::batch([t, s])
@@ -623,11 +630,11 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
 }
 
 fn toggle_pick(s: &mut Subjects, id: GroupId) {
-    match s.picked.iter().position(|&x| x == id) {
+    match s.picked.iter().position(|x| *x == id) {
         Some(i) => {
             s.picked.remove(i);
         }
-        None => s.picked.push(id),
+        None => s.picked.push(id.clone()),
     }
     s.focus = Some(id);
 }
@@ -643,7 +650,7 @@ pub fn select_mode(app: &mut App) {
     s.select_mode = !s.select_mode;
     if !s.select_mode {
         s.picked.clear();
-    } else if let Some(f) = s.focus.filter(|f| !s.picked.contains(f)) {
+    } else if let Some(f) = s.focus.clone().filter(|f| !s.picked.contains(f)) {
         s.picked.push(f);
     }
 }
@@ -658,28 +665,26 @@ pub fn undo(app: &mut App) -> Task<Message> {
 }
 
 /// A group's name for a sentence: "Person A", or "the unnamed group".
-pub fn label(s: &Subjects, id: GroupId) -> String {
+pub fn label(s: &Subjects, id: &GroupId) -> String {
     s.group(id).and_then(|g| g.name.clone()).unwrap_or_else(|| "the unnamed group".into())
 }
 
-/// The face model faces are found with: the one chosen, else the one
-/// recommended.
-pub fn face_model(app: &App) -> FaceModel {
-    app.subjects.faces.model.unwrap_or_else(people::recommended)
+/// The face model faces are found with: the one in use, else the one
+/// chosen in Preferences (the recommended one until then).
+pub fn face_model(app: &App) -> ModelId {
+    app.search.status.faces.model.unwrap_or_else(|| app.settings.face_model())
 }
 
 /// Find faces in the library indexed before faces were looked for: when
-/// the model is in place it runs now (the page stated the cost); else the
-/// download dialog asks first, with only the faces' rows.
+/// the models are in place it runs now (the page stated the cost); else
+/// the download dialog asks first, with only the faces' rows.
 fn find_faces(app: &mut App) -> Task<Message> {
-    let f = &app.subjects.faces;
-    if !f.model_installed {
-        let model = app.subjects.faces.model;
-        app.search.dialog = Some(super::search::Dialog { faces_only: true, faces: true, ..super::search::Dialog::new(super::search::Stage::Ask, &app.settings, model) });
+    if !app.search.status.faces.installed {
+        let d = super::search::Dialog { faces_only: true, faces: true, ..super::search::Dialog::new(super::search::Stage::Ask, &app.settings) };
+        app.search.dialog = Some(d);
         return Task::none();
     }
-    let model = face_model(app);
-    app.search.link.find_faces(model);
+    app.search.link.find_faces();
     app.show_status("Finding faces in the library. Groups appear as they are found, newest days first.", 6000)
 }
 
@@ -731,8 +736,8 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
         return Task::none();
     }
     let s = &app.subjects;
-    let order = arrange(&s.all, s.tab, app.settings.smallest_group()).order(s.small_open, s.hidden_open);
-    let at = s.focus.and_then(|f| order.iter().position(|&x| x == f));
+    let order = arrange(&s.all, s.tab, app.settings.people_min_photos()).order(s.small_open, s.hidden_open);
+    let at = s.focus.as_ref().and_then(|f| order.iter().position(|x| x == f));
     match key {
         Key::Named(dir @ (Named::ArrowLeft | Named::ArrowRight)) => {
             let next = match (at, *dir == Named::ArrowRight) {
@@ -740,25 +745,25 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
                 (Some(i), true) => (i + 1).min(order.len().saturating_sub(1)),
                 (Some(i), false) => i.saturating_sub(1),
             };
-            if let Some(&id) = order.get(next) {
+            if let Some(id) = order.get(next) {
                 let s = &mut app.subjects;
-                s.focus = Some(id);
+                s.focus = Some(id.clone());
                 if !s.select_mode {
-                    s.picked = vec![id];
+                    s.picked = vec![id.clone()];
                 }
             }
             Task::none()
         }
-        Key::Named(Named::Enter) => match s.focus {
-            Some(id) => person::open(app, id, false),
+        Key::Named(Named::Enter) => match s.focus.clone() {
+            Some(id) => person::open(app, &id, false),
             None => Task::none(),
         },
-        Key::Named(Named::F2) => match s.focus {
-            Some(id) => person::open(app, id, true),
+        Key::Named(Named::F2) => match s.focus.clone() {
+            Some(id) => person::open(app, &id, true),
             None => Task::none(),
         },
         Key::Named(Named::Space) if s.select_mode => {
-            if let Some(id) = s.focus {
+            if let Some(id) = s.focus.clone() {
                 toggle_pick(&mut app.subjects, id);
             }
             Task::none()
@@ -786,7 +791,7 @@ pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
     if let Some(mg) = &s.merge {
         return Some(merge_dialog(app, mg));
     }
-    if let Some(id) = s.forget {
+    if let Some(id) = &s.forget {
         return Some(forget_dialog(app, id));
     }
     person::overlay(app)
@@ -819,7 +824,7 @@ fn tabs(app: &App) -> Element<'_, Message> {
             .on_press(m(Msg::Tab(k)))
             .into()
     };
-    kit::segmented(Kind::ALL.iter().map(|&k| seg(k)).collect())
+    kit::segmented(KINDS.iter().map(|&k| seg(k)).collect())
 }
 
 fn header(app: &App) -> Element<'_, Message> {
@@ -827,7 +832,7 @@ fn header(app: &App) -> Element<'_, Message> {
     let kind = s.tab;
     let caption = match kind {
         Kind::Person => {
-            let a = arrange(&s.all, kind, app.settings.smallest_group());
+            let a = arrange(&s.all, kind, app.settings.people_min_photos());
             if a.named.is_empty() && !a.to_name.is_empty() {
                 "Faces were found while indexing. Name the people you want to find.".to_string()
             } else if a.named.is_empty() && a.to_name.is_empty() {
@@ -879,11 +884,10 @@ pub enum State {
 /// The body of `kind`'s tab.  Each kind's step answers for itself; until
 /// one is built its tab says it comes later.
 pub fn state(app: &App, kind: Kind) -> State {
-    let s = &app.subjects;
     if kind != Kind::Person {
         return State::Later;
     }
-    let f = &s.faces;
+    let f = &app.search.status.faces;
     if app.library.is_none() {
         return State::NoLibrary;
     }
@@ -900,10 +904,10 @@ pub fn state(app: &App, kind: Kind) -> State {
     if st.indexed_shots == 0 && st.pass.is_none() {
         return State::NotIndexed;
     }
-    if f.pass.is_some() || st.pass.is_some() {
+    if st.pass.is_some() && st.stopped.is_none() {
         return State::Looking;
     }
-    if f.catch_up_wanted(st.indexed_shots) {
+    if f.looked_at < st.indexed_shots {
         return State::CatchUp;
     }
     State::NoFaces
@@ -1006,12 +1010,13 @@ fn fact<'a>(k: &'a str, v: String, sub: Option<String>) -> Element<'a, Message> 
 /// costs, and the way to start it.  Nothing runs until asked.
 fn catch_up(app: &App) -> Element<'_, Message> {
     let st = &app.search.status;
-    let shots = st.indexed_shots;
+    // The photos not looked at yet: all of them the first time.
+    let shots = st.indexed_shots.saturating_sub(st.faces.looked_at);
     let device = st.device.chosen;
     let model = face_model(app);
-    let info = people::face_model(model);
+    let info = crate::ml::models::info(model);
     let on_share = app.library.as_deref().and_then(|l| super::network::share_of(app, l)).is_some();
-    let takes = estimate::describe_seconds(people::catch_up_seconds(shots, device, model));
+    let takes = estimate::describe_seconds(estimate::face_catch_up_seconds(shots, device, model));
     let mut facts = vec![
         fact("Reads", format!("Each photo's preview again: {} from the library{}", estimate::describe_bytes(estimate::bytes_read(shots)), if on_share { " on the share" } else { "" }), None),
         fact(
@@ -1020,10 +1025,10 @@ fn catch_up(app: &App) -> Element<'_, Message> {
             Some("You can keep culling, and stop it from the status bar. Groups appear as they are found, newest days first.".into()),
         ),
     ];
-    if !app.subjects.faces.model_installed {
+    if !st.faces.installed {
         facts.push(fact(
             "Downloads",
-            format!("A face model, once: {} ({}, recommended), or another you pick", super::search_setup::size(info.download), info.name),
+            format!("A face model, once: {} ({}), or another you pick", super::search_setup::size(crate::ml::models::bytes_for(&crate::ml::models::face_set(model))), info.name),
             Some("The next step lists each model with its size and licence.".into()),
         ));
     }
@@ -1035,11 +1040,17 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         }
         group = group.push(f);
     }
-    let go = if app.subjects.faces.model_installed { "Find faces" } else { "Find faces…" };
-    let action = row![kit::btn(go, style::primary(), Some(m(Msg::FindFaces))), kit::caption(format!("{} indexed", util::plural(shots as u64, "photo")))].spacing(t::S3).align_y(Alignment::Center);
+    let go = if st.faces.installed { "Find faces" } else { "Find faces…" };
+    let some = st.faces.looked_at > 0;
+    let action = row![kit::btn(go, style::primary(), Some(m(Msg::FindFaces))), kit::caption(format!("{} to look at", util::plural(shots as u64, "photo")))].spacing(t::S3).align_y(Alignment::Center);
+    let about = if some {
+        "Some of the library was indexed while finding faces was off, or before it existed. Finding them there too groups those faces with the rest. Nothing is named for you."
+    } else {
+        "The library was indexed before faces were looked for. Finding them groups the faces alike, so you can name the people you want to find and search for them. Nothing is named for you."
+    };
     let col = column![
         row![icons::view(Glyph::Person, 26.0, t::INK), text("Find the people in your photos").size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
-        text("The library was indexed before faces were looked for. Finding them groups the faces alike, so you can name the people you want to find and search for them. Nothing is named for you.").size(t::T_BODY).color(t::INK2),
+        text(about).size(t::T_BODY).color(t::INK2),
         container(group).width(Length::Fill).style(style::group()),
         text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ Search.").size(t::T_SMALL).color(t::INK3),
         action,
@@ -1061,17 +1072,17 @@ fn looking(app: &App) -> Element<'_, Message> {
 
 /// While faces are being looked for: how far, on the photos' grey.
 fn progress_strip(app: &App) -> Option<Element<'_, Message>> {
-    let f = &app.subjects.faces;
     let st = &app.search.status;
-    let (line, done, total) = match (f.pass, &st.pass) {
-        (Some(p), _) => {
-            let what = match p.kind {
-                FacesPassKind::CatchUp => "Finding faces",
-                FacesPassKind::NewModel => "Recognising the faces again with the new model",
-            };
+    let f = &st.faces;
+    if st.stopped.is_some() {
+        return None;
+    }
+    let (line, done, total) = match &st.pass {
+        Some(p) if p.kind == PassKind::Faces => {
+            let what = if f.unrecognised > 0 { "Recognising the faces again with the new model" } else { "Finding faces" };
             (format!("{what}: {} of {}", util::thousands(p.done as u64), util::plural(p.total as u64, "photo")), p.done, p.total)
         }
-        (None, Some(p)) if f.on && p.kind != crate::search::PassKind::NewExports => {
+        Some(p) if f.on && p.kind != PassKind::NewExports => {
             (format!("Indexing finds faces as it goes: {} of {} so far", util::thousands(p.done as u64), util::plural(p.total as u64, "photo")), p.done, p.total)
         }
         _ => return None,
@@ -1115,8 +1126,8 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let crop = tile::crop(handle, size, shape(g.kind));
     let name = if small && !g.hidden { None } else { g.name.clone().or_else(|| g.hidden.then(|| "Unnamed".to_string())) };
     let count = if g.hidden { "Show".to_string() } else { util::plural(g.photos as u64, "photo") };
-    let on = if g.hidden { m(Msg::Unhide(g.id)) } else { m(Msg::Tile(g.id)) };
-    let picked = s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus == Some(g.id) && !g.hidden && app.subjects.select_mode);
+    let on = if g.hidden { m(Msg::Unhide(g.id.clone())) } else { m(Msg::Tile(g.id.clone())) };
+    let picked = s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
     let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge: g.hidden.then_some(Glyph::Hide), on }.into();
     let hint = if g.hidden {
         "Show it on the tab again".to_string()
@@ -1162,7 +1173,7 @@ fn disclose<'a>(label: &'a str, n: usize, open: bool, msg: Message) -> Element<'
 
 fn groups(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
-    let a = arrange(&s.all, s.tab, app.settings.smallest_group());
+    let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
     let mut col = column![].padding(Padding { top: t::S1, bottom: t::S5, left: 0.0, right: 0.0 });
     if let Some(p) = progress_strip(app) {
         col = col.push(p);
@@ -1181,7 +1192,7 @@ fn groups(app: &App) -> Element<'_, Message> {
     if !a.small.is_empty() {
         folds = folds.push(tip(
             disclose("Smaller groups", a.small.len(), s.small_open, m(Msg::Small(!s.small_open))),
-            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ Search sets the size.", app.settings.smallest_group()),
+            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ Search sets the size.", app.settings.people_min_photos()),
             true,
         ));
         any = true;
@@ -1225,9 +1236,9 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
     let s = &app.subjects;
     let one = s.tab.one();
     let mut list = column![].spacing(2).padding(4);
-    for &id in &mg.groups {
+    for id in &mg.groups {
         let Some(g) = s.group(id) else { continue };
-        let on = id == mg.keep;
+        let on = *id == mg.keep;
         let dot = container(if on { Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: iced::Border { radius: 4.0.into(), ..iced::Border::default() }, ..Default::default() })) } else { Space::new().into() })
             .width(16)
             .height(16)
@@ -1253,10 +1264,10 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
                         ..button::Style::default()
                     }
                 })
-                .on_press(m(Msg::MergeKeep(id))),
+                .on_press(m(Msg::MergeKeep(id.clone()))),
         );
     }
-    let keep = s.group(mg.keep).and_then(|g| g.name.clone());
+    let keep = s.group(&mg.keep).and_then(|g| g.name.clone());
     let go = match &keep {
         Some(n) => format!("Merge into {n}"),
         None => "Merge".to_string(),
@@ -1273,7 +1284,7 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
     super::dialogs::backdrop(super::dialogs::frame_fit(content.into(), 500f32.min(app.window_size_width() - 48.0)))
 }
 
-fn forget_dialog(app: &App, id: GroupId) -> Element<'_, Message> {
+fn forget_dialog<'a>(app: &'a App, id: &GroupId) -> Element<'a, Message> {
     let s = &app.subjects;
     let name = label(s, id);
     let photos = s.group(id).map_or(0, |g| g.photos);
@@ -1310,11 +1321,11 @@ pub fn layered<'a>(layers: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 /// One line for the test driver.
 pub fn debug_state(app: &App) -> String {
     let s = &app.subjects;
-    let a = arrange(&s.all, s.tab, app.settings.smallest_group());
-    let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", g.id, g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
+    let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
+    let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", people::short(&g.id), g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
     let kinds: HashSet<Kind> = a.named.iter().chain(&a.to_name).chain(&a.small).chain(&a.hidden).map(|g| g.kind).collect();
     format!(
-        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} found={} named={} pass={:?}] crops={} ({} KB) {} {}",
+        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB) {} {}",
         app.view,
         s.page(),
         s.tab,
@@ -1323,20 +1334,21 @@ pub fn debug_state(app: &App) -> String {
         names(&a.to_name).into_iter().take(8).collect::<Vec<_>>(),
         a.small.len(),
         names(&a.hidden),
-        s.picked.iter().map(|g| g.to_string()).collect::<Vec<_>>(),
+        s.picked.iter().map(people::short).collect::<Vec<_>>(),
         s.select_mode,
-        s.focus.map(|g| g.to_string()),
+        s.focus.as_ref().map(people::short),
         s.small_open,
         s.hidden_open,
-        s.merge.as_ref().map(|mg| (mg.groups.iter().map(|g| g.to_string()).collect::<Vec<_>>(), mg.keep.to_string())),
-        s.forget.map(|g| g.to_string()),
-        s.faces.on,
-        s.faces.model,
-        s.faces.model_installed,
-        s.faces.looked_at,
-        s.faces.found,
-        s.faces.named,
-        s.faces.pass,
+        s.merge.as_ref().map(|mg| (mg.groups.iter().map(people::short).collect::<Vec<_>>(), people::short(&mg.keep))),
+        s.forget.as_ref().map(people::short),
+        app.search.status.faces.on,
+        app.search.status.faces.model,
+        app.search.status.faces.installed,
+        app.search.status.faces.looked_at,
+        app.search.status.faces.unrecognised,
+        app.search.status.faces.found,
+        app.search.status.faces.named,
+        app.search.status.pass,
         s.crops.len(),
         s.crops.bytes() / 1024,
         person::debug_state(app),
@@ -1382,6 +1394,7 @@ mod tests {
                 group(7, Kind::Person, None, 9, false),
             ],
             faces_found: 200,
+            undoable: None,
         }
     }
 
@@ -1389,7 +1402,7 @@ mod tests {
     fn a_tab_shows_one_kind_named_first_and_small_groups_folded_away() {
         let f = found();
         let a = arrange(&f, Kind::Person, 5);
-        let ids = |v: &[&Group]| v.iter().map(|g| g.id).collect::<Vec<_>>();
+        let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         assert_eq!(ids(&a.named), [GroupId::Cluster(1)], "a named person stays named however few photos");
         assert_eq!(ids(&a.to_name), [GroupId::Cluster(2), GroupId::Cluster(7)], "largest first");
         assert_eq!(ids(&a.small), [GroupId::Cluster(3)], "under the smallest size: folded away");
@@ -1414,15 +1427,16 @@ mod tests {
         let named: Vec<&Group> = f.named(Kind::Person).filter(|g| !g.hidden).collect();
         assert_eq!(named.len(), 1);
         assert!(named.iter().all(|g| g.kind == Kind::Person && g.name.is_some()));
-        assert!(f.by_name(Kind::Person, "person a").is_some());
-        assert!(f.by_name(Kind::Person, "Fursuit 1").is_none(), "a fursuit's name is never a person's");
+        assert!(people::by_name(&f, Kind::Person, "person a").is_some());
+        assert!(people::by_name(&f, Kind::Person, "Fursuit 1").is_none(), "a fursuit's name is never a person's");
     }
 
     #[test]
     fn crops_are_kept_by_bytes_least_used_first_out() {
         let mut c = Crops::new(3 * 64 * 64 * 4);
-        let faces: Vec<FaceRef> = (0..5).map(|i| face(i).face).collect();
-        let want: Vec<_> = faces.iter().map(|f| (*f, 64, Framing::Face)).collect();
+        let all: Vec<Face> = (0..5).map(face).collect();
+        let faces: Vec<FaceRef> = all.iter().map(|f| f.face).collect();
+        let want: Vec<_> = all.iter().map(|f| (f.clone(), 64, Framing::Face)).collect();
         let missing = c.missing(want.clone());
         assert_eq!(missing.len(), 5);
         assert!(c.missing(want.clone()).is_empty(), "asked once while on their way");
@@ -1433,8 +1447,8 @@ mod tests {
         assert!(c.get(&faces[4], 64, Framing::Face).is_some());
         assert!(c.get(&faces[0], 64, Framing::Face).is_none());
         // A photo that couldn't be read is remembered, not asked again.
-        let gone = face(9).face;
-        let k = c.missing([(gone, 64, Framing::Face)]);
+        let gone = face(9);
+        let k = c.missing([(gone.clone(), 64, Framing::Face)]);
         c.put(vec![(k[0].0, None)]);
         assert!(c.missing([(gone, 64, Framing::Face)]).is_empty());
         assert_eq!(bucket(100.0), 128);

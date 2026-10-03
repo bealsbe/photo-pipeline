@@ -2183,8 +2183,8 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal } => {
-                    let reply = search::Reply { hits, error, understood, fursuits, animal };
+                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects } => {
+                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects };
                     // A person's page asks with numbers of its own.
                     if seq >= subjects_person::SEQ_BASE {
                         tasks.push(subjects_person::on_results(self, seq, reply));
@@ -2193,8 +2193,11 @@ impl App {
                     }
                 }
                 BgEvent::SearchThings(things) => search::on_things(self, things),
+                BgEvent::Subjects(all) => tasks.push(subjects::on_subjects(self, all)),
+                BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
+                BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
+                BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
-                BgEvent::People(e) => tasks.push(subjects::on_event(self, e)),
             }
         }
         // The search pass steps back while thumbnails are wanted.

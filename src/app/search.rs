@@ -4,7 +4,12 @@
 //! - **One field.**  The query is the page's title.  While typing, the
 //!   list under it offers things search found (objects and scenes, never
 //!   people, fursuits or animals), months and years with photos, and
-//!   recent searches; its footer teaches `-word` and dates.  ↑ ↓ choose,
+//!   recent searches; its footer teaches `-word`, `@name` and dates.
+//!   After `@` it offers the people named (each kind under its own
+//!   heading; never an unnamed or hidden group): taken, a name becomes a
+//!   chip in the field, and the words beside it rank within that person's
+//!   photos (none: their photos, clearest first).  Backspace in an empty
+//!   field takes the last chip off.  ↑ ↓ choose,
 //!   Enter or Tab takes one (a thing or a date goes into the field, a
 //!   recent search runs), Enter alone searches what was typed and moves to
 //!   the results.  Esc closes the list and never leaves the page; the back
@@ -95,15 +100,15 @@ pub struct Dialog {
     /// *Find people's faces* is ticked (on unless turned off in
     /// Preferences, decision 9).
     pub faces: bool,
-    /// The face model picked (decision 10): the recommended one until the
-    /// user picks another.
-    pub face_model: super::people::FaceModel,
+    /// The face model picked (decision 10): the one in the settings (the
+    /// recommended one until the user picks another).
+    pub face_model: ModelId,
 }
 
 impl Dialog {
     /// The dialog at `stage`, finding faces as Preferences says.
-    pub fn new(stage: Stage, settings: &Settings, model: Option<super::people::FaceModel>) -> Dialog {
-        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: model.unwrap_or_else(super::people::recommended) }
+    pub fn new(stage: Stage, settings: &Settings) -> Dialog {
+        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: settings.face_model() }
     }
 }
 
@@ -141,8 +146,12 @@ pub struct Search {
     pub status: Status,
     pub downloads: Vec<Download>,
 
-    /// What is in the field.
+    /// What is in the field: the words, and before them the chips of the
+    /// people searched within (one kind or another, each a group).
     pub query: String,
+    pub chips: Vec<super::people::GroupId>,
+    /// The chips of the search shown, as it ran.
+    ran_chips: Vec<super::people::GroupId>,
     /// The completions list is open under the field.
     pub completions: bool,
     /// What it offers for the query (made on each keystroke, from memory).
@@ -160,9 +169,8 @@ pub struct Search {
     pub pending: Option<(u64, bool)>,
     /// The words of the results shown (or on their way).
     pub ran: Option<String>,
-    /// What was searched has nothing to look for (only a name, which
-    /// phase 2 can't search, or only words to leave out): no query ran,
-    /// and this says why.
+    /// What was searched has nothing to look for (only words to leave
+    /// out): no query ran, and this says why.
     pub no_words: Option<Parsed>,
     /// Why the last query couldn't run.
     pub error: Option<String>,
@@ -170,6 +178,8 @@ pub struct Search {
     pub pane: Pane,
     /// When the shown search last ran, and on how many indexed photos.
     last_run: (Instant, usize),
+    /// The words of the search shown, as sent (without the chips).
+    ran_words: String,
     /// Thumbnails pending, as last told to the engine.
     busy_sent: usize,
 
@@ -190,6 +200,8 @@ pub enum Msg {
     Take(usize),
     /// A search from the start page (a recent one, an example).
     Run(String),
+    /// A chip's ×.
+    RemoveChip(usize),
     CloseList,
     Back,
     OpenDay,
@@ -214,7 +226,7 @@ pub enum DialogMsg {
     /// *Find people's faces*, ticked or not.
     Faces,
     /// A face model picked.
-    FaceModel(super::people::FaceModel),
+    FaceModel(ModelId),
     Download,
     Cancel,
     Close,
@@ -227,13 +239,15 @@ pub enum DialogMsg {
 
 impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
-        let link = Link::new(bus, settings.search_device, settings.search_index_exports);
+        let link = Link::new(bus, settings.search_device, settings.search_index_exports, settings.find_faces, settings.face_model());
         let (status, things) = (link.status(), link.things());
         Search {
             link,
             status,
             downloads: Vec::new(),
             query: String::new(),
+            chips: Vec::new(),
+            ran_chips: Vec::new(),
             completions: false,
             offer: res::Offer::default(),
             hi: None,
@@ -247,6 +261,7 @@ impl Search {
             error: None,
             pane: Pane::new(OWNER_SEARCH, SEARCH_CACHE_BYTES),
             last_run: (Instant::now(), 0),
+            ran_words: String::new(),
             busy_sent: 0,
             dialog: None,
             banner_hidden: false,
@@ -345,15 +360,98 @@ pub fn open_day(app: &mut App) -> Task<Message> {
 
 // ── searching ───────────────────────────────────────────────────────────────
 
-/// Search for `words` and move to the results.
+/// The kinds whose names the field offers and understands: those whose
+/// step exists (people in this phase).
+pub const NAMED_KINDS: &[super::people::Kind] = &[super::people::Kind::Person];
+
+/// At most this many chips in the field.
+const MAX_CHIPS: usize = 3;
+
+/// `@`-names in `text` that name someone become chips: `@"Two Words"`, or
+/// `@` and as many of the words after it as make a name (the longest).
+/// Names that name nobody stay in the text (the engine narrows to nothing
+/// and the page says so).  Returns the groups and the text left.
+pub fn resolve_names(text: &str, names: &[res::Nameable]) -> (Vec<super::people::GroupId>, String) {
+    let tokens: Vec<&str> = text.split_whitespace().collect();
+    let find = |n: &str| names.iter().find(|x| x.name.eq_ignore_ascii_case(n.trim()));
+    let (mut ids, mut rest): (Vec<super::people::GroupId>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i];
+        let Some(after) = tok.strip_prefix('@') else {
+            rest.push(tok.to_string());
+            i += 1;
+            continue;
+        };
+        // Quoted: up to the closing quote.
+        if let Some(open) = after.strip_prefix('"') {
+            let mut words = vec![open.to_string()];
+            let mut j = i;
+            while !words.last().is_some_and(|w| w.ends_with('"')) && j + 1 < tokens.len() {
+                j += 1;
+                words.push(tokens[j].to_string());
+            }
+            let name = words.join(" ");
+            match find(name.trim_end_matches('"')) {
+                Some(n) => ids.push(n.id.clone()),
+                None => rest.push(tokens[i..=j].join(" ")),
+            }
+            i = j + 1;
+            continue;
+        }
+        // The longest run of words that is someone's name.
+        let mut taken = None;
+        for k in (1..=4.min(tokens.len() - i)).rev() {
+            let candidate = std::iter::once(after).chain(tokens[i + 1..i + k].iter().copied()).collect::<Vec<_>>().join(" ");
+            if let Some(n) = find(&candidate) {
+                taken = Some((n.id.clone(), k));
+                break;
+            }
+        }
+        match taken {
+            Some((id, k)) => {
+                ids.push(id);
+                i += k;
+            }
+            None => {
+                rest.push(tok.to_string());
+                i += 1;
+            }
+        }
+    }
+    (ids, rest.join(" "))
+}
+
+/// A chip as a query writes it, for the recent searches: `@Sam`,
+/// `@"Person A"`.
+fn chip_text(name: &str) -> String {
+    if name.contains(char::is_whitespace) { format!("@\"{name}\"") } else { format!("@{name}") }
+}
+
+/// The people the field can offer and understand now.
+fn nameables(app: &App) -> Vec<res::Nameable> {
+    res::nameable(&app.subjects.all, NAMED_KINDS)
+}
+
+/// Search for `words` (and the chips in the field) and move to the
+/// results.
 fn run(app: &mut App, words: String) -> Task<Message> {
-    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Names written out (a recent search's, or one typed whole) become
+    // chips.
+    let names = nameables(app);
+    let (found, words) = resolve_names(&words, &names);
     let s = &mut app.search;
+    for id in found {
+        if !s.chips.contains(&id) && s.chips.len() < MAX_CHIPS {
+            s.chips.push(id);
+        }
+    }
+    let words = words.split_whitespace().collect::<Vec<_>>().join(" ");
     s.query = words.clone();
     s.completions = false;
     s.hi = None;
     s.no_words = None;
-    if words.is_empty() {
+    if words.is_empty() && s.chips.is_empty() {
         s.ran = None;
         s.error = None;
         s.pending = None;
@@ -363,11 +461,11 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     if s.status.indexed_shots == 0 {
         return app.show_status("Nothing is indexed yet, so there is nothing to search.", 5000);
     }
-    // Nothing to look for (only a name, which phase 2 can't search, or only
-    // words to leave out): nothing runs, and the page says why.  Dates
-    // alone do run: every photo from them, in the order taken.
+    // Nothing to look for (only words to leave out): nothing runs, and the
+    // page says why.  Dates alone run (every photo from them, in the order
+    // taken), and so do names (their photos, clearest first).
     let parsed = crate::search::parse(&words);
-    if parsed.is_empty() && parsed.dates.is_none() {
+    if parsed.is_empty() && parsed.dates.is_none() && parsed.names.is_empty() && s.chips.is_empty() {
         s.no_words = Some(parsed);
         s.ran = Some(words);
         s.error = None;
@@ -375,9 +473,13 @@ fn run(app: &mut App, words: String) -> Task<Message> {
         s.pane.clear();
         return unfocus_field();
     }
-    app.settings.remember_search(&words);
+    // As the recent searches keep it: the chips written out, then the words.
+    let chip_names: Vec<String> = s.chips.iter().filter_map(|id| app.subjects.group(id)?.name.clone()).map(|n| chip_text(&n)).collect();
+    let full = chip_names.into_iter().chain(std::iter::once(words.clone()).filter(|w| !w.is_empty())).collect::<Vec<_>>().join(" ");
+    app.settings.remember_search(&full);
     app.settings.save_in_background();
-    app.search.ran = Some(words.clone());
+    app.search.ran = Some(full);
+    app.search.ran_chips = app.search.chips.clone();
     query(app, words, false);
     unfocus_field()
 }
@@ -390,12 +492,14 @@ fn query(app: &mut App, words: String, refresh: bool) {
     s.seq += 1;
     s.pending = Some((s.seq, refresh));
     s.last_run = (Instant::now(), s.status.indexed_shots);
-    s.link.query(s.seq, &words, closeness);
+    s.ran_words = words.clone();
+    s.link.query_in(s.seq, &words, closeness, &s.ran_chips);
 }
 
 /// Run the search shown again (the closeness changed, more is indexed).
 pub fn rerun(app: &mut App) {
-    if let Some(w) = app.search.ran.clone().filter(|_| app.search.pane.results.is_some()) {
+    if app.search.ran.is_some() && app.search.pane.results.is_some() {
+        let w = app.search.ran_words.clone();
         query(app, w, true);
     }
 }
@@ -408,6 +512,9 @@ pub struct Reply {
     pub understood: Arc<Parsed>,
     pub fursuits: Arc<Vec<Hit>>,
     pub animal: Option<String>,
+    /// The groups the search was narrowed to: its chips, and the `@name`s
+    /// that named someone (a name that named nobody is missing).
+    pub subjects: Arc<Vec<super::people::GroupId>>,
 }
 
 /// A query's answer: build its records on a worker.
@@ -427,7 +534,16 @@ pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
         return Task::done(m(Msg::Built(seq, None)));
     };
     let words = app.search.ran.clone().unwrap_or_default();
-    let work = move || Arc::new(build(seq, words, &reply, &index));
+    // Whom the search was narrowed to, by name, and the names that named
+    // nobody (the engine left them out of `subjects`).
+    let who: Vec<String> = reply.subjects.iter().filter_map(|id| app.subjects.group(id)?.name.clone()).collect();
+    let unknown: Vec<String> = reply.understood.names.iter().filter(|n| !who.iter().any(|w| w.eq_ignore_ascii_case(n))).cloned().collect();
+    let work = move || {
+        let mut r = build(seq, words, &reply, &index);
+        r.who = who;
+        r.unknown = unknown;
+        Arc::new(r)
+    };
     Task::perform(super::preferences::on_worker("search-results", work), move |r| m(Msg::Built(seq, r)))
 }
 
@@ -462,8 +578,8 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
+    let mut tasks = vec![super::subjects::on_status(app, &old)];
     let st = &app.search.status;
-    let mut tasks = Vec::new();
     if st.stopped.is_some() && old.stopped != st.stopped {
         app.search.banner_hidden = false;
     }
@@ -507,7 +623,7 @@ pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: 
     }
     // A failure shows in the dialog, reopened if it was closed.
     if failed {
-        s.dialog = Some(Dialog { stage: Stage::Progress, ..Dialog::new(Stage::Progress, &app.settings, app.subjects.faces.model) });
+        s.dialog = Some(Dialog::new(Stage::Progress, &app.settings));
     }
     Task::none()
 }
@@ -529,10 +645,31 @@ pub fn on_things(app: &mut App, things: Arc<Vec<Thing>>) {
 fn refresh_offer(app: &mut App) {
     let s = &mut app.search;
     let days = app.calendar.index.as_ref().map(|ix| ix.days.keys());
-    s.offer = res::offer(&s.query, &s.things, days.into_iter().flatten(), &app.settings.search_recent);
+    let names = res::nameable(&app.subjects.all, NAMED_KINDS);
+    s.offer = res::offer(&s.query, &s.things, days.into_iter().flatten(), &app.settings.search_recent, &names);
     if s.hi.is_some_and(|h| h >= s.offer.picks.len()) {
         s.hi = None;
     }
+}
+
+/// The crops of the names offered and of the chips (drawn on workers).
+fn name_crops(app: &mut App) -> Task<Message> {
+    let px = super::subjects::px(app, 22.0);
+    let s = &app.search;
+    let mut want = Vec::new();
+    for p in &s.offer.picks {
+        if let Pick::Name { id, .. } = p {
+            if let Some(g) = app.subjects.group(id) {
+                want.push((g.cover.clone(), px, super::people::Framing::Face));
+            }
+        }
+    }
+    for id in &s.chips {
+        if let Some(g) = app.subjects.group(id) {
+            want.push((g.cover.clone(), px, super::people::Framing::Face));
+        }
+    }
+    super::subjects::fetch(app, want)
 }
 
 /// The library was read again: the engine looks for new photos.
@@ -557,11 +694,22 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Input(text) => {
             let s = &mut app.search;
+            // Backspace in an empty field: the last chip goes.
+            if text.is_empty() && s.query.is_empty() {
+                s.chips.pop();
+            }
             s.query = text;
             s.completions = true;
             s.hi = None;
             refresh_offer(app);
-            Task::none()
+            name_crops(app)
+        }
+        Msg::RemoveChip(i) => {
+            let s = &mut app.search;
+            if i < s.chips.len() {
+                s.chips.remove(i);
+            }
+            iced::widget::operation::focus::<Message>(FIELD)
         }
         Msg::Submit => {
             let s = &app.search;
@@ -576,6 +724,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Take(i) => take(app, i),
         Msg::Run(words) => run(app, words),
         Msg::Clear => {
+            app.search.chips.clear();
             let t = run(app, String::new());
             Task::batch([t, focus_field()])
         }
@@ -589,12 +738,12 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Grid(ev) => on_grid(app, ev),
         Msg::Built(seq, r) => on_built(app, seq, r),
         Msg::IndexLibrary => {
-            app.search.dialog = Some(Dialog::new(Stage::Ask, &app.settings, app.subjects.faces.model));
+            app.search.dialog = Some(Dialog::new(Stage::Ask, &app.settings));
             Task::none()
         }
         Msg::IndexRest => {
-            let faces = app.settings.find_faces.then(|| super::subjects::face_model(app));
-            app.search.link.start_first_index(&search_models(), faces);
+            let faces = app.settings.find_faces.then(|| app.settings.face_model());
+            app.search.link.start_first_index(&crate::ml::models::models_for(faces));
             app.show_status("Indexing the rest of the library.", 5000)
         }
         Msg::Dialog(d) => super::search_setup::dialog_update(app, d),
@@ -644,9 +793,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
 fn take(app: &mut App, i: usize) -> Task<Message> {
     let Some(pick) = app.search.offer.picks.get(i).cloned() else { return Task::none() };
     if let Pick::Recent(words) = pick {
+        app.search.chips.clear();
         return run(app, words);
     }
     let s = &mut app.search;
+    if let Pick::Name { id, .. } = &pick {
+        if !s.chips.contains(id) && s.chips.len() < MAX_CHIPS {
+            s.chips.push(id.clone());
+        }
+    }
     s.query = res::apply(&s.query, &pick);
     s.completions = true;
     s.hi = None;
@@ -920,16 +1075,18 @@ pub fn long_date(d: NaiveDate) -> String {
 fn field(app: &App) -> Element<'_, Message> {
     let s = &app.search;
     let w = field_width(app);
-    let input = text_input("Search the library", &s.query)
+    let (chips, chips_w) = chips_row(app);
+    let placeholder = if s.chips.is_empty() { "Search the library" } else { "Add words to narrow it" };
+    let input = text_input(placeholder, &s.query)
         .id(FIELD)
         .on_input(|v| m(Msg::Input(v)))
         .on_submit(m(Msg::Submit))
         .size(t::T_TITLE)
         .font(paint::MEDIUM)
-        .padding(Padding { top: 7.0, bottom: 7.0, left: 36.0, right: 40.0 })
+        .padding(Padding { top: 7.0, bottom: 7.0, left: 36.0 + chips_w, right: 40.0 })
         .width(w)
         .style(field_style);
-    let end: Element<'_, Message> = if s.query.is_empty() {
+    let end: Element<'_, Message> = if s.query.is_empty() && s.chips.is_empty() {
         container(text("Ctrl+F").size(11).font(paint::MEDIUM).color(t::INK3))
             .padding(Padding::from([0.0, 5.0]))
             .style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, 4.0), ..Default::default() })
@@ -943,12 +1100,34 @@ fn field(app: &App) -> Element<'_, Message> {
             .on_press(m(Msg::Clear));
         tip(x, "Clear the search", true)
     };
-    let over = row![icons::view(Glyph::Search, 18.0, t::INK3), Space::new().width(Length::Fill), end]
+    let over = row![icons::view(Glyph::Search, 18.0, t::INK3), Space::new().width(7), chips, Space::new().width(Length::Fill), end]
         .align_y(Alignment::Center)
         .padding(Padding { left: 11.0, right: 6.0, top: 0.0, bottom: 0.0 })
         .width(w)
         .height(FIELD_H);
     stack![container(input).height(FIELD_H).center_y(FIELD_H), over].into()
+}
+
+/// The chips in the field, each a person's crop and name with ×, and the
+/// width they take (the words start after them).
+fn chips_row(app: &App) -> (Element<'_, Message>, f32) {
+    let s = &app.search;
+    let mut r = row![].spacing(4).align_y(Alignment::Center);
+    let mut w = 0.0;
+    for (i, id) in s.chips.iter().enumerate() {
+        let Some(g) = app.subjects.group(id) else { continue };
+        let label = format!("@{}", g.name.clone().unwrap_or_default());
+        let avatar = crate::ui::subject_tile::crop(app.subjects.crops.get(&g.cover.face, super::subjects::px(app, 22.0), super::people::Framing::Face), 18.0, super::subjects::shape(g.kind));
+        let x = button(container(icons::view(Glyph::Close, 11.0, t::INK3)).center(Length::Fill)).width(18).height(18).padding(0).style(style::ghost().radius(9.0).style()).on_press(m(Msg::RemoveChip(i)));
+        let chip = container(row![avatar, text(label.clone()).size(t::T_BODY).font(paint::MEDIUM).color(t::INK), tip(x, "Take this name out", true)].spacing(6).align_y(Alignment::Center))
+            .padding(Padding { left: 3.0, right: 3.0, top: 0.0, bottom: 0.0 })
+            .height(24)
+            .center_y(24)
+            .style(|_| container::Style { background: Some(Background::Color(t::RAISED)), border: style::border(t::LINE_HI, 1.0, 12.0), ..Default::default() });
+        r = r.push(chip);
+        w += 3.0 + 18.0 + 6.0 + paint::text_width(&label, t::T_BODY, paint::MEDIUM).ceil() + 6.0 + 18.0 + 3.0 + 2.0 + 4.0;
+    }
+    (r.into(), if w > 0.0 { w + 4.0 } else { 0.0 })
 }
 
 pub(super) fn field_style(_t: &Theme, status: text_input::Status) -> text_input::Style {
@@ -982,8 +1161,13 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
     let mut list = column![].spacing(2);
     let typed = s.query.trim();
     let quiet = |line: String| container(text(line).size(t::T_SMALL).color(t::INK3)).padding(Padding::from([t::S2, 10.0]));
-    if offer.names_later {
-        list = list.push(quiet("Searching by name comes later. For now, search by what a photo shows.".into()));
+    if offer.naming && offer.picks.is_empty() {
+        let line = if app.subjects.all.named(super::people::Kind::Person).next().is_none() {
+            "No one is named yet. Name people on the People tab (Ctrl+4), then find them here.".to_string()
+        } else {
+            "No one by that name yet".to_string()
+        };
+        list = list.push(quiet(line));
     } else if offer.picks.is_empty() {
         let line = if typed.is_empty() { "Type what you're looking for, then press Enter.".to_string() } else { format!("Press Enter to search for “{typed}”") };
         list = list.push(quiet(line));
@@ -995,7 +1179,10 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
             let top = if i == 0 { t::S2 } else { t::S3 };
             list = list.push(container(kit::heading(group)).padding(Padding { top, bottom: 3.0, left: 10.0, right: 10.0 }));
         }
-        list = list.push(completion_row(pick, i, s.hi == Some(i), &offer.stem, typed));
+        list = list.push(completion_row(app, pick, i, s.hi == Some(i), &offer.stem, typed));
+    }
+    if offer.naming {
+        list = list.push(quiet("Fursuits and pets come later.".into()));
     }
     list = list.push(container(kit::hairline()).padding(Padding { top: t::S1, ..Padding::ZERO }));
     list = list.push(syntax_footer());
@@ -1011,8 +1198,15 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
 /// One completion: its glyph, its words with what is typed set heavier,
 /// and its count.  `stem` is the word being typed, `typed` the whole field
 /// (what a recent search matched).
-fn completion_row<'a>(pick: &Pick, i: usize, hot: bool, stem: &str, typed: &str) -> Element<'a, Message> {
+fn completion_row<'a>(app: &'a App, pick: &Pick, i: usize, hot: bool, stem: &str, typed: &str) -> Element<'a, Message> {
     let (glyph, words, count, mark): (Glyph, String, String, String) = match pick {
+        Pick::Name { id, kind, name, photos } => {
+            // A name: its crop in its kind's shape, then the name.
+            let g = app.subjects.group(id);
+            let avatar = crate::ui::subject_tile::crop(g.and_then(|g| app.subjects.crops.get(&g.cover.face, super::subjects::px(app, 22.0), super::people::Framing::Face)), 22.0, super::subjects::shape(*kind));
+            let line = row![avatar, container(highlighted(name.clone(), stem)).width(Length::Fill), text(util::plural(*photos as u64, "photo")).size(t::T_SMALL).color(t::INK3)].spacing(10).align_y(Alignment::Center);
+            return pick_button(line.into(), hot, i);
+        }
         Pick::Thing { word, photos, minus: false } => (Glyph::Search, word.clone(), util::plural(*photos as u64, "photo"), stem.to_string()),
         Pick::Thing { word, photos, minus: true } => (Glyph::LeaveOut, format!("-{word}"), util::plural(*photos as u64, "photo"), format!("-{stem}")),
         Pick::Date { label, days, .. } => (Glyph::Calendar, label.clone(), format!("{} with photos", util::plural(*days as u64, "day")), stem.to_string()),
@@ -1022,6 +1216,11 @@ fn completion_row<'a>(pick: &Pick, i: usize, hot: bool, stem: &str, typed: &str)
     if !count.is_empty() {
         line = line.push(text(count).size(t::T_SMALL).color(t::INK3));
     }
+    pick_button(line.into(), hot, i)
+}
+
+/// A completion's row as a button: the chosen one raised.
+fn pick_button<'a>(line: Element<'a, Message>, hot: bool, i: usize) -> Element<'a, Message> {
     button(line)
         .padding(Padding::from([5.0, 10.0]))
         .width(Length::Fill)
@@ -1041,7 +1240,7 @@ fn completion_row<'a>(pick: &Pick, i: usize, hot: bool, stem: &str, typed: &str)
 /// The list's footer: the syntax, taught by example.
 fn syntax_footer<'a>() -> Element<'a, Message> {
     let item = |cap: &'a str, about: &'a str| row![keycap(cap), text(about).size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center);
-    container(row![item("-word", "leaves a word out"), item("jun 2024", "only those dates")].spacing(t::S4).align_y(Alignment::Center))
+    container(row![item("-word", "leaves a word out"), item("@name", "someone you named"), item("jun 2024", "only those dates")].spacing(t::S4).align_y(Alignment::Center))
         .padding(Padding { top: t::S2, bottom: 6.0, left: 10.0, right: 10.0 })
         .into()
 }
@@ -1112,8 +1311,9 @@ fn partial_strip(app: &App) -> Element<'_, Message> {
 fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     let r = app.search.pane.results.as_ref()?;
     let u = &r.understood;
+    let unknown = &r.unknown;
     let (dates, leave) = res::understood_lines(u);
-    if dates.is_none() && leave.is_none() && u.names.is_empty() {
+    if dates.is_none() && leave.is_none() && r.unknown.is_empty() {
         return None;
     }
     let item = |g: Glyph, words: String| row![icons::view(g, 14.0, t::INK3), text(words).size(t::T_SMALL).color(t::INK2)].spacing(6).align_y(Alignment::Center);
@@ -1124,9 +1324,9 @@ fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     if let Some(l) = leave {
         r = r.push(item(Glyph::LeaveOut, l));
     }
-    if !u.names.is_empty() {
-        let names: Vec<String> = u.names.iter().map(|n| format!("@{n}")).collect();
-        r = r.push(item(Glyph::Info, format!("Searching by name comes later, so {} was left out", res::and_list(&names))));
+    if !unknown.is_empty() {
+        let names: Vec<String> = unknown.iter().map(|n| format!("@{n}")).collect();
+        r = r.push(item(Glyph::Info, format!("No one is named {}, so nothing matches", res::and_list(&names))));
     }
     Some(column![container(r.wrap().vertical_spacing(t::S1)).padding(Padding::from([t::S2, t::S3])).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into())
 }
@@ -1250,18 +1450,12 @@ fn no_results(app: &App) -> Element<'_, Message> {
     quiet_page(title, body)
 }
 
-/// Nothing to look for was typed, so nothing ran: a name, which search
-/// can't find yet, or only words to leave out.  The page says so, plainly.
+/// Nothing to look for was typed, so nothing ran: only words to leave
+/// out.  The page says so, plainly.
 fn no_words(app: &App) -> Element<'_, Message> {
     let s = &app.search;
     let typed = s.ran.clone().unwrap_or_default();
-    let (title, body) = match &s.no_words {
-        Some(p) if !p.names.is_empty() => (
-            "Searching by name comes later".to_string(),
-            format!("“{typed}” is a name. For now, search by what a photo shows, such as fireworks or a red car at night."),
-        ),
-        _ => ("Add what to look for".to_string(), format!("“{typed}” says what to leave out. Add a few words for what the photos show, such as fireworks {typed}.")),
-    };
+    let (title, body) = ("Add what to look for".to_string(), format!("“{typed}” says what to leave out. Add a few words for what the photos show, such as fireworks {typed}."));
     quiet_page(title, body)
 }
 
@@ -1423,10 +1617,12 @@ pub fn debug_offer(app: &App) -> String {
                 Pick::Thing { word, photos, minus } => format!("{mark}{}: {}{word} ({photos} photos)", p.group(), if *minus { "-" } else { "" }),
                 Pick::Date { label, text, days, replace } => format!("{mark}{}: {label} → {text:?} ({days} days, replaces {replace})", p.group()),
                 Pick::Recent(r) => format!("{mark}{}: {r}", p.group()),
+                Pick::Name { name, photos, .. } => format!("{mark}{}: @{name} ({photos} photos)", p.group()),
             }
         })
         .collect();
-    format!("open={} query={:?} stem={:?} names_later={} picks={picks:?}", s.completions, s.query, o.stem, o.names_later)
+    let chips: Vec<String> = s.chips.iter().filter_map(|id| app.subjects.group(id)?.name.clone()).collect();
+    format!("open={} query={:?} chips={chips:?} stem={:?} naming={} picks={picks:?}", s.completions, s.query, o.stem, o.naming)
 }
 
 /// The start page's Things, for the test driver, and what the engine sent

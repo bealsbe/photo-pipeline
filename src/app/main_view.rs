@@ -115,9 +115,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
             }
             // Looking for faces, or a person's photos on their way.
             View::Subjects => {
-                app.subjects.faces.pass.is_some()
-                    || app.subjects.person.as_ref().is_some_and(|p| p.pending.is_some() || p.pane.thumbs.pending() > 0)
-                    || (app.subjects.faces.on && app.search.status.pass.as_ref().is_some_and(|p| p.kind == crate::search::PassKind::FirstIndex))
+                let st = &app.search.status;
+                let faces_pass = st.stopped.is_none() && st.pass.as_ref().is_some_and(|p| p.kind == crate::search::PassKind::Faces || (st.faces.on && p.kind == crate::search::PassKind::FirstIndex));
+                faces_pass || app.subjects.person.as_ref().is_some_and(|p| p.pending.is_some() || p.pane.thumbs.pending() > 0)
             }
             _ => app.thumbs.pending() > 0 || app.quality.analysing(),
         };
