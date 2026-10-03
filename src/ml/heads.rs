@@ -45,8 +45,8 @@ pub const TOKENS: usize = 16;
 pub const SCORE_MIN: f32 = 0.3;
 /// Boxes overlapping more than this (intersection over union) are one head.
 pub const NMS_OVERLAP: f32 = 0.4;
-/// A head's box must be at least this share of the preview's edge (~100 px
-/// of a 1616-px preview): smaller crops don't tell suits apart.
+/// A head's box must be at least this share of the preview's long edge
+/// (~100 px of a 1616-px preview): smaller crops don't tell suits apart.
 pub const MIN_SIDE: f32 = 0.06;
 /// The crop around a head: a square, this much wider than the box on each
 /// side.
@@ -84,6 +84,8 @@ pub struct Head {
     pub sharpness: f32,
     /// DINOv2's unit vector, [`DIM`] long.
     pub vector: Vec<f32>,
+    /// A `worker::TILE_PX` square JPEG around the head, for the page.
+    pub tile: Vec<u8>,
 }
 
 /// A photo's heads, with the key the helper read for it.
@@ -189,14 +191,16 @@ impl HeadModels {
         for px in imgs {
             pixels.extend(owl_input(px));
         }
-        let ids: Vec<i64> = self.ids.clone();
-        let mask: Vec<i64> = self.mask.clone();
+        // The export takes one text row per image in the batch (HF's
+        // `[batch × queries, tokens]`): the same prompt, repeated.
+        let ids: Vec<i64> = self.ids.iter().copied().cycle().take(n * TOKENS).collect();
+        let mask: Vec<i64> = self.mask.iter().copied().cycle().take(n * TOKENS).collect();
         let names: Vec<String> = self.owl.inputs().iter().map(|i| i.name().to_string()).collect();
         let mut inputs: Vec<(String, ort::session::SessionInputValue<'_>)> = Vec::new();
         for name in &names {
             let v = match name.as_str() {
-                "input_ids" => Tensor::from_array((vec![1i64, TOKENS as i64], ids.clone()))?.into(),
-                "attention_mask" => Tensor::from_array((vec![1i64, TOKENS as i64], mask.clone()))?.into(),
+                "input_ids" => Tensor::from_array((vec![n as i64, TOKENS as i64], ids.clone()))?.into(),
+                "attention_mask" => Tensor::from_array((vec![n as i64, TOKENS as i64], mask.clone()))?.into(),
                 _ => Tensor::from_array((vec![n as i64, 3, OWL_INPUT as i64, OWL_INPUT as i64], std::mem::take(&mut pixels)))?.into(),
             };
             inputs.push((name.clone(), v));
@@ -283,7 +287,7 @@ impl HeadModels {
                     .filter_map(|d| {
                         let (crop, vector) = (ci.next()?, vi.next()?);
                         let size = (d.bbox[2] * px.width as f32).max(d.bbox[3] * px.height as f32).round() as u32;
-                        Some(Head { bbox: d.bbox, score: d.score, size, sharpness: sharpness(crop), vector })
+                        Some(Head { bbox: d.bbox, score: d.score, size, sharpness: sharpness(crop), vector, tile: super::worker::tile(px, &d.bbox) })
                     })
                     .collect()
             })
@@ -391,7 +395,10 @@ pub fn decode(scores: &[f32], boxes: &[f32], w: u32, h: u32) -> Vec<Det> {
         .filter(|d| d.bbox[2] > 0.0 && d.bbox[3] > 0.0)
         .collect();
     dets = nms(dets, NMS_OVERLAP);
-    dets.retain(|d| d.bbox[2].max(d.bbox[3]) >= MIN_SIDE);
+    // The size gate is in pixels of the long edge, whichever way the box
+    // lies (a fraction of the short edge is fewer pixels).
+    let floor = MIN_SIDE * side;
+    dets.retain(|d| (d.bbox[2] * w as f32).max(d.bbox[3] * h as f32) >= floor);
     dets
 }
 
@@ -635,6 +642,11 @@ mod tests {
         assert_eq!(out[0].bbox, [0.0, 0.0, 0.2, 0.2]);
         // Nothing above the floor: nothing.
         assert!(decode(&[0.29], &[0.5, 0.5, 0.5, 0.5], 1000, 1000).is_empty());
+        // The size gate counts pixels of the long edge: on 1600×1000, a box
+        // 7 % of the height tall (70 px, 4.4 % of 1600) is too small, one
+        // 7 % of the width wide (112 px) is not.
+        assert!(decode(&[0.9], &[0.5, 0.3, 0.02, 0.07 * 1000.0 / 1600.0], 1600, 1000).is_empty());
+        assert_eq!(decode(&[0.9], &[0.5, 0.3, 0.07, 0.02], 1600, 1000).len(), 1);
     }
 
     #[test]

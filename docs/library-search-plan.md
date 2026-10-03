@@ -1850,3 +1850,111 @@ date_completions}`.
   start ever feels slow with the full library, cache them by generation.
 - "Searching the photos indexed so far" during the first index already
   carries tags for the rows done.
+
+## As built — phase 4 (backend): fursuits
+
+### The evaluation (2026-10-03): pairwise "Same suit?"
+
+Phase 4 started, as planned, with the user's own labels.  Two earlier
+pages (groups to name; one head at a time with names) were dropped at the
+user's request — clusters that mixed two suits about evenly could not be
+named as one, and nothing here is trained on names — in favour of
+**pairwise answers**: two heads from two presses of the shutter, each
+shown as a tight crop and as the whole photo with the head boxed; Y same,
+N different, S skip, X "not one clean head", Z undo.  Pairs were drawn
+from the study's 892 head tracks (one head followed through one press;
+1 239 OWLv2 crops over two event days) in bands of DINOv2 cosine
+distance around the provisional cut-offs, half of them across the two
+days, never within a press or within two minutes on the same day, and a
+pair whose answer already followed from earlier answers (same is
+transitive; different carries across a same-group) was not asked.  The
+page lives outside the repository and keeps no names, dates or paths in
+tracked files.
+
+**258 pairs answered** (65 same, 193 different; 121 of them across the
+days), 10 heads left out as not one clean head, none skipped; with
+transitivity 673 pairs have a known answer.  34 suits were seen in two or
+more presses, the largest in 29; only 2 of the 34 on both days, so the
+cross-day evidence for *same* is thin (18 asked same-pairs).
+
+P(same | distance) per band, asked pairs only (unbiased: the bands were
+sampled evenly), with the figure counting implied pairs in brackets —
+those are lifted by the suits photographed many times:
+
+| Band | All | Same day | Cross-day |
+|---|---|---|---|
+| under 0.14 | 23/26 = 88 % [99 %] | 19/21 [99 %] | 4/5 [80 %] |
+| 0.14–0.17 | 24/52 = 46 % [79 %] | 13/26 [83 %] | 11/26 [73 %] |
+| 0.17–0.20 | 12/65 = 18 % [58 %] | 9/26 [58 %] | 3/39 [58 %] |
+| 0.20–0.23 | 5/65 = 8 % [34 %] | 5/39 [21 %] | 0/26 [48 %] |
+| 0.23–0.27 | 0/39 [5 %] | 0/14 | 0/25 |
+
+Cumulative, asked pairs only (precision = share same; recall over the 65
+asked same-pairs): under **0.14**: 23/26, recall 35 % (same day 40 %,
+cross-day 22 %); under **0.17**: 47/78 = 60 %, recall 72 % (same day
+32/47, cross-day 15/31); under **0.20**: 59/143 = 41 %, recall 91 %.
+With implied pairs: 0.14 → 98.7 % / 50 %; 0.17 → 91 % / 73 % (same day
+95 % / 87 %, cross-day 73 % / 36 %); 0.20 → 82 % / 91 % (cross-day 64 %).
+
+**Purity** of average-linkage clusters over the crops, judged on clusters
+holding two or more labelled presses with an answered pair: at 0.14, 3 of
+15 mixed (20 %); 0.17, 8 of 19 (42 %); 0.20, 14 of 28 (50 %); **0.25, 14
+of 25 (56 %)**, and 9 of the 11 judged among its 16 largest — the study's
+"7 of 16" was, if anything, kind.
+
+**Chosen (`search::heads::{STRICT_CUT, SUGGEST_CUT}`):** strict *Find
+more* at **0.14** (nearly always right; finds about a third of the
+matches, fewer across days); suggestions for the Y/N review ("may show
+this fursuit") up to **0.17**; nothing offered beyond it.  The study's
+provisional 0.20 is not used: between 0.17 and 0.20 only 12 of 65 pairs
+were the same suit.  Groups to name come from the strict cut, and still
+one judged group in five mixes suits, so *Check this group* stays on
+offer before naming.  Matching across days is weak at every cut-off: the
+same suit under different light is found about half the time at 0.17
+and rarely at 0.14; this is the number to revisit if the user wants more
+cross-day matches (a looser cut for the review only, never for *Find
+more*).
+
+### The head step (helper side)
+
+`ml::heads`: OWLv2 B/16 ensemble (Xenova's export of Google's weights)
+asked for "a fursuit head" over the preview fitted top-left in a 960
+square (grey padding, CLIP normalisation); boxes decoded from the padded
+square into the preview, kept at score ≥ 0.3, one per head at IoU 0.4,
+and at least 6 % of the long edge; a square crop with a 12 % margin
+(black beyond the edge, as the study's); DINOv2 base over the crop
+resized to 256 and centre-cut to 224, pooled as CLS and mean patch token
+(1 536, unit length); a sharpness measure for clarity; a 128-px tile.
+On the card both sessions are checked against the processor on fixed
+inputs (cosine 1.000000 measured, largest difference 5e-5); a failure is
+a card failure, never a move to the processor.  The helper takes
+`--heads`, answers `Request::FindHeads` with `Reply::Heads`, and
+`Embedder::find_heads` is image work under the same card rule as
+embedding.  Models pinned in the registry as `Owlv2` (614 MB + 2 MB
+tokenizer) and `Dinov2` (347 MB), role *Fursuits*.
+
+### The step's state (`search::heads`)
+
+The head cache beside the index, files readable by the user alone:
+`heads.bin` (detections per photo looked at, sealed blocks with a
+detector version), `headvecs-dinov2-base.bin` (ref + f16 vector, the
+model's weights digest in the header), `headtiles.bin`; nothing shared
+with the face cache.  A scan runner over `find_heads` with the pass's
+cancel, busy and card rules (`heads::start`, `heads::execute`).
+`Fursuits`: the gate (a photo is looked at when the index tags it
+*fursuit* and the cache hasn't seen it), the plan over the library's
+indexed shots newest day first, and decision 11's rule as code:
+`consider(jobs, why, device, asked)` starts on the card, and on the
+processor holds the jobs as `Step::Asking(Offer)` every time — first
+index, new exports, resume — until `answer(start)`; a skipped scan's
+photos are remembered and offered again from the tab as a catch-up; a
+catch-up the tab asked for (its cost already shown) starts.  A card
+failure ends the step `Failed`; `card_back` makes it idle again.  Costs:
+`estimate::head_catch_up_seconds` (0.12 s a photo on the card, 1.3 s on
+the processor, from the study; the helper's own numbers follow from the
+ignored `ml::heads` test on the real models).
+
+Kinds never mix: a head is a `FaceRef` of `Kind::Fursuit` subjects only;
+its vectors are 1 536 wide where faces are 512; its files, requests and
+replies are its own; the store ignores face files in the same folder
+(tested).
