@@ -14,14 +14,17 @@
 //! least [`MIN_FACE_PX`] on the full preview are recognised.
 //!
 //! The detector runs on a fixed square canvas ([`DET_SIZE`]): the preview
-//! is scaled to fit (about half size for a 1 616-px preview, which kept
-//! 29 of 30 faces in the study) and padded with black, so every photo has
-//! the same tensor shape and a chunk can be batched on the card.
+//! is scaled to fit (about two thirds of a 1 616-px preview) and padded
+//! with black, so every photo has the same tensor shape and a chunk can
+//! be batched on the card.  Measured on 200 of the study's previews
+//! (faces of score ≥ 0.9 and ≥ 40 px): a 640 canvas found 49, 832 55,
+//! **1 024 61**, 1 280 64 at twice the cost, and the full preview 59
+//! (large faces score lower); 1 024 is the knee.
 
 use crate::imaging::decode::{self, Pixels};
 
 /// The detector's canvas edge (a multiple of 32).
-pub const DET_SIZE: u32 = 832;
+pub const DET_SIZE: u32 = 1024;
 /// Faces below this YuNet score are ignored (the study: 0.8 let blurred
 /// faces of different people share groups; 0.9 didn't).
 pub const MIN_SCORE: f32 = 0.9;
@@ -339,13 +342,13 @@ mod tests {
         data[0..3].copy_from_slice(&[255, 0, 0]); // a red pixel top left
         let px = Pixels::new(1600, 1000, 3, data);
         let c = canvas(&px);
-        assert!((c.scale - 0.52).abs() < 0.01, "{}", c.scale);
+        assert!((c.scale - 0.64).abs() < 0.01, "{}", c.scale);
         let n = (DET_SIZE * DET_SIZE) as usize;
         assert_eq!(c.planes.len(), CANVAS_LEN);
         assert!(c.planes[2 * n] > 60 && c.planes[0] < 10, "red lands in the R plane: {} {}", c.planes[2 * n], c.planes[0]);
         // Below the fitted height the canvas is black padding.
         assert_eq!(c.planes[(DET_SIZE as usize - 1) * DET_SIZE as usize], 0);
-        assert_eq!(cells(8) + cells(16) + cells(32), 10816 + 2704 + 676);
+        assert_eq!(cells(8) + cells(16) + cells(32), 16384 + 4096 + 1024);
         // A small photo is not scaled up.
         assert_eq!(canvas(&Pixels::new(400, 300, 3, vec![9; 400 * 300 * 3])).scale, 1.0);
     }
@@ -384,10 +387,10 @@ mod tests {
         assert!((f.bbox[2] - 64.0).abs() < 1e-3 && (f.score - 0.95).abs() < 1e-3);
         assert!((f.landmarks[0][0] - 5.5 * 32.0).abs() < 1e-3);
         // Back on a 1600 × 1000 preview at the canvas scale.
-        let placed = place(&found, 0.52, 1600, 1000);
+        let placed = place(&found, 0.64, 1600, 1000);
         assert_eq!(placed.len(), 1);
-        assert!((placed[0].size_px - 64.0 / 0.52).abs() < 0.1);
-        assert!((placed[0].bbox[2] - 64.0 / 0.52 / 1600.0).abs() < 1e-4);
+        assert!((placed[0].size_px - 64.0 / 0.64).abs() < 0.1);
+        assert!((placed[0].bbox[2] - 64.0 / 0.64 / 1600.0).abs() < 1e-4);
         assert!(placed[0].bbox.iter().all(|v| (0.0..=1.0).contains(v)));
         // Too small on the preview: dropped.
         assert!(place(&found, 2.0, 1600, 1000).is_empty());

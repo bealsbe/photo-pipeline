@@ -512,11 +512,17 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 
 Downloaded once, after a dialog that names each file, its size and licence;
 every file is checked against its SHA-256 before use and deleted if it
-doesn't match (`src/ml/models.rs` holds the pins).  Phase 1 uses one model:
+doesn't match (`src/ml/models.rs` holds the pins).  Search uses one model;
+people's faces use a detector and one of three recognition models, the
+user's choice:
 
 | Model | Files | Size | Licence | Source |
 |---|---|---|---|---|
 | SigLIP 2 ViT-B/16, 256 px (Google) | image tower (fp32), text tower (fp16), tokenizer | 971 MB | Apache-2.0 | Hugging Face `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js export of `google/siglip2-base-patch16-256` |
+| YuNet, 2023 March (OpenCV) | face detector, for every face model | 0.2 MB | MIT | OpenCV Zoo `face_detection_yunet_2023mar.onnx` |
+| AuraFace v1 (fal), recommended | face recognition, 512-d | 261 MB | Apache-2.0 | Hugging Face `fal/AuraFace-v1`, `glintr100.onnx` alone |
+| SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
+| InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
 | OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
 | DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
 
@@ -533,11 +539,71 @@ full size, not the 768-wide CLS half that measured as well).
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the
-processor.  The fp16 text tower's answers equal fp32's.
+processor.  The fp16 text tower's answers equal fp32's.  YuNet's published
+file declares a 640 × 640 input although the network runs at any size: the
+helper makes those dims symbolic in memory after the digest check (the file
+on disk stays the publisher's) and runs it on a 1 024-px canvas.
+InsightFace's model is never pre-selected; its licence is shown in plain
+words in the dialog, and it is downloaded only from InsightFace's release,
+never re-hosted here.
 
 ONNX Runtime comes through the `ort` crate (pinned release candidate); the
 first build downloads it (~120 MB) into `~/.cache/ort.pyke.io` and puts
 `libwebgpu_dawn.so` beside the binary.
+
+## People
+
+Phase 3 of the plan: faces are found and grouped so the library can be
+searched by person.  The *Subjects* page (Ctrl+4) is the UI's; this is what
+the engine does underneath (`src/search/faces.rs`, `src/search/step.rs`,
+`src/model/subjects.rs`, `src/ml/face.rs`).
+
+- **On by default** (Preferences ▸ People ▸ *Find people's faces*).  While
+  photos are indexed, the helper looks for faces in the same read of each
+  preview as the search vector: YuNet finds faces and their five landmarks
+  on a 1 024-px canvas; faces of score ≥ 0.9 and ≥ 40 px (on the full
+  preview) are cut from the full preview, aligned to the ArcFace template,
+  recognised by the chosen model, and given a 128-px tile.  All of it runs
+  where search runs: on the graphics card by default, with each face
+  session self-checked against the processor first; a card that fails
+  stops the work and is reported, never worked around.
+- **Catch-up.**  A library indexed before faces existed, or with faces
+  off, is looked at only when asked (*Find faces in the N photos
+  indexed*): the previews are read again and nothing in the search index
+  changes.  Changing the face model keeps every face found and recomputes
+  only the vectors, from the stored landmarks.
+- **Groups.**  Faces not yet confirmed to anyone are clustered (clearest
+  first, by the model's cut-off), incrementally as batches arrive and
+  fully on a worker thread when a pass ends or a decision changes.  Groups
+  under the minimum (Preferences ▸ People ▸ *Smallest group to show*: 3, 5
+  or 10 photos) fold under *Smaller groups*.
+- **The user's decisions** — names, merges, splits, hides, "not this
+  person" — point at detections (a photo's content key and the face's box
+  in thousandths), not at group numbers, so they survive a regroup, a
+  face-model change and a rebuild.  They live in
+  `~/.local/share/photo-pipeline/subjects.json`, apart from the caches;
+  Ctrl+Z takes the last one back.  Suggestions for a person are the faces
+  within the cut-off of its confirmed members, not confirmed elsewhere and
+  not rejected for it, nearest first, one per burst; answering Yes adds
+  them, No makes sure they are never suggested again.
+- **A person's photos** come clearest first: half how clear the face is
+  (its size, sharpness and detection score), half how sure its membership
+  is, so doubtful ones sink to the bottom.  `@Name` in a search narrows
+  to that person's photos (with words, best first within them; a name
+  nobody has narrows to nothing).
+- **Kinds never mix.**  People, fursuits (phase 4) and pets (phase 5)
+  have their own detections, vectors, groups and suggestions; a merge, a
+  move or a suggestion across kinds is refused, and tests hold it.
+- **Privacy.**  Face data stays on this computer, in files only the user
+  can read (`faces.bin`, `facevecs-<model>.bin`, `tiles.bin` beside the
+  search index, mode 0600); nothing is written into photos, sidecars or
+  exports.  *Clear* (the search index) drops the unnamed detections;
+  Preferences ▸ Storage ▸ *Forget all* drops everything, the names
+  included.
+- **Measured** (this machine, the card): on 1 010 of the study's previews
+  YuNet at 1 024 px finds 140 faces in 119 photos (the study found 145
+  at full size); on a scratch library of 634 shots read from the share,
+  the first index with faces took 50 s and gave 56 faces in 35 groups.
 
 ## File safety
 

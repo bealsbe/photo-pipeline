@@ -471,6 +471,170 @@ fn tag_thresholds() {
 ///     cargo test --release -- --ignored --nocapture --exact search::eval::library_queries
 /// ```
 #[test]
+/// Phase 3's check on a scratch library of symlinks (read only): the first
+/// index with faces on the chosen device, the clusters that follow, naming
+/// the largest, `@name` queries clearest first, suggestions, a tile, undo
+/// and *Forget all*.  Prints counts only, never names or paths of people.
+///
+/// ```sh
+/// PP_MODEL_DIR=<siglip2 dir> PP_MODEL_ROOT=<models root> PP_EVAL_LIBRARY=<root> \
+///   PP_EVAL_OUT=<scratch> [PP_EVAL_DEVICE=gpu|cpu] [PP_EVAL_FACE_MODEL=aura-face|s-face|insight-face] \
+///   cargo test --release people_library -- --ignored --nocapture
+/// ```
+#[ignore = "phase 3: needs PP_MODEL_DIR, PP_MODEL_ROOT, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
+fn people_library() {
+    use crate::bus::BgEvent;
+    use crate::ml::models::{self, ModelId};
+    use crate::model::library_cache::{self, Store};
+    use crate::model::library_index;
+    use crate::model::subjects::{Framing, GroupId, Kind};
+    use crate::search::engine::{Config, Engine};
+    use std::sync::Arc;
+    use std::time::Duration;
+    let root = PathBuf::from(need("PP_EVAL_LIBRARY"));
+    let out = PathBuf::from(need("PP_EVAL_OUT"));
+    need("PP_MODEL_DIR");
+    need("PP_MODEL_ROOT");
+    let device = match env("PP_EVAL_DEVICE").as_deref() {
+        Some("cpu") => Device::Cpu,
+        _ => Device::Gpu,
+    };
+    let face_model = env("PP_EVAL_FACE_MODEL").and_then(|s| serde_json::from_value::<ModelId>(serde_json::Value::String(s)).ok()).unwrap_or(models::FACE_MODEL_DEFAULT);
+    let cancelled = std::sync::atomic::AtomicBool::new(false);
+    let scanned = library_cache::scan(&root, None, true, &cancelled, &|_| {}).unwrap().unwrap();
+    let store = parking_lot::Mutex::new(Store::new(root.clone()));
+    let lib = Arc::new(library_index::index_from_tree(&root, &scanned.tree, &store, &cancelled).unwrap());
+    eprintln!("library: {} shots in {} days", lib.total_shots, lib.len());
+    let (bus, rx) = crate::bus::channel();
+    let subjects_path = out.join("subjects.json");
+    let _ = std::fs::remove_file(&subjects_path);
+    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()) };
+    let engine = Engine::with_config(bus, device, true, true, face_model, config);
+    engine.on_library(lib.clone());
+    let t = Instant::now();
+    engine.start_first_index(&models::models_for(Some(face_model)));
+    let deadline = Instant::now() + Duration::from_secs(3600);
+    let status = loop {
+        let s = engine.status();
+        if s.stopped.is_some() || (s.first_index_asked && s.pass.is_none() && s.indexed_shots > 0) {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "the index didn't finish: {s:?}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(status.stopped.is_none(), "{:?}", status.stopped);
+    eprintln!(
+        "indexed {} shots in {:.1} s on {:?}; faces: on={} model={:?} looked_at={} found={} unrecognised={}",
+        status.indexed_shots,
+        t.elapsed().as_secs_f64(),
+        status.device.name,
+        status.faces.on,
+        status.faces.model,
+        status.faces.looked_at,
+        status.faces.found,
+        status.faces.unrecognised
+    );
+    assert_eq!(status.faces.looked_at, status.indexed_shots, "every indexed shot was looked at for faces");
+    let mut stream: std::pin::Pin<Box<dyn iced::futures::Stream<Item = Vec<BgEvent>>>> = Box::pin(crate::bus::stream(&rx));
+    let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    // The regroup after the pass: wait for a snapshot with clusters.
+    let wait_subjects = |stream: &mut std::pin::Pin<Box<dyn iced::futures::Stream<Item = Vec<BgEvent>>>>, pred: &dyn Fn(&crate::model::subjects::Subjects) -> bool| -> Arc<crate::model::subjects::Subjects> {
+        rt.block_on(async {
+            use iced::futures::StreamExt;
+            let deadline = Instant::now() + Duration::from_secs(120);
+            let mut latest = engine.subjects();
+            while !pred(&latest) && Instant::now() < deadline {
+                let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(200), stream.next()).await else { continue };
+                for ev in batch {
+                    if let BgEvent::Subjects(s) = ev {
+                        latest = s;
+                    }
+                }
+            }
+            latest
+        })
+    };
+    let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| matches!(g.id, GroupId::Cluster(_))) || status.faces.found == 0);
+    let clusters: Vec<&crate::model::subjects::Group> = snap.groups.iter().filter(|g| matches!(g.id, GroupId::Cluster(_))).collect();
+    let sizes: Vec<usize> = clusters.iter().map(|g| g.photos).collect();
+    eprintln!("groups: {} clusters over {} faces; photos per cluster (largest first): {:?}; of >= 5 photos: {}", clusters.len(), snap.faces_found, &sizes[..sizes.len().min(20)], sizes.iter().filter(|&&n| n >= 5).count());
+    assert!(clusters.iter().all(|g| g.kind == Kind::Person && g.name.is_none()));
+    let Some(largest) = clusters.first() else {
+        engine.shutdown();
+        return;
+    };
+    // Its faces, clearest first; a tile from the cache; suggestions.
+    engine.faces(1, largest.id.clone());
+    engine.suggestions(2, largest.id.clone());
+    let (faces, suggestions) = rt.block_on(async {
+        use iced::futures::StreamExt;
+        let (mut f, mut s) = (None, None);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while (f.is_none() || s.is_none()) && Instant::now() < deadline {
+            let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(200), stream.next()).await else { continue };
+            for ev in batch {
+                match ev {
+                    BgEvent::SubjectFaces { seq: 1, faces, .. } => f = Some(faces),
+                    BgEvent::Suggestions { seq: 2, list, .. } => s = Some(list),
+                    _ => {}
+                }
+            }
+        }
+        (f.expect("faces"), s.expect("suggestions"))
+    });
+    eprintln!("largest cluster: {} faces, clarity {:.2}..{:.2}, {} bursts to check", faces.len(), faces.first().map_or(0.0, |f| f.clarity), faces.last().map_or(0.0, |f| f.clarity), suggestions.len());
+    assert!(faces.windows(2).all(|w| w[0].clarity >= w[1].clarity), "clearest first");
+    let t = Instant::now();
+    let tile = engine.crop(&largest.cover, 128, Framing::Face).expect("a tile");
+    let whole = engine.crop(&largest.cover, 300, Framing::Photo).expect("the photo");
+    eprintln!("crop: tile {}x{} and photo {}x{} in {:.0} ms", tile.0, tile.1, whole.0, whole.1, t.elapsed().as_secs_f64() * 1000.0);
+    // Name it, then search for it.
+    engine.name_group(largest.id.clone(), "Someone".into());
+    let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| g.name.as_deref() == Some("Someone")));
+    let named = snap.groups.iter().find(|g| g.name.as_deref() == Some("Someone")).expect("named");
+    eprintln!("named: {} photos on {} days, {} suggestions, undoable {:?}", named.photos, named.days, named.suggestions, snap.undoable);
+    assert!(snap.undoable.is_some());
+    for (seq, q) in [(10u64, "@Someone"), (11, "@Someone camera"), (12, "@Nobody"), (13, "camera")] {
+        let t = Instant::now();
+        engine.query(seq, q, crate::search::CLOSENESS_DEFAULT, &[]);
+        let got = rt.block_on(async {
+            use iced::futures::StreamExt;
+            loop {
+                let Some(batch) = stream.next().await else { return None };
+                for ev in batch {
+                    if let BgEvent::SearchResults { seq: s, hits, error, subjects, .. } = ev {
+                        if s == seq {
+                            return Some((hits, error, subjects));
+                        }
+                    }
+                }
+            }
+        });
+        let (hits, error, subjects) = got.expect("an answer");
+        eprintln!("{q:>16}: {} hits, {} subjects applied, error {error:?}; {:.0} ms; first scores {:?}", hits.len(), subjects.len(), t.elapsed().as_secs_f64() * 1000.0, hits.iter().take(3).map(|h| h.score).collect::<Vec<_>>());
+        match q {
+            "@Someone" => {
+                assert_eq!(hits.len(), named.photos);
+                assert!(hits.windows(2).all(|w| w[0].score >= w[1].score), "clearest first");
+                assert_eq!(subjects.len(), 1);
+            }
+            "@Nobody" => assert!(hits.is_empty() && subjects.is_empty()),
+            _ => {}
+        }
+    }
+    // Undo the naming; forget all.
+    engine.undo();
+    let snap = wait_subjects(&mut stream, &|s| !s.groups.iter().any(|g| g.name.is_some()));
+    assert!(snap.groups.iter().all(|g| g.name.is_none()));
+    engine.forget_all();
+    let snap = wait_subjects(&mut stream, &|s| s.faces_found == 0);
+    eprintln!("after forget all: {} groups, {} faces, subjects file exists {}", snap.groups.len(), snap.faces_found, subjects_path.exists());
+    assert!(snap.groups.is_empty() && !subjects_path.exists());
+    engine.shutdown();
+    std::thread::sleep(Duration::from_millis(200));
+}
+
+#[test]
 #[ignore = "phase 2: needs PP_MODEL_DIR, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
 fn library_queries() {
     use crate::bus::BgEvent;

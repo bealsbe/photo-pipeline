@@ -30,6 +30,7 @@ use crate::ml::client::{FaceFound, FaceSpot};
 use crate::ml::face;
 use crate::ml::models::{self, ModelId};
 use crate::model::binfile::{Reader, Writer};
+use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
 use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, private_dir, private_file};
 use crate::ops::fsutil;
 
@@ -70,13 +71,14 @@ impl Detection {
     }
 }
 
-/// The face vectors of one model, in memory.
+/// The face vectors of one model, in memory as on disk: f16 bits (a
+/// regroup works on an f32 copy of its own).
 #[derive(Default)]
 pub struct FaceVectors {
     pub dim: usize,
     pub refs: Vec<FaceRef>,
     pub by_ref: HashMap<FaceRef, usize>,
-    /// `refs.len() × dim` f16 bits.
+    /// `refs.len() × dim`, row-major, unit rows, as f16 bits.
     pub data: Vec<u16>,
 }
 
@@ -85,6 +87,7 @@ impl FaceVectors {
         self.refs.len()
     }
 
+    /// Row `i` as f32.
     pub fn row(&self, i: usize) -> Vec<f32> {
         self.data[i * self.dim..(i + 1) * self.dim].iter().map(|&h| f16_to_f32(h)).collect()
     }
@@ -559,6 +562,28 @@ impl FaceStore {
     }
 }
 
+impl KindStep for FaceStore {
+    fn kind(&self) -> Kind {
+        Kind::Person
+    }
+
+    fn refs(&self) -> &[FaceRef] {
+        &self.vectors.refs
+    }
+
+    fn rows(&self) -> subjects::Rows<'_> {
+        subjects::Rows::F16 { dim: self.vectors.dim, data: &self.vectors.data }
+    }
+
+    fn clarity(&self, r: &FaceRef) -> f32 {
+        self.detection(r).map_or(0.0, Detection::clarity)
+    }
+
+    fn cutoffs(&self) -> subjects::Cutoffs {
+        subjects::cutoff_for(self.model)
+    }
+}
+
 /// The people state the engine's thread owns.
 pub struct People {
     /// Where the user's file lives (`subjects::default_path`, or a test's).
@@ -566,18 +591,57 @@ pub struct People {
     pub file: SubjectsFile,
     /// The face cache, once the library's index folder is known.
     pub store: Option<FaceStore>,
+    /// The people's clusters and sureness, from the last regroup and the
+    /// faces assigned since.
+    pub grouped: Grouped,
     /// Earlier states of the file with what changed them, newest last.
     undo: Vec<(SubjectsFile, String)>,
     /// The snapshot last built.
     pub snapshot: Arc<Subjects>,
-    generation: u64,
+    /// Moves on with every regroup: cluster ids are valid within one.
+    pub generation: u64,
 }
 
 impl People {
     /// Load the user's file (none is empty).
     pub fn load(file_path: Option<PathBuf>) -> People {
         let file = file_path.as_deref().map(SubjectsFile::load).unwrap_or_default();
-        People { file_path, file, store: None, undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
+        People { file_path, file, store: None, grouped: Grouped::default(), undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
+    }
+
+    /// A regroup's input for the worker, stamped with the next generation.
+    pub fn regroup_job(&mut self) -> Option<RegroupJob> {
+        let store = self.store.as_ref()?;
+        if store.vectors.len() == 0 {
+            return None;
+        }
+        self.generation += 1;
+        Some(step::job(store, &self.file, self.generation))
+    }
+
+    /// Take a regroup's result (an older generation's is dropped), then
+    /// assign the faces that arrived meanwhile.
+    pub fn apply_regroup(&mut self, r: Regrouped) -> bool {
+        if r.generation != self.generation || r.kind != Kind::Person {
+            return false;
+        }
+        let Some(store) = &self.store else { return false };
+        self.grouped.apply(r, store.refs(), &|f| store.clarity(f));
+        self.grouped.assign_new(store, &self.file);
+        true
+    }
+
+    /// Faces that arrived since the last regroup join the clusters.
+    pub fn assign_new(&mut self) {
+        if let Some(store) = &self.store {
+            self.grouped.assign_new(store, &self.file);
+        }
+    }
+
+    /// The grouping starts over (the vectors were rebuilt).
+    pub fn reset_grouping(&mut self) {
+        self.grouped = Grouped::default();
+        self.generation += 1;
     }
 
     /// Record the state before an edit, so [`People::undo`] can restore
@@ -623,9 +687,12 @@ impl People {
     }
 
     /// A cluster's faces for the current generation (none: stale or
-    /// unknown).  Clusters arrive with the grouping (a later commit).
-    fn cluster_members(&self, _id: &GroupId) -> Option<Vec<FaceRef>> {
-        None
+    /// unknown).
+    fn cluster_members(&self, id: &GroupId) -> Option<Vec<FaceRef>> {
+        let GroupId::Cluster(id) = id else { return None };
+        let store = self.store.as_ref()?;
+        let c = self.grouped.cluster(*id)?;
+        Some(c.members.iter().filter_map(|&m| store.refs().get(m).copied()).collect())
     }
 
     /// A group's confirmed or clustered faces.
@@ -824,17 +891,65 @@ impl People {
     /// counted.
     pub fn build_snapshot(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>) -> Arc<Subjects> {
         let mut groups: Vec<Group> = Vec::new();
-        for s in &self.file.subjects {
-            let faces: Vec<Face> = s.members.iter().filter_map(resolve).collect();
-            let Some(cover) = s.cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity))) else { continue };
+        let group_of = |id: GroupId, kind: Kind, name: Option<String>, hidden: bool, cover: Option<FaceRef>, members: &[FaceRef], suggestions: usize| -> Option<Group> {
+            let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
+            let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
             let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
             let days = faces.iter().map(|f| f.day).collect::<HashSet<_>>().len();
-            groups.push(Group { id: GroupId::Subject(s.id.clone()), kind: s.kind, name: s.name.clone(), hidden: s.hidden, photos, days, cover, suggestions: 0 });
+            Some(Group { id, kind, name, hidden, photos, days, cover, suggestions })
+        };
+        for s in &self.file.subjects {
+            let suggestions = self.grouped.suggestion_counts.get(&s.id).copied().unwrap_or(0);
+            groups.extend(group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions));
         }
-        groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
+        if let Some(store) = &self.store {
+            let refs = store.refs();
+            for (c, &id) in self.grouped.clusters.iter().zip(&self.grouped.ids) {
+                let members: Vec<FaceRef> = c.members.iter().filter_map(|&m| refs.get(m).copied()).collect();
+                groups.extend(group_of(GroupId::Cluster(id), Kind::Person, None, false, None, &members, 0));
+            }
+        }
+        groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
         Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable })
+    }
+
+    /// Suggestions for review (UI 6): for a subject, the faces within
+    /// the cut-off (the strict one with `strict`) of its confirmed
+    /// members that are confirmed nowhere and not rejected for it, nearest
+    /// first, one entry per burst; for a cluster, its own members to
+    /// check, surest first, one entry per burst.  Never another kind's.
+    pub fn suggestions(&self, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>, strict: bool) -> Result<Vec<Vec<Face>>, Refused> {
+        let Some(store) = &self.store else { return Ok(Vec::new()) };
+        let refs = store.refs();
+        let rows = store.rows();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let ordered: Vec<(usize, f32)> = match id {
+            GroupId::Subject(sid) => {
+                let s = self.file.get(sid).ok_or_else(|| Refused::NoSuchSubject(sid.clone()))?;
+                if s.kind != Kind::Person {
+                    return Ok(Vec::new());
+                }
+                let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
+                let confirmed = self.file.confirmed(Kind::Person);
+                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+                let cutoffs = store.cutoffs();
+                let cutoff = if strict { cutoffs.strict } else { cutoffs.suggest };
+                subjects::candidates(&rows, &members, &pool, cutoff)
+            }
+            GroupId::Cluster(cid) => {
+                let c = self.grouped.cluster(*cid).ok_or(Refused::StaleGroup)?;
+                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
+                v.sort_by(|a, b| a.1.total_cmp(&b.1));
+                v
+            }
+        };
+        let faces: Vec<(Face, Option<u64>)> = ordered.iter().filter_map(|&(i, _)| resolve(refs.get(i)?)).map(|f| {
+            let b = f.burst;
+            (f, b)
+        }).collect();
+        Ok(subjects::per_burst(faces))
     }
 
     /// Keep a snapshot built with [`People::build_snapshot`].
@@ -861,9 +976,15 @@ impl People {
         Ok(members.iter().map(|f| f.key).collect())
     }
 
-    /// A face's clarity from the cache (0 when unknown).
+    /// A face's clarity (UI 12): how clear a view it is and how sure its
+    /// membership is; 0 when unknown.
     pub fn clarity(&self, r: &FaceRef) -> f32 {
-        self.store.as_ref().and_then(|s| s.detection(r)).map_or(0.0, Detection::clarity)
+        let Some(store) = &self.store else { return 0.0 };
+        let visual = store.clarity(r);
+        match store.vectors.by_ref.get(r) {
+            Some(&row) => self.grouped.clarity_of(row, visual),
+            None => 0.5 * visual,
+        }
     }
 
     /// The clarity of the clearest face in each of `keys` (UI 12's order
@@ -871,7 +992,7 @@ impl People {
     pub fn clarity_by_photo(&self, keys: &HashSet<Key>) -> HashMap<Key, f32> {
         keys.iter()
             .map(|k| {
-                let best = self.store.as_ref().map_or(0.0, |s| s.faces_of(k).iter().map(Detection::clarity).fold(0.0, f32::max));
+                let best = self.store.as_ref().map_or(0.0, |s| s.faces_of(k).iter().map(|d| self.clarity(&d.face_ref(*k))).fold(0.0, f32::max));
                 (*k, best)
             })
             .collect()

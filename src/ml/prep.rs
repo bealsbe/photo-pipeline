@@ -6,8 +6,8 @@
 //! [`INPUT_SIZE`] square (what SigLIP2's preprocessing does, so the whole
 //! frame is seen) and normalised to mean 0.5, std 0.5 in CHW order.
 //!
-//! With faces wanted, the same decode (at least ~740 px on its long side,
-//! about half the preview) also fills the face detector's canvas, and the
+//! With faces wanted, the same decode (at least ~1 000 px on its long
+//! side, filling the detector's canvas) also fills that canvas, and the
 //! preview's bytes are kept so the faces found can be cut from the full
 //! preview afterwards ([`FacePrep::full_pixels`]), one read per photo.
 //!
@@ -35,9 +35,9 @@ pub const INPUT_SIZE: u32 = 256;
 pub const PREVIEW_MIN_EDGE: u32 = 300;
 /// A RAW-only shot's preview for faces: at least this long (§7.3).
 pub const FACE_PREVIEW_MIN_EDGE: u32 = 1000;
-/// The decode for the detector keeps at least this on the long side
-/// (half a 1 616-px preview, which kept 29 of 30 faces in the study).
-pub const DETECT_MIN_LONG_EDGE: u32 = 740;
+/// The decode for the detector keeps at least this on the long side, so
+/// the canvas (`face::DET_SIZE`) is filled rather than upscaled into.
+pub const DETECT_MIN_LONG_EDGE: u32 = 1000;
 
 /// Everything one read of a photo gives the index.
 #[derive(Clone)]
@@ -150,22 +150,26 @@ fn prepare_raw(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileErro
 /// [`DETECT_MIN_LONG_EDGE`]), orient it, judge it and normalise it.
 fn finish(jpeg: Vec<u8>, orientation: u8, source: Source, key: Key, capture: Option<NaiveDateTime>, meta: ShotMeta, faces: bool) -> Result<Prepared, FileError> {
     let (w, h) = decode::jpeg_dimensions(&jpeg).ok_or_else(|| FileError::other("not a readable JPEG"))?;
-    let denom = if faces {
-        [8, 4, 2].into_iter().find(|&d| w.max(h) / d >= DETECT_MIN_LONG_EDGE && w.min(h) / d >= INPUT_SIZE).unwrap_or(1)
-    } else {
-        [8, 4, 2].into_iter().find(|&d| w.min(h) / d >= INPUT_SIZE).unwrap_or(1)
-    };
+    // The search input and the accident rule work on a small decode (a
+    // DCT reduction is nearly free); the detector's canvas, when wanted,
+    // on a second, larger one.  Measuring accidents on the large decode
+    // cost more than the detector itself.
+    let denom = [8, 4, 2].into_iter().find(|&d| w.min(h) / d >= INPUT_SIZE).unwrap_or(1);
     let px = decode::decode_jpeg_full_scaled(&jpeg, denom).map_err(FileError::other)?;
     let accidental = accidental(&px, orientation, source);
     let px = decode::apply_orientation(px, orientation);
     let input = normalise(&px);
-    let face_prep = faces.then(|| {
+    let face_prep = if faces {
+        let big_denom = [8, 4, 2].into_iter().find(|&d| w.max(h) / d >= DETECT_MIN_LONG_EDGE).unwrap_or(1);
+        let big = if big_denom == denom { px } else { decode::apply_orientation(decode::decode_jpeg_full_scaled(&jpeg, big_denom).map_err(FileError::other)?, orientation) };
         // The full preview's oriented size, which the decoded size scales
         // to (the DCT reduction rounds up).
         let swap = orientation >= 5;
         let (fw, fh) = if swap { (h, w) } else { (w, h) };
-        FacePrep { canvas: face::canvas(&px), width: fw, height: fh, source: FaceSource::Jpeg { data: jpeg, orientation } }
-    });
+        Some(FacePrep { canvas: face::canvas(&big), width: fw, height: fh, source: FaceSource::Jpeg { data: jpeg, orientation } })
+    } else {
+        None
+    };
     Ok(Prepared { key, capture, meta, accidental, input, faces: face_prep })
 }
 

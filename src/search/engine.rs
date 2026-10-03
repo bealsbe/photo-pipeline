@@ -67,6 +67,8 @@ enum Cmd {
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
     Suggestions { seq: u64, group: GroupId },
     Undo,
+    /// A regroup finished on its worker.
+    Regrouped(Box<super::step::Regrouped>),
     Shutdown,
 }
 
@@ -171,6 +173,8 @@ impl Engine {
                     restrict: None,
                     face_pass_pending: None,
                     subjects_sent: None,
+                    regroup_running: false,
+                    regroup_wanted: false,
                 }
                 .run()
             })
@@ -492,6 +496,9 @@ struct Worker {
     face_pass_pending: Option<bool>,
     /// When the *Subjects* snapshot was last sent (throttled in a pass).
     subjects_sent: Option<Instant>,
+    /// A regroup is on its worker; another was asked for meanwhile.
+    regroup_running: bool,
+    regroup_wanted: bool,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -599,6 +606,7 @@ impl Worker {
                     if let Some(store) = &mut self.people.store {
                         store.forget_all();
                     }
+                    self.people.reset_grouping();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -622,6 +630,7 @@ impl Worker {
                     if let Some(store) = &mut self.people.store {
                         store.forget_all();
                     }
+                    self.people.reset_grouping();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -661,6 +670,7 @@ impl Worker {
                         if let Some(store) = &mut self.people.store {
                             store.set_model(model);
                         }
+                        self.people.reset_grouping();
                         self.drop_embedder();
                         self.update(|s| s.faces.model = Some(model));
                         self.refresh_installed();
@@ -692,6 +702,8 @@ impl Worker {
                 }
                 Cmd::ForgetAll => {
                     self.people.forget_all();
+                    self.people.reset_grouping();
+                    self.refresh_counts();
                     self.publish_subjects();
                 }
                 Cmd::Faces { seq, group } => {
@@ -708,12 +720,30 @@ impl Worker {
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::Suggestions { seq, group } => {
-                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(Vec::new()) });
+                    self.ensure_resolver();
+                    let list = match self.people.suggestions(&group, &|f| self.resolve_face(f), false) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            eprintln!("subjects: suggestions refused: {e}");
+                            Vec::new()
+                        }
+                    };
+                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
                 }
                 Cmd::Undo => {
                     if let Some(what) = self.people.undo() {
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
                         self.publish_subjects();
+                        self.start_regroup();
+                    }
+                }
+                Cmd::Regrouped(r) => {
+                    self.regroup_running = false;
+                    if self.people.apply_regroup(*r) {
+                        self.publish_subjects();
+                    }
+                    if std::mem::take(&mut self.regroup_wanted) {
+                        self.start_regroup();
                     }
                 }
                 Cmd::Shutdown => break,
@@ -760,10 +790,34 @@ impl Worker {
     /// After a subjects edit: a refusal is logged (nothing changed); any
     /// outcome republishes the page's state.
     fn after_edit(&mut self, result: Result<(), Refused>) {
-        if let Err(e) = result {
-            eprintln!("subjects: refused: {e}");
+        match result {
+            Err(e) => eprintln!("subjects: refused: {e}"),
+            // Members and rejections moved: the clusters and the
+            // suggestion counts follow, on the worker.
+            Ok(()) => self.start_regroup(),
         }
         self.publish_subjects();
+    }
+
+    /// Group the faces again on a worker thread (`Cmd::Regrouped` brings
+    /// the result); one at a time, the next asked for meanwhile running
+    /// after.
+    fn start_regroup(&mut self) {
+        if self.regroup_running {
+            self.regroup_wanted = true;
+            return;
+        }
+        let Some(job) = self.people.regroup_job() else { return };
+        self.regroup_running = true;
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("subjects-regroup".into())
+            .spawn(move || {
+                let _t = crate::profile::span("subjects", "regroup");
+                let r = super::step::regroup(&job);
+                let _ = me.send(Cmd::Regrouped(Box::new(r)));
+            })
+            .expect("spawn subjects-regroup");
     }
 
     /// While a pass runs, the snapshot is rebuilt at most every
@@ -857,6 +911,10 @@ impl Worker {
         self.library = Some(lib);
         self.resolver = None;
         self.refresh_counts();
+        if root_changed {
+            self.people.reset_grouping();
+            self.start_regroup();
+        }
         self.publish_subjects();
         if root_changed {
             self.vocab_tried = false;
@@ -1198,6 +1256,9 @@ impl Worker {
         if batch.faces_scanned {
             self.refresh_counts();
             self.publish_subjects_throttled(batch.finished.is_some());
+            if batch.finished.is_some() {
+                self.start_regroup();
+            }
         }
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
@@ -1256,7 +1317,9 @@ impl Worker {
             }
             self.resolver = None;
         }
-        // The faces found (or recognised again) go into the face cache.
+        // The faces found (or recognised again) go into the face cache,
+        // and join the clusters as they come (the full regroup runs when
+        // the pass ends).
         if batch.faces_scanned {
             if let Some(store) = &mut self.people.store {
                 for (job, e) in &batch.embedded {
@@ -1266,6 +1329,7 @@ impl Worker {
                     }
                 }
             }
+            self.people.assign_new();
         }
         // What couldn't be embedded isn't tried again at this pass's end;
         // a file whose own content is the trouble is remembered, so it
