@@ -467,6 +467,14 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 - **Keys survive renames.**  A shot is identified by a digest of its file's
   size and first 64 KB, so Sort, export and copies keep its vector; a
   cropped JPG re-encoded by a Move export is indexed again.
+- **A file that can't be read** (empty, damaged, not a photo) is read
+  once: it is remembered beside the path map with its size and mtime and
+  skipped at every later check, until the file changes or the index is
+  rebuilt (Preferences ▸ Storage ▸ Rebuild; a re-read of the library with
+  F5 doesn't retry it).  A share that went away or a model that failed
+  is not held against the file: those are tried again at the next check.
+  No pass ever starts another over the files it just couldn't embed, and
+  × holds until you ask again.
 - **How close matches must be** (Preferences ▸ Search) is a floor on the
   model's own match probability (SigLIP 2's trained calibration, so it
   means the same for every query): looser shows weaker matches, stricter

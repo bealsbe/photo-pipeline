@@ -179,6 +179,9 @@ pub struct Search {
     pub banner_hidden: bool,
     /// The indexing steps, over the status bar.
     pub steps: bool,
+    /// Where the running pass began (what its progress and its end are
+    /// measured from).
+    pub pass_start: Option<super::search_setup::PassStart>,
 }
 
 #[derive(Debug, Clone)]
@@ -229,6 +232,7 @@ impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
         let link = Link::new(bus, settings.search_device, settings.search_index_exports);
         let (status, things) = (link.status(), link.things());
+        let pass_start = super::search_setup::pass_start(None, &status);
         Search {
             link,
             status,
@@ -251,6 +255,7 @@ impl Search {
             dialog: None,
             banner_hidden: false,
             steps: false,
+            pass_start,
         }
     }
 
@@ -475,16 +480,18 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     if matches!(old.stopped, Some(Stopped::Card(_))) && st.stopped.is_none() && st.device.chosen == Device::Gpu {
         tasks.push(app.show_status("The graphics card passed its check. Indexing carries on.", 6000));
     }
+    // Where the pass that just ended began; the one now shown, if any.
+    let start = app.search.pass_start;
+    app.search.pass_start = super::search_setup::pass_start(start, &app.search.status);
     let st = &app.search.status;
     if let (Some(p), None, None) = (&old.pass, &st.pass, &st.stopped) {
-        let text = match p.kind {
-            PassKind::NewExports => format!("Search has the {} new {}.", util::thousands(p.total as u64), if p.total == 1 { "photo" } else { "photos" }),
-            _ if st.indexed_shots >= st.library_shots => format!("Indexed {}. Search has the whole library.", util::plural(st.library_shots as u64, "photo")),
-            _ => format!("Indexed {} of {} photos.", util::thousands(st.indexed_shots as u64), util::thousands(st.library_shots as u64)),
-        };
+        let ended = super::search_setup::pass_ended(p, start, st);
         app.search.steps = false;
-        tasks.push(app.show_status(text, 8000));
-        rerun(app);
+        // A pass of new exports that added nothing says nothing.
+        if let Some(text) = ended {
+            tasks.push(app.show_status(text, 8000));
+            rerun(app);
+        }
     } else {
         // Searching while the first index runs: the results fill in.
         let s = &app.search;

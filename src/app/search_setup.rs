@@ -29,7 +29,7 @@ use super::{App, Message, dialogs};
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
 use crate::ml::{CardFailure, Device};
-use crate::search::{PassKind, Stopped, estimate};
+use crate::search::{PassKind, PassProgress, Status, Stopped, estimate};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::theme::{self as t, alpha};
@@ -598,8 +598,10 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
             Stopped::Cancelled => return None,
         }
     } else if let Some(p) = &st.pass {
-        let frac = if p.total == 0 { 0.0 } else { p.done as f32 / p.total as f32 };
-        let of = format!("{} of {}", util::thousands(p.done as u64), util::thousands(p.total as u64));
+        // New exports count their own photos; the rest, the library's.
+        let (done, total) = if p.kind == PassKind::NewExports { new_photos(p, s.pass_start) } else { (p.done, p.total) };
+        let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+        let of = format!("{} of {}", util::thousands(done as u64), util::thousands(total as u64));
         match p.kind {
             PassKind::NewExports => {
                 // Quiet: no ×, a grey bar.
@@ -633,6 +635,49 @@ pub fn retry_label(f: &CardFailure) -> &'static str {
         CardFailure::SelfCheckFailed { .. } => "Check the card again",
         CardFailure::NoCard => "Look for the card again",
         CardFailure::Crashed | CardFailure::Failed(_) => "Try the card again",
+    }
+}
+
+/// Where the running pass began.  The engine counts every pass against the
+/// whole library (`done` starts at the shots already indexed), so a pass of
+/// new exports is measured from here: its own photos on the quiet line, and
+/// what search gained when it ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PassStart {
+    pub kind: PassKind,
+    /// The pass's `done` when it first showed.
+    pub done: usize,
+    /// Shots indexed then.
+    pub indexed: usize,
+}
+
+/// The start of the pass `st` shows: kept while that pass runs, taken
+/// afresh when another begins, none when none runs.
+pub fn pass_start(was: Option<PassStart>, st: &Status) -> Option<PassStart> {
+    let p = st.pass.as_ref()?;
+    match was {
+        Some(s) if s.kind == p.kind && s.done <= p.done => Some(s),
+        _ => Some(PassStart { kind: p.kind, done: p.done, indexed: st.indexed_shots }),
+    }
+}
+
+/// A pass of new exports in its own photos: (done, of).
+pub fn new_photos(p: &PassProgress, start: Option<PassStart>) -> (usize, usize) {
+    let from = start.filter(|s| s.kind == p.kind).map_or(0, |s| s.done.min(p.done));
+    (p.done - from, p.total.saturating_sub(from))
+}
+
+/// What the status bar says when a pass ends of itself.  `None` for a pass
+/// of new exports that added nothing (files that can't be read): nothing
+/// to say, and nothing for the results to show again.
+pub fn pass_ended(p: &PassProgress, start: Option<PassStart>, st: &Status) -> Option<String> {
+    match p.kind {
+        PassKind::NewExports => {
+            let added = start.map_or(0, |s| st.indexed_shots.saturating_sub(s.indexed));
+            (added > 0).then(|| format!("Search has the {} new {}.", util::thousands(added as u64), if added == 1 { "photo" } else { "photos" }))
+        }
+        _ if st.indexed_shots >= st.library_shots => Some(format!("Indexed {}. Search has the whole library.", util::plural(st.library_shots as u64, "photo"))),
+        _ => Some(format!("Indexed {} of {} photos.", util::thousands(st.indexed_shots as u64), util::thousands(st.library_shots as u64))),
     }
 }
 
@@ -763,6 +808,68 @@ mod tests {
             assert!(label.contains("card"), "{label}");
             assert!(!label.contains("processor") && !label.contains("cpu"), "{label}");
         }
+    }
+
+    fn status(pass: Option<(PassKind, usize, usize)>, indexed: usize, library: usize) -> Status {
+        Status {
+            pass: pass.map(|(kind, done, total)| PassProgress { kind, done, total, oldest_day: None }),
+            indexed_shots: indexed,
+            library_shots: library,
+            first_index_asked: true,
+            ..Status::default()
+        }
+    }
+
+    /// Feed snapshots in order, as `on_status` does: the start is followed
+    /// and each pass that ends gives its note (or none).
+    fn notes(snapshots: &[Status]) -> Vec<Option<String>> {
+        let (mut start, mut old): (Option<PassStart>, Option<&Status>) = (None, None);
+        let mut out = Vec::new();
+        for st in snapshots {
+            let was = start;
+            start = pass_start(was, st);
+            if let (Some(p), None) = (old.and_then(|o| o.pass.as_ref()), &st.pass) {
+                out.push(pass_ended(p, was, st));
+            }
+            old = Some(st);
+        }
+        out
+    }
+
+    #[test]
+    fn a_pass_of_new_exports_counts_only_its_own_photos() {
+        // The engine counts against the library: 44,878 already indexed,
+        // 59 to go.  The quiet line says 0 of 59, then 22 of 59.
+        let first = status(Some((PassKind::NewExports, 44_878, 44_937)), 44_792, 44_937);
+        let start = pass_start(None, &first);
+        assert_eq!(new_photos(first.pass.as_ref().unwrap(), start), (0, 59));
+        let later = status(Some((PassKind::NewExports, 44_900, 44_937)), 44_800, 44_937);
+        let start = pass_start(start, &later);
+        assert_eq!(start.map(|s| (s.done, s.indexed)), Some((44_878, 44_792)), "kept while the pass runs");
+        assert_eq!(new_photos(later.pass.as_ref().unwrap(), start), (22, 59));
+        // Unknown start (the stand-in counts from 0): as given.
+        assert_eq!(new_photos(later.pass.as_ref().unwrap(), None), (44_900, 44_937));
+    }
+
+    #[test]
+    fn a_pass_that_adds_nothing_says_nothing_and_one_that_adds_says_how_many() {
+        let lib = 127;
+        // Files that can't be read, tried again and again: no note, ever
+        // (it used to say "Search has the 127 new photos." each time).
+        let mut stuck = Vec::new();
+        for _ in 0..3 {
+            stuck.push(status(Some((PassKind::NewExports, 126, lib)), 126, lib));
+            stuck.push(status(None, 126, lib));
+        }
+        assert_eq!(notes(&stuck), vec![None, None, None]);
+        // A real export: what search gained, not the library's size.
+        let added = [status(Some((PassKind::NewExports, 124, lib)), 124, lib), status(Some((PassKind::NewExports, 126, lib)), 126, lib), status(None, 127, lib)];
+        assert_eq!(notes(&added), vec![Some("Search has the 3 new photos.".to_string())]);
+        let one = [status(Some((PassKind::NewExports, 126, lib)), 126, lib), status(None, 127, lib)];
+        assert_eq!(notes(&one), vec![Some("Search has the 1 new photo.".to_string())]);
+        // The first index still says where it got to.
+        let first = [status(Some((PassKind::FirstIndex, 0, lib)), 0, lib), status(None, 127, lib)];
+        assert_eq!(notes(&first), vec![Some("Indexed 127 photos. Search has the whole library.".to_string())]);
     }
 
     #[test]
