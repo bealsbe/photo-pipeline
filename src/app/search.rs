@@ -229,7 +229,7 @@ pub enum DialogMsg {
 
 impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
-        let link = Link::new(bus, settings.search_device, settings.search_index_exports);
+        let link = Link::new(bus, settings.search_device, settings.search_index_exports, settings.find_faces, settings.face_model());
         let (status, things) = (link.status(), link.things());
         Search {
             link,

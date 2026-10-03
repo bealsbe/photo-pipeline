@@ -18,6 +18,10 @@
 //! - [`tags`]: hidden tags derived from the stored vectors against the
 //!   vocabulary; *Things* and the ranking boost come from them.
 //! - [`estimate`]: the numbers the invitation and the dialog quote.
+//! - [`faces`]: people's faces (phase 3): the detections and face
+//!   vectors cache beside the index, the catch-up, and the grouping into
+//!   the *Subjects* page's groups (`crate::model::subjects` holds the
+//!   pure rules and the user's file).
 //!
 //! Search is library only (decision 14).  The index and the models live in
 //! the user's cache, never in the library; nothing is written to photos
@@ -27,6 +31,7 @@ pub mod engine;
 pub mod estimate;
 #[cfg(test)]
 mod eval;
+pub mod faces;
 pub mod index;
 pub mod parse;
 pub mod pass;
@@ -55,6 +60,34 @@ pub enum PassKind {
     /// Preferences ▸ Storage ▸ Rebuild: everything again, the old index
     /// answering until the new one is complete.
     Rebuild,
+    /// Faces over photos already indexed: the catch-up the People tab
+    /// asks for, or the face vectors again after a face-model change
+    /// (phase 3).  Reads previews, writes the faces cache, never the
+    /// search index.
+    Faces,
+}
+
+/// Where finding people's faces stands (phase 3, decision 9).  Part of
+/// [`Status`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FacesStatus {
+    /// Preferences ▸ People ▸ *Find people's faces* (on by default).
+    pub on: bool,
+    /// The chosen face model (Preferences ▸ People ▸ *Face model*).
+    pub model: Option<crate::ml::models::ModelId>,
+    /// The detector's and the chosen model's files are in place.
+    pub installed: bool,
+    /// Indexed shots that have been looked at for faces (with the
+    /// detector; whichever model recognised them).  Below
+    /// `indexed_shots` means a catch-up is on offer.
+    pub looked_at: usize,
+    /// Shots whose faces still want vectors from the chosen model (after
+    /// a model change); zero otherwise.
+    pub unrecognised: usize,
+    /// Faces found (score and size above the quality gate).
+    pub found: usize,
+    /// People named.
+    pub named: usize,
 }
 
 /// A running pass, as the status bar shows it.
@@ -106,6 +139,8 @@ pub struct Status {
     pub helper_restarts: u32,
     /// Preferences ▸ *Index new exports*.
     pub index_exports: bool,
+    /// People's faces (phase 3).
+    pub faces: FacesStatus,
 }
 
 /// One entry of *Things in your photos*: a vocabulary word with how many

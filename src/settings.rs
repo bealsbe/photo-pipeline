@@ -85,7 +85,23 @@ pub struct Settings {
     /// The last [`RECENT_SEARCHES`] queries, newest first (§7a.3).
     /// *Forget them* in Preferences clears it.
     pub search_recent: Vec<String>,
+
+    // People (phase 3, §7a.8 Preferences ▸ People).
+    /// *Find people's faces* (on by default, decision 9): faces are found
+    /// as photos are indexed.  Off: no new faces are looked for.
+    pub find_faces: bool,
+    /// *Face model*: the recognition model chosen in the download dialog
+    /// (decision 10); changing it recomputes the face vectors and keeps
+    /// names, members and rejections.
+    pub face_model: crate::ml::models::ModelId,
+    /// *Smallest group to show*: clusters with fewer photos fold under
+    /// *Smaller groups* (3, 5 or 10; §10 says 5).
+    pub people_min_photos: usize,
 }
+
+/// *Smallest group to show*, the choices and the default.
+pub const PEOPLE_MIN_PHOTOS_CHOICES: [usize; 3] = [3, 5, 10];
+pub const PEOPLE_MIN_PHOTOS_DEFAULT: usize = 5;
 
 /// How many recent searches are kept.
 
@@ -133,6 +149,9 @@ impl Default for Settings {
             search_closeness: crate::search::CLOSENESS_DEFAULT,
             search_index_exports: true,
             search_recent: Vec::new(),
+            find_faces: true,
+            face_model: crate::ml::models::FACE_MODEL_DEFAULT,
+            people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
     }
 }
@@ -155,6 +174,19 @@ impl Settings {
     /// Preferences ▸ *Forget them*.
     pub fn forget_searches(&mut self) {
         self.search_recent.clear();
+    }
+
+    /// *Smallest group to show*: one of the choices, else the default (a
+    /// hand-edited file).
+    #[allow(dead_code)] // Phase 3 UI: the People tab folds groups by it; called when it lands.
+    pub fn people_min_photos(&self) -> usize {
+        if PEOPLE_MIN_PHOTOS_CHOICES.contains(&self.people_min_photos) { self.people_min_photos } else { PEOPLE_MIN_PHOTOS_DEFAULT }
+    }
+
+    /// The face model to use: a face model, else the default (a settings
+    /// file naming the search model, or nothing).
+    pub fn face_model(&self) -> crate::ml::models::ModelId {
+        if self.face_model.is_face_model() { self.face_model } else { crate::ml::models::FACE_MODEL_DEFAULT }
     }
 
     /// The closeness to search with.  A value outside the slider's range
@@ -402,6 +434,25 @@ mod tests {
         assert_eq!(kept.closeness(), 0.01);
         let text = serde_json::to_string(&Settings { search_device: crate::ml::Device::Cpu, ..Settings::default() }).unwrap();
         assert!(text.contains(r#""search_device":"cpu""#));
+    }
+
+    /// Decision 9 and 10: faces on by default, AuraFace pre-selected,
+    /// groups of five; odd values fall back.
+    #[test]
+    fn people_settings_default_to_faces_on_with_auraface() {
+        let s = Settings::default();
+        assert!(s.find_faces);
+        assert_eq!(s.face_model(), crate::ml::models::ModelId::AuraFace);
+        assert_eq!(s.people_min_photos(), 5);
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).unwrap();
+        assert!(old.find_faces && old.face_model() == crate::ml::models::ModelId::AuraFace && old.people_min_photos() == 5);
+        let odd = Settings { face_model: crate::ml::models::ModelId::Siglip2, people_min_photos: 7, ..Settings::default() };
+        assert_eq!(odd.face_model(), crate::ml::models::ModelId::AuraFace, "not a face model: the default");
+        assert_eq!(odd.people_min_photos(), 5);
+        let chosen = Settings { face_model: crate::ml::models::ModelId::SFace, people_min_photos: 10, find_faces: false, ..Settings::default() };
+        assert_eq!((chosen.face_model(), chosen.people_min_photos(), chosen.find_faces), (crate::ml::models::ModelId::SFace, 10, false));
+        let text = serde_json::to_string(&chosen).unwrap();
+        assert!(text.contains(r#""face_model":"s-face""#) && text.contains(r#""find_faces":false"#), "{text}");
     }
 
     #[test]

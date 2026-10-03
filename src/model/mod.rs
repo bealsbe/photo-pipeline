@@ -13,3 +13,4 @@ pub mod quality_cache;
 pub mod record;
 pub mod saver;
 pub mod sidecar;
+pub mod subjects;
