@@ -248,7 +248,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if let Some(r) = app.subjects.review.as_mut() {
                 r.seq = seq;
             }
-            app.search.link.suggestions(seq, &group);
+            app.search.link.find_more(seq, &group);
             app.show_status("Looking again, from everything confirmed so far.", 4000)
         }
         Msg::Done => done(app),

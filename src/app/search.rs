@@ -103,12 +103,20 @@ pub struct Dialog {
     /// The face model picked (decision 10): the one in the settings (the
     /// recommended one until the user picks another).
     pub face_model: ModelId,
+    /// *Find fursuit heads* is ticked: on as Preferences says, but unticked
+    /// to start with when the processor is chosen (§7a.4: about 15 hours).
+    pub fursuits: bool,
+    /// Asked from the Fursuits tab: only the head models (the library is
+    /// indexed already).
+    pub fursuits_only: bool,
 }
 
 impl Dialog {
-    /// The dialog at `stage`, finding faces as Preferences says.
+    /// The dialog at `stage`, finding faces and fursuit heads as
+    /// Preferences says.
     pub fn new(stage: Stage, settings: &Settings) -> Dialog {
-        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: settings.face_model() }
+        let fursuits = settings.find_heads && settings.search_device == Device::Gpu;
+        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: settings.face_model(), fursuits, fursuits_only: false }
     }
 }
 
@@ -230,6 +238,8 @@ pub enum DialogMsg {
     Faces,
     /// A face model picked.
     FaceModel(ModelId),
+    /// *Find fursuit heads*, ticked or not.
+    Fursuits,
     Download,
     Cancel,
     Close,
@@ -243,6 +253,7 @@ pub enum DialogMsg {
 impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
         let link = Link::new(bus, settings.search_device, settings.search_index_exports, settings.find_faces, settings.face_model());
+        link.set_find_heads(settings.find_heads);
         let (status, things) = (link.status(), link.things());
         let pass_start = super::search_setup::pass_start(None, &status);
         Search {
@@ -366,8 +377,9 @@ pub fn open_day(app: &mut App) -> Task<Message> {
 // ── searching ───────────────────────────────────────────────────────────────
 
 /// The kinds whose names the field offers and understands: those whose
-/// step exists (people in this phase).
-pub const NAMED_KINDS: &[super::people::Kind] = &[super::people::Kind::Person];
+/// step exists (people, and fursuits from phase 4), each under its own
+/// heading, never mixed.
+pub const NAMED_KINDS: &[super::people::Kind] = &[super::people::Kind::Person, super::people::Kind::Fursuit];
 
 /// At most this many chips in the field.
 const MAX_CHIPS: usize = 3;
@@ -583,7 +595,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
-    let mut tasks = vec![super::subjects::on_status(app, &old)];
+    let mut tasks = vec![super::subjects::on_status(app, &old), super::subjects_fursuits::on_status(app, &old)];
     let st = &app.search.status;
     if st.stopped.is_some() && old.stopped != st.stopped {
         app.search.banner_hidden = false;

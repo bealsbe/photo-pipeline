@@ -26,6 +26,7 @@ pub mod preferences;
 pub mod preferences_storage;
 pub mod style;
 pub mod subjects;
+pub mod subjects_fursuits;
 pub mod subjects_person;
 pub mod subjects_review;
 pub mod testing;
@@ -282,6 +283,8 @@ pub enum Message {
     Search(search::Msg),
     /// People, fursuits and pets.
     Subjects(subjects::Msg),
+    /// The fursuit-head step: its offers, the processor's question, stop.
+    Fursuits(subjects_fursuits::Msg),
 }
 
 impl Message {
@@ -320,6 +323,7 @@ impl Message {
             Message::Bulk(_) => "Bulk",
             Message::Search(_) => "Search",
             Message::Subjects(_) => "Subjects",
+            Message::Fursuits(_) => "Fursuits",
         }
     }
 }
@@ -1690,6 +1694,7 @@ impl App {
             Message::Bulk(m) => bulk::update(self, m),
             Message::Search(m) => search::update(self, m),
             Message::Subjects(m) => subjects::update(self, m),
+            Message::Fursuits(m) => subjects_fursuits::update(self, m),
         }
     }
 

@@ -90,6 +90,12 @@ pub enum Control {
     SmallestGroup(usize),
     /// *Forget all…* (people).
     ForgetPeople,
+    /// *Find fursuit heads*.
+    FindHeads,
+    /// Look at the fursuit photos not looked at yet (the catch-up).
+    FindHeadsNow,
+    /// *Forget all…* (fursuits).
+    ForgetFursuits,
     Open(Cache),
     Clear(Cache),
     SearchRebuild,
@@ -130,6 +136,9 @@ impl Control {
             Control::SmallestGroup(10) => "pref-smallest-10",
             Control::SmallestGroup(_) => "pref-smallest-5",
             Control::ForgetPeople => "pref-forget-people",
+            Control::FindHeads => "pref-find-heads",
+            Control::FindHeadsNow => "pref-find-heads-now",
+            Control::ForgetFursuits => "pref-forget-fursuits",
             Control::SearchRebuild => "pref-search-rebuild",
             Control::SearchClear => "pref-search-clear",
             Control::ModelsOpen => "pref-models-open",
@@ -183,6 +192,8 @@ pub enum Ask {
     ModelsDelete,
     /// Forget every face found and every name given.
     ForgetPeople,
+    /// Forget every fursuit head found and every fursuit name given.
+    ForgetFursuits,
 }
 
 /// The Preferences window and what it has counted.
@@ -472,6 +483,10 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
             link.delete_models();
             "Deleted the downloaded model."
         }
+        Ask::ForgetFursuits => {
+            link.forget_all_fursuits();
+            "Forgot every fursuit head found and every fursuit name given. Your photos are not changed."
+        }
         Ask::ForgetPeople => {
             link.forget_all();
             app.subjects.crops.clear();
@@ -594,6 +609,32 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::FindHeads => {
+            let on = !app.settings.find_heads;
+            app.settings.find_heads = on;
+            app.settings.save_in_background();
+            app.search.link.set_find_heads(on);
+            if on {
+                Task::none()
+            } else {
+                app.show_status("Finding fursuit heads is off. The heads found and the names you gave are kept.", 5000)
+            }
+        }
+        Control::FindHeadsNow => {
+            if !heads_catch_up(app) {
+                return Task::none();
+            }
+            let t = super::subjects_fursuits::update(app, super::subjects_fursuits::Msg::FindHeads);
+            // The download dialog (if the models are missing) opens in the
+            // main window.
+            Task::batch([t, close(app)])
+        }
+        Control::ForgetFursuits => {
+            if fursuits_to_forget(app) {
+                app.prefs.confirm = Some(Ask::ForgetFursuits);
+            }
+            Task::none()
+        }
         Control::SearchRebuild | Control::SearchClear | Control::ModelsDelete => {
             if search_action_ready(app, c) {
                 app.prefs.confirm = Some(match c {
@@ -640,6 +681,18 @@ fn clearable(p: &Prefs, c: Cache) -> bool {
 fn people_to_forget(app: &App) -> bool {
     let f = &app.search.status.faces;
     f.found > 0 || f.named > 0 || !app.subjects.all.groups.is_empty()
+}
+
+/// Something about fursuits is kept: heads found or names given.
+fn fursuits_to_forget(app: &App) -> bool {
+    let h = &app.search.status.heads;
+    h.found > 0 || h.named > 0 || app.subjects.all.groups.iter().any(|g| g.kind == super::people::Kind::Fursuit)
+}
+
+/// Fursuit photos indexed and not looked at for heads, with nothing
+/// running or waiting: Preferences offers them, with their cost.
+fn heads_catch_up(app: &App) -> bool {
+    app.settings.find_heads && app.search.status.heads.catch_up_wanted() && app.search.status.indexed_shots > 0
 }
 
 fn models_exist(p: &Prefs) -> bool {
@@ -701,6 +754,13 @@ fn controls(app: &App) -> Vec<Control> {
     v.extend(crate::settings::PEOPLE_MIN_PHOTOS_CHOICES.iter().map(|&n| Control::SmallestGroup(n)));
     if people_to_forget(app) {
         v.push(Control::ForgetPeople);
+    }
+    v.push(Control::FindHeads);
+    if heads_catch_up(app) {
+        v.push(Control::FindHeadsNow);
+    }
+    if fursuits_to_forget(app) {
+        v.push(Control::ForgetFursuits);
     }
     if !settings::global_menu_forced_off() {
         v.push(Control::GlobalMenu);
@@ -898,6 +958,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         folders(app),
         search_section(app),
         people_section(app),
+        fursuits_section(app),
         desktop(app),
         storage_section(app),
         kit::caption(format!(
@@ -1242,7 +1303,11 @@ fn search_section(app: &App) -> Element<'_, Message> {
         let all = estimate::describe_seconds(estimate::seconds(shots, Device::Cpu));
         let day = estimate::describe_seconds(estimate::seconds(5_000, Device::Cpu));
         about_device = about_device.push(
-            text(format!("Indexing this library on the processor: {all}. Each new day of 5,000 photos: {day}."))
+            text(format!(
+                "Indexing this library on the processor: {all}. Each new day of 5,000 photos: {day}. Fursuit heads: {}, {} an event day, and each scan asks first.",
+                super::fursuits::describe_cost(super::fursuits::photos_to_look_at(&app.search.status.heads, shots), Device::Cpu).replacen(" on the processor", "", 1),
+                estimate::describe_seconds(super::fursuits::head_seconds(super::fursuits::EVENT_DAY_PHOTOS, Device::Cpu)),
+            ))
                 .size(t::T_SMALL)
                 .color(t::INK3),
         );
@@ -1372,6 +1437,54 @@ fn people_section(app: &App) -> Element<'_, Message> {
         ],
     );
     container(people).id("pref-section-people").width(Length::Fill).into()
+}
+
+/// Fursuits, after People: whether heads are looked for, what that costs on
+/// the device chosen (on the processor every scan asks first), and the
+/// photos with fursuits not looked at yet.  Kept apart from people: its
+/// own switch, never one setting for both.
+fn fursuits_section(app: &App) -> Element<'_, Message> {
+    use super::fursuits;
+    let p = &app.prefs;
+    let s = &app.settings;
+    let h = &app.search.status.heads;
+    let device = s.search_device;
+    let shots = app.search.status.library_shots.max(app.search.status.indexed_shots);
+    let all = fursuits::photos_to_look_at(h, shots).max(h.tagged);
+    let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
+    let cost = match device {
+        Device::Gpu => format!("about {} for this library the first time, then {day} a new event day", fursuits::describe_cost(all, device).trim_start_matches("about ")),
+        Device::Cpu => format!("{} for this library, {day} an event day; on the processor each scan asks first, with its cost", fursuits::describe_cost(all, device)),
+    };
+    let mut rows = vec![setting(
+        "Find fursuit heads",
+        about(format!("Looks for fursuit heads while indexing, after search and faces, only on photos with fursuits: {cost}. Nothing is named for you.")),
+        switch(p, Control::FindHeads, s.find_heads, true),
+    )];
+    if heads_catch_up(app) {
+        let n = h.unscanned();
+        let go = focusable(p, Control::FindHeadsNow, kit::btn("Find their heads…", style::secondary(), Some(m(Msg::Press(Control::FindHeadsNow)))));
+        rows.push(setting(
+            "Photos not looked at yet",
+            about(format!(
+                "{} with fursuits {} indexed before heads were looked for, or {} skipped. Looking at them takes {}.",
+                util::plural(n as u64, "photo"),
+                if n == 1 { "was" } else { "were" },
+                if n == 1 { "its scan was" } else { "their scans were" },
+                fursuits::describe_cost(n, device)
+            )),
+            go,
+        ));
+    }
+    let found = if h.found == 0 { "Nothing found yet.".to_string() } else { format!("{} found, {} named.", util::plural(h.found as u64, "head"), util::thousands(h.named as u64)) };
+    let forget = focusable(p, Control::ForgetFursuits, kit::btn("Forget all…", style::secondary(), fursuits_to_forget(app).then(|| m(Msg::Press(Control::ForgetFursuits)))));
+    rows.push(setting(
+        "Fursuits found",
+        about(format!("{found} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
+        forget,
+    ));
+    let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people or pets."), rows);
+    container(sec).id("pref-section-fursuits").width(Length::Fill).into()
 }
 
 /// *Change the face model*: the models, how long finding the faces again
@@ -1630,6 +1743,23 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
                 format!(
                     "This deletes the {} found in your photos{names}, with every answer from the reviews. Your photos are not changed. Faces are found again at the next index unless finding them is turned off.",
                     util::plural(f.found as u64, "face")
+                ),
+                "Forget all",
+                true,
+            )
+        }
+        Ask::ForgetFursuits => {
+            let h = &app.search.status.heads;
+            let names = match h.named {
+                0 => String::new(),
+                1 => " and the 1 fursuit name you gave".to_string(),
+                n => format!(" and the {n} fursuit names you gave"),
+            };
+            (
+                "Forget all fursuits?",
+                format!(
+                    "This deletes the {} found in your photos{names}, with every answer from the reviews. People are not touched, and your photos are not changed. Heads are found again at the next index unless finding them is turned off.",
+                    util::plural(h.found as u64, "fursuit head")
                 ),
                 "Forget all",
                 true,

@@ -33,7 +33,8 @@ use std::time::Duration;
 use chrono::{Duration as Span, NaiveDateTime};
 use parking_lot::Mutex;
 
-use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Subjects};
+use super::fursuits::{self, FakeFursuits};
+use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Kind, Subjects};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
@@ -127,6 +128,12 @@ impl Link {
                     s.status.stopped = None;
                     s.resume();
                 }
+                // A head scan the card stopped: on the processor, it asks
+                // first (the user chose the processor; the scan didn't).
+                if d == Device::Cpu && matches!(s.status.heads.step, fursuits::Step::Failed(_)) {
+                    s.status.heads.step = fursuits::Step::Idle;
+                    s.start_heads(fursuits::Why::Resume);
+                }
             }),
         }
     }
@@ -196,7 +203,7 @@ impl Link {
                 GroupId::Subject(s) => e.rename(s.clone(), name.to_string()),
                 GroupId::Cluster(_) => e.name_group(id.clone(), name.to_string()),
             },
-            Link::Fake(f) => f.people(|p, _| p.name_group(id, name).map(|_| ())),
+            Link::Fake(f) => f.edit(id, |p, _| p.name_group(id, name).map(|_| ()), |z, _| z.name_group(id, name).map(|_| ())),
         }
     }
 
@@ -204,20 +211,28 @@ impl Link {
     pub fn merge(&self, into: &GroupId, others: &[GroupId]) {
         match self {
             Link::Engine(e) => e.merge(into.clone(), others.to_vec()),
-            Link::Fake(f) => f.people(|p, subjects| {
-                let kinds = |g: &GroupId| subjects.group(g).map(|x| x.kind);
-                p.merge(into, others, kinds)
-            }),
+            Link::Fake(f) => f.edit(
+                into,
+                |p, subjects| p.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
+                |z, subjects| z.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
+            ),
         }
     }
 
     pub fn set_hidden(&self, id: &GroupId, hidden: bool) {
         match self {
             Link::Engine(e) => e.set_hidden(id.clone(), hidden),
-            Link::Fake(f) => f.people(|p, _| {
-                p.set_hidden(id, hidden);
-                Ok(())
-            }),
+            Link::Fake(f) => f.edit(
+                id,
+                |p, _| {
+                    p.set_hidden(id, hidden);
+                    Ok(())
+                },
+                |z, _| {
+                    z.set_hidden(id, hidden);
+                    Ok(())
+                },
+            ),
         }
     }
 
@@ -229,10 +244,17 @@ impl Link {
                     e.forget(s.clone());
                 }
             }
-            Link::Fake(f) => f.people(|p, _| {
-                p.forget(id);
-                Ok(())
-            }),
+            Link::Fake(f) => f.edit(
+                id,
+                |p, _| {
+                    p.forget(id);
+                    Ok(())
+                },
+                |z, _| {
+                    z.forget(id);
+                    Ok(())
+                },
+            ),
         }
     }
 
@@ -242,6 +264,7 @@ impl Link {
             Link::Engine(e) => e.forget_all(),
             Link::Fake(f) => f.change(|s| {
                 s.people.forget_all();
+                s.edits.retain(|k| *k != Kind::Person);
                 s.status.faces.looked_at = 0;
                 if s.status.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
                     s.status.pass = None;
@@ -256,7 +279,10 @@ impl Link {
         match self {
             Link::Engine(e) => e.faces(seq, id.clone()),
             Link::Fake(f) => {
-                let faces = Arc::new(f.state.lock().people.faces(id));
+                let faces = {
+                    let s = f.state.lock();
+                    Arc::new(if s.fursuits.owns(id) { s.fursuits.faces(id) } else { s.people.faces(id) })
+                };
                 let _ = f.bus.unbounded_send(BgEvent::SubjectFaces { seq, group: id.clone(), faces });
             }
         }
@@ -266,7 +292,7 @@ impl Link {
     pub fn move_faces(&self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) {
         match self {
             Link::Engine(e) => e.move_faces(from.clone(), faces.to_vec(), to.cloned()),
-            Link::Fake(f) => f.people(|p, _| p.move_faces(from, faces, to)),
+            Link::Fake(f) => f.edit(from, |p, _| p.move_faces(from, faces, to), |z, _| z.move_faces(from, faces, to)),
         }
     }
 
@@ -275,10 +301,17 @@ impl Link {
     pub fn answer(&self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>) {
         match self {
             Link::Engine(e) => e.answer(id.clone(), faces.to_vec(), yes),
-            Link::Fake(f) => f.people(|p, _| {
-                p.answer(id, faces, yes);
-                Ok(())
-            }),
+            Link::Fake(f) => f.edit(
+                id,
+                |p, _| {
+                    p.answer(id, faces, yes);
+                    Ok(())
+                },
+                |z, _| {
+                    z.answer(id, faces, yes);
+                    Ok(())
+                },
+            ),
         }
     }
 
@@ -287,10 +320,33 @@ impl Link {
         match self {
             Link::Engine(e) => e.suggestions(seq, id.clone()),
             Link::Fake(f) => {
-                let list = Arc::new(f.state.lock().people.suggestions(id));
+                let list = {
+                    let s = f.state.lock();
+                    Arc::new(if s.fursuits.owns(id) { s.fursuits.suggestions(id) } else { s.people.suggestions(id) })
+                };
                 let _ = f.bus.unbounded_send(BgEvent::Suggestions { seq, group: id.clone(), list });
             }
         }
+    }
+
+    /// *Find more*: look again for `id` from everything confirmed, then
+    /// send what the review offers.  Strict for fursuits (the next few
+    /// under the cut-off; nothing new means nothing more is close enough);
+    /// for people the same as `suggestions`.
+    pub fn find_more(&self, seq: u64, id: &GroupId) {
+        if let Link::Fake(f) = self {
+            {
+                let mut s = f.state.lock();
+                if s.fursuits.owns(id) {
+                    s.fursuits.find_more(id);
+                    s.refresh_people();
+                }
+            }
+            f.publish_people();
+        }
+        // The engine's fursuit side lands with the phase 4 backend; until
+        // then it answers as for people.
+        self.suggestions(seq, id);
     }
 
     /// Take back the last edit to people (`BgEvent::SubjectsUndone`, then
@@ -301,7 +357,11 @@ impl Link {
             Link::Fake(f) => {
                 let what = {
                     let mut s = f.state.lock();
-                    let what = s.people.undo();
+                    // The newest edit, whichever kind it changed.
+                    let what = match s.edits.pop() {
+                        Some(Kind::Fursuit) => s.fursuits.undo(),
+                        _ => s.people.undo(),
+                    };
                     s.refresh_people();
                     what
                 };
@@ -357,6 +417,79 @@ impl Link {
                 s.status.faces.unrecognised = 0;
                 s.status.pass = Some(PassProgress { kind: PassKind::Faces, done: s.people.looked_at, total, oldest_day: None });
             }),
+        }
+    }
+
+    // ── fursuit heads (the stand-in answers until the phase 4 backend's
+    //    API lands; the engine's arms do nothing yet) ──
+
+    /// Preferences ▸ *Find fursuit heads* (and the download dialog's tick).
+    pub fn set_find_heads(&self, on: bool) {
+        if let Link::Fake(f) = self {
+            f.change(|s| {
+                s.status.heads.on = on;
+                if !on {
+                    s.status.heads.step = fursuits::Step::Idle;
+                }
+            });
+        }
+    }
+
+    /// Look for heads in the fursuit photos not looked at yet (asked from
+    /// the Fursuits tab or Preferences, after the cost was shown): the head
+    /// models first if missing, then the scan, on either device.
+    pub fn find_heads(&self) {
+        if let Link::Fake(f) = self {
+            f.change(|s| {
+                let h = &mut s.status.heads;
+                h.on = true;
+                h.models_installed = true;
+                h.skipped = 0;
+                let total = h.unscanned();
+                h.step = fursuits::Step::Scanning { why: fursuits::Why::CatchUp, done: 0, total };
+            });
+        }
+    }
+
+    /// The answer to a head scan waiting on the processor: start it, or
+    /// skip it (its photos wait for a later catch-up).
+    pub fn answer_heads(&self, start: bool) {
+        if let Link::Fake(f) = self {
+            f.change(|s| {
+                let h = &mut s.status.heads;
+                let fursuits::Step::Asking(o) = h.step else { return };
+                h.step = if start {
+                    fursuits::Step::Scanning { why: o.why, done: 0, total: o.photos }
+                } else {
+                    h.skipped += o.photos;
+                    fursuits::Step::Idle
+                };
+            });
+        }
+    }
+
+    /// × on a head scan: stop it, keeping what was found.
+    pub fn stop_heads(&self) {
+        if let Link::Fake(f) = self {
+            f.change(|s| {
+                if s.status.heads.scanning() {
+                    s.status.heads.step = fursuits::Step::Idle;
+                }
+            });
+        }
+    }
+
+    /// Forget every fursuit head found and every fursuit name given;
+    /// people are not touched.
+    pub fn forget_all_fursuits(&self) {
+        if let Link::Fake(f) = self {
+            f.change(|s| {
+                s.fursuits.forget_all();
+                s.edits.retain(|k| *k != Kind::Fursuit);
+                s.status.heads.step = fursuits::Step::Idle;
+                s.status.heads.skipped = 0;
+                s.refresh_people();
+            });
         }
     }
 
@@ -424,6 +557,11 @@ struct FakeState {
     /// Made-up people, from the library's shots (their status is
     /// `status.faces`).
     people: FakePeople,
+    /// Made-up fursuits on the same shots (their status is `status.heads`).
+    fursuits: FakeFursuits,
+    /// Which kind each edit changed, newest last: Ctrl+Z takes back the
+    /// newest, whichever kind.
+    edits: Vec<Kind>,
     subjects: Arc<Subjects>,
     /// The generation of the groups last sent (sent again on a change).
     sent_people: Option<u64>,
@@ -443,19 +581,61 @@ impl FakeState {
     }
 
     fn busy(&self) -> bool {
-        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()))
+        let heads = self.status.heads.scanning() && self.status.stopped.is_none();
+        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()) || heads)
     }
 
     /// The groups and the faces counts, after the people changed.
     fn refresh_people(&mut self) {
-        let snap = self.people.snapshot();
+        let mut snap = self.people.snapshot();
         let f = &mut self.status.faces;
         f.found = snap.faces_found;
         f.named = self.people.named();
         f.looked_at = self.people.looked_at;
+        // The fursuits' groups ride along, each carrying its kind.
+        snap.groups.extend(self.fursuits.groups());
+        snap.groups.sort_by(|a, b| (b.name.is_some(), b.photos).cmp(&(a.name.is_some(), a.photos)).then(a.cover.capture.cmp(&b.cover.capture)));
+        snap.generation += self.fursuits.generation();
+        self.refresh_heads();
         if *self.subjects != snap {
             self.subjects = Arc::new(snap);
         }
+    }
+
+    /// The head step's counts, from the fursuits stand-in and the index.
+    fn refresh_heads(&mut self) {
+        let h = &mut self.status.heads;
+        h.tagged = self.fursuits.tagged_in(self.status.indexed_shots);
+        h.scanned = self.fursuits.scanned.min(h.tagged);
+        h.found = self.fursuits.found();
+        h.named = self.fursuits.named();
+    }
+
+    /// A head scan would start: on the card it does; on the processor it
+    /// waits for the user's answer, with its cost (decision 11).
+    fn start_heads(&mut self, why: fursuits::Why) {
+        self.refresh_heads();
+        let h = &mut self.status.heads;
+        let photos = h.unscanned().saturating_sub(h.skipped);
+        if !h.on || photos == 0 {
+            return;
+        }
+        h.step = if fursuits::starts_unasked(self.status.device.chosen) {
+            fursuits::Step::Scanning { why, done: 0, total: photos }
+        } else {
+            fursuits::Step::Asking(fursuits::Offer { photos, why })
+        };
+    }
+
+    /// One tick of a head scan; false when none runs.
+    fn step_heads(&mut self) -> bool {
+        let fursuits::Step::Scanning { why, done, total } = self.status.heads.step else { return false };
+        let base = self.fursuits.scanned.saturating_sub(done);
+        let done = (done + (total / 30).max(1)).min(total);
+        self.fursuits.scan(base + done);
+        self.status.heads.step = if done >= total { fursuits::Step::Idle } else { fursuits::Step::Scanning { why, done, total } };
+        self.refresh_people();
+        true
     }
 }
 
@@ -482,6 +662,7 @@ impl Fake {
         }
         status.faces = FacesStatus { on: find_faces, model: indexed.then_some(face_model), installed: indexed, ..FacesStatus::default() };
         let people = FakePeople::new(true);
+        status.heads = fursuits::HeadsStatus { on: true, models_installed: indexed, ..fursuits::HeadsStatus::default() };
         let state = FakeState {
             status,
             downloads: Vec::new(),
@@ -492,6 +673,8 @@ impl Fake {
             ticking: false,
             start_indexed: indexed,
             people,
+            fursuits: FakeFursuits::new(true),
+            edits: Vec::new(),
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
         };
@@ -509,16 +692,30 @@ impl Fake {
         self.keep_ticking(&mut s);
     }
 
-    /// Change the people (an edit the page asked for), then say so; a
-    /// refusal is printed (the page checks first, as the engine does).
-    fn people(&self, f: impl FnOnce(&mut FakePeople, &Subjects) -> Result<(), String>) {
+    /// Change a group (an edit the page asked for) in the stand-in of its
+    /// kind, then say so; a refusal is printed (the page checks first, as
+    /// the engine does).
+    fn edit(
+        &self,
+        id: &GroupId,
+        people: impl FnOnce(&mut FakePeople, &Subjects) -> Result<(), String>,
+        fursuits: impl FnOnce(&mut FakeFursuits, &Subjects) -> Result<(), String>,
+    ) {
         {
             let mut s = self.state.lock();
             let snap = s.subjects.clone();
-            if let Err(e) = f(&mut s.people, &snap) {
-                eprintln!("[people] refused: {e}");
+            let fursuit = s.fursuits.owns(id);
+            let before = s.fursuits.undo_depth();
+            let done = if fursuit { fursuits(&mut s.fursuits, &snap) } else { people(&mut s.people, &snap) };
+            match done {
+                Err(e) => eprintln!("[people] refused: {e}"),
+                Ok(()) if fursuit && s.fursuits.undo_depth() > before => s.edits.push(Kind::Fursuit),
+                Ok(()) if !fursuit => s.edits.push(Kind::Person),
+                Ok(()) => {}
             }
             s.refresh_people();
+            // Publish the head counts with the groups.
+            self.publish(&s);
         }
         self.publish_people();
     }
@@ -610,11 +807,14 @@ impl Fake {
             s.status.library_shots = shots;
             if let Some(ix) = s.index.clone() {
                 s.people.on_library(&ix);
+                s.fursuits.on_library(&ix);
             }
             if s.start_indexed {
                 s.start_indexed = false;
                 s.status.indexed_shots = shots;
                 s.people.look_at(shots);
+                let tagged = s.fursuits.tagged_in(shots);
+                s.fursuits.scan(tagged);
             }
             s.status.indexed_shots = s.status.indexed_shots.min(shots);
             s.refresh_people();
@@ -668,6 +868,12 @@ impl Fake {
                 s.status.device.self_check = SelfCheck::Passed { cosine: 1.0, max_diff: 2.7e-5 };
             }
             s.resume();
+            // A head scan the card stopped carries on (on the processor it
+            // asks first).
+            if matches!(s.status.heads.step, fursuits::Step::Failed(_)) && s.status.stopped.is_none() {
+                s.status.heads.step = fursuits::Step::Idle;
+                s.start_heads(fursuits::Why::Resume);
+            }
         });
     }
 
@@ -764,6 +970,64 @@ impl Fake {
                     st.people.look_at(done);
                     st.refresh_people();
                 }
+                // Fursuits: heads found with two named, found with none
+                // named, the library indexed before heads were looked for,
+                // finding them off, a scan running, a scan waiting on the
+                // processor's answer, scans skipped, the card failing.
+                "fursuits" | "fursuits-first" => {
+                    let indexed = s.indexed_shots;
+                    s.heads = fursuits::HeadsStatus { on: true, models_installed: true, ..fursuits::HeadsStatus::default() };
+                    st.fursuits.forget_all();
+                    st.fursuits.name_first = word == "fursuits";
+                    let tagged = st.fursuits.tagged_in(indexed);
+                    st.fursuits.scan(tagged);
+                    st.refresh_people();
+                }
+                "heads-catchup" => {
+                    s.heads = fursuits::HeadsStatus { on: true, models_installed: false, ..fursuits::HeadsStatus::default() };
+                    st.fursuits.forget_all();
+                    st.refresh_people();
+                }
+                "heads-off" => {
+                    s.heads.on = false;
+                    s.heads.step = fursuits::Step::Idle;
+                }
+                "heads-running" => {
+                    let total = st.fursuits.tagged_in(s.indexed_shots);
+                    let done = if n > 0 { n.min(total) } else { total / 4 };
+                    s.heads = fursuits::HeadsStatus { on: true, models_installed: true, step: fursuits::Step::Scanning { why: fursuits::Why::CatchUp, done, total }, ..fursuits::HeadsStatus::default() };
+                    st.fursuits.forget_all();
+                    st.fursuits.name_first = false;
+                    st.fursuits.scan(done);
+                    st.refresh_people();
+                }
+                "heads-asking" => {
+                    // heads-asking [photos] [first|export|resume]
+                    let mut words = arg.split_whitespace();
+                    let photos = words.next().and_then(|w| w.parse().ok()).unwrap_or(412);
+                    let why = match words.next() {
+                        Some("first") => fursuits::Why::FirstIndex,
+                        Some("resume") => fursuits::Why::Resume,
+                        _ => fursuits::Why::NewExports,
+                    };
+                    s.heads.on = true;
+                    s.heads.models_installed = true;
+                    s.heads.step = fursuits::Step::Asking(fursuits::Offer { photos, why });
+                }
+                "heads-skipped" => {
+                    let tagged = st.fursuits.tagged_in(s.indexed_shots);
+                    let skip = if n > 0 { n.min(tagged) } else { tagged / 5 };
+                    s.heads.on = true;
+                    s.heads.models_installed = true;
+                    s.heads.skipped = skip;
+                    s.heads.step = fursuits::Step::Idle;
+                    st.fursuits.scan(tagged - skip);
+                    st.refresh_people();
+                }
+                "heads-cardcrash" => {
+                    s.stopped = Some(Stopped::Card(CardFailure::Crashed));
+                    s.heads.step = fursuits::Step::Failed(CardFailure::Crashed);
+                }
                 _ => eprintln!("[search] unknown fake state {what:?}"),
             }
         });
@@ -778,7 +1042,7 @@ impl Fake {
             let mut within: Vec<GroupId> = subjects.to_vec();
             let mut unknown = false;
             for n in &names {
-                match super::people::by_name(&all, super::people::Kind::Person, n) {
+                match crate::app::search::NAMED_KINDS.iter().find_map(|&k| super::people::by_name(&all, k, n)) {
                     Some(g) => within.push(g.id.clone()),
                     None => unknown = true,
                 }
@@ -855,14 +1119,16 @@ impl Fake {
             let s = self.state.lock();
             let mut keep: Option<std::collections::HashSet<Key>> = None;
             for g in subjects {
-                let m = s.people.members(g);
+                let m = if s.fursuits.owns(g) { s.fursuits.members(g) } else { s.people.members(g) };
                 keep = Some(match keep {
                     None => m,
                     Some(k) => k.intersection(&m).copied().collect(),
                 });
             }
             let keep = keep.unwrap_or_default();
-            let faces: Vec<Face> = s.people.faces(&subjects[0]).into_iter().filter(|f| keep.contains(&f.face.key)).collect();
+            let first = &subjects[0];
+            let faces = if s.fursuits.owns(first) { s.fursuits.faces(first) } else { s.people.faces(first) };
+            let faces: Vec<Face> = faces.into_iter().filter(|f| keep.contains(&f.face.key)).collect();
             (faces, s.status.indexed_shots)
         };
         let parsed = crate::search::parse(text);
@@ -916,8 +1182,20 @@ impl Cropper {
     /// RGBA).  Blocking: call it on a worker.
     pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
         if let Some(fake) = &self.fake {
-            let person = fake.lock().people.look_of(&face.face);
-            return Some(super::people::silhouette(person, &face.face, px, framing));
+            let (suit, person) = {
+                let s = fake.lock();
+                (s.fursuits.look_of(&face.face), s.people.look_of(&face.face))
+            };
+            // A fursuit's head is a grey cartoon head; a person's face a
+            // grey silhouette.  Never a photo.
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            face.face.hash(&mut h);
+            let seed = h.finish();
+            return Some(match (suit, framing) {
+                (Some(suit), Framing::Face) => super::fursuit_art::head_crop(suit, seed, px),
+                (Some(suit), Framing::Photo) => super::fursuit_art::photo(suit, seed, face.face.bbox, px),
+                (None, _) => super::people::silhouette(person, &face.face, px, framing),
+            });
         }
         self.engine.as_ref()?.crop(face, px, framing)
     }
@@ -953,6 +1231,8 @@ fn step(s: &mut FakeState) {
         }
         if s.downloads.iter().all(|d| d.3 == DownloadState::Checked) {
             s.status.models_installed = true;
+            // The head models come with them when finding heads is on.
+            s.status.heads.models_installed |= s.status.heads.on;
             if s.status.device.chosen == Device::Gpu {
                 s.status.device.self_check = SelfCheck::Passed { cosine: 1.0, max_diff: 2.7e-5 };
             }
@@ -960,7 +1240,18 @@ fn step(s: &mut FakeState) {
         }
         return;
     }
+    // The card failed: a head scan stops and says so, never moving to the
+    // processor.
+    if let Some(Stopped::Card(f)) = &s.status.stopped {
+        if s.status.heads.scanning() {
+            s.status.heads.step = fursuits::Step::Failed(f.clone());
+        }
+    }
     if s.status.stopped.is_some() {
+        return;
+    }
+    // A head scan on its own (an export's photos, the catch-up).
+    if s.status.pass.is_none() && s.step_heads() {
         return;
     }
     // A faces pass on its own: the catch-up reads the photos indexed, a new
@@ -996,6 +1287,12 @@ fn step(s: &mut FakeState) {
                 s.status.indexed_shots = (s.status.indexed_shots + total).min(library);
             }
             s.status.pass = None;
+            // Then the fursuit-head step, on the photos with fursuits.
+            match kind {
+                PassKind::NewExports => s.start_heads(fursuits::Why::NewExports),
+                PassKind::FirstIndex | PassKind::Rebuild => s.start_heads(fursuits::Why::FirstIndex),
+                _ => {}
+            }
         }
     }
 }
