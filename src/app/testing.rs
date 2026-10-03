@@ -120,6 +120,39 @@
 //!                             # restarted, waiting [n], mismatch, offline
 //! search wait 5000            # wait (up to 5 s) for the query in flight
 //! search dump                 # print the page's state
+//! search fake people          # the stand-in's people: people (two named),
+//!                             # people-first (none named), faces-catchup
+//!                             # (indexed before faces), faces-off,
+//!                             # faces-running [n]
+//! search dlg faces|face 1     # the dialog's Find people's faces box, the
+//!                             # 2nd face model (registry order)
+//! subjects open               # People, fursuits and pets (Ctrl+4)
+//! subjects tab person|fursuit|pet
+//! subjects click 2 [ctrl]     # the 3rd group tile in the tab's order
+//!                             # (opens it; ctrl picks it)
+//! subjects small|hidden       # open or fold Smaller groups / Hidden
+//! subjects select             # S: pick several
+//! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
+//! subjects hide|unhide 0      # hide the picked; show a hidden one again
+//! subjects undo               # Ctrl+Z on the page
+//! subjects forgetgo|forgetcancel
+//! subjects findfaces          # the catch-up offer's button
+//! subjects name Person C      # type in a group's name field
+//! subjects nameenter|take 1|rename
+//! subjects words camera       # type beside the chip, then Enter
+//! subjects photos|faces       # Photos | Faces on a subject's page
+//! subjects facepick 3         # pick the 4th face
+//! subjects moveto new|2       # Move to… a new group / the 3rd group listed
+//! subjects notthis            # "Not Person A"
+//! subjects menu more|merge|move|close
+//! subjects mergeinto 0        # ⋯ ▸ Merge into… the 1st listed
+//! subjects hidethis|forget    # ⋯ ▸ Hide / Forget this person…
+//! subjects pclick 2|pactivate 2   # a photo tile on a subject's page
+//! subjects openday|back
+//! subjects review             # Y: start the review
+//! subjects y|n|next|prev|at 5|done|findmore|advance|open
+//! subjects wait 3000          # wait for the subject's query in flight
+//! subjects dump               # print the page's state
 //! quit
 //! ```
 
@@ -188,8 +221,8 @@ pub fn drive_scroll(app: &mut App) {
     let k = (d.start.elapsed().as_secs_f32() * 1000.0 / d.ms).min(1.0);
     let y = d.from + (d.to - d.from) * k;
     if d.search {
-        app.search.scroll = y;
-        app.search.scroll_seq += 1;
+        app.search.pane.scroll = y;
+        app.search.pane.scroll_seq += 1;
     } else {
         app.grid.scroll = y;
         app.grid.scroll_seq += 1;
@@ -263,6 +296,13 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         "prefs" => prefs_step(app, &arg),
         "search" => {
             let (t, wait) = search_step(app, i, &arg);
+            if let Some(t) = wait {
+                return t;
+            }
+            t
+        }
+        "subjects" => {
+            let (t, wait) = subjects_step(app, i, &arg);
             if let Some(t) = wait {
                 return t;
             }
@@ -930,7 +970,7 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
     let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
     let rest = rest.trim();
     let s = |m: Msg| Message::Search(m);
-    let tile = |app: &App, n: &str| app.search.layout.tiles.get(n.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0)).copied();
+    let tile = |app: &App, n: &str| app.search.pane.layout.tiles.get(n.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0)).copied();
     let main_key = |app: &mut App, spec: &str| {
         let (key, mods) = parse_key(spec);
         match app.main_id {
@@ -992,6 +1032,8 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
         "index" => app.update(s(Msg::IndexLibrary)),
         "dlg" => {
             let m = match rest {
+                "faces" => Some(DialogMsg::Faces),
+                r if r.starts_with("face ") => r[5..].trim().parse::<usize>().ok().and_then(|k| super::people::FACE_MODELS.get(k)).map(|mi| DialogMsg::FaceModel(mi.id)),
                 "download" => Some(DialogMsg::Download),
                 "cancel" => Some(DialogMsg::Cancel),
                 "close" => Some(DialogMsg::Close),
@@ -1019,7 +1061,7 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
         "scroll" => {
             let mut a = rest.split_whitespace().map(|x| x.parse::<f32>().unwrap_or(0.0));
             let (to, ms) = (a.next().unwrap_or(0.0), a.next().unwrap_or(1000.0).max(1.0));
-            app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.search.scroll, to, ms, search: true });
+            app.script_scroll = Some(ScrollDrive { start: Instant::now(), from: app.search.pane.scroll, to, ms, search: true });
             Task::none()
         }
         "wait" => {
@@ -1037,6 +1079,153 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
         }
         _ => {
             eprintln!("[script] unknown search action {arg}");
+            Task::none()
+        }
+    };
+    (t, None)
+}
+
+fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Task<Message>>) {
+    use super::people::Kind;
+    use super::subjects::{self, Msg};
+    use super::subjects_person::{Menu, Msg as P, Show};
+    use super::subjects_review::Msg as R;
+    use crate::ui::grid::GridEvent;
+    let (what, rest) = arg.split_once(' ').unwrap_or((arg, ""));
+    let rest = rest.trim();
+    let n: usize = rest.split_whitespace().next().and_then(|x| x.parse().ok()).unwrap_or(0);
+    let s = |m: Msg| Message::Subjects(m);
+    let p = |m: P| Message::Subjects(Msg::Person(m));
+    let r = |m: R| Message::Subjects(Msg::Review(m));
+    // The tab's groups in the page's order (what the arrow keys step).
+    let order = |app: &App| {
+        let st = &app.subjects;
+        subjects::arrange(&st.all, st.tab, app.settings.smallest_group()).order(st.small_open, st.hidden_open)
+    };
+    let others = |app: &App| -> Vec<super::people::GroupId> {
+        let st = &app.subjects;
+        let Some(pp) = st.person.as_ref() else { return Vec::new() };
+        let a = subjects::arrange(&st.all, pp.kind, app.settings.smallest_group());
+        a.named.iter().chain(a.to_name.iter().take(6)).map(|g| g.id).filter(|&id| id != pp.group).collect()
+    };
+    let photo = |app: &App, n: usize| app.subjects.pane().and_then(|pp| pp.layout.tiles.get(n).copied());
+    let t = match what {
+        "open" => app.update(Message::Cmd(Cmd::Subjects)),
+        "tab" => {
+            let k = match rest {
+                "fursuit" | "fursuits" => Kind::Fursuit,
+                "pet" | "pets" => Kind::Pet,
+                _ => Kind::Person,
+            };
+            app.update(s(Msg::Tab(k)))
+        }
+        "click" => match order(app).get(n).copied() {
+            Some(id) if rest.ends_with("ctrl") => app.update(s(Msg::Pick(id))),
+            Some(id) => app.update(s(Msg::Tile(id))),
+            None => Task::none(),
+        },
+        "small" => {
+            let open = !app.subjects.small_open;
+            app.update(s(Msg::Small(open)))
+        }
+        "hidden" => {
+            let open = !app.subjects.hidden_open;
+            app.update(s(Msg::Hidden(open)))
+        }
+        "select" => app.update(s(Msg::SelectMode)),
+        "merge" => app.update(s(Msg::MergeAsk)),
+        "mergego" => app.update(s(Msg::MergeGo)),
+        "mergecancel" => app.update(s(Msg::MergeCancel)),
+        "keep" => match app.subjects.merge.as_ref().and_then(|mg| mg.groups.get(n).copied()) {
+            Some(id) => app.update(s(Msg::MergeKeep(id))),
+            None => Task::none(),
+        },
+        "hide" => app.update(s(Msg::HidePicked)),
+        "unhide" => {
+            let st = &app.subjects;
+            let id = subjects::arrange(&st.all, st.tab, app.settings.smallest_group()).hidden.get(n).map(|g| g.id);
+            match id {
+                Some(id) => app.update(s(Msg::Unhide(id))),
+                None => Task::none(),
+            }
+        }
+        "undo" => app.update(s(Msg::Undo)),
+        "forgetgo" => app.update(s(Msg::ForgetGo)),
+        "forgetcancel" => app.update(s(Msg::ForgetCancel)),
+        "findfaces" => app.update(s(Msg::FindFaces)),
+        "name" => app.update(p(P::NameInput(rest.to_string()))),
+        "nameenter" => app.update(p(P::NameSubmit)),
+        "take" => app.update(p(P::NameTake(n))),
+        "rename" => app.update(p(P::Rename)),
+        "words" => {
+            let t = app.update(p(P::Words(rest.to_string())));
+            Task::batch([t, app.update(p(P::Submit))])
+        }
+        "photos" => app.update(p(P::Show(Show::Photos))),
+        "faces" => app.update(p(P::Show(Show::Faces))),
+        "facepick" => {
+            let f = app.subjects.person.as_ref().and_then(|pp| pp.faces.as_ref()).and_then(|f| f.get(n)).map(|f| f.face);
+            match f {
+                Some(f) => app.update(p(P::FacePick(f))),
+                None => Task::none(),
+            }
+        }
+        "moveto" if rest == "new" => app.update(p(P::MoveTo(None))),
+        "moveto" => match others(app).get(n).copied() {
+            Some(id) => app.update(p(P::MoveTo(Some(id)))),
+            None => Task::none(),
+        },
+        "notthis" => app.update(p(P::NotThis)),
+        "menu" => {
+            let m = match rest {
+                "more" => Some(Menu::More),
+                "merge" => Some(Menu::MergeInto),
+                "move" => Some(Menu::MoveTo),
+                _ => None,
+            };
+            app.update(p(P::Menu(m)))
+        }
+        "mergeinto" => match others(app).get(n).copied() {
+            Some(id) => app.update(p(P::MergeInto(id))),
+            None => Task::none(),
+        },
+        "hidethis" => app.update(p(P::Hide)),
+        "forget" => app.update(p(P::Forget)),
+        "pclick" => match photo(app, n) {
+            Some(id) => app.update(p(P::Grid(GridEvent::Click { id, modifiers: Modifiers::empty() }))),
+            None => Task::none(),
+        },
+        "pactivate" => match photo(app, n) {
+            Some(id) => app.update(p(P::Grid(GridEvent::Activate(id)))),
+            None => Task::none(),
+        },
+        "openday" => app.update(p(P::OpenDay)),
+        "back" => app.update(p(P::Back)),
+        "review" => app.update(p(P::Review)),
+        "y" => app.update(r(R::Answer(true))),
+        "n" => app.update(r(R::Answer(false))),
+        "next" => app.update(r(R::Step(1))),
+        "prev" => app.update(r(R::Step(-1))),
+        "at" => app.update(r(R::At(n))),
+        "done" => app.update(r(R::Done)),
+        "findmore" => app.update(r(R::FindMore)),
+        "advance" => app.update(r(R::Advance)),
+        "photo" => app.update(r(R::Open)),
+        "wait" => {
+            let left: u64 = rest.parse().unwrap_or(3_000);
+            let pending = app.subjects.person.as_ref().is_some_and(|pp| pp.pending.is_some());
+            if pending && left > 0 {
+                app.script[i] = format!("subjects wait {}", left.saturating_sub(100));
+                return (Task::none(), Some(Task::perform(tokio::time::sleep(Duration::from_millis(100)), move |_| Message::Script(i))));
+            }
+            Task::none()
+        }
+        "dump" => {
+            eprintln!("[subjects] {}", subjects::debug_state(app));
+            Task::none()
+        }
+        _ => {
+            eprintln!("[script] unknown subjects action {arg}");
             Task::none()
         }
     };

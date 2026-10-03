@@ -232,6 +232,7 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::GridView => "view-list-icons",
         Cmd::CalendarView => "view-calendar",
         Cmd::Search => "system-search",
+        Cmd::Subjects => "system-users",
         Cmd::SelectMode => "edit-select",
         Cmd::QuickLook => "view-preview",
         Cmd::PruneSelected => "dialog-cancel",
@@ -419,6 +420,7 @@ mod tests {
         assert_eq!(shortcut(Cmd::PruneSelected), Some(vec![vec!["P".to_string()]]));
         assert_eq!(shortcut(Cmd::Preferences), Some(vec![vec!["Control".to_string(), "comma".into()]]));
         assert_eq!(shortcut(Cmd::Search), Some(vec![vec!["Control".to_string(), "F".into()]]));
+        assert_eq!(shortcut(Cmd::Subjects), Some(vec![vec!["Control".to_string(), "4".into()]]));
     }
 
     #[test]
