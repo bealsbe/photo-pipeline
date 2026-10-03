@@ -32,6 +32,7 @@ pub mod estimate;
 #[cfg(test)]
 mod eval;
 pub mod faces;
+pub mod heads;
 pub mod index;
 pub mod parse;
 pub mod pass;
@@ -144,6 +145,9 @@ pub struct Status {
     pub index_exports: bool,
     /// People's faces (phase 3).
     pub faces: FacesStatus,
+    /// The fursuit-head step (phase 4): on or off, how far, what it waits
+    /// for (`heads`).
+    pub heads: heads::HeadsStatus,
 }
 
 /// One entry of *Things in your photos*: a vocabulary word with how many

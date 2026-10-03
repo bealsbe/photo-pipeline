@@ -1703,8 +1703,8 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.fail_paths_containing = Some("0003".into());
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 5);
@@ -1756,8 +1756,8 @@ mod tests {
         f.fail_paths_containing = Some("0001".into());
         f.fail_errno = Some(libc::EIO);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 3);
@@ -1785,8 +1785,8 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.delay = Duration::from_millis(100);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 320);
