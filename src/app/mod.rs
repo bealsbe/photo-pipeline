@@ -7,6 +7,8 @@ pub mod calendar;
 pub mod commands;
 pub mod compare;
 pub mod dialogs;
+pub mod fursuit_art;
+pub mod fursuits;
 pub mod global_menu;
 pub mod hints_ui;
 pub mod kit;
