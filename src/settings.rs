@@ -86,6 +86,10 @@ pub struct Settings {
     /// *Forget them* in Preferences clears it.
     pub search_recent: Vec<String>,
 
+    // People, fursuits and pets (§7a.5).
+    /// The tab People, fursuits and pets opens on: 0 people, 1 fursuits,
+    /// 2 pets.
+    pub subjects_tab: u8,
     // People (phase 3, §7a.8 Preferences ▸ People).
     /// *Find people's faces* (on by default, decision 9): faces are found
     /// as photos are indexed.  Off: no new faces are looked for.
@@ -149,6 +153,7 @@ impl Default for Settings {
             search_closeness: crate::search::CLOSENESS_DEFAULT,
             search_index_exports: true,
             search_recent: Vec::new(),
+            subjects_tab: 0,
             find_faces: true,
             face_model: crate::ml::models::FACE_MODEL_DEFAULT,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
@@ -178,7 +183,6 @@ impl Settings {
 
     /// *Smallest group to show*: one of the choices, else the default (a
     /// hand-edited file).
-    #[allow(dead_code)] // Phase 3 UI: the People tab folds groups by it; called when it lands.
     pub fn people_min_photos(&self) -> usize {
         if PEOPLE_MIN_PHOTOS_CHOICES.contains(&self.people_min_photos) { self.people_min_photos } else { PEOPLE_MIN_PHOTOS_DEFAULT }
     }
@@ -391,6 +395,13 @@ mod tests {
         let py = Settings::from_qsettings("[filter]\npruned=true\nmarked_only=false\n");
         assert!(py.filter_pruned && !py.filter_marked_only && !py.filter_pruned_only);
         assert!(!Settings::from_qsettings("[filter]\npruned=false\n").filter_pruned);
+    }
+
+    #[test]
+    fn the_people_tab_opens_on_people() {
+        assert_eq!(Settings::default().subjects_tab, 0);
+        let old: Settings = serde_json::from_str(r#"{"view_index": 2}"#).unwrap();
+        assert_eq!(old.subjects_tab, 0);
     }
 
     #[test]

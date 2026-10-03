@@ -13,7 +13,9 @@ pub mod kit;
 pub mod main_view;
 pub mod quicklook;
 pub mod quality;
+pub mod results_pane;
 pub mod network;
+pub mod people;
 pub mod search;
 pub mod search_link;
 pub mod search_results;
@@ -21,6 +23,9 @@ pub mod search_setup;
 pub mod preferences;
 pub mod preferences_storage;
 pub mod style;
+pub mod subjects;
+pub mod subjects_person;
+pub mod subjects_review;
 pub mod testing;
 pub mod undo;
 pub mod viewer;
@@ -80,12 +85,14 @@ pub enum View {
     /// Search the library (not kept between runs: the app starts where
     /// search was opened from).
     Search,
+    /// People, fursuits and pets (not kept between runs either).
+    Subjects,
 }
 
 impl View {
     /// A library page: read-only, no filter bar, no marking.
     pub fn is_library(self) -> bool {
-        matches!(self, View::Calendar | View::Search)
+        matches!(self, View::Calendar | View::Search | View::Subjects)
     }
 
     /// The saved `view_index`, numbered as the Python app numbers its views
@@ -95,7 +102,7 @@ impl View {
         match self {
             View::Grid => 1,
             View::Calendar => 2,
-            View::Search => 1,
+            View::Search | View::Subjects => 1,
         }
     }
 
@@ -271,6 +278,8 @@ pub enum Message {
     Bulk(bulk::Msg),
     /// The search page, its download dialog and indexing.
     Search(search::Msg),
+    /// People, fursuits and pets.
+    Subjects(subjects::Msg),
 }
 
 impl Message {
@@ -308,6 +317,7 @@ impl Message {
             Message::Hints(_) => "Hints",
             Message::Bulk(_) => "Bulk",
             Message::Search(_) => "Search",
+            Message::Subjects(_) => "Subjects",
         }
     }
 }
@@ -429,6 +439,8 @@ pub struct App {
     pub calendar: calendar::Calendar,
     /// The search page (Ctrl+F) and the engine's link.
     pub search: search::Search,
+    /// People, fursuits and pets (Ctrl+4).
+    pub subjects: subjects::Subjects,
     /// Network shares: probes, failing saves, the banner, the quit prompt.
     pub net: network::Net,
     quitting: bool,
@@ -467,6 +479,7 @@ impl App {
         };
         let calendar = calendar::Calendar::new(&settings, bus.clone());
         let search = search::Search::new(bus.clone(), &settings);
+        let subjects = subjects::Subjects::new(settings.subjects_tab, &search.link);
         let global_menu = global_menu::GlobalMenu::start(bus.clone(), settings.global_menu_wanted(crate::settings::global_menu_forced_off()));
 
         let mut filter = FilterUi::defaults();
@@ -570,6 +583,7 @@ impl App {
             shortcuts: None,
             calendar,
             search,
+            subjects,
             net: network::Net::default(),
             quitting: false,
             script: testing::load(),
@@ -1081,7 +1095,7 @@ impl App {
         }
         // Back from a day opened from search: search's own back button
         // still returns where search was opened from.
-        let from = if was == View::Calendar && self.calendar.is_from_search() { View::Search } else { was };
+        let from = if was == View::Calendar && self.calendar.is_from_search() { self.calendar.back_view() } else { was };
         if v != View::Calendar {
             self.calendar.leave_search_day();
         }
@@ -1090,6 +1104,12 @@ impl App {
             search::arriving(self, from);
             let text = self.calendar.status_text();
             return self.show_status(text, 0);
+        }
+        if v == View::Subjects {
+            self.calendar.deactivate();
+            let t = subjects::arriving(self);
+            let text = self.calendar.status_text();
+            return Task::batch([t, self.show_status(text, 0)]);
         }
         if v == View::Calendar {
             self.calendar.activate(&self.workers);
@@ -1217,7 +1237,7 @@ impl App {
                 }
                 open
             }
-            View::Calendar | View::Search => return Task::none(),
+            View::Calendar | View::Search | View::Subjects => return Task::none(),
         };
         if ids.is_empty() {
             return hint;
@@ -1367,6 +1387,11 @@ impl App {
             }
             return search::escape(self);
         }
+        // Esc on People, fursuits and pets, even when a field took it: a
+        // dialog, a menu or the name field first, then the page below.
+        if self.view == View::Subjects && key == Key::Named(Named::Escape) && self.quicklook.is_none() && self.modal.is_none() {
+            return subjects::escape(self);
+        }
         // The Hints menu, like the date picker, takes the keys while open.
         if self.quality.menu {
             if key == Key::Named(Named::Escape) {
@@ -1403,7 +1428,7 @@ impl App {
             }
         }
         if let Some(cmd) = Cmd::from_key(&key, mods) {
-            let enabled = !self.view.is_library() || !matches!(cmd, Cmd::SelectMode);
+            let enabled = !self.view.is_library() || !matches!(cmd, Cmd::SelectMode) || self.view == View::Subjects;
             if enabled {
                 return self.update(Message::Cmd(cmd));
             }
@@ -1415,6 +1440,7 @@ impl App {
         match self.view {
             View::Calendar => calendar::on_key(self, &key, mods),
             View::Search => search::on_key(self, &key, mods),
+            View::Subjects => subjects::on_key(self, &key, mods),
             View::Grid => self.grid_key(&key, mods),
         }
     }
@@ -1661,6 +1687,7 @@ impl App {
             Message::Hints(m) => hints_ui::update(self, m),
             Message::Bulk(m) => bulk::update(self, m),
             Message::Search(m) => search::update(self, m),
+            Message::Subjects(m) => subjects::update(self, m),
         }
     }
 
@@ -1715,7 +1742,13 @@ impl App {
             Cmd::GridView => self.switch_view(View::Grid),
             Cmd::CalendarView => self.switch_view(View::Calendar),
             Cmd::Search => search::open(self),
+            Cmd::Subjects => subjects::open(self),
             Cmd::QuickLook => quicklook::toggle(self),
+            // S on the People tab picks several groups.
+            Cmd::SelectMode if self.view == View::Subjects => {
+                subjects::select_mode(self);
+                Task::none()
+            }
             Cmd::SelectMode => {
                 let on = !self.grid.select_mode;
                 self.set_select_mode(on);
@@ -1747,6 +1780,8 @@ impl App {
                 }
                 self.refresh_mark(&ids)
             }
+            // On People, fursuits and pets: the last change to people.
+            Cmd::Undo if self.view == View::Subjects => subjects::undo(self),
             Cmd::Undo => undo::undo(self),
             Cmd::Redo => undo::redo(self),
             Cmd::Quit => self.quit(),
@@ -1776,6 +1811,7 @@ impl App {
             Cmd::Compare => compare::open_selected(self),
             Cmd::ReviewBurst => viewer_burst::open_from_main(self),
             Cmd::StackBurst if self.view == View::Search => search::toggle_focused(self),
+            Cmd::StackBurst if self.view == View::Subjects => subjects_person::toggle_focused(self),
             Cmd::StackBurst if self.view != View::Grid => Task::none(),
             Cmd::StackBurst => match self.grid_focus() {
                 Some(id) => self.toggle_burst(id),
@@ -1783,6 +1819,7 @@ impl App {
             },
             // On the search page, for its results only.
             Cmd::StackBursts if self.view == View::Search => search::toggle_all(self),
+            Cmd::StackBursts if self.view == View::Subjects => subjects_person::toggle_all(self),
             // A saved preference: from the menu, the keys or Preferences,
             // whichever view is showing.
             Cmd::StackBursts => self.toggle_all_bursts(),
@@ -2074,7 +2111,11 @@ impl App {
                     } else if owner == OWNER_CALENDAR {
                         self.calendar.thumbs.deliver(path, thumb);
                     } else if owner == thumbs::OWNER_SEARCH {
-                        self.search.thumbs.deliver(path, thumb);
+                        self.search.pane.thumbs.deliver(path, thumb);
+                    } else if owner == thumbs::OWNER_PERSON {
+                        if let Some(p) = self.subjects.person.as_mut() {
+                            p.pane.thumbs.deliver(path, thumb);
+                        }
                     }
                 }
                 BgEvent::Full { path, result } => {
@@ -2142,13 +2183,20 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects: _ } => {
-                    tasks.push(search::on_results(self, seq, search::Reply { hits, error, understood, fursuits, animal }))
+                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects } => {
+                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects };
+                    // A person's page asks with numbers of its own.
+                    if seq >= subjects_person::SEQ_BASE {
+                        tasks.push(subjects_person::on_results(self, seq, reply));
+                    } else {
+                        tasks.push(search::on_results(self, seq, reply));
+                    }
                 }
                 BgEvent::SearchThings(things) => search::on_things(self, things),
-                // People (phase 3): the Subjects page's events; its views
-                // take them up when the page lands.
-                BgEvent::Subjects(_) | BgEvent::SubjectsUndone(_) | BgEvent::SubjectFaces { .. } | BgEvent::Suggestions { .. } => {}
+                BgEvent::Subjects(all) => tasks.push(subjects::on_subjects(self, all)),
+                BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
+                BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
+                BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }

@@ -212,10 +212,7 @@ impl Engine {
     }
 }
 
-/// The people API (phase 3): what the *Subjects* page calls.  The page is
-/// being built against it, so until it lands nothing in the binary calls
-/// these; the allowance goes when it does.
-#[allow(dead_code)]
+/// The people API (phase 3): what the *Subjects* page calls.
 impl Engine {
     /// The *Subjects* page's state as last built (a cheap clone; no I/O).
     /// Also sent as `BgEvent::Subjects` whenever it changes.
@@ -1918,6 +1915,48 @@ mod tests {
         let scanned = crate::model::library_cache::scan(root, None, true, &cancel, &|_| {}).unwrap().unwrap();
         let store = Mutex::new(crate::model::library_cache::Store::new(root.to_path_buf()));
         Arc::new(crate::model::library_index::index_from_tree(root, &scanned.tree, &store, &cancel).unwrap())
+    }
+
+    /// The face catch-up covers every indexed photo not yet looked at for
+    /// faces (the user, 2026-10-03): photos indexed while face finding was
+    /// off, new exports included, and it runs only when asked.
+    #[test]
+    fn the_face_catch_up_covers_every_photo_indexed_without_faces() {
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library("face-catch-up", 6);
+        let (factory, _) = logging_factory(false);
+        // Faces on and the models in place: the first index looks at
+        // every photo.
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 6);
+        e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 6 && s.pass.is_none());
+        assert_eq!((s.faces.on, s.faces.looked_at), (true, 6));
+        // Faces off; two exports arrive and are indexed without faces.
+        e.set_find_faces(false);
+        wait_for(&e, "faces off", |s| !s.faces.on);
+        let day = d.join("lib/2025/Mar-2025/12-Mar-2025/JPG");
+        std::fs::write(day.join("0006.JPG"), "new").unwrap();
+        std::fs::write(day.join("0007.JPG"), "newer").unwrap();
+        e.on_library(rescan(&d.join("lib")));
+        let s = wait_for(&e, "the new exports", |s| s.indexed_shots == 8 && s.pass.is_none());
+        assert_eq!(s.faces.looked_at, 6, "nothing is looked at for faces while the setting is off");
+        // Nothing happens on its own; the catch-up, when asked, takes the two.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(e.status().faces.looked_at, 6);
+        e.set_find_faces(true);
+        e.find_faces();
+        let s = wait_for(&e, "the catch-up", |s| s.faces.looked_at == 8 && s.pass.is_none());
+        assert_eq!((s.indexed_shots, s.stopped), (8, None));
+        // Asked again with nothing left: no pass starts.
+        e.find_faces();
+        std::thread::sleep(Duration::from_millis(100));
+        let s = e.status();
+        assert!(s.pass.is_none() && s.faces.looked_at == 8);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A file the helper can't read is read once: the first index ends

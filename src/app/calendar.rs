@@ -133,9 +133,13 @@ pub struct Calendar {
     prefetch_at: Option<Instant>,
     bus: crate::bus::Bus,
     hovered: Option<NaiveDate>,
-    /// A day opened from search (Open day ›): its back button returns
-    /// there, and the calendar goes back to where it was.
+    /// A day opened from search or a person's photos (Open day ›): its
+    /// back button returns there, and the calendar goes back to where it
+    /// was.
     from_search: Option<Position>,
+    /// Where that back button returns, and what it says ("Search",
+    /// "Person A").
+    back_to: (View, String),
     /// The photo to select once the day's records are in.
     pick: Option<PathBuf>,
     /// Bring the selected photo into view (bumped with it).
@@ -156,7 +160,8 @@ pub enum Msg {
     Stage(StageEvent),
     Grid(GridEvent),
     Back,
-    /// Back to the search the day was opened from.
+    /// Back to the search (or the person's photos) the day was opened
+    /// from.
     BackToSearch,
     Prev,
     Next,
@@ -205,6 +210,7 @@ impl Calendar {
             bus,
             hovered: None,
             from_search: None,
+            back_to: (View::Search, "Search".into()),
             pick: None,
             day_reveal: (0, None),
         };
@@ -328,6 +334,13 @@ impl Calendar {
     /// Open day › from search: `day`, with the photo at `path` selected and
     /// in view.  Shown at once (no zoom: it isn't reached from a month).
     pub fn open_from_search(&mut self, day: NaiveDate, path: PathBuf) {
+        self.open_from(day, path, View::Search, "Search".into());
+    }
+
+    /// Open day › from `view` (search, a person's photos): its back button
+    /// says `label` and returns there.
+    pub fn open_from(&mut self, day: NaiveDate, path: PathBuf, view: View, label: String) {
+        self.back_to = (view, label);
         if self.from_search.is_none() {
             self.from_search = Some(Position { mode: self.mode, year: self.year, month: self.month, day: self.day });
         }
@@ -342,9 +355,15 @@ impl Calendar {
         self.apply_pick();
     }
 
-    /// The day page was opened from search (its back button says so).
+    /// The day page was opened from search or a person's photos (its back
+    /// button says so).
     pub fn is_from_search(&self) -> bool {
         self.from_search.is_some() && self.mode == Mode::Day
+    }
+
+    /// Where the day page's back button returns.
+    pub fn back_view(&self) -> View {
+        self.back_to.0
     }
 
     /// Leaving the calendar, or its search day: it goes back to the page
@@ -1012,7 +1031,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
         },
         Msg::Grid(ev) => return on_day_grid(app, ev),
-        Msg::BackToSearch => return app.switch_view(View::Search),
+        Msg::BackToSearch => {
+            let to = cal.back_to.0;
+            return app.switch_view(to);
+        }
         Msg::Back => cal.go_back(),
         Msg::Prev => cal.step(-1),
         Msg::Next => cal.step(1),
@@ -1108,7 +1130,10 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     }
     if cal.mode == Mode::Day {
         match (key, c) {
-            (Key::Named(Named::Escape), _) | (Key::Named(Named::Backspace), _) if cal.is_from_search() => return app.switch_view(View::Search),
+            (Key::Named(Named::Escape), _) | (Key::Named(Named::Backspace), _) if cal.is_from_search() => {
+                let to = cal.back_to.0;
+                return app.switch_view(to);
+            }
             (Key::Named(Named::Escape), _) | (Key::Named(Named::Backspace), _) => cal.go_back(),
             (_, Some("[")) => cal.step(-1),
             (_, Some("]")) => cal.step(1),
@@ -1270,8 +1295,8 @@ fn header(cal: &Calendar) -> Element<'_, Message> {
     let mut r = row![].spacing(t::S1).align_y(Alignment::Center);
     if is_day && cal.is_from_search() {
         r = r.push(kit::tip(
-            kit::icon_text_btn(Glyph::ChevronLeft, "Search", t::INK2, style::secondary(), cmsg(Msg::BackToSearch)),
-            "Back to the search  (Esc)",
+            kit::icon_text_btn(Glyph::ChevronLeft, cal.back_to.1.clone(), t::INK2, style::secondary(), cmsg(Msg::BackToSearch)),
+            if cal.back_to.0 == View::Search { "Back to the search  (Esc)".to_string() } else { format!("Back to {}  (Esc)", cal.back_to.1) },
             true,
         ));
         r = r.push(Space::new().width(t::S2));

@@ -76,7 +76,6 @@ pub fn face_seconds(shots: usize, device: Device, model: ModelId) -> f64 {
 /// Seconds for a face catch-up over `shots` already indexed: the previews
 /// are read again (the read-bound time on the card), and the faces found
 /// and recognised; the slower of reading and inference decides.
-#[allow(dead_code)] // Phase 3 UI: the People tab's invitation; called when it lands.
 pub fn face_catch_up_seconds(shots: usize, device: Device, model: ModelId) -> f64 {
     let read = shots as f64 * SECONDS_PER_SHOT_GPU;
     let work = face_seconds(shots, device, model);
@@ -89,7 +88,6 @@ pub fn face_catch_up_seconds(shots: usize, device: Device, model: ModelId) -> f6
 /// Seconds to recognise again the faces already found in `shots` with
 /// faces (a face-model change: the photos with faces are read again,
 /// about a quarter of the library, and only the face model runs).
-#[allow(dead_code)] // Phase 3 UI: Preferences, People, Change…; called when it lands.
 pub fn face_model_change_seconds(shots_with_faces: usize, faces: usize, device: Device, model: ModelId) -> f64 {
     let read = shots_with_faces as f64 * SECONDS_PER_SHOT_GPU;
     let work = faces as f64 * face_seconds_per_face(device, model);

@@ -145,7 +145,6 @@ impl ModelInfo {
     }
 
     /// Bytes kept once installed (the dialog's "174 MB is kept").
-    #[allow(dead_code)] // Phase 3 UI: the download dialog's; called when the People rows land.
     pub fn kept_bytes(&self) -> u64 {
         self.files.iter().map(|f| f.bytes).sum()
     }

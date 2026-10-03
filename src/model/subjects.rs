@@ -273,7 +273,6 @@ impl Subjects {
 
 /// How `Engine::crop` frames a face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // Phase 3 UI: chosen by the Subjects page; constructed when it lands.
 pub enum Framing {
     /// A square around the box with a margin: tiles and the review's crop.
     Face,
@@ -415,12 +414,6 @@ impl SubjectsFile {
         Ok(())
     }
 
-    #[allow(dead_code)] // Phase 3: *Change the cover* (the page's menu), wired with the face cache.
-    pub fn set_cover(&mut self, id: &SubjectId, cover: Option<FaceRef>) -> Result<(), Refused> {
-        self.get_mut(id)?.cover = cover;
-        Ok(())
-    }
-
     /// Forget a subject: its members become unnamed faces again.
     pub fn forget(&mut self, id: &SubjectId) -> Result<Subject, Refused> {
         let i = self.subjects.iter().position(|s| &s.id == id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?;
@@ -524,7 +517,6 @@ impl SubjectsFile {
     }
 
     /// Faces confirmed to any subject of `kind`, with their subject.
-    #[allow(dead_code)] // Phase 3: the grouping's must-links, next commit.
     pub fn confirmed(&self, kind: Kind) -> HashMap<FaceRef, SubjectId> {
         let mut out = HashMap::new();
         for s in self.subjects.iter().filter(|s| s.kind == kind) {
@@ -533,12 +525,6 @@ impl SubjectsFile {
             }
         }
         out
-    }
-
-    /// Every face the file mentions (for keeping cache rows alive).
-    #[allow(dead_code)] // Phase 3: the face cache's retention, next commit.
-    pub fn faces(&self) -> HashSet<FaceRef> {
-        self.subjects.iter().flat_map(|s| s.members.iter().chain(s.rejected.iter()).chain(s.cover.iter())).copied().collect()
     }
 
     /// Subjects named, of `kind`.
@@ -966,10 +952,9 @@ mod tests {
         assert_eq!(f.named(Kind::Person, " a ").len(), 1);
         assert_eq!(f.named_count(Kind::Person), 1);
         assert_eq!(f.confirmed(Kind::Person).len(), 3);
-        assert_eq!(f.faces().len(), 3);
         f.rename(&a, "A renamed".into()).unwrap();
         f.set_hidden(&a, true).unwrap();
-        f.set_cover(&a, Some(face(3, 0.1))).unwrap();
+        f.get_mut(&a).unwrap().cover = Some(face(3, 0.1));
         f.remove_members(&a, &[face(3, 0.1)]).unwrap();
         assert!(f.get(&a).unwrap().cover.is_none(), "a cover that leaves is forgotten");
         assert!(f.get(&a).unwrap().hidden && f.get(&a).unwrap().name.as_deref() == Some("A renamed"));

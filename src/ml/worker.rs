@@ -635,34 +635,34 @@ struct Cut {
 }
 
 /// Cut, align and tile the faces placed on each photo of a chunk
-/// (`faces[i]` for photo `i`), decoding each full preview once on the
-/// reader pool.  Photos whose preview can't be decoded again lose their
-/// faces.
-fn cut_faces(pool: &rayon::ThreadPool, preps: &[&FacePrep], placed: &[Vec<face::Placed>]) -> Vec<Cut> {
+/// (`faces[i]` for photo `i`), decoding each full preview once, in
+/// parallel on the global pool.  Never on the reader pool: its threads
+/// may all be blocked handing prepared photos to this thread, and
+/// waiting on them here would deadlock (it did, on the processor).
+/// Photos whose preview can't be decoded again lose their faces.
+fn cut_faces(preps: &[&FacePrep], placed: &[Vec<face::Placed>]) -> Vec<Cut> {
     use rayon::prelude::*;
-    let mut cuts: Vec<Vec<Cut>> = pool.install(|| {
-        preps
-            .par_iter()
-            .zip(placed.par_iter())
-            .enumerate()
-            .map(|(i, (prep, faces))| {
-                if faces.is_empty() {
-                    return Vec::new();
-                }
-                let Some(full) = prep.full_pixels() else { return Vec::new() };
-                let (w, h) = (full.width as f32, full.height as f32);
-                faces
-                    .iter()
-                    .map(|p| {
-                        let lm = p.landmarks.map(|[x, y]| [x * w, y * h]);
-                        let crop = face::align(&full, &lm);
-                        let sharpness = face::sharpness(&crop);
-                        Cut { photo: i, placed: *p, crop, sharpness, tile: tile(&full, &p.bbox) }
-                    })
-                    .collect()
-            })
-            .collect()
-    });
+    let mut cuts: Vec<Vec<Cut>> = preps
+        .par_iter()
+        .zip(placed.par_iter())
+        .enumerate()
+        .map(|(i, (prep, faces))| {
+            if faces.is_empty() {
+                return Vec::new();
+            }
+            let Some(full) = prep.full_pixels() else { return Vec::new() };
+            let (w, h) = (full.width as f32, full.height as f32);
+            faces
+                .iter()
+                .map(|p| {
+                    let lm = p.landmarks.map(|[x, y]| [x * w, y * h]);
+                    let crop = face::align(&full, &lm);
+                    let sharpness = face::sharpness(&crop);
+                    Cut { photo: i, placed: *p, crop, sharpness, tile: tile(&full, &p.bbox) }
+                })
+                .collect()
+        })
+        .collect();
     cuts.drain(..).flatten().collect()
 }
 
@@ -767,7 +767,7 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
                     };
                     let faces: Vec<Vec<FaceFound>> = match &want.faces {
                         FaceAsk::None => vec![Vec::new(); ready.len()],
-                        ask => match faces_in(models, &pool, ready, ask, &files) {
+                        ask => match faces_in(models, ready, ask, &files) {
                             Ok(f) => f,
                             Err(e) => {
                                 for (i, _) in ready.drain(..) {
@@ -831,7 +831,7 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
 /// The faces of a chunk: detected on the canvases (or taken as known
 /// landmarks for a model change), cut from the full previews, recognised
 /// and tiled.  One list per photo of `ready`, in its order.
-fn faces_in(models: &mut Models, pool: &rayon::ThreadPool, ready: &[(usize, Prepared)], ask: &FaceAsk, files: &[(PathBuf, FileType)]) -> ort::Result<Vec<Vec<FaceFound>>> {
+fn faces_in(models: &mut Models, ready: &[(usize, Prepared)], ask: &FaceAsk, files: &[(PathBuf, FileType)]) -> ort::Result<Vec<Vec<FaceFound>>> {
     let n = ready.len();
     let preps: Vec<&FacePrep> = ready.iter().map(|(_, p)| p.faces.as_ref()).collect::<Option<Vec<_>>>().unwrap_or_default();
     if preps.len() != n {
@@ -862,7 +862,7 @@ fn faces_in(models: &mut Models, pool: &rayon::ThreadPool, ready: &[(usize, Prep
             .collect(),
         FaceAsk::None => vec![Vec::new(); n],
     };
-    let cuts = cut_faces(pool, &preps, &placed);
+    let cuts = cut_faces(&preps, &placed);
     let crops: Vec<&Pixels> = cuts.iter().map(|c| &c.crop).collect();
     let vectors = if crops.is_empty() { Vec::new() } else { models.recognise(&crops)? };
     let mut out: Vec<Vec<FaceFound>> = vec![Vec::new(); n];
