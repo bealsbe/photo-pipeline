@@ -1721,6 +1721,61 @@ photos in all (anything clearly visible counted, background included).
   follow the index's generation (`Index::generation`: new rows tagged,
   a cleared index started over).
 
+### Infrared (the user, 2026-10-02): a word and a generalised contrast
+
+- **The word.**  "infrared" is a vocabulary word of kind scene (so it
+  may appear in *Things*) with a prompt of its own, since the template
+  doesn't suit it: `Word::prompt` is `"a photo taken with an infrared
+  camera."`, and a plain search for one vocabulary word uses the word's
+  prompt (`vocab::query_prompt`).  Measured against the sample's frames
+  from the user's converted body (28 of 1 779 by the sources' EXIF model,
+  `eval::infrared`; 15 sources could no longer be found): at the search
+  default it finds 16, 14 of them infrared (precision 0.88, recall 0.50),
+  the top 10 all infrared, 21 of the top 50, AP 0.71.  Other phrasings:
+  the template's "a photo of a infrared." 11/10 (AP 0.54), "an infrared
+  photo." 10/10 (0.66), "infrared photography" 7/7 (0.65), "an infrared
+  landscape photo." 9/8 (0.62), the bare "infrared" 10/8 (0.46).  The
+  frames the word misses rank near zero: a6000 frames without the
+  infrared look (night shots and the like), which don't trip snow or
+  sunsets either.
+- **The contrast.**  `Word::fursuit_lookalike` became `Word::must_beat:
+  Option<&str>`: a word this one must beat for a photo to count, in tags
+  and in search alike, unless the query names that word itself
+  (`vocab::contrasts_in`; "snow infrared" asks for infrared snow).  The
+  fursuit rule is unchanged (`must_beat: Some("fursuit")` on the animals,
+  "stuffed animal" and "cosplay"; the animal split and its tests as they
+  were).  `must_beat: Some("infrared")` is set on **snow, sunset, night
+  sky and mountain**: photos infrared beats are simply dropped, no
+  section.
+- **Evidence for which words** (the user's labels; the labelling page
+  showed the top 50 by rank, so that is where the false ticks were).
+  Infrared frames in the top 50 before → after the contrast, right ones
+  kept → kept (right lost): snow 13 → 1, 4 → 4 (0); sunset 15 → 1, 4 → 4
+  (0); night sky 10 → 1, 1 → 1 (0); mountain 14 → 1, 5 → 5 (0).  At the
+  search default: snow 2 hits, 1 right, the wrong one infrared → 1 hit,
+  right; sunset 2 hits, both wrong and infrared → 1.  **Every wrong snow
+  and sunset tick at the default was an a6000 frame.**  Not contrasted,
+  with reason: tree (6 of the 22 right trees are infrared frames — a
+  white tree is a tree; the contrast would drop 5 right from the top 50),
+  beach (2 right dropped), building (1 right dropped), flowers (3
+  infrared in the top 50, none wrong at the default), forest, field,
+  park, sign, kitchen, bedroom (one to four hits each, infrared frames of
+  real fields and parks).  The word alone separates the infrared look
+  well; a Preferences setting naming an infrared body would catch the
+  a6000 frames without that look, which only the user can decide and is
+  not built.
+
+**Open — revisit later (the user, 2026-10-02): infrared recall.**  The
+"infrared" word is precise (88 % at the default; the top 10 all infrared)
+but finds only half the frames from the infrared body (14 of 28; AP 0.71).
+The misses rank near zero and don't look infrared, so the word catches
+the *look*, not the body.  The test set is small (28 frames, 15 more
+sources unresolved after renames).  Options when this is picked up:
+check the 14 missed frames by eye (if they don't look infrared, the word
+is doing its job); a looser floor for "infrared" alone (more found, some
+ordinary photos let in); or a Preferences setting naming the infrared
+body (exact for that camera, if every frame from it is infrared).
+
 ### Queries (§7.2) as applied
 
 - `search::parse` is pure and shared with the page: words, quotes

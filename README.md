@@ -481,7 +481,14 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   0.3 %).  Words fursuits are taken for — the animals, a stuffed animal —
   count only where the word beats *fursuit*.  Tags are never shown on a
   photo: they make *Things in your photos*, the completions and the
-  ranking boost (a photo tagged with what you typed comes first).
+  ranking boost (a photo tagged with what you typed comes first).  A few
+  words must beat another to count, in tags and in search alike: the
+  animals and a stuffed animal must beat *fursuit*; *snow*, *sunset*,
+  *night sky* and *mountain* must beat *infrared*, because an
+  infrared-converted camera's frames (white foliage, strange skies) read
+  as those to the model.
+  Naming the word waives it (*snow infrared*), and *infrared* on its own
+  finds those frames.
   Tagging is arithmetic on vectors already in memory, on the engine's
   thread, as photos are indexed.
 - **`-word` and animal words** are the same measured contrast: a photo

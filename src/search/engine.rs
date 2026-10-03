@@ -872,13 +872,17 @@ impl Worker {
             return;
         }
         // The prompts: the words (none when browsing dates), each
-        // exclusion, and "fursuit" for the contrast on a real animal's
-        // query.
+        // exclusion, the words the query's vocabulary words must beat
+        // ("infrared" for snow), and "fursuit" last for the contrast on a
+        // real animal's query.
         let mut prompts = Vec::new();
         if !browsing {
-            prompts.push(if parsed.exact { parsed.words.clone() } else { query::prompt(&vocab::for_prompt(&parsed.words)) });
+            prompts.push(if parsed.exact { parsed.words.clone() } else { vocab::query_prompt(&parsed.words) });
+            prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
+            prompts.extend(vocab::contrasts_in(&parsed.words).iter().map(|w| w.prompt()));
+        } else {
+            prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
         }
-        prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
         if animal.is_some() {
             prompts.push(query::prompt("fursuit"));
         }
@@ -928,9 +932,10 @@ impl Worker {
     }
 
     /// Score the index against the query's vectors (the words, then each
-    /// exclusion, then "fursuit" when `contrast`), cut by closeness, and
-    /// resolve the rows: the hits (tagged with the query's words first,
-    /// then by similarity) and, with the contrast, the fursuits left out.
+    /// exclusion and each word the query's words must beat, then
+    /// "fursuit" when `contrast`), cut by closeness, and resolve the rows:
+    /// the hits (tagged with the query's words first, then by similarity)
+    /// and, with the contrast, the fursuits left out.
     fn hits(&mut self, parsed: &Parsed, vectors: &[Vec<f32>], contrast: bool, closeness: f32) -> (Vec<Hit>, Vec<Hit>) {
         self.ensure_resolver();
         let (Some(ix), Some(r)) = (&self.index, self.resolver.as_ref()) else { return (Vec::new(), Vec::new()) };
@@ -1324,6 +1329,9 @@ mod tests {
             Ok(texts
                 .iter()
                 .map(|t| {
+                    if let Some(w) = vocab::VOCABULARY.iter().position(|w| w.prompt.is_some_and(|p| p == t)) {
+                        return Axes::unit(&[(w, 1.0)]);
+                    }
                     let inner = t.strip_prefix("a photo of a ").and_then(|s| s.strip_suffix('.')).unwrap_or(t);
                     let words = vocab::words_in(inner);
                     if words.is_empty() {
@@ -1374,6 +1382,9 @@ mod tests {
                 ("2024/Jun-2024/08-Jun-2024", "0009-camera-30.JPG"),
                 ("2024/Jun-2024/08-Jun-2024", "0010-dog-50.JPG"),
                 ("2024/Jun-2024/08-Jun-2024", "0011-stuffed_animal-30-fursuit-50.JPG"),
+                ("2023/May-2023/05-May-2023", "0012-snow-50.JPG"),
+                ("2023/May-2023/05-May-2023", "0013-snow-30-infrared-50.JPG"),
+                ("2023/May-2023/05-May-2023", "0014-sunset-40-infrared-60.JPG"),
             ],
         );
         let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1385,19 +1396,20 @@ mod tests {
         let config = Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
         let e = Engine::with_config(bus, Device::Gpu, true, config);
         e.on_library(lib.clone());
-        wait_for(&e, "the library", |s| s.library_shots == 11);
+        wait_for(&e, "the library", |s| s.library_shots == 14);
         e.start_first_index(&[ModelId::Siglip2]);
-        wait_for(&e, "the first index", |s| s.indexed_shots == 11 && s.pass.is_none());
+        wait_for(&e, "the first index", |s| s.indexed_shots == 14 && s.pass.is_none());
         let mut ev = Events::new(&rx);
         let name = |h: &Hit| crate::util::stem(h.jpg.as_deref().unwrap()).split('-').next().unwrap().to_string();
         let names = |hs: &[Hit]| hs.iter().map(name).collect::<Vec<_>>();
 
         // Things: objects and scenes with photos, most first; never a
-        // subject kind, never the accidental frame, and the plush toy
-        // that is really a fursuit isn't counted.
+        // subject kind, never the accidental frame; the plush toy that is
+        // really a fursuit and the snow that is really infrared foliage
+        // aren't counted.
         let things = ev.things(&e);
         let list: Vec<(String, usize)> = things.iter().map(|t| (t.word.clone(), t.photos)).collect();
-        assert_eq!(list, [("cameras".to_string(), 2), ("fireworks".to_string(), 2)], "{things:?}");
+        assert_eq!(list, [("cameras".to_string(), 2), ("fireworks".to_string(), 2), ("infrared".to_string(), 2), ("snow".to_string(), 1)], "{things:?}");
         assert!(things.iter().all(|t| !t.kind.is_subject()));
         assert_eq!(*e.things(), *things);
         assert!(d.join("index").join("vocab-siglip2-b16-256.bin").is_file(), "the vocabulary's vectors are kept beside the index");
@@ -1406,7 +1418,7 @@ mod tests {
         // canine fursuit in the list of its own, never in the main one.
         e.query(1, "dog", super::super::CLOSENESS_DEFAULT);
         let (hits, indexed, error, understood, fursuits, animal) = ev.results(1);
-        assert_eq!((indexed, error), (11, None));
+        assert_eq!((indexed, error), (14, None));
         assert_eq!(names(&hits), ["0001", "0010", "0003"], "{hits:?}");
         assert_eq!(hits.iter().map(|h| h.tagged).collect::<Vec<_>>(), [true, true, false]);
         assert_eq!(names(&fursuits), ["0002"]);
@@ -1478,8 +1490,24 @@ mod tests {
         e.query(15, "-fursuit", super::super::CLOSENESS_DEFAULT);
         let (hits, _, error, ..) = ev.results(15);
         assert!(hits.is_empty() && error.is_none(), "a -word alone runs nothing");
-        e.query(16, "2023", super::super::CLOSENESS_DEFAULT);
+        e.query(16, "2022", super::super::CLOSENESS_DEFAULT);
         assert!(ev.results(16).0.is_empty(), "no photos in that year");
+
+        // The infrared contrast: "snow" counts only where snow beats
+        // infrared; "infrared" finds the frames; naming both waives it.
+        e.query(17, "snow", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, _, fursuits, animal) = ev.results(17);
+        assert_eq!(names(&hits), ["0012"], "the infrared frame that looks like snow is simply dropped");
+        assert!(fursuits.is_empty() && animal.is_none());
+        e.query(18, "sunset", super::super::CLOSENESS_DEFAULT);
+        assert!(ev.results(18).0.is_empty());
+        e.query(19, "infrared", super::super::CLOSENESS_DEFAULT);
+        let (hits, ..) = ev.results(19);
+        assert_eq!(names(&hits), ["0014", "0013"]);
+        assert!(hits.iter().all(|h| h.tagged));
+        e.query(20, "snow infrared", super::super::CLOSENESS_DEFAULT);
+        let (hits, ..) = ev.results(20);
+        assert!(names(&hits).contains(&"0013".to_string()), "{hits:?}");
 
         // An animal nothing matches: empty, still an animal query.
         e.query(10, "cat", super::super::CLOSENESS_DEFAULT);
@@ -1504,9 +1532,9 @@ mod tests {
         });
         let e2 = Engine::with_config(bus2, Device::Gpu, true, Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) });
         e2.on_library(lib.clone());
-        wait_for(&e2, "the saved index", |s| s.indexed_shots == 11);
+        wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         let things = Events::new(&rx2).things(&e2);
-        assert_eq!(things.len(), 2);
+        assert_eq!(things.len(), 4);
         assert!(asked2.lock().is_empty(), "no helper was needed for the tags");
         e2.clear_index();
         wait_for(&e2, "the clear", |s| s.indexed_shots == 0);
