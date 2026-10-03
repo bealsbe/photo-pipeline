@@ -127,6 +127,7 @@ impl Engine {
                     pass: None,
                     download: None,
                     first_index_pending: false,
+                    tried: HashSet::new(),
                     resolver: None,
                     text_cache: HashMap::new(),
                     vocab: None,
@@ -302,6 +303,11 @@ struct Worker {
     download: Option<crate::ml::download::DownloadHandle>,
     /// The first index starts as soon as the downloads finish.
     first_index_pending: bool,
+    /// Files (library-relative) the last pass couldn't embed: no plan
+    /// holds them again until the library is checked again or the user
+    /// asks (start, try again, the device, rebuild), so the end of one
+    /// pass never starts another over the same files.
+    tried: HashSet<PathBuf>,
     resolver: Option<Resolver>,
     /// Query texts encoded this session (bounded).
     text_cache: HashMap<String, Vec<f32>>,
@@ -408,6 +414,7 @@ impl Worker {
                     if let Some(ix) = &mut self.index {
                         let _ = ix.clear();
                     }
+                    self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
                         s.indexed_shots = 0;
@@ -420,10 +427,13 @@ impl Worker {
                 Cmd::RebuildIndex => {
                     self.cancel_pass();
                     if let Some(ix) = &mut self.index {
+                        // Clearing also forgets the files that couldn't be
+                        // read: a rebuild tries everything again.
                         let _ = ix.clear();
                         ix.set_first_index_asked();
                         let _ = ix.save_paths();
                     }
+                    self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
                         s.indexed_shots = 0;
@@ -491,8 +501,13 @@ impl Worker {
         self.update(|s| s.pass = None);
     }
 
-    /// The library arrived or changed.
+    /// The library arrived or changed (the calendar checked it: files
+    /// the last pass couldn't embed may be tried once more; files
+    /// remembered as unreadable only when their size or mtime changed —
+    /// a deep re-read of the library looks the same from here, so only a
+    /// rebuild retries those).
     fn on_library(&mut self, lib: Arc<LibraryIndex>) {
+        self.tried.clear();
         let root_changed = self.index.as_ref().is_none_or(|ix| ix.root != lib.root);
         if root_changed {
             self.cancel_pass();
@@ -595,17 +610,32 @@ impl Worker {
         });
     }
 
+    /// The library against the index: what is to be indexed, less what
+    /// the last pass couldn't embed (see `tried`).  Notes how many files
+    /// are skipped as unreadable in the status, for the caller's next
+    /// publish.
+    fn check(&self) -> Option<pass::Plan> {
+        let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return None };
+        let mut plan = pass::plan(lib, &ix.paths, &ix.vectors);
+        if !self.tried.is_empty() {
+            plan.jobs.retain(|j| !self.tried.contains(&j.rel));
+        }
+        self.shared.status.lock().unreadable = plan.unreadable;
+        Some(plan)
+    }
+
     /// New exports: queued on their own once the first index was asked
     /// for and the setting is on; counted as waiting while the card is
-    /// unusable.
+    /// unusable; nothing while the user's × holds.
     fn maybe_index_new(&mut self) {
-        let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return };
-        if !ix.paths.first_index_asked || self.pass.is_some() {
+        if self.pass.is_some() || !self.index.as_ref().is_some_and(|ix| ix.paths.first_index_asked) {
             return;
         }
-        let plan = pass::plan(lib, &ix.paths, &ix.vectors);
+        let Some(plan) = self.check() else { return };
         let stopped = self.shared.status.lock().stopped.clone();
         match stopped {
+            // × holds until the user asks again: start, try again, rebuild.
+            Some(Stopped::Cancelled) => self.publish(),
             Some(Stopped::Card(_)) | Some(Stopped::Helper { .. }) => self.update(|s| s.waiting = plan.jobs.len()),
             _ if self.index_exports && !plan.jobs.is_empty() => self.start_pass(PassKind::NewExports),
             _ => self.update(|s| s.waiting = 0),
@@ -613,6 +643,7 @@ impl Worker {
     }
 
     fn start_first_index(&mut self, wanted: Vec<ModelId>) {
+        self.tried.clear();
         if let Some(ix) = &mut self.index {
             ix.set_first_index_asked();
             let _ = ix.save_paths();
@@ -651,6 +682,7 @@ impl Worker {
         if !asked || self.pass.is_some() {
             return;
         }
+        self.tried.clear();
         let kind = if self.index.as_ref().is_some_and(|ix| ix.is_empty()) { PassKind::FirstIndex } else { PassKind::NewExports };
         self.start_pass(kind);
     }
@@ -683,10 +715,7 @@ impl Worker {
     }
 
     fn card_failed(&mut self, f: CardFailure) {
-        let waiting = match (&self.library, &self.index) {
-            (Some(lib), Some(ix)) => pass::plan(lib, &ix.paths, &ix.vectors).jobs.len(),
-            _ => 0,
-        };
+        let waiting = self.check().map_or(0, |p| p.jobs.len());
         self.update(|s| {
             if let CardFailure::SelfCheckFailed { cosine, max_diff } = &f {
                 s.device.self_check = SelfCheck::Failed { cosine: *cosine, max_diff: *max_diff };
@@ -701,12 +730,12 @@ impl Worker {
         if self.pass.is_some() {
             return;
         }
-        let (Some(lib), Some(ix)) = (self.library.clone(), self.index.as_ref()) else { return };
+        let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
         if !(self.models_ready)() {
             self.update(|s| s.models_installed = false);
             return;
         }
-        let plan = pass::plan(&lib, &ix.paths, &ix.vectors);
+        let Some(plan) = self.check() else { return };
         if plan.jobs.is_empty() {
             self.refresh_counts();
             self.update(|s| s.waiting = 0);
@@ -715,8 +744,9 @@ impl Worker {
         let Some(embedder) = self.image_embedder() else { return };
         let (tx, rx) = crossbeam_channel::unbounded::<pass::Batch>();
         let total = plan.total;
-        let already = plan.unchanged;
-        let req = pass::Request { root: lib.root.clone(), jobs: plan.jobs, total };
+        // Done before this pass: indexed, and skipped as unreadable.
+        let already = plan.unchanged + plan.unreadable;
+        let req = pass::Request { root, jobs: plan.jobs, total };
         let handle = pass::start(req, embedder, already, move |b| drop(tx.send(b)));
         self.pass = Some(Running { handle, kind, batches: rx });
         self.update(|s| {
@@ -743,11 +773,14 @@ impl Worker {
                 let _ = ix.save_paths();
             }
             let stopped = fin.stopped.clone();
-            let is_card = matches!(stopped, Some(Stopped::Card(_)));
+            let complete = stopped.is_none();
             if let Some(Stopped::Card(f)) = &stopped {
                 self.drop_embedder();
                 self.card_failed(f.clone());
             } else {
+                if !complete {
+                    self.check();
+                }
                 self.update(|s| {
                     s.pass = None;
                     s.indexed_shots = indexed;
@@ -755,7 +788,12 @@ impl Worker {
                 });
             }
             self.resolver = None;
-            if !is_card {
+            // Only a pass that ran to its end looks for files that arrived
+            // meanwhile.  A stopped one (×, the card, the library away)
+            // waits for the user or the library; and what this pass
+            // couldn't embed is in `tried`, so its end never starts
+            // another pass over the same files.
+            if complete {
                 self.maybe_index_new();
             }
         } else {
@@ -783,6 +821,16 @@ impl Worker {
                 eprintln!("search: couldn't write the index: {e}");
             }
             self.resolver = None;
+        }
+        // What couldn't be embedded isn't tried again at this pass's end;
+        // a file whose own content is the trouble is remembered, so it
+        // isn't read again at every check until it changes.
+        for (job, err) in &batch.failed {
+            self.tried.insert(job.rel.clone());
+            if pass::is_files_own(err) {
+                ix.note_failed(job.rel.clone(), job.size, &job.mtime);
+                self.resolver = None;
+            }
         }
     }
 
@@ -1089,11 +1137,39 @@ mod tests {
     struct Events {
         stream: std::pin::Pin<Box<dyn iced::futures::Stream<Item = Vec<BgEvent>>>>,
         rt: tokio::runtime::Runtime,
+        /// A pass was running at the last status read.
+        running: bool,
     }
 
     impl Events {
         fn new(rx: &crate::bus::Receiver) -> Events {
-            Events { stream: Box::pin(crate::bus::stream(rx)), rt: tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap() }
+            Events { stream: Box::pin(crate::bus::stream(rx)), rt: tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap(), running: false }
+        }
+
+        /// The passes that started since the last call, from the status
+        /// events: each change from no pass to one.  Waits until the
+        /// engine has been quiet for a moment, so a pass that would start
+        /// at the end of another is seen.
+        fn pass_starts(&mut self) -> Vec<PassKind> {
+            let stream = &mut self.stream;
+            let running = &mut self.running;
+            self.rt.block_on(async {
+                use iced::futures::StreamExt;
+                let mut out = Vec::new();
+                while let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(400), stream.next()).await {
+                    for ev in batch {
+                        if let BgEvent::SearchStatus(s) = ev {
+                            if let Some(p) = &s.pass {
+                                if !*running {
+                                    out.push(p.kind);
+                                }
+                            }
+                            *running = s.pass.is_some();
+                        }
+                    }
+                }
+                out
+            })
         }
 
         /// The answer to query `seq`.
@@ -1256,6 +1332,144 @@ mod tests {
         let s = wait_for(&e2, "the clear", |s| s.indexed_shots == 0);
         assert!(!s.first_index_asked);
         e2.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A factory that hands out one `Fake`, kept so the test can read its
+    /// call count.
+    fn one_fake(fake: Arc<Fake>) -> EmbedderFactory {
+        Box::new(move |_, _| Ok(fake.clone() as Arc<dyn Embedder>))
+    }
+
+    /// Scan a scratch library again (after its files changed).
+    fn rescan(root: &Path) -> Arc<LibraryIndex> {
+        let cancel = AtomicBool::new(false);
+        let scanned = crate::model::library_cache::scan(root, None, true, &cancel, &|_| {}).unwrap().unwrap();
+        let store = Mutex::new(crate::model::library_cache::Store::new(root.to_path_buf()));
+        Arc::new(crate::model::library_index::index_from_tree(root, &scanned.tree, &store, &cancel).unwrap())
+    }
+
+    /// A file the helper can't read is read once: the first index ends
+    /// and no pass follows it, a library check with nothing new starts
+    /// nothing, the failure is kept on disk, and only a change to the
+    /// file's size or mtime makes it a job again.
+    #[test]
+    fn an_unreadable_file_is_skipped_until_it_changes_and_never_loops() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library("unreadable", 5);
+        let mut f = Fake::new(Device::Gpu);
+        f.fail_paths_containing = Some("0003".into());
+        let fake = Arc::new(f);
+        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
+        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let mut ev = Events::new(&rx);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 5);
+        e.start_first_index(&[ModelId::Siglip2]);
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+        assert!(s.stopped.is_none(), "{s:?}");
+        assert_eq!(ev.pass_starts(), [PassKind::FirstIndex], "the first index ran and nothing followed it");
+        let s = e.status();
+        assert_eq!((s.unreadable, s.waiting, s.pass.clone()), (1, 0, None), "{s:?}");
+        assert_eq!(fake.calls.load(Relaxed), 1, "the unreadable file was read once");
+
+        // A library check with nothing new starts nothing.
+        e.on_library(lib.clone());
+        assert!(ev.pass_starts().is_empty(), "no pass for a file already known to be unreadable");
+        assert_eq!(fake.calls.load(Relaxed), 1);
+        assert_eq!(e.status().unreadable, 1);
+        let bad = d.join("lib/2025/Mar-2025/12-Mar-2025/JPG/0003.JPG");
+        let saved = Index::load(&d.join("lib"), &d.join("index"), models::info(ModelId::Siglip2));
+        assert!(saved.paths.is_failed(Path::new("2025/Mar-2025/12-Mar-2025/JPG/0003.JPG"), std::fs::metadata(&bad).unwrap().len(), &crate::model::record::MTime::from_metadata(&std::fs::metadata(&bad).unwrap())), "the failure is on disk: {:?}", saved.paths.failed);
+
+        // The file changed size: tried again (and fails again, once).
+        std::fs::write(&bad, "not really a jpeg 3, rewritten").unwrap();
+        e.on_library(rescan(&d.join("lib")));
+        assert_eq!(ev.pass_starts(), [PassKind::NewExports], "a changed file is a job again");
+        assert_eq!(fake.calls.load(Relaxed), 2);
+        assert_eq!(e.status().unreadable, 1);
+
+        // Its mtime changed, the size not: tried once more.
+        let later = std::time::SystemTime::now() + Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&bad).unwrap().set_modified(later).unwrap();
+        e.on_library(rescan(&d.join("lib")));
+        assert_eq!(ev.pass_starts(), [PassKind::NewExports], "a touched file is a job again");
+        assert_eq!(fake.calls.load(Relaxed), 3);
+        let s = e.status();
+        assert_eq!((s.unreadable, s.indexed_shots, s.pass.clone(), s.stopped.clone()), (1, 4, None, None), "{s:?}");
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A failure that isn't the file's own (an I/O error, as a share that
+    /// went away gives) isn't remembered, but the pass's end still starts
+    /// no pass over it: the next library check tries it once more.
+    #[test]
+    fn a_passing_failure_is_tried_again_at_the_next_check_and_never_at_the_pass_end() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library("transient", 3);
+        let mut f = Fake::new(Device::Gpu);
+        f.fail_paths_containing = Some("0001".into());
+        f.fail_errno = Some(libc::EIO);
+        let fake = Arc::new(f);
+        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
+        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let mut ev = Events::new(&rx);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 3);
+        e.start_first_index(&[ModelId::Siglip2]);
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 2 && s.pass.is_none());
+        assert!(s.stopped.is_none() && s.unreadable == 0, "{s:?}");
+        assert_eq!(ev.pass_starts(), [PassKind::FirstIndex], "nothing followed the first index");
+        assert_eq!(fake.calls.load(Relaxed), 1);
+        e.on_library(lib.clone());
+        assert_eq!(ev.pass_starts(), [PassKind::NewExports], "the check tries it once more, and that pass ends it");
+        assert_eq!(fake.calls.load(Relaxed), 2);
+        assert_eq!(e.status().unreadable, 0);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// × on a running first index: the batch in flight finishes, then no
+    /// pass starts on its own — not at the pass's end, not for a library
+    /// check, not for the setting — and `stopped` stays Cancelled until
+    /// the user asks again.
+    #[test]
+    fn the_stop_button_holds_until_the_user_asks_again() {
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library("cancel", 320);
+        let mut f = Fake::new(Device::Gpu);
+        f.delay = Duration::from_millis(100);
+        let fake = Arc::new(f);
+        let config = Config { factory: one_fake(fake.clone()), models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
+        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let mut ev = Events::new(&rx);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 320);
+        e.start_first_index(&[ModelId::Siglip2]);
+        wait_for(&e, "the first batch", |s| s.indexed_shots > 0 && s.pass.is_some());
+        e.stop_indexing();
+        let s = wait_for(&e, "the stop", |s| s.pass.is_none());
+        assert_eq!(s.stopped, Some(Stopped::Cancelled), "{s:?}");
+        assert!(s.indexed_shots > 0 && s.indexed_shots < 320, "stopped part-way: {s:?}");
+        let indexed = s.indexed_shots;
+        assert_eq!(ev.pass_starts(), [PassKind::FirstIndex], "nothing started at the stopped pass's end");
+
+        e.on_library(lib.clone());
+        e.set_index_exports(false);
+        e.set_index_exports(true);
+        assert!(ev.pass_starts().is_empty(), "× holds through a library check and the setting");
+        let s = e.status();
+        assert_eq!((s.stopped.clone(), s.indexed_shots, s.pass.clone()), (Some(Stopped::Cancelled), indexed, None), "{s:?}");
+
+        // Asking again carries on where it stopped.
+        e.try_card_again();
+        let s = wait_for(&e, "the rest", |s| s.indexed_shots == 320 && s.pass.is_none());
+        assert!(s.stopped.is_none(), "{s:?}");
+        assert_eq!(ev.pass_starts(), [PassKind::NewExports]);
+        e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }
 
