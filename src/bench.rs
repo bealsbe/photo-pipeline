@@ -394,7 +394,7 @@ fn bench_search_index() {
     let scratch = std::env::temp_dir().join(format!("pp-bench-search-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&scratch);
     let (bus, rx) = bus::channel();
-    let config = Config { factory: crate::ml::client::Client::factory(), installed: Box::new(|_| true), subjects_path: None, index_dir: Some(scratch.clone()) };
+    let config = Config { factory: crate::ml::client::Client::factory(), installed: Box::new(|_| true), subjects_path: None, downloader: crate::search::engine::no_downloads(), index_dir: Some(scratch.clone()) };
     let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
