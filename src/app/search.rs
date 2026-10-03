@@ -584,6 +584,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
+    super::search_setup::settle_downloads(&mut app.search.downloads, &app.search.status);
     let mut tasks = vec![super::subjects::on_status(app, &old)];
     let st = &app.search.status;
     if st.stopped.is_some() && old.stopped != st.stopped {
@@ -625,11 +626,7 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
 pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: DownloadState) -> Task<Message> {
     let s = &mut app.search;
     let failed = super::search_setup::failed(&state);
-    let d = Download { model, done, total, state };
-    match s.downloads.iter_mut().find(|x| x.model == model) {
-        Some(x) => *x = d,
-        None => s.downloads.push(d),
-    }
+    super::search_setup::record_download(&mut s.downloads, Download { model, done, total, state });
     // A failure shows in the dialog, reopened if it was closed.
     if failed {
         s.dialog = Some(Dialog::new(Stage::Progress, &app.settings));
@@ -1545,9 +1542,17 @@ fn invitation(app: &App) -> Element<'_, Message> {
             Some("Search works on the newest days within a minute. You can keep culling, and stop it from the status bar. Preferences ▸ Search chooses the graphics card or the processor."),
         ),
     ];
-    if !st.models_installed {
-        let what = if app.settings.find_faces { "The search model and a face model you pick, once" } else { "The search model, once" };
-        facts.push(fact("Downloads", format!("{what}: {} for search", costs.download), None));
+    // What the dialog will fetch: search's model unless it's here, a face
+    // model unless the one chosen is.
+    let face_missing = app.settings.find_faces && !st.faces.installed;
+    let download = match (!st.models_installed, face_missing) {
+        (true, true) => Some(format!("The search model and a face model you pick, once: {} for search", costs.download)),
+        (true, false) => Some(format!("The search model, once: {}", costs.download)),
+        (false, true) => Some("A face model you pick, once; the next step lists each with its size".to_string()),
+        (false, false) => None,
+    };
+    if let Some(line) = download {
+        facts.push(fact("Downloads", line, None));
     }
     facts.push(fact("Keeps", format!("{}, on this computer, readable only by you. Nothing about your photos is sent anywhere.", super::search_setup::capital(&costs.kept)), None));
     let mut group = column![];
