@@ -36,15 +36,15 @@ use crate::model::binfile::{Reader, Writer, fnv1a};
 use crate::ops::fsutil;
 
 /// The match probability a photo needs to carry a word, unless the word
-/// says otherwise: 2 % (cosine ≥ 0.114), well above the search default
-/// of 0.3 %, so a tag is a plain match.  Swept on the phase 0 sample
-/// (1 779 previews, 29 labelled words, `eval::tag_thresholds`): at 2 %
-/// every tagged photo of 27 of the 29 words is right (selfie 7 of 8,
-/// crowd 3 of 4), with 27 % of the labelled photos found; the study's
-/// counts come back ("camera" 3 of 3 right, "fireworks" 19 of 19,
-/// "stage" 25 by eye); at 5 % precision is perfect but only 15 % are
-/// found and "camera" has one; at 0.5 % precision falls to 0.74.
-pub const DEFAULT_THRESHOLD: f32 = 0.02;
+/// says otherwise: 1 % (cosine ≥ 0.108), above the search default of
+/// 0.3 %, so a tag is a plain match.  Set from the user's own labels on the
+/// phase 0 sample (1 779 previews, 28 words, `eval::tag_thresholds`): at
+/// 1 % the tags are right 87.6 % of the time and find 30.5 % of the
+/// labelled photos; at 2 % (the earlier choice, from the agent's own
+/// judgement) 88.5 % and 21.5 %, so 1 % finds two fifths more for a point
+/// of precision; at 0.5 % precision falls to 76 %.  Tags are helpers (the
+/// ranking boost, completions, Things), so precision comes first.
+pub const DEFAULT_THRESHOLD: f32 = 0.01;
 
 const VOCAB_MAGIC: &[u8; 8] = b"PPSRCHT\0";
 const VOCAB_VERSION: u32 = 1;

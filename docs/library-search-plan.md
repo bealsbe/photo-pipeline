@@ -1654,12 +1654,41 @@ pets never appear in it, and are never combined, is held by tests in
 they contain.  Plurals go through the vocabulary's own forms, then
 plain English rules.
 
+### The user's labels (phase 0, 2026-10-02)
+
+The user labelled the phase 0 sample: 36 words, 28 with photos, 331 right
+photos in all (anything clearly visible counted, background included).
+
+- **Search's closeness default is confirmed.**  Swept over the slider's
+  range, mean F1 peaks at the default (match probability ≥ ~0.3 %,
+  cosine ≥ 0.097): precision 0.70, recall 0.47.  Stricter is more often
+  right but finds far less (1 %: 0.88 / 0.31); looser lets junk in.
+  Unchanged.
+- **The prompt template stays.**  Five phrasings span a mean average
+  precision of 0.62–0.67; "a photo of a {}." scores 0.663, within noise of
+  the best (0.667).
+- **The tag floor drops from 2 % to 1 %.**  On the user's labels: 1 %
+  tags are right 87.6 % of the time and find 30.5 % of the labelled photos,
+  against 88.5 % and 21.5 % at 2 %; 0.5 % falls to 76 % right.  Tags are
+  helpers, so precision first, but 1 % finds two fifths more for a point.
+- **Strong and weak words.**  Fireworks, fursuit, dance floor and building
+  are excellent (P@10 1.0); sunset, night sky and phone found nothing
+  right at the default.
+- **Infrared photos.**  Some of the sample was taken with an
+  infrared-converted camera, which turns foliage white and skies strange:
+  the model reads those frames as snow and sunsets, the source of most of
+  the false "snow" and "sunset" hits.  Not a threshold problem.  Options
+  for later: an "infrared" word in the vocabulary (so such photos can be
+  searched for, and "snow"/"sunset" made to beat it, as animal words beat
+  "fursuit"), or a per-camera flag in Preferences that marks a body as
+  infrared.
+
 ### Hidden tags: the rule and its evidence
 
 - **Rule.**  A photo carries a word when SigLIP2's own match probability
   for the word's prompt (the query template) reaches the word's floor,
-  **2 % by default** (cosine ≥ 0.114; `tags::DEFAULT_THRESHOLD`, a per-word
-  override is possible), and, for a word fursuits are taken for, when the
+  **1 % by default** (cosine ≥ 0.108; `tags::DEFAULT_THRESHOLD`, a per-word
+  override is possible; 2 % before the user's labels, see below), and, for a word fursuits are taken for, when the
   word also beats "fursuit".  Each word is judged on its own: the study's
   softmax share let the fursuit label swallow the rest.
 - **Evidence** (`eval::tag_thresholds`, the phase 0 sample of 1 779
