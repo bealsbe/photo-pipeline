@@ -24,7 +24,7 @@ pub enum Kind {
     /// Fursuits (phase 4).
     Fursuit,
     /// Real animals: pets (phase 5).  To the models, many of these words
-    /// mean fursuits in this library ([`Word::fursuit_lookalike`]).
+    /// mean fursuits in this library ([`Word::must_beat`]).
     Animal,
 }
 
@@ -46,14 +46,20 @@ pub struct Word {
     /// "fireworks", "food").
     pub plural: &'static str,
     pub kind: Kind,
-    /// Fursuits are taken for it: a photo carries its tag only where the
-    /// word beats "fursuit" (the measured contrast), and for a real
-    /// animal (decision 12b) a query naming it, and not naming fursuits,
-    /// leaves fursuits out by default.  Set on the animals and on the
-    /// things the sample confused with fursuits (a stuffed animal: 139 of
-    /// 148 tagged were fursuits before the contrast, every one left after
-    /// it a real plush toy).
-    pub fursuit_lookalike: bool,
+    /// A vocabulary word this one must beat for a photo to count (the
+    /// measured contrast), in tags and in search alike, unless the query
+    /// names that word itself.  `"fursuit"` for what fursuits are taken
+    /// for: the animals (decision 12b: a real animal's query also puts
+    /// the fursuits in a list of their own) and the things the sample
+    /// confused with them (a stuffed animal: 139 of 148 tagged were
+    /// fursuits before the contrast, every one left after it a real plush
+    /// toy).  `"infrared"` for what an infrared-converted camera's frames
+    /// look like (snow, a sunset: white foliage and strange skies).
+    pub must_beat: Option<&'static str>,
+    /// The prompt its tag vector and a plain search for it encode, when
+    /// the template doesn't suit the word ("a photo taken with an infrared
+    /// camera." rather than "a photo of a infrared.").
+    pub prompt: Option<&'static str>,
     /// The match probability ([`super::query::match_probability`]) a
     /// photo needs to carry the word as a hidden tag.  Calibrated on the
     /// phase 0 sample (see `tags.rs`); `None` is the vocabulary's default.
@@ -61,24 +67,35 @@ pub struct Word {
 }
 
 impl Word {
-    /// The text its tag vector is encoded from (the query template).
+    /// The text its tag vector is encoded from: its own prompt, else the
+    /// query template around the word.
     pub fn prompt(&self) -> String {
-        super::query::prompt(self.word)
+        self.prompt.map(str::to_string).unwrap_or_else(|| super::query::prompt(self.word))
+    }
+
+    /// The vocabulary index of the word this one must beat, if any.
+    pub fn must_beat_index(&self) -> Option<usize> {
+        self.must_beat.and_then(|t| VOCABULARY.iter().position(|w| w.word == t))
     }
 }
 
 const fn w(word: &'static str, plural: &'static str, kind: Kind) -> Word {
-    Word { word, plural, kind, fursuit_lookalike: false, threshold: None }
+    Word { word, plural, kind, must_beat: None, prompt: None, threshold: None }
+}
+
+/// A word that must beat another (see [`Word::must_beat`]).
+const fn beats(word: &'static str, plural: &'static str, kind: Kind, target: &'static str) -> Word {
+    Word { word, plural, kind, must_beat: Some(target), prompt: None, threshold: None }
 }
 
 /// A real animal fursuits are taken for.
 const fn a(word: &'static str, plural: &'static str) -> Word {
-    Word { word, plural, kind: Kind::Animal, fursuit_lookalike: true, threshold: None }
+    beats(word, plural, Kind::Animal, "fursuit")
 }
 
 /// A real animal nobody takes a fursuit for.
 const fn a0(word: &'static str, plural: &'static str) -> Word {
-    Word { word, plural, kind: Kind::Animal, fursuit_lookalike: false, threshold: None }
+    w(word, plural, Kind::Animal)
 }
 
 /// The vocabulary.  Order is the tag index order (`tags.rs` stores tags
@@ -114,7 +131,7 @@ pub const VOCABULARY: &[Word] = &[
     w("tree", "trees", Kind::Object),
     w("christmas tree", "christmas trees", Kind::Object),
     w("toy", "toys", Kind::Object),
-    Word { word: "stuffed animal", plural: "stuffed animals", kind: Kind::Object, fursuit_lookalike: true, threshold: None },
+    beats("stuffed animal", "stuffed animals", Kind::Object, "fursuit"),
     w("guitar", "guitars", Kind::Object),
     w("piano", "pianos", Kind::Object),
     w("drum", "drums", Kind::Object),
@@ -164,19 +181,22 @@ pub const VOCABULARY: &[Word] = &[
     w("garden", "gardens", Kind::Scene),
     w("forest", "forests", Kind::Scene),
     w("field", "fields", Kind::Scene),
-    w("mountain", "mountains", Kind::Scene),
-    w("snow", "snow", Kind::Scene),
+    beats("mountain", "mountains", Kind::Scene, "infrared"),
+    beats("snow", "snow", Kind::Scene, "infrared"),
     w("beach", "beaches", Kind::Scene),
     w("lake", "lakes", Kind::Scene),
     w("river", "rivers", Kind::Scene),
     w("waterfall", "waterfalls", Kind::Scene),
     w("sky", "sky", Kind::Scene),
-    w("sunset", "sunsets", Kind::Scene),
-    w("night sky", "night sky", Kind::Scene),
+    beats("sunset", "sunsets", Kind::Scene, "infrared"),
+    beats("night sky", "night sky", Kind::Scene, "infrared"),
     w("fireworks", "fireworks", Kind::Scene),
     w("campfire", "campfires", Kind::Scene),
     w("city skyline", "city skylines", Kind::Scene),
     w("rain", "rain", Kind::Scene),
+    // A style rather than a place: the frames of an infrared-converted
+    // camera, which the model otherwise reads as snow and sunsets.
+    Word { word: "infrared", plural: "infrared", kind: Kind::Scene, must_beat: None, prompt: Some("a photo taken with an infrared camera."), threshold: None },
     // People.
     w("person", "people", Kind::Person),
     w("group of people", "groups of people", Kind::Person),
@@ -185,7 +205,7 @@ pub const VOCABULARY: &[Word] = &[
     w("baby", "babies", Kind::Person),
     w("selfie", "selfies", Kind::Person),
     w("portrait", "portraits", Kind::Person),
-    Word { word: "cosplay", plural: "cosplay", kind: Kind::Person, fursuit_lookalike: true, threshold: None },
+    beats("cosplay", "cosplay", Kind::Person, "fursuit"),
     // Fursuits.
     w("fursuit", "fursuits", Kind::Fursuit),
     w("mascot costume", "mascot costumes", Kind::Fursuit),
@@ -398,7 +418,35 @@ pub fn animal_in(text: &str) -> Option<&'static Word> {
     if names_fursuits(text) {
         return None;
     }
-    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.fursuit_lookalike && w.kind == Kind::Animal)
+    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.must_beat == Some("fursuit") && w.kind == Kind::Animal)
+}
+
+/// The words the query's vocabulary words must beat, other than
+/// "fursuit" (the animal rule, [`animal_in`]), each once, and never one
+/// the query names itself ("snow infrared" asks for infrared snow).  A
+/// photo counts only where the query's words beat each of them.
+pub fn contrasts_in(text: &str) -> Vec<&'static Word> {
+    let named = words_in(text);
+    let mut out: Vec<&'static Word> = Vec::new();
+    for &i in &named {
+        let Some(t) = VOCABULARY[i].must_beat_index() else { continue };
+        if VOCABULARY[t].word == "fursuit" || named.contains(&t) || out.iter().any(|w| w.word == VOCABULARY[t].word) {
+            continue;
+        }
+        out.push(&VOCABULARY[t]);
+    }
+    out
+}
+
+/// The prompt a plain search for `words` encodes: a query that is one
+/// vocabulary word (singular or plural) uses that word's own prompt;
+/// anything else goes through the template with plurals made singular.
+pub fn query_prompt(words: &str) -> String {
+    let whole = tokens(words).join(" ");
+    match VOCABULARY.iter().find(|w| w.word == whole) {
+        Some(w) => w.prompt(),
+        None => super::query::prompt(&for_prompt(words)),
+    }
 }
 
 /// The query names a real animal and doesn't name fursuits (the
@@ -455,6 +503,29 @@ mod tests {
         assert_eq!(for_prompt("two dogs on beaches"), "two dog on beach");
         assert_eq!(for_prompt("glasses and food"), "glasses and food", "a word that is its own plural stays");
         assert_eq!(for_prompt("zebras crossing"), "zebra crossing");
+        assert_eq!(query_prompt("cameras"), "a photo of a camera.");
+        assert_eq!(query_prompt("red cars"), "a photo of a red car.");
+        assert_eq!(query_prompt("Infrared"), "a photo taken with an infrared camera.", "a word's own prompt");
+        assert_eq!(query_prompt("infrared trees"), "a photo of a infrared tree.");
+    }
+
+    /// The generalised contrast: what a word must beat, in search and in
+    /// tags, unless the query names the word itself; the fursuit rule is
+    /// the animals' own and stays out of it.
+    #[test]
+    fn contrasts_are_named_by_the_vocabulary_and_waived_by_naming_the_word() {
+        let names = |t: &str| contrasts_in(t).into_iter().map(|w| w.word).collect::<Vec<_>>();
+        assert_eq!(names("snow"), ["infrared"]);
+        assert_eq!(names("snow at sunset"), ["infrared"], "each target once");
+        assert_eq!(names("snow infrared"), Vec::<&str>::new(), "naming the word waives it");
+        assert_eq!(names("infrared"), Vec::<&str>::new());
+        assert_eq!(names("dog"), Vec::<&str>::new(), "the fursuit rule is the animal split's");
+        assert_eq!(names("stuffed animal"), Vec::<&str>::new());
+        assert_eq!(names("camera"), Vec::<&str>::new());
+        assert!(animal_in("dog").is_some() && animal_in("snow").is_none());
+        let snow = &VOCABULARY[find("snow").unwrap()];
+        assert_eq!(snow.must_beat_index().map(|i| VOCABULARY[i].word), Some("infrared"));
+        assert_eq!(VOCABULARY[find("camera").unwrap()].must_beat_index(), None);
     }
 
     /// Kinds never mix: the *Things* kinds are objects and scenes only,
@@ -466,9 +537,15 @@ mod tests {
             assert!(seen.insert(w.word), "{} twice", w.word);
             assert_eq!(w.word, w.word.to_lowercase().trim());
             assert!(!w.word.is_empty() && !w.plural.is_empty());
-            assert!(!w.fursuit_lookalike || w.kind != Kind::Fursuit, "{}", w.word);
+            if let Some(t) = w.must_beat {
+                assert!(t != w.word && VOCABULARY.iter().any(|x| x.word == t), "{} must beat {t}, which isn't a word", w.word);
+                assert!(w.kind != Kind::Fursuit, "{}", w.word);
+            }
+            if let Some(p) = w.prompt {
+                assert!(p.contains(w.word), "{}'s prompt {p:?} doesn't name it", w.word);
+            }
             assert!(w.threshold.is_none_or(|t| t > 0.0 && t < 1.0), "{}", w.word);
-            assert_eq!(w.prompt(), format!("a photo of a {}.", w.word));
+            assert_eq!(w.prompt(), w.prompt.map(str::to_string).unwrap_or_else(|| format!("a photo of a {}.", w.word)));
         }
         for (_, w) in things() {
             assert!(!w.kind.is_subject(), "{} is in Things", w.word);
@@ -476,7 +553,9 @@ mod tests {
         assert!(things().count() > 50);
         assert!(VOCABULARY.iter().any(|w| w.kind == Kind::Person));
         assert!(VOCABULARY.iter().any(|w| w.kind == Kind::Fursuit));
-        assert!(VOCABULARY.iter().filter(|w| w.fursuit_lookalike).count() > 50);
+        assert!(VOCABULARY.iter().filter(|w| w.must_beat == Some("fursuit")).count() > 50);
+        assert!(VOCABULARY.iter().any(|w| w.must_beat == Some("infrared")));
+        assert_eq!(find("infrared").map(|i| VOCABULARY[i].kind), Some(Kind::Scene), "infrared may appear in Things");
         assert!(Kind::Person.is_subject() && Kind::Fursuit.is_subject() && Kind::Animal.is_subject());
         assert!(!Kind::Object.is_subject() && !Kind::Scene.is_subject());
     }

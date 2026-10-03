@@ -588,3 +588,175 @@ fn library_queries() {
     engine.shutdown();
     std::thread::sleep(Duration::from_millis(200));
 }
+
+/// Infrared frames (the user's converted body) against the vocabulary:
+/// how well candidate "infrared" prompts find them, which words they
+/// trip, and "snow"/"sunset" before and after the contrast, scored
+/// against the user's labels.  `PP_EVAL_MODELS` is a TSV of
+/// `preview<TAB>camera model<TAB>source` (every frame whose model
+/// contains `PP_EVAL_IR_MODEL`, default `ILCE-6000`, is infrared).
+#[test]
+#[ignore = "phase 2: needs the candidates run, PP_EVAL_LABELS and PP_EVAL_MODELS"]
+fn infrared() {
+    use crate::search::tags::DEFAULT_THRESHOLD;
+    use crate::search::vocab::{self, VOCABULARY};
+    let s = setup();
+    let labels: HashMap<String, Vec<String>> = serde_json::from_str(&std::fs::read_to_string(need("PP_EVAL_LABELS")).expect("labels file")).expect("labels JSON");
+    let index_of: HashMap<&Path, usize> = s.paths.iter().enumerate().map(|(i, p)| (p.as_path(), i)).collect();
+    let ir_model = env("PP_EVAL_IR_MODEL").unwrap_or_else(|| "ILCE-6000".into());
+    let mut ir: HashSet<usize> = HashSet::new();
+    let mut unknown: HashSet<usize> = HashSet::new();
+    let mut known = 0;
+    for line in std::fs::read_to_string(need("PP_EVAL_MODELS")).expect("models file").lines() {
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 2 {
+            continue;
+        }
+        if let Some(&i) = index_of.get(Path::new(cols[0])) {
+            if cols[1] == "?" {
+                unknown.insert(i);
+                continue;
+            }
+            known += 1;
+            if cols[1].contains(&ir_model) {
+                ir.insert(i);
+            }
+        }
+    }
+    let n = s.paths.len();
+    eprintln!("{known} of {n} previews have a camera model ({} unknown); {} are infrared ({ir_model})", unknown.len(), ir.len());
+    assert!(!ir.is_empty(), "no infrared frames in the models file");
+    let default_floor = query::cosine_for_probability(query::CLOSENESS_DEFAULT);
+    let tag_floor = query::cosine_for_probability(DEFAULT_THRESHOLD);
+    let pr = |hits: &[usize], right: &HashSet<usize>| -> (usize, usize, f64, f64) {
+        let tp = hits.iter().filter(|i| right.contains(i)).count();
+        (hits.len(), tp, if hits.is_empty() { 1.0 } else { tp as f64 / hits.len() as f64 }, if right.is_empty() { 0.0 } else { tp as f64 / right.len() as f64 })
+    };
+    // Average precision of a ranking against a set.
+    let ap = |scores: &[f32], right: &HashSet<usize>| -> f64 {
+        let ranked = s.ranked(scores);
+        let (mut hits, mut sum) = (0usize, 0.0f64);
+        for (k, &i) in ranked.iter().enumerate() {
+            if right.contains(&i) {
+                hits += 1;
+                sum += hits as f64 / (k + 1) as f64;
+            }
+        }
+        if right.is_empty() { 0.0 } else { sum / right.len() as f64 }
+    };
+
+    // 1. Candidate prompts for the word.
+    let candidates: Vec<String> = env("PP_EVAL_IR_PROMPTS").map(|p| p.split(';').map(|x| x.trim().to_string()).collect()).unwrap_or_else(|| {
+        [
+            query::prompt("infrared"),
+            "an infrared photo.".to_string(),
+            "infrared photography".to_string(),
+            "an infrared photograph.".to_string(),
+            "a photo taken with an infrared camera.".to_string(),
+            "a false-colour infrared photo with white foliage.".to_string(),
+            "an infrared landscape photo.".to_string(),
+            "infrared".to_string(),
+        ]
+        .to_vec()
+    });
+    let qv = s.encode(&candidates);
+    eprintln!("\ninfrared prompts against the {} infrared frames: hits at the search default / right / precision / recall, the same at the tag floor, AP, top p", ir.len());
+    let mut best: Option<(f64, usize)> = None;
+    let mut cand_scores: Vec<Vec<f32>> = Vec::new();
+    for (k, (p, v)) in candidates.iter().zip(&qv).enumerate() {
+        let scores = s.scores(v);
+        let at_default: Vec<usize> = (0..n).filter(|&i| scores[i] >= default_floor).collect();
+        let at_tag: Vec<usize> = (0..n).filter(|&i| scores[i] >= tag_floor).collect();
+        let (h, r, prec, rec) = pr(&at_default, &ir);
+        let (h2, r2, prec2, rec2) = pr(&at_tag, &ir);
+        let a = ap(&scores, &ir);
+        let top = scores.iter().copied().fold(f32::MIN, f32::max);
+        eprintln!("{p:>52}: {h:>4}/{r:>4} P {prec:.2} R {rec:.2} | tag {h2:>4}/{r2:>4} P {prec2:.2} R {rec2:.2} | AP {a:.3} | top p {:.3}", query::match_probability(top));
+        if best.is_none_or(|(b, _)| a > b) {
+            best = Some((a, k));
+        }
+        cand_scores.push(scores);
+    }
+    let (_, best_k) = best.unwrap();
+    let ir_scores = cand_scores[best_k].clone();
+    eprintln!("best by AP: {:?}", candidates[best_k]);
+    // The ranking's shape: where do the infrared frames sit?
+    let ranked = s.ranked(&ir_scores);
+    let in_top = |k: usize, set: &HashSet<usize>| ranked.iter().take(k).filter(|i| set.contains(i)).count();
+    eprintln!(
+        "infrared frames in the top 10/25/50/100/200: {}/{}/{}/{}/{}; frames of unknown model there: {}/{}/{}/{}/{}",
+        in_top(10, &ir),
+        in_top(25, &ir),
+        in_top(50, &ir),
+        in_top(100, &ir),
+        in_top(200, &ir),
+        in_top(10, &unknown),
+        in_top(25, &unknown),
+        in_top(50, &unknown),
+        in_top(100, &unknown),
+        in_top(200, &unknown)
+    );
+    eprintln!("the top 60 by the best prompt (I = infrared by model, ? = unknown model):");
+    for &i in ranked.iter().take(60) {
+        let mark = if ir.contains(&i) { "I" } else if unknown.contains(&i) { "?" } else { " " };
+        eprintln!("  {mark} {:.3} {}", query::match_probability(ir_scores[i]), s.paths[i].display());
+    }
+
+    // 2. Which vocabulary words do infrared frames trip?  Hits at the
+    // search default and tags at the floor, with their infrared share.
+    let vocab_v = s.encode(&VOCABULARY.iter().map(|w| w.prompt()).collect::<Vec<_>>());
+    eprintln!("\nwords tripped by infrared frames (hits at the search default: infrared of all; tags at the floor: infrared of all); shown where ≥ 3 infrared or ≥ 30 %");
+    let mut tripped: Vec<(f64, String)> = Vec::new();
+    for (w, v) in VOCABULARY.iter().zip(&vocab_v) {
+        let scores = s.scores(v);
+        let hits: Vec<usize> = (0..n).filter(|&i| scores[i] >= default_floor).collect();
+        let tags: Vec<usize> = (0..n).filter(|&i| scores[i] >= tag_floor).collect();
+        let hi = hits.iter().filter(|i| ir.contains(i)).count();
+        let ti = tags.iter().filter(|i| ir.contains(i)).count();
+        let share = if hits.is_empty() { 0.0 } else { hi as f64 / hits.len() as f64 };
+        if hi >= 3 || (share >= 0.3 && !hits.is_empty()) {
+            tripped.push((share, format!("{:>18}: hits {hi:>4} of {:>4} ({:.0} %), tags {ti:>3} of {:>3}", w.word, hits.len(), share * 100.0, tags.len())));
+        }
+    }
+    tripped.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (_, line) in &tripped {
+        eprintln!("{line}");
+    }
+
+    // 3. Before and after for the labelled words that trip, against the
+    // user's labels: hits at the search default, right, precision,
+    // recall; the wrong hits that are infrared; right ones the contrast
+    // would drop.
+    let words: Vec<String> = env("PP_EVAL_IR_WORDS").map(|p| p.split(';').map(|x| x.trim().to_string()).collect()).unwrap_or_else(|| ["snow", "sunset", "night sky", "tree", "forest", "mountain", "beach", "flowers", "building"].iter().map(|s| s.to_string()).collect());
+    eprintln!("\n{:>12} {:>22} {:>22} {:>8} {:>8}", "word", "before hits/right/P/R", "after hits/right/P/R", "wrong IR", "right lost");
+    for w in &words {
+        let Some(right) = labels.get(w) else { continue };
+        let right: HashSet<usize> = right.iter().filter_map(|p| index_of.get(Path::new(p)).copied()).collect();
+        let v = s.encode(&[vocab::query_prompt(w)]).swap_remove(0);
+        let scores = s.scores(&v);
+        let before: Vec<usize> = (0..n).filter(|&i| scores[i] >= default_floor).collect();
+        let after: Vec<usize> = before.iter().copied().filter(|&i| scores[i] > ir_scores[i]).collect();
+        let (bh, br, bp, brc) = pr(&before, &right);
+        let (ah, ar, ap_, arc) = pr(&after, &right);
+        let wrong_ir = before.iter().filter(|i| !right.contains(i) && ir.contains(i)).count();
+        let wrong = before.len() - br;
+        let lost = before.iter().filter(|i| right.contains(i) && !after.contains(i)).count();
+        eprintln!("{w:>12} {:>22} {:>22} {:>8} {:>8}   (labelled {}, of them infrared {})", format!("{bh}/{br}/{bp:.2}/{brc:.2}"), format!("{ah}/{ar}/{ap_:.2}/{arc:.2}"), format!("{wrong_ir} of {wrong}"), lost, right.len(), right.iter().filter(|i| ir.contains(i)).count());
+        // The labelling page showed the top 50 by rank: the same, there.
+        let top: Vec<usize> = s.ranked(&scores).into_iter().take(CANDIDATES).collect();
+        let kept: Vec<usize> = s.ranked(&scores).into_iter().filter(|&i| scores[i] > ir_scores[i]).take(CANDIDATES).collect();
+        let count = |v: &[usize], set: &HashSet<usize>| v.iter().filter(|i| set.contains(i)).count();
+        eprintln!(
+            "{:>12} top 50 by rank: right {}, infrared {}, unknown model {}; with the contrast the top 50 hold right {}, infrared {}, unknown {} (right dropped from the top 50: {})",
+            "",
+            count(&top, &right),
+            count(&top, &ir),
+            count(&top, &unknown),
+            count(&kept, &right),
+            count(&kept, &ir),
+            count(&kept, &unknown),
+            top.iter().filter(|i| right.contains(i) && !kept.contains(i)).count()
+        );
+    }
+    s.client.shutdown();
+}
