@@ -147,7 +147,7 @@ fn setup() -> Setup {
     };
     let files = previews(&root);
     assert!(files.len() >= 10, "{} holds {} JPEGs; the sample should hold hundreds", root.display(), files.len());
-    let start = move || Client::start(device, None).unwrap_or_else(|e| panic!("the helper couldn't start on {}: {e:?}", device.label()));
+    let start = move || Client::start(crate::ml::client::Spec::images(device, None)).unwrap_or_else(|e| panic!("the helper couldn't start on {}: {e:?}", device.label()));
     let have = vectors(&files, &root, &out, &start);
     let mut paths: Vec<PathBuf> = have.keys().cloned().collect();
     paths.sort();

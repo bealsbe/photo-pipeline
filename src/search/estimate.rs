@@ -99,6 +99,40 @@ pub fn face_model_change_seconds(shots_with_faces: usize, faces: usize, device: 
     }
 }
 
+/// Seconds per fursuit photo for the head step (OWLv2 over the preview,
+/// then DINOv2 on each head; plan §3.4, §3.7): the study's PyTorch
+/// numbers, 0.12 s on the card and 1.3 s on the processor, until the
+/// helper's own run is measured (`ml::heads` tests).  Provisional.
+#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+pub const HEAD_SECONDS_PER_PHOTO_GPU: f64 = 0.12;
+#[allow(dead_code)] // Phase 4: as above.
+pub const HEAD_SECONDS_PER_PHOTO_CPU: f64 = 1.3;
+
+/// Seconds to look for heads in `photos` fursuit photos on `device`,
+/// beyond reading them.
+#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+pub fn head_seconds(photos: usize, device: Device) -> f64 {
+    photos as f64
+        * match device {
+            Device::Gpu => HEAD_SECONDS_PER_PHOTO_GPU,
+            Device::Cpu => HEAD_SECONDS_PER_PHOTO_CPU,
+        }
+}
+
+/// Seconds for a head scan over `photos` fursuit photos already indexed
+/// (a catch-up, or new exports): the previews are read again and the two
+/// models run; inference dominates on both devices.  This is the number
+/// the Fursuits tab and the processor's question quote (decision 11).
+#[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
+pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
+    let read = photos as f64 * SECONDS_PER_SHOT_GPU;
+    let work = head_seconds(photos, device);
+    match device {
+        Device::Gpu => read.max(work),
+        Device::Cpu => read + work,
+    }
+}
+
 /// A duration in the invitation's words: "about 7 minutes", "about an
 /// hour", "about 1.4 hours", "under a minute".
 pub fn describe_seconds(s: f64) -> String {
@@ -149,6 +183,20 @@ mod tests {
 
     /// Plan §3.7: faces add a few minutes on the card and 4–15 on the
     /// processor; a catch-up is bound by reading the previews again.
+    /// Decision 11: about 15 hours on the processor for the library's
+    /// fursuit photos (74 % of 56 710 ≈ 42 000), over an hour an event day;
+    /// about 1.4 hours on the card.
+    #[test]
+    fn head_estimates_follow_the_plan() {
+        let photos = 42_000;
+        let cpu = head_catch_up_seconds(photos, Device::Cpu) / 3600.0;
+        let gpu = head_catch_up_seconds(photos, Device::Gpu) / 3600.0;
+        assert!((15.0..16.0).contains(&cpu), "{cpu} h");
+        assert!((1.3..1.5).contains(&gpu), "{gpu} h");
+        assert!(head_catch_up_seconds(3_500, Device::Cpu) > 3600.0, "an event day is over an hour on the processor");
+        assert!(head_catch_up_seconds(100, Device::Gpu) >= head_seconds(100, Device::Gpu), "never under the work itself");
+    }
+
     #[test]
     fn face_estimates_follow_the_plan() {
         let n = 56_710;
