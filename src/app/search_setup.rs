@@ -499,10 +499,12 @@ fn progress_view(app: &App) -> Element<'_, Message> {
         return col.into();
     }
     let done = !s.downloads.is_empty() && s.downloads.iter().all(|x| x.state == DownloadState::Checked);
-    let (title, body) = if done {
-        ("Search model ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got.")
-    } else {
-        ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar.")
+    let several = s.downloads.len() > 1;
+    let (title, body) = match (done, several) {
+        (true, false) => ("Search model ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
+        (true, true) => ("Models ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
+        (false, false) => ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar."),
+        (false, true) => ("Downloading the models", "Indexing starts as soon as the models are in place. You can close this: the downloads carry on, with their progress in the status bar."),
     };
     let rows = s
         .downloads
@@ -578,7 +580,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         let (done, total) = s.downloads.iter().fold((0u64, 0u64), |(a, b), x| (a + x.done, b + x.total));
         let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
         let content = row![
-            words("Downloading the search model".into()),
+            words(if s.downloads.len() > 1 { "Downloading the models".into() } else { "Downloading the search model".into() }),
             text(progress_bytes(done, total)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
             bar(frac, Some(56.0)),
         ]

@@ -248,7 +248,7 @@ impl Prefs {
             .collect();
         let journal = self.survey.as_ref().map(|s| format!("{:?}", s.journal)).unwrap_or_else(|| "…".into());
         format!(
-            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] search={:?} journal={journal} last_clear={:?}",
+            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] search={:?} journal={journal} last_clear={:?} faces_offer={} face_change={:?}",
             self.window.is_some(),
             self.focus,
             self.ring,
@@ -258,6 +258,8 @@ impl Prefs {
             sizes.join(", "),
             self.search_storage(),
             self.last_clear,
+            self.faces_offer,
+            self.face_change,
         )
     }
 }
@@ -1342,7 +1344,12 @@ fn people_section(app: &App) -> Element<'_, Message> {
     let model = super::subjects::face_model(app);
     let mi = crate::ml::models::info(model);
     let model_about = if f.model.is_some() {
-        format!("{}: {} {}, {}. Changing it recognises every face again; names and the photos you confirmed are kept.", mi.name, mi.what.trim_end_matches('.').to_lowercase(), super::search_setup::size(mi.kept_bytes()), mi.licence)
+        format!(
+            "{}: {}, {}. Changing it recognises every face again; names and the photos you confirmed are kept.",
+            short_name(mi.name),
+            super::search_setup::size(mi.kept_bytes()),
+            super::search_setup::capital(mi.licence)
+        )
     } else {
         format!("{} unless you pick another when faces are first looked for. {}", mi.name, mi.what)
     };
@@ -1374,6 +1381,11 @@ fn people_section(app: &App) -> Element<'_, Message> {
     container(people).id("pref-section-people").width(Length::Fill).into()
 }
 
+/// A model's name without what follows a comma ("InsightFace").
+fn short_name(name: &str) -> &str {
+    name.split(',').next().unwrap_or(name).trim()
+}
+
 /// *Change the face model*: the models, how long finding the faces again
 /// takes, and that names are kept.
 fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_, Message> {
@@ -1402,8 +1414,9 @@ fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_,
         }
         top = top.push(Space::new().width(Length::Fill));
         top = top.push(text(super::search_setup::size(mi.bytes())).size(t::T_SMALL).color(t::INK2));
-        let licence = format!("Licence: {}: {}. From {}, its publisher.", mi.licence, mi.licence_plain, mi.publisher);
-        let col = column![top, text(mi.what).size(t::T_SMALL).color(t::INK2), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
+        let licence = format!("Licence: {}: {}. From {}, its publisher.", super::search_setup::capital(mi.licence), mi.licence_plain, mi.publisher);
+        let what = mi.what.split_whitespace().collect::<Vec<_>>().join(" ");
+        let col = column![top, text(what).size(t::T_SMALL).color(t::INK2), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
         let dot = container(if on { Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() })) } else { Space::new().into() })
             .width(16)
             .height(16)
@@ -1422,7 +1435,7 @@ fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_,
         );
     }
     let same = now == Some(picked);
-    let go = if same { "Already in use".to_string() } else { format!("Find faces again with {}", models::info(picked).name) };
+    let go = if same { "Already in use".to_string() } else { format!("Find faces again with {}", short_name(models::info(picked).name)) };
     let content = column![
         dialogs::header("Change the face model?", None),
         kit::secondary(format!(
@@ -1628,7 +1641,7 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             (
                 "Forget all people?",
                 format!(
-                    "This deletes the {} found in your photos{names}, with every answer from the reviews. Your photos are not changed. Faces are found again at the next index unless finding them is turned off.",
+                    "This deletes the {} found in your photos{names}, with every answer from the reviews. Your photos are not changed. To find faces again later, ask on the People tab.",
                     util::plural(f.found as u64, "face")
                 ),
                 "Forget all",

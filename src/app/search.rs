@@ -1423,14 +1423,17 @@ fn start_page(app: &App) -> Element<'_, Message> {
     let newest = app.calendar.index.as_ref().and_then(|ix| ix.days.keys().next_back().copied());
     let (year, m0) = newest.map_or((2024, 5), |d| (d.year(), d.month0()));
     let month = crate::search::parse::date_text(year, Some(m0 + 1));
-    let examples = column![
+    let mut examples = column![
         example("red car at night".into(), "Photos that look like the words, best match first".into()),
         example("fireworks -crowd".into(), "Leave a word out: fireworks, without the crowd".into()),
         example(format!("fireworks {year}"), format!("Only those dates: {year}, {month}, apr–jun {year}")),
         example(month.clone(), "Every photo from those dates, in the order they were taken".into()),
-    ]
-    .spacing(10)
-    .padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
+    ];
+    // Someone named, once there is: their photos, clearest first.
+    if let Some(n) = nameables(app).into_iter().next() {
+        examples = examples.push(example(chip_text(&n.name), "Photos of someone you named, clearest first; add words to narrow them".into()));
+    }
+    let examples = examples.spacing(10).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
     col = col.push(examples);
     col = col.push(
         container(text("Search goes by what a photo shows, not its file or folder name. Results are read-only, like the calendar's days: Open day › takes you to a photo's day.").size(t::T_SMALL).color(t::PHOTO_INK3))
@@ -1536,7 +1539,8 @@ fn invitation(app: &App) -> Element<'_, Message> {
         ),
     ];
     if !st.models_installed {
-        facts.push(fact("Downloads", format!("The search model, once: {}", costs.download), None));
+        let what = if app.settings.find_faces { "The search model and a face model you pick, once" } else { "The search model, once" };
+        facts.push(fact("Downloads", format!("{what}: {} for search", costs.download), None));
     }
     facts.push(fact("Keeps", format!("{}, on this computer, readable only by you. Nothing about your photos is sent anywhere.", super::search_setup::capital(&costs.kept)), None));
     let mut group = column![];
@@ -1554,7 +1558,11 @@ fn invitation(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
     explained(
         "Search the library by what's in your photos",
-        "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns.",
+        if app.settings.find_faces {
+            "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns. In the same pass it finds faces, so you can name people and search for them."
+        } else {
+            "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns."
+        },
         Some(container(group).width(Length::Fill).style(style::group()).into()),
         "After this, each export is added on its own, in the background.",
         action.into(),
@@ -1568,7 +1576,11 @@ fn preparing(app: &App) -> Element<'_, Message> {
     let (line, action): (String, Element<'_, Message>) = if s.downloading() {
         let (done, total) = s.downloads.iter().fold((0, 0), |(a, b), d| (a + d.done, b + d.total));
         (
-            format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total)),
+            if s.downloads.len() > 1 {
+                format!("Downloading the models: {}. Indexing starts as soon as they're in place.", super::search_setup::progress_bytes(done, total))
+            } else {
+                format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total))
+            },
             kit::btn("Show the download", style::secondary(), Some(m(Msg::Dialog(DialogMsg::Show)))).into(),
         )
     } else {

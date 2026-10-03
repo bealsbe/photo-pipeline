@@ -904,8 +904,11 @@ pub fn state(app: &App, kind: Kind) -> State {
     if !f.on {
         return State::Off;
     }
-    if st.indexed_shots == 0 && st.pass.is_none() {
+    if st.indexed_shots == 0 && st.pass.is_none() && !app.search.downloading() {
         return State::NotIndexed;
+    }
+    if app.search.downloading() {
+        return State::Looking;
     }
     if st.pass.is_some() && st.stopped.is_none() {
         return State::Looking;
@@ -1069,7 +1072,12 @@ fn catch_up(app: &App) -> Element<'_, Message> {
 
 /// Faces are being looked for and none is grouped yet.
 fn looking(app: &App) -> Element<'_, Message> {
-    let col = column![progress_strip(app).unwrap_or_else(|| Space::new().into()), later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")];
+    let body = if app.search.downloading() {
+        later(Glyph::Person, "Downloading the models", "Faces are found as the library is indexed, which starts once the models are in place. Groups appear here as they are found.")
+    } else {
+        later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")
+    };
+    let col = column![progress_strip(app).unwrap_or_else(|| Space::new().into()), body];
     container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
