@@ -46,8 +46,13 @@ pub struct Word {
     /// "fireworks", "food").
     pub plural: &'static str,
     pub kind: Kind,
-    /// A real animal that fursuits are taken for (decision 12b): a query
-    /// naming it, and not naming fursuits, leaves fursuits out by default.
+    /// Fursuits are taken for it: a photo carries its tag only where the
+    /// word beats "fursuit" (the measured contrast), and for a real
+    /// animal (decision 12b) a query naming it, and not naming fursuits,
+    /// leaves fursuits out by default.  Set on the animals and on the
+    /// things the sample confused with fursuits (a stuffed animal: 139 of
+    /// 148 tagged were fursuits before the contrast, every one left after
+    /// it a real plush toy).
     pub fursuit_lookalike: bool,
     /// The match probability ([`super::query::match_probability`]) a
     /// photo needs to carry the word as a hidden tag.  Calibrated on the
@@ -109,7 +114,7 @@ pub const VOCABULARY: &[Word] = &[
     w("tree", "trees", Kind::Object),
     w("christmas tree", "christmas trees", Kind::Object),
     w("toy", "toys", Kind::Object),
-    w("stuffed animal", "stuffed animals", Kind::Object),
+    Word { word: "stuffed animal", plural: "stuffed animals", kind: Kind::Object, fursuit_lookalike: true, threshold: None },
     w("guitar", "guitars", Kind::Object),
     w("piano", "pianos", Kind::Object),
     w("drum", "drums", Kind::Object),
@@ -180,7 +185,7 @@ pub const VOCABULARY: &[Word] = &[
     w("baby", "babies", Kind::Person),
     w("selfie", "selfies", Kind::Person),
     w("portrait", "portraits", Kind::Person),
-    w("cosplay", "cosplay", Kind::Person),
+    Word { word: "cosplay", plural: "cosplay", kind: Kind::Person, fursuit_lookalike: true, threshold: None },
     // Fursuits.
     w("fursuit", "fursuits", Kind::Fursuit),
     w("mascot costume", "mascot costumes", Kind::Fursuit),
@@ -362,19 +367,38 @@ pub fn words_in(text: &str) -> Vec<usize> {
     out
 }
 
+/// The query's words for the prompt: a vocabulary word's plural becomes
+/// its singular ("cameras" → "camera", so the Things list's word, which
+/// is the plural, asks the model the question it answers best: measured
+/// on the sample, "a photo of a cameras." tops at a match probability of
+/// 0.035 against 0.21 for the singular).  Other words stay as typed.
+pub fn for_prompt(text: &str) -> String {
+    text.split_whitespace()
+        .map(|tok| {
+            let lower = tok.to_lowercase();
+            match VOCABULARY.iter().find(|w| w.plural == lower && w.plural != w.word) {
+                Some(w) => w.word.to_string(),
+                None => tok.to_string(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// The query names fursuits on purpose.
 pub fn names_fursuits(text: &str) -> bool {
     let raw: Vec<String> = text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect();
     raw.iter().any(|w| FURSUIT_WORDS.contains(&w.as_str())) || words_in(text).iter().any(|&i| VOCABULARY[i].kind == Kind::Fursuit)
 }
 
-/// The real animal the query names (the first fursuit lookalike), when
-/// it doesn't name fursuits: decision 12b's contrast applies.
+/// The real animal the query names (the first animal word fursuits are
+/// taken for), when it doesn't name fursuits: decision 12b's contrast
+/// applies.
 pub fn animal_in(text: &str) -> Option<&'static Word> {
     if names_fursuits(text) {
         return None;
     }
-    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.fursuit_lookalike)
+    words_in(text).into_iter().map(|i| &VOCABULARY[i]).find(|w| w.fursuit_lookalike && w.kind == Kind::Animal)
 }
 
 /// The query names a real animal and doesn't name fursuits (the
@@ -426,6 +450,11 @@ mod tests {
         assert_eq!(find("Fireworks").map(|i| VOCABULARY[i].word), Some("fireworks"));
         assert_eq!(find("people").map(|i| VOCABULARY[i].word), Some("person"));
         assert_eq!(find("xylophone"), None);
+        assert_eq!(for_prompt("Cameras"), "camera");
+        assert_eq!(for_prompt("red cars at night"), "red car at night");
+        assert_eq!(for_prompt("two dogs on beaches"), "two dog on beach");
+        assert_eq!(for_prompt("glasses and food"), "glasses and food", "a word that is its own plural stays");
+        assert_eq!(for_prompt("zebras crossing"), "zebra crossing");
     }
 
     /// Kinds never mix: the *Things* kinds are objects and scenes only,
@@ -437,7 +466,7 @@ mod tests {
             assert!(seen.insert(w.word), "{} twice", w.word);
             assert_eq!(w.word, w.word.to_lowercase().trim());
             assert!(!w.word.is_empty() && !w.plural.is_empty());
-            assert!(!w.fursuit_lookalike || w.kind == Kind::Animal, "{}", w.word);
+            assert!(!w.fursuit_lookalike || w.kind != Kind::Fursuit, "{}", w.word);
             assert!(w.threshold.is_none_or(|t| t > 0.0 && t < 1.0), "{}", w.word);
             assert_eq!(w.prompt(), format!("a photo of a {}.", w.word));
         }

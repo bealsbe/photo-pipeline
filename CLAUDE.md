@@ -53,12 +53,18 @@ cargo test --release  # unit tests; must pass with zero warnings
   and are built from the calendar's library index, never from disk.  When
   the card fails, say so and stop: never offer or move work to the
   processor.  `PP_SEARCH_FAKE` stands in for the engine in tests.
-  **Kinds never mix:** Things and completions offer objects and scenes
-  only (the page filters `Kind::is_subject` again, whatever the engine
-  sends); the fursuits an animal word left out are a section of their own
-  (`FURSUITS_DAY`) after the real animals, never in their list, and the
-  viewer steps through one section only.  Completions are worked out in
-  memory on each keystroke (`search_results::offer`), never with I/O.
+- **Search kinds never mix** (`docs/library-search-plan.md`, decisions 8,
+  12, 12b): pets are never combined with fursuits or people, anywhere.
+  *Things* lists objects and scenes only (`vocab::Kind::is_subject` is
+  the one gate, and the page applies it again to Things and completions,
+  whatever the engine sends); a real animal's results never carry a
+  fursuit (they come as `fursuits`, a separate list, shown as a section
+  of its own, `FURSUITS_DAY`, after the real animals, and the viewer
+  steps through one section only); hidden tags are never shown on a
+  photo.  The vocabulary (`src/search/vocab.rs`) holds generic words
+  only.  Where models run is the user's choice: a failing card is
+  reported, never worked around (`src/ml`).  Completions are worked out
+  in memory on each keystroke (`search_results::offer`), never with I/O.
 - **Windows** open with `app::window_settings()`: it carries the Wayland app
   id (`app::APP_ID`, which must match `assets/<id>.desktop.in` and
   `install.sh`) and the icon.  A window without it shows the generic

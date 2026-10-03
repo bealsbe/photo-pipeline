@@ -369,21 +369,29 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   searches what you typed and moves to the results.  The list's footer
   shows the syntax: `-word` and dates.  Preferences ▸ Search ▸ *Forget
   them* clears the recent searches.
-- **Words, `-word` and dates.**  Type what the photos show (*red car at
-  night*).  `-crowd` leaves a word out: photos must look more like the
-  rest than like it.  `2024`, `jun 2024` or `apr–jun 2024` keeps to those
-  dates.  Dates alone (`jun 2026`, or `jun 2026 -crowd`) show every photo
-  from them, in the order they were taken rather than best first ("312
-  photos from Jun 2026"), accidental frames left out.  A strip over the
-  results says quietly what was applied besides the words ("Only Jun
-  2024", "Every photo from Jun 2026", "Leaving out crowd"), so you can
-  see why they look as they do.  Names (`@name`) come later, with people,
-  fursuits and pets: one in the query is left out and the strip says so,
-  and a query with nothing but a name, or only words to leave out,
-  searches nothing and the page says why.
-- **The start page** (nothing searched): your recent searches, *Things in
-  your photos* (the objects and scenes search found most, with their
-  counts; a click searches one; never people, fursuits or pets), and a few
+- **What you can write.**  Plain words (*red car at night*) find photos
+  that look like them.  Everything else is optional and combines with
+  AND: `"a red car at night"` in quotes sends the words exactly as typed;
+  `-crowd` keeps only photos more like your words than like *crowd*
+  (*fireworks -crowd*); a date narrows to those days — `2024`, `jun 2024`,
+  `apr–jun 2024` or `2023–2024` (`-` and `..` work as the dash; full month
+  names too).  Dates alone (`jun 2026`, or `jun 2026 -fursuit`: all of
+  June but what a search for *fursuit* would find) show every photo from
+  them, in the order they were taken rather than best first ("312 photos
+  from Jun 2026"), accidental frames left out.  `@Name` is for a person,
+  fursuit or pet you have named, which comes in a later phase: for now
+  the strip says so and the other words are searched; a name or a
+  `-word` on its own searches nothing, and the page says why.
+- **What was understood.**  A quiet strip over the results says what was
+  applied besides the words ("Only Jun 2024", "Every photo from Jun
+  2026", "Leaving out crowd"), so you can see why they look as they do.
+- **Things in your photos.**  The start page lists the things the index
+  knows the library holds (*cameras 96*, *fireworks 24*, *food 21*), most
+  photos first; a click searches one.  The list holds objects and scenes
+  only: people, fursuits and pets never appear in it, or in the list
+  under the field; they get pages of their own later.  Photos that
+  plainly show the thing you searched for come first, then the rest by
+  similarity.  The start page also shows your recent searches and a few
   ways to search.
 - **Results, best first.**  One list in the grid of a library day, on the
   same grey, with each photo's date under it (hover for the date and time
@@ -465,9 +473,25 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   only the plainest; the default (0.3 %) keeps empty and dark frames out
   while a thing most of the library shows comes back whole.  A setting
   saved by an earlier build on another scale falls back to the default.
-- **Nothing is written into the library**, no sidecar, no XMP; the index and
-  the models live in `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows
-  and clears them).  Queries read no photos.
+- **Hidden tags.**  A vocabulary of a couple of hundred generic words
+  (`src/search/vocab.rs`: objects, scenes, people, fursuits, animals) is
+  encoded once by the text tower and kept beside the index; each indexed
+  photo is then tagged, from its stored vector alone, with the words whose
+  match probability reaches 2 % (a plain match; the search default is
+  0.3 %).  Words fursuits are taken for — the animals, a stuffed animal —
+  count only where the word beats *fursuit*.  Tags are never shown on a
+  photo: they make *Things in your photos*, the completions and the
+  ranking boost (a photo tagged with what you typed comes first).
+  Tagging is arithmetic on vectors already in memory, on the engine's
+  thread, as photos are indexed.
+- **`-word` and animal words** are the same measured contrast: a photo
+  counts only where its similarity to your words beats its similarity to
+  the word left out (or to *fursuit*).  Dates go by the day the shot was
+  taken, as the calendar files it.
+- **Nothing is written into the library**, no sidecar, no XMP; the index,
+  the vocabulary's vectors and the models live in
+  `~/.cache/photo_pipeline/` (Preferences ▸ Storage shows and clears
+  them).  Queries read no photos.
 
 ### Models
 
@@ -601,7 +625,11 @@ These are deliberate:
   Tests that need the models are ignored and take `PP_MODEL_DIR=<folder
   with the SigLIP2 files>`; the phase 0 harness (`src/search/eval.rs`) also
   takes `PP_EVAL_PREVIEWS` and `PP_EVAL_OUT`, and `PP_EVAL_LABELS` to score
-  hand labels.  `bench::bench_search_index` indexes a library through the
+  hand labels; phase 2's `tag_thresholds` sweeps the hidden tags' floor
+  against those labels, and `library_queries` indexes a scratch library
+  (`PP_EVAL_LIBRARY`) and prints the example queries with their hit
+  counts, the fursuits left out and the Things list (`PP_EVAL_QUERIES`
+  overrides the queries, `;`-separated).  `bench::bench_search_index` indexes a library through the
   real helper (`PP_BENCH_LIBRARY`, `PP_MODEL_DIR`, `PP_BENCH_DEVICE`) into a
   temporary folder and times queries.  `PP_ML_FAKE_CARD=no-card|self-check|crash`
   makes the graphics card fail without touching a device, for UI tests of

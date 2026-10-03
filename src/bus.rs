@@ -83,7 +83,10 @@ pub enum BgEvent {
     /// empty.  `understood` is the query as the engine applied it (its
     /// words, exclusions, dates; `names` are recognised and not searched
     /// in phase 2: with no words beside them nothing runs and `hits` is
-    /// empty without an error).  When the query names a real animal and
+    /// empty without an error).  Dates with no words browse the period:
+    /// every indexed shot of those days in shooting order, oldest first,
+    /// `score` 0, minus what a search for each `-word` would show.  When
+    /// the query names a real animal and
     /// not fursuits (`animal` is that word, singular), the fursuits the
     /// contrast left out come in `fursuits`, best first, never
     /// overlapping `hits` (the page's *Show fursuits too* section needs

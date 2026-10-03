@@ -538,7 +538,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
         s.thumbs.clear_queue(&app.workers);
     }
     s.relayout(false, None);
-    // A new search selects its best match, ready for Space, Enter or Open day.
+    // A new search selects its first result, ready for Space, Enter or Open day.
     if !refresh {
         if let Some(&first) = s.layout.tiles.first() {
             s.selection = [first].into();
