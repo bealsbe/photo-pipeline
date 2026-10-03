@@ -87,7 +87,7 @@ pub enum Control {
     /// *Face model* ▸ *Change…*.
     FaceModel,
     /// *Smallest group to show*: 3, 5 or 10 photos.
-    SmallestGroup(u32),
+    SmallestGroup(usize),
     /// *Forget all…* (people).
     ForgetPeople,
     Open(Cache),
@@ -169,7 +169,7 @@ pub enum Msg {
     /// Count the sizes again (after the engine cleared or deleted).
     Recount,
     /// A face model picked in *Change the face model*.
-    PickFaceModel(super::people::FaceModel),
+    PickFaceModel(crate::ml::models::ModelId),
     /// Change to it (or cancel: `false`).
     ChangeFaceModel(bool),
 }
@@ -206,7 +206,7 @@ pub struct Prefs {
     /// *Find people's faces* was just turned off: offer to forget them.
     faces_offer: bool,
     /// *Change the face model* is open, with the model picked.
-    face_change: Option<super::people::FaceModel>,
+    face_change: Option<crate::ml::models::ModelId>,
 }
 
 impl Prefs {
@@ -431,11 +431,13 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::ChangeFaceModel(go) => {
             let Some(f) = app.prefs.face_change.take() else { return Task::none() };
-            if !go || app.subjects.faces.model == Some(f) {
+            if !go || super::subjects::face_model(app) == f {
                 return Task::none();
             }
+            app.settings.face_model = f;
+            app.settings.save_in_background();
             app.search.link.set_face_model(f);
-            let name = super::people::face_model(f).name;
+            let name = crate::ml::models::info(f).name;
             app.show_status(format!("Recognising every face again with {name}. Names and the photos you confirmed are kept."), 8000)
         }
     }
@@ -557,7 +559,8 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             app.settings.save_in_background();
             app.search.link.set_find_faces(on);
             // Off, with faces already found: offer to forget them.
-            app.prefs.faces_offer = !on && (app.subjects.faces.found > 0 || app.subjects.faces.named > 0);
+            let f = &app.search.status.faces;
+            app.prefs.faces_offer = !on && (f.found > 0 || f.named > 0);
             Task::none()
         }
         Control::KeepFaces => {
@@ -575,13 +578,13 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
                 let now = super::subjects::face_model(app);
                 // The dialog opens on another model: the one in use is
                 // already in use.
-                let other = super::people::FACE_MODELS.iter().map(|m| m.id).find(|&m| m != now).unwrap_or(now);
+                let other = crate::ml::models::face_models().map(|m| m.id).find(|&m| m != now).unwrap_or(now);
                 app.prefs.face_change = Some(other);
             }
             Task::none()
         }
         Control::SmallestGroup(n) => {
-            app.settings.smallest_group = n;
+            app.settings.people_min_photos = n;
             app.settings.save_in_background();
             Task::none()
         }
@@ -635,7 +638,7 @@ fn clearable(p: &Prefs, c: Cache) -> bool {
 
 /// Something about people is kept: faces found or names given.
 fn people_to_forget(app: &App) -> bool {
-    let f = &app.subjects.faces;
+    let f = &app.search.status.faces;
     f.found > 0 || f.named > 0 || !app.subjects.all.groups.is_empty()
 }
 
@@ -695,7 +698,7 @@ fn controls(app: &App) -> Vec<Control> {
     if app.settings.find_faces {
         v.push(Control::FaceModel);
     }
-    v.extend(crate::settings::GROUP_SIZES.iter().map(|&n| Control::SmallestGroup(n)));
+    v.extend(crate::settings::PEOPLE_MIN_PHOTOS_CHOICES.iter().map(|&n| Control::SmallestGroup(n)));
     if people_to_forget(app) {
         v.push(Control::ForgetPeople);
     }
@@ -1313,11 +1316,11 @@ fn search_section(app: &App) -> Element<'_, Message> {
 fn people_section(app: &App) -> Element<'_, Message> {
     let p = &app.prefs;
     let s = &app.settings;
-    let f = &app.subjects.faces;
+    let f = &app.search.status.faces;
     let on = s.find_faces;
     let mut find = column![about(format!(
         "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight.",
-        s.smallest_group()
+        s.people_min_photos()
     ))]
     .spacing(t::S2);
     if p.faces_offer {
@@ -1337,16 +1340,16 @@ fn people_section(app: &App) -> Element<'_, Message> {
         find = find.push(container(offer).padding(Padding::from([t::S2, t::S3])).style(style::group()));
     }
     let model = super::subjects::face_model(app);
-    let mi = super::people::face_model(model);
+    let mi = crate::ml::models::info(model);
     let model_about = if f.model.is_some() {
-        format!("{}: {} {}, {}. Changing it recognises every face again; names and the photos you confirmed are kept.", mi.name, mi.what.trim_end_matches('.').to_lowercase(), super::search_setup::size(mi.kept), mi.licence)
+        format!("{}: {} {}, {}. Changing it recognises every face again; names and the photos you confirmed are kept.", mi.name, mi.what.trim_end_matches('.').to_lowercase(), super::search_setup::size(mi.kept_bytes()), mi.licence)
     } else {
         format!("{} unless you pick another when faces are first looked for. {}", mi.name, mi.what)
     };
     let change = focusable(p, Control::FaceModel, kit::btn("Change…", style::secondary(), (on && f.model.is_some()).then(|| m(Msg::Press(Control::FaceModel)))));
-    let sizes: Vec<Element<'_, Message>> = crate::settings::GROUP_SIZES
+    let sizes: Vec<Element<'_, Message>> = crate::settings::PEOPLE_MIN_PHOTOS_CHOICES
         .iter()
-        .map(|&n| focusable(p, Control::SmallestGroup(n), kit::segment_compact(format!("{n} photos"), s.smallest_group() == n as usize, m(Msg::Press(Control::SmallestGroup(n))))).into())
+        .map(|&n| focusable(p, Control::SmallestGroup(n), kit::segment_compact(format!("{n} photos"), s.people_min_photos() == n, m(Msg::Press(Control::SmallestGroup(n))))).into())
         .collect();
     let kept = if f.found == 0 && f.named == 0 {
         "Nothing found yet.".to_string()
@@ -1373,21 +1376,22 @@ fn people_section(app: &App) -> Element<'_, Message> {
 
 /// *Change the face model*: the models, how long finding the faces again
 /// takes, and that names are kept.
-fn face_model_view(app: &App, picked: super::people::FaceModel) -> Element<'_, Message> {
-    use super::people::{self, FACE_MODELS};
+fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_, Message> {
+    use crate::ml::models;
     let st = &app.search.status;
-    let f = &app.subjects.faces;
+    let f = &st.faces;
     let now = f.model;
     let device = st.device.chosen;
-    let shots = st.indexed_shots.max(st.library_shots);
-    let secs = people::new_model_seconds(shots, device, picked);
+    // About a photo in four holds a face; never more photos than faces.
+    let with_faces = (st.indexed_shots / 4).min(f.found).max(f.found.min(1));
+    let secs = estimate::face_model_change_seconds(with_faces, f.found, device, picked);
     let names = match f.named {
         0 => "Names you give later are kept the same way.".to_string(),
         1 => "The 1 name you gave is kept, and matched again from the faces you confirmed.".to_string(),
         n => format!("The {n} names you gave are kept, and matched again from the faces you confirmed."),
     };
     let mut list = column![].spacing(2).padding(2);
-    for mi in FACE_MODELS {
+    for mi in models::face_models() {
         let on = mi.id == picked;
         let mut top = row![text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
         if mi.recommended {
@@ -1397,7 +1401,7 @@ fn face_model_view(app: &App, picked: super::people::FaceModel) -> Element<'_, M
             top = top.push(text("In use now").size(t::T_SMALL).color(t::INK3));
         }
         top = top.push(Space::new().width(Length::Fill));
-        top = top.push(text(super::search_setup::size(mi.download)).size(t::T_SMALL).color(t::INK2));
+        top = top.push(text(super::search_setup::size(mi.bytes())).size(t::T_SMALL).color(t::INK2));
         let licence = format!("Licence: {}: {}. From {}, its publisher.", mi.licence, mi.licence_plain, mi.publisher);
         let col = column![top, text(mi.what).size(t::T_SMALL).color(t::INK2), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
         let dot = container(if on { Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() })) } else { Space::new().into() })
@@ -1418,14 +1422,15 @@ fn face_model_view(app: &App, picked: super::people::FaceModel) -> Element<'_, M
         );
     }
     let same = now == Some(picked);
-    let go = if same { "Already in use".to_string() } else { format!("Download {} and find faces again", super::search_setup::size(people::face_model(picked).download)) };
+    let go = if same { "Already in use".to_string() } else { format!("Find faces again with {}", models::info(picked).name) };
     let content = column![
         dialogs::header("Change the face model?", None),
         kit::secondary(format!(
-            "Every face found is recognised again with the new model: {} {} {}. {names} The old model keeps answering until the new one is done.",
+            "Every face found is recognised again with the new model: {} {} {}. {names} A model not downloaded yet is fetched first ({}).",
             estimate::describe_seconds(secs),
             if device == Device::Gpu { "with" } else { "on" },
-            device.phrase()
+            device.phrase(),
+            super::search_setup::size(models::info(picked).bytes())
         )),
         container(list).width(Length::Fill).style(style::group()),
         Space::new().height(t::S1),
@@ -1614,7 +1619,7 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             true,
         ),
         Ask::ForgetPeople => {
-            let f = &app.subjects.faces;
+            let f = &app.search.status.faces;
             let names = match f.named {
                 0 => String::new(),
                 1 => " and the 1 name you gave".to_string(),

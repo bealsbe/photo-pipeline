@@ -22,10 +22,11 @@ use chrono::{NaiveDate, NaiveDateTime};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
+use super::faces::People;
 use super::index::{Index, Key, PathEntry, Record};
 use super::parse::{self, Parsed};
 use super::tags::{Tags, VocabVectors};
-use super::{Hit, PassKind, PassProgress, Status, Stopped, Thing, pass, query, vocab};
+use super::{FacesStatus, Hit, PassKind, PassProgress, Status, Stopped, Thing, pass, query, vocab};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::client::{Client, Embedder, EmbedderFactory, HelperError, StartError};
 use crate::ml::models::{self, ModelId};
@@ -34,6 +35,7 @@ use crate::model::bursts::Bursts;
 use crate::model::collection::Collection;
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, PhotoRecord};
+use crate::model::subjects::{Face, FaceRef, Framing, GroupId, Kind, Refused, SubjectId, Subjects};
 
 /// What the engine's thread is asked.
 enum Cmd {
@@ -48,8 +50,23 @@ enum Cmd {
     ClearIndex,
     RebuildIndex,
     DeleteModels,
-    Query { seq: u64, text: String, closeness: f32 },
+    Query { seq: u64, text: String, closeness: f32, subjects: Vec<GroupId> },
     Busy(usize),
+    // People (phase 3).
+    SetFindFaces(bool),
+    SetFaceModel(ModelId),
+    FindFaces,
+    NameGroup(GroupId, String),
+    Rename(SubjectId, String),
+    Merge { into: GroupId, others: Vec<GroupId> },
+    SetHidden(GroupId, bool),
+    Forget(SubjectId),
+    ForgetAll,
+    Faces { seq: u64, group: GroupId },
+    MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId> },
+    Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
+    Suggestions { seq: u64, group: GroupId },
+    Undo,
     Shutdown,
 }
 
@@ -72,6 +89,8 @@ struct Shared {
     status: Mutex<Status>,
     /// *Things in your photos*, as last derived from the tags.
     things: Mutex<Arc<Vec<Thing>>>,
+    /// The *Subjects* page's state, as last built.
+    subjects: Mutex<Arc<Subjects>>,
 }
 
 /// What the engine is built on; tests swap the pieces that touch the
@@ -80,33 +99,38 @@ pub struct Config {
     /// Makes the helper.
     pub factory: EmbedderFactory,
     /// Whether the search model's files are in place (stats them).
-    pub models_ready: Box<dyn Fn() -> bool + Send>,
+    pub installed: Box<dyn Fn(ModelId) -> bool + Send>,
     /// Where this library's index lives (the cache folder by default).
     pub index_dir: Option<PathBuf>,
+    /// The user's subjects file (`~/.local/share/photo-pipeline/subjects.json`
+    /// by default; `None` keeps it in memory only, for tests).
+    pub subjects_path: Option<PathBuf>,
 }
 
 impl Config {
-    /// The app's: the real helper, the registry, the cache.
+    /// The app's: the real helper, the registry, the cache, the user's
+    /// data folder.
     pub fn real() -> Config {
-        Config { factory: Client::factory(), models_ready: Box::new(|| models::installed(ModelId::Siglip2)), index_dir: None }
+        Config { factory: Client::factory(), installed: Box::new(models::installed), index_dir: None, subjects_path: super::faces::default_file_path() }
     }
 }
 
 impl Engine {
-    /// Start the engine with the real helper.  `device` and
-    /// `index_exports` are the saved preferences.
-    pub fn new(bus: Bus, device: Device, index_exports: bool) -> Engine {
-        Engine::with_config(bus, device, index_exports, Config::real())
+    /// Start the engine with the real helper.  `device`, `index_exports`,
+    /// `find_faces` and `face_model` are the saved preferences.
+    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId) -> Engine {
+        Engine::with_config(bus, device, index_exports, find_faces, face_model, Config::real())
     }
 
     /// Start the engine on a configuration (tests).
-    pub fn with_config(bus: Bus, device: Device, index_exports: bool, config: Config) -> Engine {
+    pub fn with_config(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId, config: Config) -> Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
-        let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, ..Status::default() };
-        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())) });
+        let faces = FacesStatus { on: find_faces, model: Some(face_model), ..FacesStatus::default() };
+        let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, faces, ..Status::default() };
+        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())) });
         let s = shared.clone();
         let me = tx.clone();
-        let Config { factory, models_ready, index_dir } = config;
+        let Config { factory, installed, index_dir, subjects_path } = config;
         std::thread::Builder::new()
             .name("search-engine".into())
             .spawn(move || {
@@ -116,7 +140,7 @@ impl Engine {
                     bus,
                     shared: s,
                     factory,
-                    models_ready,
+                    installed,
                     index_dir,
                     device,
                     index_exports,
@@ -135,6 +159,10 @@ impl Engine {
                     tags: Tags::default(),
                     things_dirty: false,
                     things_sent: None,
+                    find_faces,
+                    face_model,
+                    people: People::load(subjects_path),
+                    restrict: None,
                 }
                 .run()
             })
@@ -147,6 +175,138 @@ impl Engine {
         self.shared.status.lock().clone()
     }
 
+    /// Run a query (the syntax of [`parse::parse`]); `BgEvent::SearchResults
+    /// { seq, .. }` answers, with the query as understood.  `subjects`
+    /// narrows it to photos of those groups (AND; a subject's page is a
+    /// query with its chip), as do `@name`s in the text that name a
+    /// subject; with no words, the photos come clearest first (UI 12).
+    /// Queries never touch the library.
+    pub fn query(&self, seq: u64, text: &str, closeness: f32, subjects: &[GroupId]) {
+        self.send(Cmd::Query { seq, text: text.to_string(), closeness, subjects: subjects.to_vec() });
+    }
+
+    /// Thumbnails the grid is waiting for: the pass steps back while any.
+    pub fn set_busy(&self, pending: usize) {
+        self.send(Cmd::Busy(pending));
+    }
+
+    /// Stop the pass and the helper; the index is flushed.
+    pub fn shutdown(&self) {
+        self.send(Cmd::Shutdown);
+    }
+
+    fn send(&self, cmd: Cmd) {
+        let _ = self.tx.send(cmd);
+    }
+}
+
+/// The people API (phase 3): what the *Subjects* page calls.
+impl Engine {
+    /// The *Subjects* page's state as last built (a cheap clone; no I/O).
+    /// Also sent as `BgEvent::Subjects` whenever it changes.
+    pub fn subjects(&self) -> Arc<Subjects> {
+        self.shared.subjects.lock().clone()
+    }
+
+    /// Preferences ▸ People ▸ *Find people's faces*.  Off: no new faces
+    /// are looked for (what was found stays until *Forget all*).
+    pub fn set_find_faces(&self, on: bool) {
+        self.send(Cmd::SetFindFaces(on));
+    }
+
+    /// Preferences ▸ People ▸ *Face model* ▸ *Change…*: the face vectors
+    /// are computed again with `model` (the photos with faces are read
+    /// again); names, members, rejections and covers are kept.  Downloads
+    /// the model first if need be.
+    pub fn set_face_model(&self, model: ModelId) {
+        self.send(Cmd::SetFaceModel(model));
+    }
+
+    /// *Find faces in the N photos indexed*: the catch-up over an
+    /// already-indexed library, only when asked (plan §5.2 step 3).
+    /// Downloads the detector and the chosen model first if need be.
+    pub fn find_faces(&self) {
+        self.send(Cmd::FindFaces);
+    }
+
+    /// Name a group: a cluster becomes a named subject with the cluster's
+    /// faces; a subject is renamed.
+    pub fn name_group(&self, id: GroupId, name: String) {
+        self.send(Cmd::NameGroup(id, name));
+    }
+
+    /// Rename a subject (F2).
+    pub fn rename(&self, id: SubjectId, name: String) {
+        self.send(Cmd::Rename(id, name));
+    }
+
+    /// Merge `others` into `into`; refused, and nothing changed, when the
+    /// kinds differ.  Ctrl+Z ([`Engine::undo`]) takes it back.
+    pub fn merge(&self, into: GroupId, others: Vec<GroupId>) {
+        self.send(Cmd::Merge { into, others });
+    }
+
+    /// Hide a group from its tab and from completions (its photos still
+    /// come up by name), or show it again.
+    pub fn set_hidden(&self, id: GroupId, hidden: bool) {
+        self.send(Cmd::SetHidden(id, hidden));
+    }
+
+    /// *Forget this person*: the subject goes; its faces are unnamed
+    /// again.
+    pub fn forget(&self, id: SubjectId) {
+        self.send(Cmd::Forget(id));
+    }
+
+    /// Preferences ▸ Storage ▸ *Forget all*: every face found, every
+    /// vector and tile, and the subjects file (§10).
+    pub fn forget_all(&self) {
+        self.send(Cmd::ForgetAll);
+    }
+
+    /// A group's faces, clearest first: `BgEvent::SubjectFaces { seq, .. }`.
+    pub fn faces(&self, seq: u64, group: GroupId) {
+        self.send(Cmd::Faces { seq, group });
+    }
+
+    /// Move faces out of `from`: into `to` (the same kind, else refused),
+    /// or into a new unnamed group (`None`).
+    pub fn move_faces(&self, from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>) {
+        self.send(Cmd::MoveFaces { from, faces, to });
+    }
+
+    /// A review answer: `Some(true)` adds the faces to the group,
+    /// `Some(false)` is "not this person" (out of the members, never
+    /// suggested again), `None` takes an answer back.  One call covers a
+    /// burst's frames.
+    pub fn answer(&self, group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>) {
+        self.send(Cmd::Answer { group, faces, yes });
+    }
+
+    /// Suggestions for review: `BgEvent::Suggestions { seq, .. }`, one
+    /// entry per burst, most likely first; for a cluster, its own members
+    /// to check.
+    pub fn suggestions(&self, seq: u64, group: GroupId) {
+        self.send(Cmd::Suggestions { seq, group });
+    }
+
+    /// Take the last subjects edit back (name, rename, merge, hide, move,
+    /// answer, forget): `BgEvent::SubjectsUndone` says what, with a fresh
+    /// `BgEvent::Subjects`.
+    pub fn undo(&self) {
+        self.send(Cmd::Undo);
+    }
+
+    /// A face's pixels for a tile or the review, `px`×`px` (or fitted,
+    /// for [`Framing::Photo`]), as `(width, height, RGBA)`.  **Blocks**:
+    /// reads the cached tile, else the photo's preview; call it on a
+    /// worker, never the UI thread.
+    pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
+        super::faces::crop_from_photo(face, px, framing)
+    }
+}
+
+impl Engine {
     /// *Things in your photos* as last derived: objects and scenes with
     /// photos, most first (a cheap clone; no I/O).  Also sent as
     /// `BgEvent::SearchThings` whenever it changes.
@@ -211,27 +371,6 @@ impl Engine {
     pub fn delete_models(&self) {
         self.send(Cmd::DeleteModels);
     }
-
-    /// Run a query (the syntax of [`parse::parse`]); `BgEvent::SearchResults
-    /// { seq, .. }` answers, with the query as understood.  Queries never
-    /// touch the library.
-    pub fn query(&self, seq: u64, text: &str, closeness: f32) {
-        self.send(Cmd::Query { seq, text: text.to_string(), closeness });
-    }
-
-    /// Thumbnails the grid is waiting for: the pass steps back while any.
-    pub fn set_busy(&self, pending: usize) {
-        self.send(Cmd::Busy(pending));
-    }
-
-    /// Stop the pass and the helper; the index is flushed.
-    pub fn shutdown(&self) {
-        self.send(Cmd::Shutdown);
-    }
-
-    fn send(&self, cmd: Cmd) {
-        let _ = self.tx.send(cmd);
-    }
 }
 
 /// Sizes of the index and the models folders.  Walks them: call on a
@@ -289,7 +428,7 @@ struct Worker {
     bus: Bus,
     shared: Arc<Shared>,
     factory: EmbedderFactory,
-    models_ready: Box<dyn Fn() -> bool + Send>,
+    installed: Box<dyn Fn(ModelId) -> bool + Send>,
     index_dir: Option<PathBuf>,
     device: Device,
     index_exports: bool,
@@ -322,6 +461,15 @@ struct Worker {
     /// runs, so the start page isn't rebuilt several times a second).
     things_dirty: bool,
     things_sent: Option<Instant>,
+    /// Preferences ▸ People: faces looked for while indexing, and with
+    /// which model.
+    find_faces: bool,
+    face_model: ModelId,
+    /// The user's subjects and what is derived from the faces found.
+    people: People,
+    /// The photos the running query is narrowed to (its subjects), while
+    /// it runs.
+    restrict: Option<HashSet<Key>>,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -330,7 +478,7 @@ const THINGS_EVERY: Duration = Duration::from_secs(2);
 
 impl Worker {
     fn run(mut self) {
-        self.update(|s| s.models_installed = (self.models_ready)());
+        self.refresh_installed();
         loop {
             let cmd = if let Some(p) = &self.pass {
                 crossbeam_channel::select! {
@@ -356,7 +504,7 @@ impl Worker {
                 Cmd::DownloadsDone(ok) => {
                     self.download = None;
                     self.vocab_tried = false;
-                    self.update(|s| s.models_installed = (self.models_ready)());
+                    self.refresh_installed();
                     if self.first_index_pending && ok.contains(&ModelId::Siglip2) {
                         self.first_index_pending = false;
                         self.start_pass(PassKind::FirstIndex);
@@ -450,10 +598,73 @@ impl Worker {
                     }
                     self.update(|s| s.models_installed = false);
                 }
-                Cmd::Query { seq, text, closeness } => self.query(seq, &text, closeness),
+                Cmd::Query { seq, text, closeness, subjects } => self.query(seq, &text, closeness, &subjects),
                 Cmd::Busy(n) => {
                     if let Some(p) = &self.pass {
                         p.handle.set_busy(n);
+                    }
+                }
+                Cmd::SetFindFaces(on) => {
+                    self.find_faces = on;
+                    self.update(|s| s.faces.on = on);
+                }
+                Cmd::SetFaceModel(model) => {
+                    if models::face_models().any(|m| m.id == model) && model != self.face_model {
+                        self.face_model = model;
+                        self.update(|s| s.faces.model = Some(model));
+                        self.refresh_installed();
+                    }
+                }
+                Cmd::FindFaces => {
+                    // The catch-up pass comes with the face cache; for now
+                    // the models it needs are fetched.
+                    let wanted = models::models_for(Some(self.face_model));
+                    self.download_missing(&wanted);
+                }
+                Cmd::NameGroup(id, name) => {
+                    let r = self.people.name_group(&id, name);
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::Rename(id, name) => {
+                    let r = self.people.name_group(&GroupId::Subject(id), name);
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::Merge { into, others } => {
+                    let r = self.people.merge(&into, &others);
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::SetHidden(id, hidden) => {
+                    let r = self.people.set_hidden(&id, hidden);
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::Forget(id) => {
+                    let r = self.people.forget(&id);
+                    self.after_edit(r);
+                }
+                Cmd::ForgetAll => {
+                    self.people.forget_all();
+                    self.publish_subjects();
+                }
+                Cmd::Faces { seq, group } => {
+                    self.ensure_resolver();
+                    let faces = self.people.faces(&group, &|f| self.resolve_face(f)).unwrap_or_default();
+                    let _ = self.bus.unbounded_send(BgEvent::SubjectFaces { seq, group, faces: Arc::new(faces) });
+                }
+                Cmd::MoveFaces { from, faces, to } => {
+                    let r = self.people.move_faces(&from, faces, to.as_ref());
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::Answer { group, faces, yes } => {
+                    let r = self.people.answer(&group, faces, yes);
+                    self.after_edit(r.map(|_| ()));
+                }
+                Cmd::Suggestions { seq, group } => {
+                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(Vec::new()) });
+                }
+                Cmd::Undo => {
+                    if let Some(what) = self.people.undo() {
+                        let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
+                        self.publish_subjects();
                     }
                 }
                 Cmd::Shutdown => break,
@@ -469,6 +680,58 @@ impl Worker {
     fn update(&self, f: impl FnOnce(&mut Status)) {
         f(&mut self.shared.status.lock());
         self.publish();
+    }
+
+    /// The search model's files are in place.
+    fn models_ready(&self) -> bool {
+        (self.installed)(ModelId::Siglip2)
+    }
+
+    /// The models among `ids` whose files aren't in place.
+    fn missing(&self, ids: &[ModelId]) -> Vec<ModelId> {
+        ids.iter().copied().filter(|&id| !(self.installed)(id)).collect()
+    }
+
+    /// Which models are in place: search's, and the detector with the
+    /// chosen face model (stats files, on this thread).
+    fn refresh_installed(&mut self) {
+        let search = self.models_ready();
+        let faces = self.missing(&models::face_set(self.face_model)).is_empty();
+        self.update(|s| {
+            s.models_installed = search;
+            s.faces.installed = faces;
+        });
+    }
+
+    /// After a subjects edit: a refusal is logged (nothing changed); any
+    /// outcome republishes the page's state.
+    fn after_edit(&mut self, result: Result<(), Refused>) {
+        if let Err(e) = result {
+            eprintln!("subjects: refused: {e}");
+        }
+        self.publish_subjects();
+    }
+
+    /// Rebuild the *Subjects* snapshot and send it.
+    fn publish_subjects(&mut self) {
+        self.ensure_resolver();
+        let snapshot = self.people.build_snapshot(&|f| self.resolve_face(f));
+        self.people.set_snapshot(snapshot.clone());
+        let named = self.people.file.named_count(Kind::Person);
+        *self.shared.subjects.lock() = snapshot.clone();
+        self.update(|s| s.faces.named = named);
+        let _ = self.bus.unbounded_send(BgEvent::Subjects(snapshot));
+    }
+
+    /// A detection as a [`Face`] with its shot, from the resolver; none
+    /// when the photo isn't in the library any more.
+    fn resolve_face(&self, f: &FaceRef) -> Option<Face> {
+        let r = self.resolver.as_ref()?;
+        let shot = r.shots.get(&f.key)?;
+        let rec = self.index.as_ref().and_then(|ix| ix.vectors.by_key.get(&f.key).map(|&i| &ix.vectors.records[i]));
+        let capture = rec.and_then(|rec| rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64))).unwrap_or(shot.mtime);
+        let confirmed = self.people.file.member_of(Kind::Person, f).is_some();
+        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: 0.0, confirmed })
     }
 
     fn publish(&self) {
@@ -547,7 +810,7 @@ impl Worker {
         if self.vocab.is_none() {
             self.vocab = VocabVectors::load(&dir, model);
         }
-        if self.vocab.is_none() && !self.vocab_tried && (self.models_ready)() {
+        if self.vocab.is_none() && !self.vocab_tried && self.models_ready() {
             self.vocab_tried = true;
             let _t = crate::profile::span("search", "vocabulary");
             match self.encode(&VocabVectors::prompts()) {
@@ -648,20 +911,38 @@ impl Worker {
             ix.set_first_index_asked();
             let _ = ix.save_paths();
         }
+        // The dialog's face choice (decision 10): a face model among the
+        // rows means faces on with that model; none means faces unticked.
+        let face_model = models::face_model_in(&wanted);
+        self.find_faces = face_model.is_some();
+        if let Some(m) = face_model {
+            self.face_model = m;
+        }
+        let (on, model) = (self.find_faces, self.face_model);
         self.update(|s| {
             s.first_index_asked = true;
             s.stopped = None;
+            s.faces.on = on;
+            s.faces.model = Some(model);
         });
-        let missing = if (self.models_ready)() { Vec::new() } else { models::missing(&wanted) };
+        self.refresh_installed();
+        let missing = self.missing(&wanted);
         if missing.is_empty() {
             self.start_pass(PassKind::FirstIndex);
             return;
         }
-        if self.download.is_some() {
-            self.first_index_pending = true;
+        self.first_index_pending = true;
+        self.download_missing(&wanted);
+    }
+
+    /// Download the models among `wanted` that aren't in place, on a
+    /// thread of their own; `Cmd::DownloadsDone` follows.  Nothing to do
+    /// when a download is already running or nothing is missing.
+    fn download_missing(&mut self, wanted: &[ModelId]) {
+        let missing = self.missing(wanted);
+        if missing.is_empty() || self.download.is_some() {
             return;
         }
-        self.first_index_pending = true;
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = crate::ml::download::DownloadHandle::from_flag(cancel.clone());
         let (bus, me) = (self.bus.clone(), self.me.clone());
@@ -731,7 +1012,7 @@ impl Worker {
             return;
         }
         let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
-        if !(self.models_ready)() {
+        if !self.models_ready() {
             self.update(|s| s.models_installed = false);
             return;
         }
@@ -892,10 +1173,35 @@ impl Worker {
         Ok(texts.iter().map(|t| self.text_cache[t].clone()).collect())
     }
 
-    fn query(&mut self, seq: u64, text: &str, closeness: f32) {
+    fn query(&mut self, seq: u64, text: &str, closeness: f32, subjects: &[GroupId]) {
         let indexed = self.index.as_ref().map_or(0, Index::len);
         let parsed = Arc::new(parse::parse(text));
         let animal = vocab::animal_in(&parsed.words).map(|w| w.word.to_string());
+        // The groups the query is narrowed to: those passed, and each
+        // `@name` that names a subject (a name of two subjects means
+        // either).  A name nobody has is absent, and narrows to nothing.
+        let mut groups: Vec<GroupId> = subjects.to_vec();
+        let mut restrict: Option<HashSet<Key>> = None;
+        let mut narrow = |keys: HashSet<Key>| {
+            restrict = Some(match restrict.take() {
+                Some(r) => r.intersection(&keys).copied().collect(),
+                None => keys,
+            });
+        };
+        for g in subjects {
+            narrow(self.people.photos_of(g).unwrap_or_default());
+        }
+        for name in &parsed.names {
+            let named = self.people.named(Kind::Person, name);
+            let mut keys = HashSet::new();
+            for g in &named {
+                keys.extend(self.people.photos_of(g).unwrap_or_default());
+            }
+            groups.extend(named);
+            narrow(keys);
+        }
+        groups.dedup();
+        let groups = Arc::new(groups);
         let bus = self.bus.clone();
         let answer = |hits: Vec<Hit>, fursuits: Vec<Hit>, error: Option<String>| {
             let _ = bus.unbounded_send(BgEvent::SearchResults {
@@ -906,8 +1212,18 @@ impl Worker {
                 understood: parsed.clone(),
                 fursuits: Arc::new(fursuits),
                 animal: animal.clone(),
+                subjects: groups.clone(),
             });
         };
+        // Subjects with no words and no dates: their photos, clearest
+        // first (UI 12).
+        if parsed.is_empty() && parsed.dates.is_none() && parsed.exclude.is_empty() {
+            if let Some(keys) = &restrict {
+                let hits = self.subject_hits(keys);
+                answer(hits, Vec::new(), None);
+                return;
+            }
+        }
         // Nothing to search: a name or a `-word` alone runs nothing;
         // dates alone browse the period.
         if indexed == 0 || (parsed.is_empty() && parsed.dates.is_none()) {
@@ -915,10 +1231,11 @@ impl Worker {
             return;
         }
         let browsing = parsed.is_empty();
-        if !(self.models_ready)() && !(browsing && parsed.exclude.is_empty()) {
+        if !self.models_ready() && !(browsing && parsed.exclude.is_empty()) {
             answer(Vec::new(), Vec::new(), Some("The search model isn't downloaded.".into()));
             return;
         }
+        self.restrict = restrict;
         // The prompts: the words (none when browsing dates), each
         // exclusion, the words the query's vocabulary words must beat
         // ("infrared" for snow), and "fursuit" last for the contrast on a
@@ -943,10 +1260,33 @@ impl Worker {
         };
         let t = std::time::Instant::now();
         let (hits, fursuits) = if browsing { (self.browse(&parsed, &vectors, closeness), Vec::new()) } else { self.hits(&parsed, &vectors, animal.is_some(), closeness) };
+        self.restrict = None;
         if crate::profile::on() {
             eprintln!("search: {} hits ({} fursuits left out) of {indexed} in {:.1} ms", hits.len(), fursuits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
         answer(hits, fursuits, None);
+    }
+
+    /// A subject's photos with no words typed: one hit per photo among
+    /// `keys`, clearest first (UI 12): `score` is the clarity of the
+    /// subject's clearest face in the photo, so doubtful members sink to
+    /// the bottom.  Pure lookups; no model.
+    fn subject_hits(&mut self, keys: &HashSet<Key>) -> Vec<Hit> {
+        self.ensure_resolver();
+        let (Some(ix), Some(r)) = (&self.index, self.resolver.as_ref()) else { return Vec::new() };
+        let clarity = self.people.clarity_by_photo(keys);
+        let mut hits: Vec<Hit> = keys
+            .iter()
+            .filter_map(|key| {
+                let shot = r.shots.get(key)?;
+                let rec = ix.vectors.by_key.get(key).map(|&i| &ix.vectors.records[i]);
+                let capture = rec.and_then(|rec| rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64))).unwrap_or(shot.mtime);
+                let score = clarity.get(key).copied().unwrap_or(0.0);
+                Some(Hit { id: key.short(), key: *key, score, tagged: false, day: shot.day, capture, burst: shot.burst, jpg: shot.jpg.clone(), raw: shot.raw.clone() })
+            })
+            .collect();
+        hits.sort_by(|a, b| b.score.total_cmp(&a.score).then_with(|| b.capture.cmp(&a.capture)).then_with(|| a.key.cmp(&b.key)));
+        hits
     }
 
     /// A query of dates and no words: every indexed shot of those days in
@@ -960,12 +1300,13 @@ impl Worker {
         let (Some(ix), Some(r), Some(dates)) = (&self.index, self.resolver.as_ref(), parsed.dates) else { return Vec::new() };
         let scores: Vec<Vec<f32>> = excluded.iter().map(|v| query::score_rows(v, &ix.vectors.data, ix.vectors.dim)).collect();
         let floor = query::cosine_for_probability(closeness.clamp(query::CLOSENESS_MIN, query::CLOSENESS_MAX));
+        let restrict = self.restrict.as_ref();
         let mut hits: Vec<Hit> = ix
             .vectors
             .records
             .iter()
             .enumerate()
-            .filter(|(i, rec)| !rec.accidental && !scores.iter().any(|s| s[*i] >= floor))
+            .filter(|(i, rec)| !rec.accidental && !scores.iter().any(|s| s[*i] >= floor) && restrict.is_none_or(|r| r.contains(&rec.key)))
             .filter_map(|(_, rec)| {
                 let shot = r.shots.get(&rec.key)?;
                 if !dates.contains(shot.day) {
@@ -993,9 +1334,10 @@ impl Worker {
         let (excluded, fursuit) = if contrast { others.split_at(others.len() - 1) } else { (others.as_slice(), &[][..]) };
         let records = &ix.vectors.records;
         let dates = parsed.dates;
+        let restrict = self.restrict.as_ref();
         let skip = |i: usize| {
             let rec = &records[i];
-            if rec.accidental {
+            if rec.accidental || restrict.is_some_and(|r| !r.contains(&rec.key)) {
                 return true;
             }
             let Some(shot) = r.shots.get(&rec.key) else { return true };
@@ -1092,13 +1434,13 @@ mod tests {
     #[test]
     fn the_status_starts_from_the_saved_preferences_and_a_query_answers() {
         let (bus, _rx) = crate::bus::channel();
-        let config = Config { factory: Box::new(|_, _| Err(StartError::Other("no".into()))), models_ready: Box::new(|| false), index_dir: None };
-        let e = Engine::with_config(bus, Device::Cpu, false, config);
+        let config = Config { factory: Box::new(|_, _| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None };
+        let e = Engine::with_config(bus, Device::Cpu, false, true, ModelId::AuraFace, config);
         let s = e.status();
         assert_eq!(s.device.chosen, Device::Cpu);
         assert!(!s.index_exports && s.not_indexed());
         e.set_index_exports(true);
-        e.query(3, "camera", super::super::CLOSENESS_DEFAULT);
+        e.query(3, "camera", super::super::CLOSENESS_DEFAULT, &[]);
         wait_for(&e, "the setting", |s| s.index_exports);
         e.shutdown();
     }
@@ -1181,7 +1523,7 @@ mod tests {
                 while Instant::now() < deadline {
                     let Some(batch) = stream.next().await else { break };
                     for ev in batch {
-                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal } = ev {
+                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal, subjects: _ } = ev {
                             if s == seq {
                                 return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
                             }
@@ -1241,8 +1583,8 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("device-rule", 6);
         let (factory, asked) = logging_factory(true);
-        let config = Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 6);
         e.start_first_index(&[ModelId::Siglip2]);
@@ -1254,7 +1596,7 @@ mod tests {
         // Trying again fails the same way; a query still gets an answer.
         e.try_card_again();
         wait_for(&e, "the second failure", |s| s.stopped.is_some());
-        e.query(1, "dog", super::super::CLOSENESS_DEFAULT);
+        e.query(1, "dog", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, indexed, error) = results(&rx, 1);
         assert!(hits.is_empty() && indexed == 0 && error.is_none());
         let calls = asked.lock().clone();
@@ -1277,8 +1619,8 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("round-trip", 12);
         let (factory, asked) = logging_factory(false);
-        let config = Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 12);
         // Nothing is indexed on its own before the first index is asked for.
@@ -1292,7 +1634,7 @@ mod tests {
         // A query for one photo's own vector finds it first, with its day,
         // its file and its burst (all twelve frames are one press).
         let target = lib.days.values().next().unwrap().files[5].path.clone();
-        e.query(7, target.to_str().unwrap(), super::super::CLOSENESS_DEFAULT);
+        e.query(7, target.to_str().unwrap(), super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, indexed, error) = results(&rx, 7);
         assert_eq!((indexed, error), (12, None));
         assert!(!hits.is_empty());
@@ -1325,7 +1667,7 @@ mod tests {
         // Clear removes it all.
         let (bus2, _rx2) = crate::bus::channel();
         let (factory, _) = logging_factory(false);
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         e2.clear_index();
@@ -1607,8 +1949,8 @@ mod tests {
             log.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let config = Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) };
-        let e = Engine::with_config(bus, Device::Gpu, true, config);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 14);
         e.start_first_index(&[ModelId::Siglip2]);
@@ -1630,7 +1972,7 @@ mod tests {
 
         // "dog": the real dogs, tagged first (the weak one after), the
         // canine fursuit in the list of its own, never in the main one.
-        e.query(1, "dog", super::super::CLOSENESS_DEFAULT);
+        e.query(1, "dog", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, indexed, error, understood, fursuits, animal) = ev.results(1);
         assert_eq!((indexed, error), (14, None));
         assert_eq!(names(&hits), ["0001", "0010", "0003"], "{hits:?}");
@@ -1641,90 +1983,92 @@ mod tests {
         assert!(hits.iter().all(|h| fursuits.iter().all(|f| f.id != h.id)));
 
         // "dog fursuit" asks for suits: no contrast, no section.
-        e.query(2, "dog fursuit", super::super::CLOSENESS_DEFAULT);
+        e.query(2, "dog fursuit", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, _, fursuits, animal) = ev.results(2);
         assert!(names(&hits).contains(&"0002".to_string()) && fursuits.is_empty() && animal.is_none(), "{hits:?}");
 
         // Dates filter on the shot's day, before the split.
-        e.query(3, "dogs 2024", super::super::CLOSENESS_DEFAULT);
+        e.query(3, "dogs 2024", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, fursuits, _) = ev.results(3);
         assert_eq!(names(&hits), ["0010"]);
         assert!(fursuits.is_empty());
         assert_eq!(understood.dates.map(|r| r.label()).as_deref(), Some("2024"));
-        e.query(4, "camera jun 2024", super::super::CLOSENESS_DEFAULT);
+        e.query(4, "camera jun 2024", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, ..) = ev.results(4);
         assert_eq!(names(&hits), ["0009"]);
 
         // "-word": more like the words than like the word.
-        e.query(5, "fireworks -crowd", super::super::CLOSENESS_DEFAULT);
+        e.query(5, "fireworks -crowd", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, ..) = ev.results(5);
         assert_eq!(names(&hits), ["0005"], "the crowd shot with a little fireworks goes");
         assert_eq!(understood.exclude, ["crowd"]);
-        e.query(6, "fireworks", super::super::CLOSENESS_DEFAULT);
+        e.query(6, "fireworks", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, ..) = ev.results(6);
         assert_eq!(names(&hits), ["0005", "0004"]);
 
         // Quotes: the prompt as typed; the accidental frame never shows.
-        e.query(7, "\"camera\"", super::super::CLOSENESS_DEFAULT);
+        e.query(7, "\"camera\"", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, ..) = ev.results(7);
         assert!(understood.exact);
         assert_eq!(names(&hits), ["0006", "0009"]);
         assert!(hits.iter().all(|h| h.tagged));
 
-        // @name alone: nothing runs, no error; with words, the words.
-        e.query(8, "@Someone", super::super::CLOSENESS_DEFAULT);
+        // @name nobody has: it narrows to nothing, with no error (the page
+        // tells, since the name resolved to no subject); with words the
+        // same, since the words are searched within the person's photos.
+        e.query(8, "@Someone", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, error, understood, ..) = ev.results(8);
         assert!(hits.is_empty() && error.is_none() && understood.is_empty());
         assert_eq!(understood.names, ["Someone"]);
-        e.query(9, "@Someone camera", super::super::CLOSENESS_DEFAULT);
+        e.query(9, "@Someone camera", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, ..) = ev.results(9);
-        assert_eq!(names(&hits), ["0006", "0009"]);
+        assert!(hits.is_empty(), "{hits:?}");
         assert_eq!(understood.names, ["Someone"]);
 
         // Dates alone browse the period: every shot of those days in
         // shooting order, oldest first, a neutral score, the accidental
         // frame out; with a `-word`, minus what a search for it would show.
-        e.query(11, "2024", super::super::CLOSENESS_DEFAULT);
+        e.query(11, "2024", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, error, understood, fursuits, animal) = ev.results(11);
         assert_eq!(names(&hits), ["0009", "0010", "0011"]);
         assert!(hits.iter().all(|h| h.score == 0.0 && !h.tagged) && hits.windows(2).all(|w| w[0].capture < w[1].capture));
         assert!(error.is_none() && fursuits.is_empty() && animal.is_none() && understood.is_empty());
         assert_eq!(understood.dates.map(|r| r.label()).as_deref(), Some("2024"));
-        e.query(12, "mar 2025", super::super::CLOSENESS_DEFAULT);
+        e.query(12, "mar 2025", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, ..) = ev.results(12);
         assert_eq!(names(&hits), ["0001", "0002", "0003", "0004", "0005", "0006", "0007"], "the accidental 0008 stays out");
-        e.query(13, "2025 -fursuit", super::super::CLOSENESS_DEFAULT);
+        e.query(13, "2025 -fursuit", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, ..) = ev.results(13);
         assert_eq!(names(&hits), ["0001", "0003", "0004", "0005", "0006"], "the two a fursuit search finds are left out");
         assert_eq!(understood.exclude, ["fursuit"]);
-        e.query(14, "@Someone 2024", super::super::CLOSENESS_DEFAULT);
+        e.query(14, "@Someone 2024", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, understood, ..) = ev.results(14);
-        assert_eq!(names(&hits).len(), 3);
+        assert!(hits.is_empty(), "an unknown name narrows the dates to nothing");
         assert_eq!(understood.names, ["Someone"]);
-        e.query(15, "-fursuit", super::super::CLOSENESS_DEFAULT);
+        e.query(15, "-fursuit", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, error, ..) = ev.results(15);
         assert!(hits.is_empty() && error.is_none(), "a -word alone runs nothing");
-        e.query(16, "2022", super::super::CLOSENESS_DEFAULT);
+        e.query(16, "2022", super::super::CLOSENESS_DEFAULT, &[]);
         assert!(ev.results(16).0.is_empty(), "no photos in that year");
 
         // The infrared contrast: "snow" counts only where snow beats
         // infrared; "infrared" finds the frames; naming both waives it.
-        e.query(17, "snow", super::super::CLOSENESS_DEFAULT);
+        e.query(17, "snow", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, _, fursuits, animal) = ev.results(17);
         assert_eq!(names(&hits), ["0012"], "the infrared frame that looks like snow is simply dropped");
         assert!(fursuits.is_empty() && animal.is_none());
-        e.query(18, "sunset", super::super::CLOSENESS_DEFAULT);
+        e.query(18, "sunset", super::super::CLOSENESS_DEFAULT, &[]);
         assert!(ev.results(18).0.is_empty());
-        e.query(19, "infrared", super::super::CLOSENESS_DEFAULT);
+        e.query(19, "infrared", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, ..) = ev.results(19);
         assert_eq!(names(&hits), ["0014", "0013"]);
         assert!(hits.iter().all(|h| h.tagged));
-        e.query(20, "snow infrared", super::super::CLOSENESS_DEFAULT);
+        e.query(20, "snow infrared", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, ..) = ev.results(20);
         assert!(names(&hits).contains(&"0013".to_string()), "{hits:?}");
 
         // An animal nothing matches: empty, still an animal query.
-        e.query(10, "cat", super::super::CLOSENESS_DEFAULT);
+        e.query(10, "cat", super::super::CLOSENESS_DEFAULT, &[]);
         let (hits, _, _, _, fursuits, animal) = ev.results(10);
         assert!(hits.is_empty() && fursuits.is_empty() && animal.as_deref() == Some("cat"));
 
@@ -1744,7 +2088,7 @@ mod tests {
             log2.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, Config { factory, models_ready: Box::new(|| true), index_dir: Some(d.join("index")) });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         let things = Events::new(&rx2).things(&e2);

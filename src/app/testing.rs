@@ -1033,7 +1033,7 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
         "dlg" => {
             let m = match rest {
                 "faces" => Some(DialogMsg::Faces),
-                r if r.starts_with("face ") => r[5..].trim().parse::<usize>().ok().and_then(|k| super::people::FACE_MODELS.get(k)).map(|mi| DialogMsg::FaceModel(mi.id)),
+                r if r.starts_with("face ") => r[5..].trim().parse::<usize>().ok().and_then(|k| crate::ml::models::face_models().nth(k)).map(|mi| DialogMsg::FaceModel(mi.id)),
                 "download" => Some(DialogMsg::Download),
                 "cancel" => Some(DialogMsg::Cancel),
                 "close" => Some(DialogMsg::Close),
@@ -1100,13 +1100,13 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
     // The tab's groups in the page's order (what the arrow keys step).
     let order = |app: &App| {
         let st = &app.subjects;
-        subjects::arrange(&st.all, st.tab, app.settings.smallest_group()).order(st.small_open, st.hidden_open)
+        subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open)
     };
     let others = |app: &App| -> Vec<super::people::GroupId> {
         let st = &app.subjects;
         let Some(pp) = st.person.as_ref() else { return Vec::new() };
-        let a = subjects::arrange(&st.all, pp.kind, app.settings.smallest_group());
-        a.named.iter().chain(a.to_name.iter().take(6)).map(|g| g.id).filter(|&id| id != pp.group).collect()
+        let a = subjects::arrange(&st.all, pp.kind, app.settings.people_min_photos());
+        a.named.iter().chain(a.to_name.iter().take(6)).map(|g| g.id.clone()).filter(|id| *id != pp.group).collect()
     };
     let photo = |app: &App, n: usize| app.subjects.pane().and_then(|pp| pp.layout.tiles.get(n).copied());
     let t = match what {
@@ -1119,7 +1119,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             };
             app.update(s(Msg::Tab(k)))
         }
-        "click" => match order(app).get(n).copied() {
+        "click" => match order(app).get(n).cloned() {
             Some(id) if rest.ends_with("ctrl") => app.update(s(Msg::Pick(id))),
             Some(id) => app.update(s(Msg::Tile(id))),
             None => Task::none(),
@@ -1136,14 +1136,14 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "merge" => app.update(s(Msg::MergeAsk)),
         "mergego" => app.update(s(Msg::MergeGo)),
         "mergecancel" => app.update(s(Msg::MergeCancel)),
-        "keep" => match app.subjects.merge.as_ref().and_then(|mg| mg.groups.get(n).copied()) {
+        "keep" => match app.subjects.merge.as_ref().and_then(|mg| mg.groups.get(n).cloned()) {
             Some(id) => app.update(s(Msg::MergeKeep(id))),
             None => Task::none(),
         },
         "hide" => app.update(s(Msg::HidePicked)),
         "unhide" => {
             let st = &app.subjects;
-            let id = subjects::arrange(&st.all, st.tab, app.settings.smallest_group()).hidden.get(n).map(|g| g.id);
+            let id = subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).hidden.get(n).map(|g| g.id.clone());
             match id {
                 Some(id) => app.update(s(Msg::Unhide(id))),
                 None => Task::none(),
@@ -1171,7 +1171,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             }
         }
         "moveto" if rest == "new" => app.update(p(P::MoveTo(None))),
-        "moveto" => match others(app).get(n).copied() {
+        "moveto" => match others(app).get(n).cloned() {
             Some(id) => app.update(p(P::MoveTo(Some(id)))),
             None => Task::none(),
         },
@@ -1185,7 +1185,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             };
             app.update(p(P::Menu(m)))
         }
-        "mergeinto" => match others(app).get(n).copied() {
+        "mergeinto" => match others(app).get(n).cloned() {
             Some(id) => app.update(p(P::MergeInto(id))),
             None => Task::none(),
         },

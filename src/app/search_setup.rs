@@ -22,7 +22,6 @@ use iced::widget::{Space, button, column, container, mouse_area, opaque, progres
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{self, FaceModelInfo};
 use super::search::{Dialog, DialogMsg, Download, Msg, Stage, search_models};
 use super::style;
 use super::{App, Message, dialogs};
@@ -119,26 +118,32 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
         DialogMsg::Download | DialogMsg::Retry => {
             let ask = s.dialog.as_ref().map(|d| (d.faces_only, d.faces, d.face_model));
             let (faces_only, faces, model) = ask.unwrap_or(fallback);
+            // The face model picked is the one Preferences shows from now.
+            if app.settings.face_model != model || app.settings.find_faces != (faces || faces_only) {
+                app.settings.face_model = model;
+                app.settings.find_faces = faces || faces_only;
+                app.settings.save_in_background();
+            }
             if faces_only {
                 // The library is indexed: find faces in it, with the
                 // model picked (its download first, then the catch-up).
+                let s = &mut app.search;
                 s.dialog = None;
-                app.settings.find_faces = true;
-                app.settings.save_in_background();
-                app.search.link.set_find_faces(true);
-                app.search.link.find_faces(model);
-                return app.show_status(format!("Finding faces in the library with {}. Groups appear on the People tab as they are found.", people::face_model(model).name), 8000);
-            }
-            if app.settings.find_faces != faces {
-                app.settings.find_faces = faces;
-                app.settings.save_in_background();
+                s.link.set_find_faces(true);
+                s.link.set_face_model(model);
+                s.link.find_faces();
+                return app.show_status(format!("Finding faces in the library with {}. Groups appear on the People tab as they are found.", models::info(model).name), 8000);
             }
             let face = faces.then_some(model);
             let s = &mut app.search;
-            let ids = search_models();
-            if s.status.models_installed {
+            let ids = models::models_for(face);
+            s.link.set_find_faces(faces);
+            if face.is_some() {
+                s.link.set_face_model(model);
+            }
+            if s.status.models_installed && face.is_none() {
                 s.dialog = None;
-                s.link.start_first_index(&ids, face);
+                s.link.start_first_index(&ids);
                 return app.show_status("Indexing the library. Search works on the newest days within a minute.", 6000);
             }
             // The rows show at once, waiting, until the engine reports.
@@ -146,11 +151,11 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             if let Some(d) = s.dialog.as_mut() {
                 d.stage = Stage::Progress;
             }
-            s.link.start_first_index(&ids, face);
+            s.link.start_first_index(&ids);
             Task::none()
         }
         DialogMsg::Show => {
-            let d = Dialog::new(Stage::Progress, &app.settings, app.subjects.faces.model);
+            let d = Dialog::new(Stage::Progress, &app.settings);
             app.search.dialog = Some(d);
             Task::none()
         }
@@ -271,11 +276,11 @@ fn tick<'a>(on: bool, label: &'a str, msg: Message) -> Element<'a, Message> {
 /// One face model the user can pick: its name, size, how it did and how
 /// long it takes here, its licence in plain words and where it comes from
 /// (a restrictive licence in the warning tone).
-fn face_row<'a>(app: &App, mi: &FaceModelInfo, on: bool, enabled: bool, installed: bool, catch_up: bool) -> Element<'a, Message> {
+fn face_row<'a>(app: &App, mi: &models::ModelInfo, on: bool, enabled: bool, installed: bool, catch_up: bool) -> Element<'a, Message> {
     let st = &app.search.status;
     let shots = st.library_shots.max(st.indexed_shots);
     let device = st.device.chosen;
-    let secs = if catch_up { people::catch_up_seconds(shots, device, mi.id) } else { people::face_seconds(shots, device, mi.id) };
+    let secs = if catch_up { estimate::face_catch_up_seconds(shots, device, mi.id) } else { estimate::face_seconds(shots, device, mi.id) };
     let speed = format!("{} for this library {} {}.", capital(&estimate::describe_seconds(secs)), if device == Device::Gpu { "with" } else { "on" }, device.phrase());
     let ink = |c: iced::Color| if enabled { c } else { alpha(c, 0.45) };
     let mut top = row![text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(ink(t::INK))].spacing(8).align_y(Alignment::Center);
@@ -283,9 +288,8 @@ fn face_row<'a>(app: &App, mi: &FaceModelInfo, on: bool, enabled: bool, installe
         top = top.push(text("Recommended").size(t::T_SMALL).color(ink(t::SIGNAL)));
     }
     top = top.push(Space::new().width(Length::Fill));
-    top = top.push(text(if installed { "Downloaded".to_string() } else { size(mi.download) }).size(t::T_SMALL).color(ink(t::INK2)));
-    let kept = if mi.kept != mi.download { format!(" {} is kept.", size(mi.kept)) } else { String::new() };
-    let licence = format!("Licence: {}: {}. From {}, its publisher.{kept}", mi.licence, mi.licence_plain, mi.publisher);
+    top = top.push(text(if installed { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(ink(t::INK2)));
+    let licence = format!("Licence: {}: {}. From {}, its publisher.", capital(mi.licence), mi.licence_plain, mi.publisher);
     let col = column![
         top,
         text(format!("{} {speed}", mi.what)).size(t::T_SMALL).color(ink(t::INK2)),
@@ -308,14 +312,15 @@ fn face_row<'a>(app: &App, mi: &FaceModelInfo, on: bool, enabled: bool, installe
 
 fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     let st = &app.search.status;
-    let faces_st = &app.subjects.faces;
+    let faces_st = &st.faces;
     let c = costs(app);
     let ready = st.models_installed;
     let faces = dl.faces || dl.faces_only;
-    let model = people::face_model(dl.face_model);
-    // The face model is fetched unless the one in place is the one picked.
-    let face_ready = faces_st.model_installed && faces_st.model == Some(dl.face_model);
-    let face_bytes = if faces && !face_ready { model.download + people::FINDER.3 } else { 0 };
+    let model = models::info(dl.face_model);
+    // The face models are fetched unless the ones in place are the ones
+    // picked.
+    let face_ready = faces_st.installed && faces_st.model == Some(dl.face_model);
+    let face_bytes = if faces && !face_ready { models::bytes_for(&models::face_set(dl.face_model)) } else { 0 };
     let search_bytes = if ready || dl.faces_only { 0 } else { models::bytes_for(&search_models()) };
     let total = search_bytes + face_bytes;
     let title = match (dl.faces_only, total > 0) {
@@ -351,19 +356,21 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     // Faces: on unless unticked, with the model picked.
     let head: Element<'_, Message> = if dl.faces_only { kit::heading("Faces").into() } else { tick(dl.faces, "Find people's faces", d(DialogMsg::Faces)) };
     col = col.push(row![head, kit::caption("Groups faces alike so you can name people. Pick the model:")].spacing(t::S2).align_y(Alignment::Center));
-    let rows: Vec<Element<'_, Message>> = people::FACE_MODELS
-        .iter()
-        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, faces_st.model_installed && faces_st.model == Some(mi.id), dl.faces_only))
+    let rows: Vec<Element<'_, Message>> = models::face_models()
+        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, faces_st.installed && faces_st.model == Some(mi.id), dl.faces_only))
         .collect();
     let mut list = column![].spacing(2).padding(2);
     for r in rows {
         list = list.push(r);
     }
     col = col.push(container(list).width(Length::Fill).style(style::group()));
-    let (finder, finder_licence, finder_from, finder_bytes) = people::FINDER;
+    let finder = models::info(models::FACE_DETECTOR);
     col = col.push(kit::caption(format!(
-        "{finder} ({}, {finder_licence}, from {finder_from}) finds the faces for whichever model you pick, so changing the model later keeps the faces and their names. Nothing is named for you.",
-        size(finder_bytes)
+        "{} ({}, {}, from {}) finds the faces for whichever model you pick, so changing the model later keeps the faces and their names. Nothing is named for you.",
+        finder.name,
+        size(finder.bytes()),
+        finder.licence,
+        finder.publisher
     )));
     let runs = match (st.device.chosen, &st.device.name) {
         (Device::Gpu, Some(name)) => format!("The graphics card ({name}), checked against the processor first"),
@@ -379,9 +386,10 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     facts.push(fact("Reads", capital(&c.read), None));
     facts.push(fact("Runs on", runs, Some("Preferences ▸ Search chooses the graphics card or the processor.")));
     let takes = if dl.faces_only {
-        format!("{} {} {}. Groups appear on the People tab as they are found.", capital(&estimate::describe_seconds(people::catch_up_seconds(shots, device, dl.face_model))), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
+        let todo = st.indexed_shots.saturating_sub(faces_st.looked_at);
+        format!("{} {} {}. Groups appear on the People tab as they are found.", capital(&estimate::describe_seconds(estimate::face_catch_up_seconds(todo, device, dl.face_model))), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
     } else if faces {
-        let secs = estimate::seconds(shots, device) + people::face_seconds(shots, device, dl.face_model);
+        let secs = estimate::seconds(shots, device) + estimate::face_seconds(shots, device, dl.face_model);
         format!("{} for search and faces {} {}. Search works on the newest days within a minute.", capital(&estimate::describe_seconds(secs)), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
     } else {
         format!("{}. Search works on the newest days within a minute.", c.takes)
@@ -420,12 +428,20 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
             }
         }
         if faces {
-            rows.push(
-                column![text(format!("Faces: {}", model.name)).size(t::T_SMALL).color(t::INK), text(model.source_url).size(t::T_SMALL).color(t::INK3)]
-                    .spacing(1)
-                    .padding(Padding::from([6.0, 12.0]))
-                    .into(),
-            );
+            for mi in [finder, model] {
+                for f in mi.files {
+                    rows.push(
+                        column![
+                            text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                            text(f.url).size(t::T_SMALL).color(t::INK3),
+                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                        ]
+                        .spacing(1)
+                        .padding(Padding::from([6.0, 12.0]))
+                        .into(),
+                    );
+                }
+            }
         }
         col = col.push(group(rows));
     }

@@ -18,7 +18,7 @@ use iced::widget::{Space, button, column, container, pin, row, scrollable, stack
 use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task};
 
 use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, Group, GroupId, Kind};
+use super::people::{self, Face, FaceRef, Framing, Group, GroupId, Kind, KindWords};
 use super::results_pane::{Ask, Pane};
 use super::search::Reply;
 use super::search_results::Results;
@@ -161,7 +161,7 @@ pub enum NameOption {
 /// that kind whose name starts with it (any word), the exact one first,
 /// then the name itself unless someone already has it.  Never another
 /// kind's names.
-pub fn name_options(all: &super::people::Subjects, kind: Kind, group: GroupId, typed: &str) -> Vec<NameOption> {
+pub fn name_options(all: &super::people::Subjects, kind: Kind, group: &GroupId, typed: &str) -> Vec<NameOption> {
     let typed = typed.split_whitespace().collect::<Vec<_>>().join(" ");
     if typed.is_empty() {
         return Vec::new();
@@ -169,7 +169,7 @@ pub fn name_options(all: &super::people::Subjects, kind: Kind, group: GroupId, t
     let low = typed.to_lowercase();
     let mut merges: Vec<&Group> = all
         .named(kind)
-        .filter(|g| g.id != group)
+        .filter(|g| &g.id != group)
         .filter(|g| g.name.as_deref().is_some_and(|n| {
             let n = n.to_lowercase();
             n.starts_with(&low) || n.contains(&format!(" {low}"))
@@ -177,7 +177,7 @@ pub fn name_options(all: &super::people::Subjects, kind: Kind, group: GroupId, t
         .collect();
     merges.sort_by_key(|g| (g.name.as_deref().map(str::to_lowercase) != Some(low.clone()), std::cmp::Reverse(g.photos)));
     let taken = merges.iter().any(|g| g.name.as_deref().is_some_and(|n| n.to_lowercase() == low));
-    let mut out: Vec<NameOption> = merges.into_iter().take(4).map(|g| NameOption::MergeInto { id: g.id, name: g.name.clone().unwrap_or_default(), photos: g.photos }).collect();
+    let mut out: Vec<NameOption> = merges.into_iter().take(4).map(|g| NameOption::MergeInto { id: g.id.clone(), name: g.name.clone().unwrap_or_default(), photos: g.photos }).collect();
     if !taken {
         out.push(NameOption::Name(typed));
     }
@@ -188,9 +188,9 @@ pub fn name_options(all: &super::people::Subjects, kind: Kind, group: GroupId, t
 
 /// Open `id`'s page; `rename` opens its name field (F2).  An unnamed group
 /// always opens with it ready.
-pub fn open(app: &mut App, id: GroupId, rename: bool) -> Task<Message> {
+pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     let Some(g) = app.subjects.group(id).cloned() else { return Task::none() };
-    let mut p = Person::new(id, g.kind);
+    let mut p = Person::new(id.clone(), g.kind);
     p.pane.thumb_size = app.search.pane.thumb_size;
     if g.name.is_none() || rename {
         p.naming = Some(g.name.clone().unwrap_or_default());
@@ -221,10 +221,10 @@ pub fn search(app: &mut App, refresh: bool) -> Task<Message> {
     let seq = SEQ_BASE + app.subjects.next_seq();
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     p.pending = Some((seq, refresh));
-    let photos = app.subjects.all.get(p.group).map_or(0, |g| g.photos);
+    let photos = app.subjects.all.group(&p.group).map_or(0, |g| g.photos);
     p.ran_photos = photos;
     let words = p.words.split_whitespace().collect::<Vec<_>>().join(" ");
-    let group = p.group;
+    let group = p.group.clone();
     app.search.link.query_in(seq, &words, closeness, &[group]);
     Task::none()
 }
@@ -238,7 +238,7 @@ pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
     let Some(index) = app.calendar.index.clone() else {
         return Task::done(pm(Msg::Built(seq, None)));
     };
-    let who = vec![subj::label(&app.subjects, p.group)];
+    let who = vec![subj::label(&app.subjects, &p.group)];
     let words = p.words.clone();
     let work = move || {
         let mut r = super::search::build(seq, words, &reply, &index);
@@ -252,7 +252,7 @@ pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
 /// show them as they are now.
 pub fn after_change(app: &mut App) -> Task<Message> {
     let Some(p) = app.subjects.person.as_ref() else { return Task::none() };
-    let (group, faces) = (p.group, p.show == Show::Faces);
+    let (group, faces) = (p.group.clone(), p.show == Show::Faces);
     let mut tasks = vec![search(app, true)];
     if faces {
         tasks.push(ask_faces(app, group));
@@ -265,7 +265,7 @@ fn ask_faces(app: &mut App, group: GroupId) -> Task<Message> {
     if let Some(p) = app.subjects.person.as_mut() {
         p.faces_seq = seq;
     }
-    app.search.link.faces(seq, group);
+    app.search.link.faces(seq, &group);
     Task::none()
 }
 
@@ -280,20 +280,16 @@ pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) 
     subj::refresh_crops(app)
 }
 
-pub fn on_suggestions(_app: &mut App, _seq: u64, _group: GroupId, _list: Arc<Vec<Vec<Face>>>) -> Task<Message> {
-    Task::none()
-}
-
 /// The groups changed: follow this page's group (named, merged), or go
 /// back to the tab if it went; show its photos again when they changed.
 pub fn on_subjects(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
     let Some(p) = s.person.as_mut() else { return Task::none() };
-    if s.all.get(p.group).is_none() {
-        let next = p.follow.as_deref().and_then(|n| s.all.by_name(p.kind, n)).map(|g| g.id).or(p.merged_into.filter(|&id| s.all.get(id).is_some()));
+    if s.all.group(&p.group).is_none() {
+        let next = p.follow.as_deref().and_then(|n| people::by_name(&s.all, p.kind, n)).map(|g| g.id.clone()).or(p.merged_into.clone().filter(|id| s.all.group(id).is_some()));
         match next {
             Some(id) => {
-                p.group = id;
+                p.group = id.clone();
                 p.follow = None;
                 p.merged_into = None;
                 if let Some(r) = s.review.as_mut() {
@@ -308,7 +304,7 @@ pub fn on_subjects(app: &mut App) -> Task<Message> {
         }
         return after_change(app);
     }
-    let photos = s.all.get(p.group).map_or(0, |g| g.photos);
+    let photos = s.all.group(&p.group).map_or(0, |g| g.photos);
     if photos != p.ran_photos && p.pending.is_none() {
         return after_change(app);
     }
@@ -341,8 +337,8 @@ fn open_day(app: &mut App) -> Task<Message> {
     let Some(p) = app.subjects.person.as_ref() else { return Task::none() };
     let Some((id, r)) = p.pane.focus().zip(p.pane.results.clone()) else { return Task::none() };
     let (Some(day), Some(path)) = (r.day_of(id), r.coll.get(id).map(|x| x.path.clone())) else { return Task::none() };
-    let name = subj::label(&app.subjects, p.group);
-    let label = if app.subjects.group(p.group).is_some_and(|g| g.name.is_some()) { name } else { "Unnamed".to_string() };
+    let name = subj::label(&app.subjects, &p.group);
+    let label = if app.subjects.group(&p.group).is_some_and(|g| g.name.is_some()) { name } else { "Unnamed".to_string() };
     let t = app.switch_view(View::Calendar);
     app.calendar.open_from(day, path, View::Subjects, label);
     let status = app.calendar.status_text();
@@ -350,22 +346,22 @@ fn open_day(app: &mut App) -> Task<Message> {
 }
 
 /// The crops the page shows.
-pub fn wanted(app: &App) -> Vec<(FaceRef, u32, Framing)> {
+pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Vec::new() };
     let mut v = Vec::new();
-    if let Some(g) = s.group(p.group) {
-        v.push((g.cover.face, subj::px(app, 44.0), Framing::Face));
+    if let Some(g) = s.group(&p.group) {
+        v.push((g.cover.clone(), subj::px(app, 44.0), Framing::Face));
     }
     if p.show == Show::Faces {
         if let Some(faces) = &p.faces {
             let small = subj::px(app, tile::SMALL_CROP);
-            v.extend(faces.iter().take(p.faces_shown).map(|f| (f.face, small, Framing::Face)));
+            v.extend(faces.iter().take(p.faces_shown).map(|f| (f.clone(), small, Framing::Face)));
         }
     }
     if matches!(p.menu, Some(Menu::MergeInto | Menu::MoveTo)) || p.naming.is_some() {
         for g in s.all.groups.iter().filter(|g| g.kind == p.kind && g.id != p.group).take(40) {
-            v.push((g.cover.face, subj::px(app, 22.0), Framing::Face));
+            v.push((g.cover.clone(), subj::px(app, 22.0), Framing::Face));
         }
     }
     v
@@ -412,7 +408,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             p.picked.clear();
             p.menu = None;
             app.quicklook = None;
-            let group = p.group;
+            let group = p.group.clone();
             if show == Show::Faces {
                 let t = ask_faces(app, group);
                 return Task::batch([t, subj::refresh_crops(app)]);
@@ -453,7 +449,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::NotThis => not_this(app),
         Msg::Rename => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
-            let name = app.subjects.all.get(p.group).and_then(|g| g.name.clone()).unwrap_or_default();
+            let name = app.subjects.all.group(&p.group).and_then(|g| g.name.clone()).unwrap_or_default();
             p.naming = Some(name);
             p.name_hi = 0;
             p.menu = None;
@@ -473,39 +469,39 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Hide => {
             let Some(p) = app.subjects.person.as_ref() else { return Task::none() };
-            let (id, named) = (p.group, app.subjects.group(p.group).is_some_and(|g| g.name.is_some()));
-            let name = subj::label(&app.subjects, id);
-            app.search.link.set_hidden(id, true);
+            let (id, named) = (p.group.clone(), app.subjects.group(&p.group).is_some_and(|g| g.name.is_some()));
+            let name = subj::label(&app.subjects, &id);
+            app.search.link.set_hidden(&id, true);
             let t = subj::to_overview(app);
             let what = if named { format!("{name} is hidden. Their photos still come up when you search for them by name.") } else { "The group is hidden. Find it under Hidden.".to_string() };
             Task::batch([t, app.show_status_action(what, "Undo", sm(subj::Msg::Undo))])
         }
         Msg::MergeInto(target) => {
-            let target_kind = app.subjects.group(target).map(|g| g.kind);
+            let target_kind = app.subjects.group(&target).map(|g| g.kind);
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             p.menu = None;
-            let from = p.group;
+            let from = p.group.clone();
             if target_kind != Some(p.kind) {
                 return app.show_status("Only one kind can be merged.", 5000);
             }
-            p.merged_into = Some(target);
-            let (a, b) = (subj::label(&app.subjects, from), subj::label(&app.subjects, target));
-            app.search.link.merge(target, &[from]);
+            p.merged_into = Some(target.clone());
+            let (a, b) = (subj::label(&app.subjects, &from), subj::label(&app.subjects, &target));
+            app.search.link.merge(&target, &[from]);
             let a = if a == "the unnamed group" { "The group".to_string() } else { a };
             app.show_status_action(format!("{a} was merged into {b}."), "Undo", sm(subj::Msg::Undo))
         }
         Msg::Forget => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             p.menu = None;
-            app.subjects.forget = Some(p.group);
+            app.subjects.forget = Some(p.group.clone());
             Task::none()
         }
         Msg::Review => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             p.menu = None;
             p.naming = None;
-            let group = p.group;
-            super::subjects_review::start(app, group)
+            let group = p.group.clone();
+            super::subjects_review::start(app, &group)
         }
     }
 }
@@ -537,22 +533,22 @@ pub fn toggle_all(app: &mut App) -> Task<Message> {
 fn take_name(app: &mut App, i: usize) -> Task<Message> {
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     let typed = p.naming.clone().unwrap_or_default();
-    let options = name_options(&app.subjects.all, p.kind, p.group, &typed);
+    let options = name_options(&app.subjects.all, p.kind, &p.group, &typed);
     let Some(choice) = options.get(i).or(options.first()).cloned() else {
         // Nothing typed: an unnamed group keeps its field; a rename stops.
-        if app.subjects.all.get(p.group).is_some_and(|g| g.name.is_some()) {
+        if app.subjects.all.group(&p.group).is_some_and(|g| g.name.is_some()) {
             p.naming = None;
         }
         return Task::none();
     };
-    let current = app.subjects.all.get(p.group).and_then(|g| g.name.clone());
+    let current = app.subjects.all.group(&p.group).and_then(|g| g.name.clone());
     p.naming = None;
-    let id = p.group;
+    let id = p.group.clone();
     match choice {
         NameOption::Name(n) if current.as_deref() == Some(n.as_str()) => Task::none(),
         NameOption::Name(n) => {
             p.follow = Some(n.clone());
-            app.search.link.name_group(id, &n);
+            app.search.link.name_group(&id, &n);
             let what = match current {
                 Some(old) => format!("Renamed {old} to {n}."),
                 None => format!("Named this group {n}. Their photos come up when you search for @{n}."),
@@ -560,8 +556,8 @@ fn take_name(app: &mut App, i: usize) -> Task<Message> {
             Task::batch([unfocus(), app.show_status_action(what, "Undo", sm(subj::Msg::Undo))])
         }
         NameOption::MergeInto { id: target, name, .. } => {
-            p.merged_into = Some(target);
-            app.search.link.merge(target, &[id]);
+            p.merged_into = Some(target.clone());
+            app.search.link.merge(&target, &[id]);
             Task::batch([unfocus(), app.show_status_action(format!("Merged this group into {name}."), "Undo", sm(subj::Msg::Undo))])
         }
     }
@@ -573,14 +569,14 @@ fn move_to(app: &mut App, to: Option<GroupId>) -> Task<Message> {
     if p.picked.is_empty() {
         return Task::none();
     }
-    if to.is_some_and(|t| app.subjects.all.get(t).is_none_or(|g| g.kind != p.kind)) {
+    if to.as_ref().is_some_and(|t| app.subjects.all.group(t).is_none_or(|g| g.kind != p.kind)) {
         return app.show_status("Faces move only to someone of the same kind.", 5000);
     }
     let faces = std::mem::take(&mut p.picked);
-    let from = p.group;
+    let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(from, &faces, to);
-    let whom = to.map_or_else(|| "a new group to name".to_string(), |t| subj::label(&app.subjects, t));
+    app.search.link.move_faces(&from, &faces, to.as_ref());
+    let whom = to.as_ref().map_or_else(|| "a new group to name".to_string(), |t| subj::label(&app.subjects, t));
     app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, "face")), "Undo", sm(subj::Msg::Undo))
 }
 
@@ -591,10 +587,10 @@ fn not_this(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     let faces = std::mem::take(&mut p.picked);
-    let group = p.group;
+    let group = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.answer(group, &faces, Some(false));
-    let name = subj::label(&app.subjects, group);
+    app.search.link.answer(&group, &faces, Some(false));
+    let name = subj::label(&app.subjects, &group);
     app.show_status_action(format!("Took {} out of {name}. They won't be suggested again.", util::plural(n, "photo")), "Undo", sm(subj::Msg::Undo))
 }
 
@@ -607,7 +603,7 @@ pub fn escape(app: &mut App) -> Task<Message> {
     if p.menu.take().is_some() {
         return Task::none();
     }
-    if p.naming.is_some() && app.subjects.all.get(p.group).is_some_and(|g| g.name.is_some()) {
+    if p.naming.is_some() && app.subjects.all.group(&p.group).is_some_and(|g| g.name.is_some()) {
         p.naming = None;
         return unfocus();
     }
@@ -625,7 +621,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     }
     // The name's options: ↑ ↓ choose, Tab takes.
     if let Some(typed) = p.naming.clone() {
-        let n = name_options(&app.subjects.all, p.kind, p.group, &typed).len();
+        let n = name_options(&app.subjects.all, p.kind, &p.group, &typed).len();
         match key {
             Key::Named(Named::ArrowDown) if n > 0 => {
                 p.name_hi = (p.name_hi + 1) % n;
@@ -730,7 +726,7 @@ fn field_width(app: &App) -> f32 {
 
 fn header<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let s = &app.subjects;
-    let g = s.group(p.group);
+    let g = s.group(&p.group);
     let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, p.kind.title(), t::INK2, style::secondary(), Some(pm(Msg::Back))), format!("Back to the {}  (Esc)", p.kind.title().to_lowercase()), true);
     // The field: the magnifier, the chip, then the words.
     let w = field_width(app);
@@ -786,7 +782,7 @@ fn header<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
 /// The band under the header: who this is, and what can be done.
 fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let s = &app.subjects;
-    let Some(g) = s.group(p.group) else { return Space::new().into() };
+    let Some(g) = s.group(&p.group) else { return Space::new().into() };
     let one = p.kind.one();
     let crop = tile::crop(s.crops.get(&g.cover.face, subj::px(app, 44.0), Framing::Face), 44.0, subj::shape(p.kind));
     let counts = format!("{} over {}.", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"));
@@ -857,7 +853,7 @@ fn keycap<'a>(k: &'a str) -> Element<'a, Message> {
 /// The name's options, under the name field.
 fn name_list<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
     let typed = p.naming.as_deref()?;
-    let options = name_options(&app.subjects.all, p.kind, p.group, typed);
+    let options = name_options(&app.subjects.all, p.kind, &p.group, typed);
     if options.is_empty() {
         return None;
     }
@@ -867,7 +863,7 @@ fn name_list<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         let hot = i == p.name_hi;
         let (lead, title, detail, tag): (Element<'a, Message>, Element<'a, Message>, String, &str) = match o {
             NameOption::MergeInto { id, name, photos } => {
-                let g = app.subjects.group(*id);
+                let g = app.subjects.group(id);
                 let avatar = tile::crop(g.and_then(|g| app.subjects.crops.get(&g.cover.face, subj::px(app, 22.0), Framing::Face)), 22.0, subj::shape(p.kind));
                 (
                     avatar,
@@ -877,7 +873,7 @@ fn name_list<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
                 )
             }
             NameOption::Name(n) => {
-                let is_rename = app.subjects.group(p.group).is_some_and(|g| g.name.is_some());
+                let is_rename = app.subjects.group(&p.group).is_some_and(|g| g.name.is_some());
                 (
                     icons::view(Glyph::Pencil, 15.0, t::INK3),
                     text(if is_rename { format!("Rename to “{n}”") } else { format!("Name it “{n}”") }).size(t::T_BODY).color(t::INK).into(),
@@ -946,14 +942,14 @@ fn menu_row<'a>(lead: Element<'a, Message>, label: String, trail: String, on: Op
 /// name.
 fn other_groups<'a>(app: &'a App, p: &'a Person, on: impl Fn(GroupId) -> Message) -> Vec<Element<'a, Message>> {
     let s = &app.subjects;
-    let a = subj::arrange(&s.all, p.kind, app.settings.smallest_group());
+    let a = subj::arrange(&s.all, p.kind, app.settings.people_min_photos());
     a.named
         .iter()
         .chain(a.to_name.iter().take(6))
         .filter(|g| g.id != p.group)
         .map(|g| {
             let avatar = tile::crop(s.crops.get(&g.cover.face, subj::px(app, 22.0), Framing::Face), 20.0, subj::shape(p.kind));
-            menu_row(avatar, g.name.clone().unwrap_or_else(|| "Unnamed group".into()), util::thousands(g.photos as u64), Some(on(g.id)))
+            menu_row(avatar, g.name.clone().unwrap_or_else(|| "Unnamed group".into()), util::thousands(g.photos as u64), Some(on(g.id.clone())))
         })
         .collect()
 }
@@ -961,7 +957,7 @@ fn other_groups<'a>(app: &'a App, p: &'a Person, on: impl Fn(GroupId) -> Message
 fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
     let menu = p.menu?;
     let s = &app.subjects;
-    let g = s.group(p.group)?;
+    let g = s.group(&p.group)?;
     let one = p.kind.one();
     let page_w = app.window_size_width() - RAIL_W;
     let (panel, x, y, w) = match menu {
@@ -992,7 +988,7 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
 
 /// While faces are picked: how many, and where they go.
 fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
-    let name = subj::label(&app.subjects, p.group);
+    let name = subj::label(&app.subjects, &p.group);
     let not = if name == "the unnamed group" { "Not this one".to_string() } else { format!("Not {name}") };
     let r = row![
         icons::view(Glyph::Select, 16.0, t::SIGNAL),
@@ -1033,7 +1029,7 @@ pub fn debug_state(app: &App) -> String {
     let name = |id: RecordId| p.pane.results.as_ref().and_then(|r| r.coll.get(id)).map(|r| r.stem()).unwrap_or_else(|| "?".into());
     format!(
         "person=[group={} kind={:?} words={:?} pending={:?} photos={} tiles={} sections={:?} focus={:?} show={:?} faces={:?} picked={} menu={:?} naming={:?} hi={} options={:?}]",
-        p.group,
+        people::short(&p.group),
         p.kind,
         p.words,
         p.pending,
@@ -1047,7 +1043,7 @@ pub fn debug_state(app: &App) -> String {
         p.menu,
         p.naming,
         p.name_hi,
-        p.naming.as_deref().map(|n| name_options(&app.subjects.all, p.kind, p.group, n)),
+        p.naming.as_deref().map(|n| name_options(&app.subjects.all, p.kind, &p.group, n)),
     )
 }
 
@@ -1069,6 +1065,7 @@ mod tests {
             generation: 1,
             groups: vec![g(1, Kind::Person, Some("Person A"), 312), g(2, Kind::Person, Some("Pat"), 20), g(3, Kind::Person, None, 58), g(4, Kind::Fursuit, Some("Patches"), 90)],
             faces_found: 400,
+            undoable: None,
         }
     }
 
@@ -1078,20 +1075,20 @@ mod tests {
         let me = GroupId::Cluster(3);
         // "pat" starts two people's names: both offered as merges, the
         // exact one first, then the new name; never the fursuit.
-        let o = name_options(&a, Kind::Person, me, "pat");
+        let o = name_options(&a, Kind::Person, &me, "pat");
         assert_eq!(o[0], NameOption::MergeInto { id: GroupId::Cluster(2), name: "Pat".into(), photos: 20 }, "the exact name first");
         assert!(!o.iter().any(|x| matches!(x, NameOption::MergeInto { id, .. } if *id == GroupId::Cluster(4))), "never another kind");
         assert!(!o.contains(&NameOption::Name("pat".into())), "the name is taken: no second Pat");
-        let o = name_options(&a, Kind::Person, me, "Per");
+        let o = name_options(&a, Kind::Person, &me, "Per");
         assert_eq!(o.len(), 2);
         assert!(matches!(&o[0], NameOption::MergeInto { name, .. } if name == "Person A"));
         assert_eq!(o[1], NameOption::Name("Per".into()));
         // A word start counts too ("A" for "Person A"); a new name alone
         // when nothing matches; nothing for nothing typed.
-        assert!(matches!(&name_options(&a, Kind::Person, me, "a")[0], NameOption::MergeInto { name, .. } if name == "Person A"));
-        assert_eq!(name_options(&a, Kind::Person, me, "  Zed   Q "), [NameOption::Name("Zed Q".into())]);
-        assert!(name_options(&a, Kind::Person, me, "  ").is_empty());
+        assert!(matches!(&name_options(&a, Kind::Person, &me, "a")[0], NameOption::MergeInto { name, .. } if name == "Person A"));
+        assert_eq!(name_options(&a, Kind::Person, &me, "  Zed   Q "), [NameOption::Name("Zed Q".into())]);
+        assert!(name_options(&a, Kind::Person, &me, "  ").is_empty());
         // Renaming someone never offers to merge them into themselves.
-        assert_eq!(name_options(&a, Kind::Person, GroupId::Cluster(1), "Person A"), [NameOption::Name("Person A".into())]);
+        assert_eq!(name_options(&a, Kind::Person, &GroupId::Cluster(1), "Person A"), [NameOption::Name("Person A".into())]);
     }
 }

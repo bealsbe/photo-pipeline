@@ -91,7 +91,12 @@ pub enum BgEvent {
     /// contrast left out come in `fursuits`, best first, never
     /// overlapping `hits` (the page's *Show fursuits too* section needs
     /// no second query); otherwise `fursuits` is empty and `animal`
-    /// `None`.
+    /// `None`.  `subjects` are the groups the query was narrowed to
+    /// (phase 3): those passed to `Engine::query` and the `@name`s that
+    /// resolved to a named subject; a name that resolved to nobody is
+    /// absent (the page tells by comparing with `understood.names`).
+    /// With subjects and no words, `hits` come clearest first (UI 12),
+    /// `score` the clarity.
     SearchResults {
         seq: u64,
         hits: Arc<Vec<crate::search::Hit>>,
@@ -100,7 +105,24 @@ pub enum BgEvent {
         understood: Arc<crate::search::Parsed>,
         fursuits: Arc<Vec<crate::search::Hit>>,
         animal: Option<String>,
+        subjects: Arc<Vec<crate::model::subjects::GroupId>>,
     },
+    /// The *Subjects* page's state (every kind; a tab shows one): sent
+    /// whenever the groups, names or counts change, throttled while a
+    /// pass runs (`crate::search::Engine::subjects` reads the latest at
+    /// any time).
+    Subjects(Arc<crate::model::subjects::Subjects>),
+    /// A subjects edit was taken back (`Engine::undo`): what was undone,
+    /// for the status bar ("Merged 2 groups into Someone").  A fresh
+    /// `Subjects` comes with it.
+    SubjectsUndone(String),
+    /// A group's faces, clearest first (`Engine::faces`), for the split
+    /// view.  `group` is as asked.
+    SubjectFaces { seq: u64, group: crate::model::subjects::GroupId, faces: Arc<Vec<crate::model::subjects::Face>> },
+    /// Suggestions for review (`Engine::suggestions`): one entry per burst
+    /// (its frames' faces, best first), most likely first; for a cluster,
+    /// its own members to check.  Never a face of another kind.
+    Suggestions { seq: u64, group: crate::model::subjects::GroupId, list: Arc<Vec<Vec<crate::model::subjects::Face>>> },
     /// *Things in your photos*: the hidden tags' objects and scenes with
     /// their photo counts, most first; sent when the index loads and
     /// whenever the tags change (`crate::search::Engine::things` reads
@@ -108,9 +130,6 @@ pub enum BgEvent {
     SearchThings(Arc<Vec<crate::search::Thing>>),
     /// A model download's progress (`crate::ml::download`).
     ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
-    /// People, fursuits and pets: groups, a group's faces, its suggestions,
-    /// the faces status (`crate::app::people`).
-    People(crate::app::people::Event),
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
@@ -151,8 +170,11 @@ impl BgEvent {
             BgEvent::SearchStatus(_) => "SearchStatus",
             BgEvent::SearchResults { .. } => "SearchResults",
             BgEvent::SearchThings(_) => "SearchThings",
+            BgEvent::Subjects(_) => "Subjects",
+            BgEvent::SubjectsUndone(_) => "SubjectsUndone",
+            BgEvent::SubjectFaces { .. } => "SubjectFaces",
+            BgEvent::Suggestions { .. } => "Suggestions",
             BgEvent::ModelDownload { .. } => "ModelDownload",
-            BgEvent::People(_) => "People",
         }
     }
 }
