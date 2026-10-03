@@ -149,7 +149,7 @@ pub fn ask_words(o: Offer) -> (String, String) {
         _ => format!("Find fursuit heads in {}?", photos_phrase(o)),
     };
     let before = match o.why {
-        Why::FirstIndex => "Search is done with them. ",
+        Why::FirstIndex => "The library is indexed for search. ",
         Why::NewExports => "Search already has them. ",
         Why::CatchUp | Why::Resume => "",
     };
@@ -236,7 +236,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
             super::search_setup::capital(&fursuits::describe_cost(photos, device)),
             Some(match device {
                 Device::Gpu => "You can keep culling, and stop it from the status bar. Groups appear as they are found, newest days first.".into(),
-                Device::Cpu => "On the processor, chosen in Preferences ▸ Search. You can keep culling, and stop it from the status bar.".into(),
+                Device::Cpu => "The processor is chosen in Preferences ▸ Search. You can keep culling, and stop it from the status bar.".into(),
             }),
         ),
     ];
@@ -331,6 +331,9 @@ pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
             .spacing(t::S2);
             Some(card(Glyph::Fursuit, t::PHOTO_INK2, title, detail, buttons.into()))
         }
+        // The banner over every view says it already; the tab says it once
+        // the banner is put away.
+        Step::Failed(_) if super::search_setup::banner_shown(app) => None,
         Step::Failed(f) => {
             let buttons = row![
                 kit::btn(super::search_setup::retry_label(f), style::secondary(), Some(m(Msg::TryCard))),
@@ -418,7 +421,7 @@ pub fn on_status(app: &mut App, old: &crate::search::Status) -> Task<Message> {
     if let (Step::Scanning { done, total, .. }, Step::Idle) = (&was.step, &now.step) {
         // Finished, not stopped: everything it set out to look at.
         if now.scanned >= was.scanned + total.saturating_sub(*done) {
-            let text = format!("Looked for fursuit heads in every photo asked: {} found in all.", util::plural(now.found as u64, "head"));
+            let text = format!("Finished looking for fursuit heads: {} found in all.", util::thousands(now.found as u64));
             return app.show_status(text, 8000);
         }
     }

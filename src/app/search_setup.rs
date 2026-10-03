@@ -409,10 +409,10 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     // Fursuit heads: on unless unticked (unticked to start with on the
     // processor), one row for the two models they need.
     if !dl.faces_only {
-        let note = if st.device.chosen == Device::Gpu {
-            "Scanned during indexing, after search and faces, on the photos with fursuits."
-        } else {
-            "Long on the processor, so each scan asks first, with its cost."
+        let note = match (dl.fursuits_only, st.device.chosen) {
+            (true, _) => "Only on the photos the index says show fursuits.",
+            (false, Device::Gpu) => "Scanned during indexing, after search and faces, on the photos with fursuits.",
+            (false, Device::Cpu) => "Long on the processor, so each scan asks first, with its cost.",
         };
         let head: Element<'_, Message> = if dl.fursuits_only { kit::heading("Fursuit heads").into() } else { tick(dl.fursuits, "Find fursuit heads", d(DialogMsg::Fursuits)) };
         col = col.push(row![head, kit::caption(note)].spacing(t::S2).align_y(Alignment::Center));
@@ -429,9 +429,20 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     if total > 0 {
         facts.push(fact("Downloads", format!("{} in all, once", size(total)), None));
     }
-    facts.push(fact("Reads", capital(&c.read), None));
-    facts.push(fact("Runs on", runs, Some("Preferences ▸ Search chooses the graphics card or the processor.")));
     let head_photos = fursuits::photos_to_look_at(heads_st, shots);
+    let read = if dl.fursuits_only {
+        let on_share = app.library.as_deref().and_then(|l| super::network::share_of(app, l)).is_some();
+        format!(
+            "The previews of the {} photos with fursuits again: {} from the library{}",
+            crate::util::thousands(head_photos as u64),
+            estimate::describe_bytes(fursuits::head_bytes_read(head_photos)),
+            if on_share { " on the share" } else { "" }
+        )
+    } else {
+        capital(&c.read)
+    };
+    facts.push(fact("Reads", read, None));
+    facts.push(fact("Runs on", runs, Some("Preferences ▸ Search chooses the graphics card or the processor.")));
     let takes = if dl.fursuits_only {
         format!("{}. Groups appear on the Fursuits tab as they are found.", capital(&fursuits::describe_cost(head_photos, device)))
     } else if dl.faces_only {
@@ -520,7 +531,9 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         vec![],
         vec![kit::btn("Cancel", style::secondary(), Some(d(DialogMsg::Cancel))).into(), kit::btn(go, style::primary(), Some(d(DialogMsg::Download))).into()],
     ));
-    iced::widget::scrollable(col).style(style::scroll).into()
+    // A gutter, so the scroll bar never covers the rows (the fursuit row
+    // makes the dialog scroll at ordinary window heights).
+    iced::widget::scrollable(col.padding(Padding { right: t::S3, ..Padding::ZERO })).style(style::scroll).into()
 }
 
 /// The fursuit-head models' row: their names, size, what they do and what
@@ -530,7 +543,7 @@ fn heads_row<'a>(app: &App, on: bool, installed: bool) -> Element<'a, Message> {
     let mi = fursuits::HEAD_MODELS;
     let st = &app.search.status;
     let device = st.device.chosen;
-    let photos = fursuits::photos_to_look_at(&st.heads, st.library_shots.max(st.indexed_shots));
+    let photos = fursuits::library_photos(&st.heads, st.library_shots.max(st.indexed_shots));
     let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
     let cost = match device {
         Device::Gpu => format!("{} for this library, then {day} a new event day.", capital(&fursuits::describe_cost(photos, device))),

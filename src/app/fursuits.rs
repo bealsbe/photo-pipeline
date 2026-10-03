@@ -42,6 +42,13 @@ pub const HEAD_MODELS: HeadModels = HeadModels {
     bytes: 950_000_000,
 };
 
+/// The library's fursuit photos, for "for this library" costs: those the
+/// index tags, or before anything is indexed, the study's share (three
+/// shots in four).
+pub fn library_photos(h: &HeadsStatus, shots: usize) -> usize {
+    if h.tagged > 0 { h.tagged } else { shots * 3 / 4 }
+}
+
 // ── the stand-in ────────────────────────────────────────────────────────────
 //
 // Made-up fursuits on the library's shots (the same shots and keys as the

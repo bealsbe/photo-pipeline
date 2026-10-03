@@ -1201,7 +1201,7 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
         list = list.push(completion_row(app, pick, i, s.hi == Some(i), &offer.stem, typed));
     }
     if offer.naming {
-        list = list.push(quiet("Fursuits and pets come later.".into()));
+        list = list.push(quiet("Pets come later.".into()));
     }
     list = list.push(container(kit::hairline()).padding(Padding { top: t::S1, ..Padding::ZERO }));
     list = list.push(syntax_footer());

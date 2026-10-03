@@ -689,6 +689,20 @@ fn fursuits_to_forget(app: &App) -> bool {
     h.found > 0 || h.named > 0 || app.subjects.all.groups.iter().any(|g| g.kind == super::people::Kind::Fursuit)
 }
 
+/// Why `n` fursuit photos weren't looked at for heads: indexed before
+/// heads were looked for, or their scan skipped (`skipped` of them).
+fn not_looked_at(n: usize, skipped: usize) -> String {
+    let photos = util::plural(n as u64, "photo");
+    let (was, their) = if n == 1 { ("was", "its scan was") } else { ("were", "their scans were") };
+    if skipped == 0 {
+        format!("{photos} with fursuits {was} indexed before heads were looked for.")
+    } else if skipped >= n {
+        format!("{photos} with fursuits: {their} skipped.")
+    } else {
+        format!("{photos} with fursuits {was} indexed before heads were looked for, or {their} skipped.")
+    }
+}
+
 /// Fursuit photos indexed and not looked at for heads, with nothing
 /// running or waiting: Preferences offers them, with their cost.
 fn heads_catch_up(app: &App) -> bool {
@@ -1305,7 +1319,7 @@ fn search_section(app: &App) -> Element<'_, Message> {
         about_device = about_device.push(
             text(format!(
                 "Indexing this library on the processor: {all}. Each new day of 5,000 photos: {day}. Fursuit heads: {}, {} an event day, and each scan asks first.",
-                super::fursuits::describe_cost(super::fursuits::photos_to_look_at(&app.search.status.heads, shots), Device::Cpu).replacen(" on the processor", "", 1),
+                super::fursuits::describe_cost(super::fursuits::library_photos(&app.search.status.heads, shots), Device::Cpu).replacen(" on the processor", "", 1),
                 estimate::describe_seconds(super::fursuits::head_seconds(super::fursuits::EVENT_DAY_PHOTOS, Device::Cpu)),
             ))
                 .size(t::T_SMALL)
@@ -1424,7 +1438,7 @@ fn people_section(app: &App) -> Element<'_, Message> {
     let forget = focusable(p, Control::ForgetPeople, kit::btn("Forget all…", style::secondary(), people_to_forget(app).then(|| m(Msg::Press(Control::ForgetPeople)))));
     let people = section(
         "People",
-        Some("Faces in your photos, grouped so you can name the people you want to find. Fursuits and pets come later, each with a switch of its own."),
+        Some("Faces in your photos, grouped so you can name the people you want to find. Fursuits have a section of their own; pets come later."),
         vec![
             setting("Find people's faces", find.into(), switch(p, Control::FindFaces, on, true)),
             setting("Face model", about(model_about), change.into()),
@@ -1450,7 +1464,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
     let h = &app.search.status.heads;
     let device = s.search_device;
     let shots = app.search.status.library_shots.max(app.search.status.indexed_shots);
-    let all = fursuits::photos_to_look_at(h, shots).max(h.tagged);
+    let all = fursuits::library_photos(h, shots);
     let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
     let cost = match device {
         Device::Gpu => format!("about {} for this library the first time, then {day} a new event day", fursuits::describe_cost(all, device).trim_start_matches("about ")),
@@ -1466,13 +1480,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
         let go = focusable(p, Control::FindHeadsNow, kit::btn("Find their heads…", style::secondary(), Some(m(Msg::Press(Control::FindHeadsNow)))));
         rows.push(setting(
             "Photos not looked at yet",
-            about(format!(
-                "{} with fursuits {} indexed before heads were looked for, or {} skipped. Looking at them takes {}.",
-                util::plural(n as u64, "photo"),
-                if n == 1 { "was" } else { "were" },
-                if n == 1 { "its scan was" } else { "their scans were" },
-                fursuits::describe_cost(n, device)
-            )),
+            about(format!("{} Looking at them takes {}.", not_looked_at(n, h.skipped), fursuits::describe_cost(n, device))),
             go,
         ));
     }

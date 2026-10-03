@@ -1128,7 +1128,10 @@ impl Fake {
             let keep = keep.unwrap_or_default();
             let first = &subjects[0];
             let faces = if s.fursuits.owns(first) { s.fursuits.faces(first) } else { s.people.faces(first) };
-            let faces: Vec<Face> = faces.into_iter().filter(|f| keep.contains(&f.face.key)).collect();
+            // One hit per photo, at its clearest face (a photo can hold two
+            // heads of one fursuit group).
+            let mut seen = std::collections::HashSet::new();
+            let faces: Vec<Face> = faces.into_iter().filter(|f| keep.contains(&f.face.key) && seen.insert(f.face.key)).collect();
             (faces, s.status.indexed_shots)
         };
         let parsed = crate::search::parse(text);
