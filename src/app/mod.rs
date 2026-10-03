@@ -1821,10 +1821,10 @@ impl App {
         let (title, start) = match target {
             FolderTarget::Working => ("Open Working Folder", self.folder.clone()),
             FolderTarget::Library | FolderTarget::ExportLibrary => ("Set Library Folder", self.library.clone()),
-            FolderTarget::EditCopy => ("Folder to Copy RAWs Into", dialogs::edit_copy_base(self)),
+            FolderTarget::EditCopy => ("Folder to Copy Photos Into", dialogs::edit_copy_base(self)),
             FolderTarget::EditCopySetting => {
                 let s = &self.settings.edit_copy_folder;
-                ("Folder to Copy RAWs Into", (!s.is_empty()).then(|| PathBuf::from(s)))
+                ("Folder to Copy Photos Into", (!s.is_empty()).then(|| PathBuf::from(s)))
             }
         };
         let start = start.or_else(dirs::home_dir).unwrap_or_default();

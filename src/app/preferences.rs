@@ -912,7 +912,7 @@ fn folders(app: &App) -> Element<'_, Message> {
             ),
             setting(
                 "Copies for editing",
-                path_about(edit_copy.as_deref(), "Where Copy marked RAWs for editing puts them. Not chosen yet: it asks the first time."),
+                path_about(edit_copy.as_deref(), "Where Copy marked photos for editing puts them. Not chosen yet: it asks the first time."),
                 change(Control::EditCopyFolder, edit_copy.is_some()),
             ),
             setting(

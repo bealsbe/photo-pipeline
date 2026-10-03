@@ -556,6 +556,14 @@ The one destructive path is the same as in the Python app: a **Move** export
 of a *cropped JPG* writes the cropped re-encode and then deletes the uncropped
 original.  RAWs are never re-encoded.
 
+**Copy marked photos for editing** (Ctrl+Shift+E) copies the RAWs, the JPGs or
+both of every marked shot into one folder.  The dialog has a box for each
+(RAW files is ticked at first, and one box always stays ticked; the choice is
+remembered).  A marked file brings its partner of the wanted kind, a shot with
+none of it is listed and not copied, and pruned shots are left out.  Nothing
+is overwritten; a taken name gets `_1`, `_2`.  A crop is written as an `.xmp`
+sidecar for a RAW only, and a JPG is copied as it is.
+
 ## Differences from the Python app
 
 These are deliberate:
