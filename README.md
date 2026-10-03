@@ -371,8 +371,10 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   `apr–jun 2024` or `2023–2024` (`-` and `..` work as the dash; full month
   names too); `@Name` is for a person, fursuit or pet you have named,
   which comes in a later phase (for now the page says so and searches
-  the other words).  A date, a `-word` or a name on its own searches
-  nothing.
+  the other words).  A date on its own shows every photo from those days
+  in shooting order, oldest first (*jun 2026 -fursuit*: all of June but
+  what a search for *fursuit* would find); a `-word` or a name on its
+  own searches nothing.
 - **Things in your photos.**  The start page lists the things the index
   knows the library holds — *cameras 96*, *fireworks 24*, *food 21* — most
   photos first, and the list under the field offers them, with the

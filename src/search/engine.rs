@@ -861,17 +861,24 @@ impl Worker {
                 animal: animal.clone(),
             });
         };
-        if indexed == 0 || parsed.is_empty() {
+        // Nothing to search: a name or a `-word` alone runs nothing;
+        // dates alone browse the period.
+        if indexed == 0 || (parsed.is_empty() && parsed.dates.is_none()) {
             answer(Vec::new(), Vec::new(), None);
             return;
         }
-        if !(self.models_ready)() {
+        let browsing = parsed.is_empty();
+        if !(self.models_ready)() && !(browsing && parsed.exclude.is_empty()) {
             answer(Vec::new(), Vec::new(), Some("The search model isn't downloaded.".into()));
             return;
         }
-        // The prompts: the words, each exclusion, and "fursuit" for the
-        // contrast on a real animal's query.
-        let mut prompts = vec![if parsed.exact { parsed.words.clone() } else { query::prompt(&vocab::for_prompt(&parsed.words)) }];
+        // The prompts: the words (none when browsing dates), each
+        // exclusion, and "fursuit" for the contrast on a real animal's
+        // query.
+        let mut prompts = Vec::new();
+        if !browsing {
+            prompts.push(if parsed.exact { parsed.words.clone() } else { query::prompt(&vocab::for_prompt(&parsed.words)) });
+        }
         prompts.extend(parsed.exclude.iter().map(|w| query::prompt(w)));
         if animal.is_some() {
             prompts.push(query::prompt("fursuit"));
@@ -884,11 +891,41 @@ impl Worker {
             }
         };
         let t = std::time::Instant::now();
-        let (hits, fursuits) = self.hits(&parsed, &vectors, animal.is_some(), closeness);
+        let (hits, fursuits) = if browsing { (self.browse(&parsed, &vectors, closeness), Vec::new()) } else { self.hits(&parsed, &vectors, animal.is_some(), closeness) };
         if crate::profile::on() {
             eprintln!("search: {} hits ({} fursuits left out) of {indexed} in {:.1} ms", hits.len(), fursuits.len(), t.elapsed().as_secs_f64() * 1000.0);
         }
         answer(hits, fursuits, None);
+    }
+
+    /// A query of dates and no words: every indexed shot of those days in
+    /// shooting order, oldest first, as browsing a period reads, with a
+    /// neutral score and no cut or cap.  Accidental frames stay out.  With
+    /// `-word`s (their vectors, in order), a shot is left out when a search
+    /// for the word would show it: its match probability for the word
+    /// reaches the closeness setting.
+    fn browse(&mut self, parsed: &Parsed, excluded: &[Vec<f32>], closeness: f32) -> Vec<Hit> {
+        self.ensure_resolver();
+        let (Some(ix), Some(r), Some(dates)) = (&self.index, self.resolver.as_ref(), parsed.dates) else { return Vec::new() };
+        let scores: Vec<Vec<f32>> = excluded.iter().map(|v| query::score_rows(v, &ix.vectors.data, ix.vectors.dim)).collect();
+        let floor = query::cosine_for_probability(closeness.clamp(query::CLOSENESS_MIN, query::CLOSENESS_MAX));
+        let mut hits: Vec<Hit> = ix
+            .vectors
+            .records
+            .iter()
+            .enumerate()
+            .filter(|(i, rec)| !rec.accidental && !scores.iter().any(|s| s[*i] >= floor))
+            .filter_map(|(_, rec)| {
+                let shot = r.shots.get(&rec.key)?;
+                if !dates.contains(shot.day) {
+                    return None;
+                }
+                let capture = rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64)).unwrap_or(shot.mtime);
+                Some(Hit { id: rec.key.short(), key: rec.key, score: 0.0, tagged: false, day: shot.day, capture, burst: shot.burst, jpg: shot.jpg.clone(), raw: shot.raw.clone() })
+            })
+            .collect();
+        hits.sort_by(|a, b| a.capture.cmp(&b.capture).then_with(|| a.key.cmp(&b.key)));
+        hits
     }
 
     /// Score the index against the query's vectors (the words, then each
@@ -1418,6 +1455,32 @@ mod tests {
         let (hits, _, _, understood, ..) = ev.results(9);
         assert_eq!(names(&hits), ["0006", "0009"]);
         assert_eq!(understood.names, ["Someone"]);
+
+        // Dates alone browse the period: every shot of those days in
+        // shooting order, oldest first, a neutral score, the accidental
+        // frame out; with a `-word`, minus what a search for it would show.
+        e.query(11, "2024", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, error, understood, fursuits, animal) = ev.results(11);
+        assert_eq!(names(&hits), ["0009", "0010", "0011"]);
+        assert!(hits.iter().all(|h| h.score == 0.0 && !h.tagged) && hits.windows(2).all(|w| w[0].capture < w[1].capture));
+        assert!(error.is_none() && fursuits.is_empty() && animal.is_none() && understood.is_empty());
+        assert_eq!(understood.dates.map(|r| r.label()).as_deref(), Some("2024"));
+        e.query(12, "mar 2025", super::super::CLOSENESS_DEFAULT);
+        let (hits, ..) = ev.results(12);
+        assert_eq!(names(&hits), ["0001", "0002", "0003", "0004", "0005", "0006", "0007"], "the accidental 0008 stays out");
+        e.query(13, "2025 -fursuit", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, ..) = ev.results(13);
+        assert_eq!(names(&hits), ["0001", "0003", "0004", "0005", "0006"], "the two a fursuit search finds are left out");
+        assert_eq!(understood.exclude, ["fursuit"]);
+        e.query(14, "@Someone 2024", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, _, understood, ..) = ev.results(14);
+        assert_eq!(names(&hits).len(), 3);
+        assert_eq!(understood.names, ["Someone"]);
+        e.query(15, "-fursuit", super::super::CLOSENESS_DEFAULT);
+        let (hits, _, error, ..) = ev.results(15);
+        assert!(hits.is_empty() && error.is_none(), "a -word alone runs nothing");
+        e.query(16, "2023", super::super::CLOSENESS_DEFAULT);
+        assert!(ev.results(16).0.is_empty(), "no photos in that year");
 
         // An animal nothing matches: empty, still an animal query.
         e.query(10, "cat", super::super::CLOSENESS_DEFAULT);

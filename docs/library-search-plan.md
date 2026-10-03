@@ -1698,8 +1698,20 @@ plain English rules.
   (`exact`), `-word`s, dates (a year, a month and year, a month range
   `apr–jun 2024` with `-`, `–`, `—` or `..`, a year range), `@name`s.
   Two date terms narrow each other; a month name alone stays a word
-  ("may flowers").  No words (a date, a `-word` or a name alone) runs
-  nothing and answers empty hits without an error.
+  ("may flowers").  A `-word` or a name alone runs nothing and answers
+  empty hits without an error.
+- **Dates alone browse the period** (the user, 2026-10-02): every
+  indexed shot of those days, in shooting order, oldest first, with a
+  neutral score of 0, no cut and no cap; accidental frames stay out and
+  bursts stack as usual.  With `-word`s, a shot is left out when a search
+  for the word would show it (its match probability for the word reaches
+  the closeness setting), the one sensible reading of the contrast with
+  no words to compare against.  `@name` beside dates browses the dates.
+- **The user's other answers** (2026-10-02): a burst split between the
+  real animals and the fursuits stays split per frame, because one photo
+  can hold both a fursuit and a real animal; the header's count while
+  the fursuits are shown is the real animals only; single letters in the
+  field already offer months ("j": June, July, January…).
 - One query encodes the words' prompt (or the quoted text), each
   `-word`'s prompt and, for a real-animal query, "a photo of a
   fursuit.", in one request; a photo is skipped where any `-word`'s
