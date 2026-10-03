@@ -120,7 +120,9 @@
 //!                             # notindexed, indexed, indexing [n],
 //!                             # export [n], pause, resume, cardcrash,
 //!                             # selfcheck, nocard, away [share],
-//!                             # restarted, waiting [n], mismatch, offline
+//!                             # restarted, waiting [n], mismatch, offline,
+//!                             # models (all in place, nothing indexed),
+//!                             # search-model (only search's in place)
 //! search wait 5000            # wait (up to 5 s) for the query in flight
 //! search dump                 # print the page's state
 //! search fake people          # the stand-in's people: people (two named),

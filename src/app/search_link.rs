@@ -480,7 +480,7 @@ impl Fake {
                 status.stopped = Some(Stopped::Card(f));
             }
         }
-        status.faces = FacesStatus { on: find_faces, model: indexed.then_some(face_model), installed: indexed, ..FacesStatus::default() };
+        status.faces = FacesStatus { on: find_faces, model: Some(face_model), installed: indexed, ..FacesStatus::default() };
         let people = FakePeople::new(true);
         let state = FakeState {
             status,
@@ -632,17 +632,19 @@ impl Fake {
     fn start_first_index(&self, ids: &[ModelId]) {
         let faces = models::face_model_in(ids);
         self.change(|s| {
+            // As the engine: only what isn't in place is fetched (and
+            // reported); with everything here, indexing starts at once.
+            let begin = super::search_setup::begin_first_index(&s.status, faces);
             s.status.faces.on = faces.is_some();
-            if faces.is_some() {
-                s.status.faces.model = faces;
-                s.status.faces.installed = true;
+            if let Some(f) = faces {
+                s.status.faces.installed = super::search_setup::face_ready(&s.status, f);
+                s.status.faces.model = Some(f);
             }
             s.status.first_index_asked = true;
             s.status.stopped = None;
-            if !s.status.models_installed {
-                s.downloads = ids.iter().map(|&id| (id, 0, models::info(id).bytes(), DownloadState::Waiting)).collect();
-            } else {
-                s.resume();
+            match begin {
+                super::search_setup::Begin::Index => s.resume(),
+                super::search_setup::Begin::Download(rows) => s.downloads = rows.into_iter().map(|d| (d.model, 0, d.total, DownloadState::Waiting)).collect(),
             }
         });
     }
@@ -676,8 +678,11 @@ impl Fake {
         self.change(|st| {
             let s = &mut st.status;
             match word {
-                "notindexed" => {
-                    s.models_installed = false;
+                // Nothing indexed; `models` with every model already in
+                // place, `search-model` with only search's.
+                "notindexed" | "models" | "search-model" => {
+                    s.models_installed = word != "notindexed";
+                    s.faces.installed = word == "models";
                     s.indexed_shots = 0;
                     s.first_index_asked = false;
                     s.pass = None;
@@ -953,6 +958,9 @@ fn step(s: &mut FakeState) {
         }
         if s.downloads.iter().all(|d| d.3 == DownloadState::Checked) {
             s.status.models_installed = true;
+            if s.status.faces.on {
+                s.status.faces.installed = true;
+            }
             if s.status.device.chosen == Device::Gpu {
                 s.status.device.self_check = SelfCheck::Passed { cosine: 1.0, max_diff: 2.7e-5 };
             }

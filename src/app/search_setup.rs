@@ -97,6 +97,79 @@ pub fn costs(app: &App) -> Costs {
     }
 }
 
+// ── what is still to download ───────────────────────────────────────────────
+
+/// `model`'s files (the detector's and its own) are in place, as the
+/// status knows: it says so only for the face model the engine has
+/// chosen, so another one counts as missing.
+pub fn face_ready(st: &Status, model: ModelId) -> bool {
+    st.faces.installed && st.faces.model == Some(model)
+}
+
+/// The models still to fetch, as the status knows them: the search model
+/// unless it is in place (when `search` asks for it), and the detector
+/// with `face` unless that same model's set is.  The dialog's sizes,
+/// its "Downloaded" labels and the rows it shows all come from here.
+pub fn missing_models(st: &Status, search: bool, face: Option<ModelId>) -> Vec<ModelId> {
+    let mut out = Vec::new();
+    if search && !st.models_installed {
+        out.extend(search_models());
+    }
+    if let Some(f) = face.filter(|&f| !face_ready(st, f)) {
+        out.extend(models::face_set(f));
+    }
+    out
+}
+
+/// What *Download and index* does next.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Begin {
+    /// Everything is in place: the dialog closes and indexing starts.
+    Index,
+    /// The rows to show, waiting, until the engine reports on each: only
+    /// the models it will fetch, so none waits for a report that never
+    /// comes.
+    Download(Vec<Download>),
+}
+
+pub fn begin_first_index(st: &Status, face: Option<ModelId>) -> Begin {
+    let missing = missing_models(st, true, face);
+    if missing.is_empty() {
+        return Begin::Index;
+    }
+    Begin::Download(missing.into_iter().map(|id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect())
+}
+
+/// A download reported.  A new download after the last ones finished
+/// starts a fresh list, so the status bar's total is this download's.
+pub fn record_download(rows: &mut Vec<Download>, d: Download) {
+    if !d.state.is_final() && rows.iter().all(|x| x.state.is_final()) {
+        rows.clear();
+    }
+    match rows.iter_mut().find(|x| x.model == d.model) {
+        Some(x) => *x = d,
+        None => rows.push(d),
+    }
+}
+
+/// Rows still waiting for a model the status now says is in place are
+/// done: the engine reports only what it fetches, and a row the dialog
+/// listed from an older status (another face model chosen, say) would
+/// otherwise wait for ever.
+pub fn settle_downloads(rows: &mut [Download], st: &Status) {
+    for x in rows.iter_mut().filter(|x| x.state == DownloadState::Waiting) {
+        let in_place = match x.model {
+            ModelId::Siglip2 => st.models_installed,
+            m if m == models::FACE_DETECTOR => st.faces.installed,
+            m => face_ready(st, m),
+        };
+        if in_place {
+            x.done = x.total;
+            x.state = DownloadState::Checked;
+        }
+    }
+}
+
 // ── the download dialog ─────────────────────────────────────────────────────
 
 pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
@@ -141,18 +214,24 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             if face.is_some() {
                 s.link.set_face_model(model);
             }
-            if s.status.models_installed && face.is_none() {
-                s.dialog = None;
-                s.link.start_first_index(&ids);
-                return app.show_status("Indexing the library. Search works on the newest days within a minute.", 6000);
+            match begin_first_index(&s.status, face) {
+                Begin::Index => {
+                    s.dialog = None;
+                    s.link.start_first_index(&ids);
+                    let faces_too = if face.is_some() { " Faces are found in the same pass." } else { "" };
+                    app.show_status(format!("Indexing the library. Search works on the newest days within a minute.{faces_too}"), 6000)
+                }
+                Begin::Download(rows) => {
+                    // The rows show at once, waiting, until the engine
+                    // reports.
+                    s.downloads = rows;
+                    if let Some(d) = s.dialog.as_mut() {
+                        d.stage = Stage::Progress;
+                    }
+                    s.link.start_first_index(&ids);
+                    Task::none()
+                }
             }
-            // The rows show at once, waiting, until the engine reports.
-            s.downloads = ids.iter().map(|&id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect();
-            if let Some(d) = s.dialog.as_mut() {
-                d.stage = Stage::Progress;
-            }
-            s.link.start_first_index(&ids);
-            Task::none()
         }
         DialogMsg::Show => {
             let d = Dialog::new(Stage::Progress, &app.settings);
@@ -318,12 +397,8 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     let ready = st.models_installed;
     let faces = dl.faces || dl.faces_only;
     let model = models::info(dl.face_model);
-    // The face models are fetched unless the ones in place are the ones
-    // picked.
-    let face_ready = faces_st.installed && faces_st.model == Some(dl.face_model);
-    let face_bytes = if faces && !face_ready { models::bytes_for(&models::face_set(dl.face_model)) } else { 0 };
-    let search_bytes = if ready || dl.faces_only { 0 } else { models::bytes_for(&search_models()) };
-    let total = search_bytes + face_bytes;
+    // What *Download* fetches: the same list its rows will show.
+    let total = models::bytes_for(&missing_models(st, !dl.faces_only, faces.then_some(dl.face_model)));
     let title = match (dl.faces_only, total > 0) {
         (true, true) => "Download a face model and find faces?",
         (true, false) => "Find faces in the library?",
@@ -358,7 +433,7 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     let head: Element<'_, Message> = if dl.faces_only { kit::heading("Faces").into() } else { tick(dl.faces, "Find people's faces", d(DialogMsg::Faces)) };
     col = col.push(row![head, kit::caption("Groups faces alike so you can name people. Pick the model:")].spacing(t::S2).align_y(Alignment::Center));
     let rows: Vec<Element<'_, Message>> = models::face_models()
-        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, faces_st.installed && faces_st.model == Some(mi.id), dl.faces_only))
+        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, face_ready(st, mi.id), dl.faces_only))
         .collect();
     let mut list = column![].spacing(2).padding(2);
     for r in rows {
@@ -909,5 +984,103 @@ mod tests {
         assert_eq!(size(971_000_000), "971 MB");
         assert!(!size(models::bytes_for(&[ModelId::Siglip2])).starts_with("about"));
         assert_eq!(capital("about 7 minutes with the graphics card"), "About 7 minutes with the graphics card");
+    }
+
+    /// Nothing indexed; `search` and `faces` say which models are in
+    /// place (the faces' for AuraFace, the engine's chosen model).
+    fn models_here(search: bool, faces: bool) -> Status {
+        let mut st = status(None, 0, 634);
+        st.first_index_asked = false;
+        st.models_installed = search;
+        st.faces = crate::search::FacesStatus { on: true, model: Some(ModelId::AuraFace), installed: faces, ..Default::default() };
+        st
+    }
+
+    fn rows(b: &Begin) -> Vec<ModelId> {
+        match b {
+            Begin::Index => Vec::new(),
+            Begin::Download(rows) => rows.iter().map(|d| d.model).collect(),
+        }
+    }
+
+    #[test]
+    fn with_every_model_in_place_the_dialog_closes_and_indexing_starts() {
+        // The do-not-break pass: all three models here, faces ticked.  The
+        // rows used to list them all, waiting for reports that never came.
+        let st = models_here(true, true);
+        assert_eq!(begin_first_index(&st, Some(ModelId::AuraFace)), Begin::Index);
+        assert_eq!(begin_first_index(&st, None), Begin::Index);
+        assert!(missing_models(&st, true, Some(ModelId::AuraFace)).is_empty(), "the dialog quotes nothing to download");
+    }
+
+    #[test]
+    fn with_search_in_place_only_the_face_rows_show_and_the_total_is_theirs() {
+        // The upgrade: search's model here, the face models not.
+        let st = models_here(true, false);
+        let begin = begin_first_index(&st, Some(ModelId::AuraFace));
+        assert_eq!(rows(&begin), vec![models::FACE_DETECTOR, ModelId::AuraFace]);
+        let Begin::Download(list) = begin else { unreachable!() };
+        let total: u64 = list.iter().map(|d| d.total).sum();
+        assert_eq!(total, models::bytes_for(&models::face_set(ModelId::AuraFace)));
+        assert!(list.iter().all(|d| d.state == DownloadState::Waiting && d.done == 0));
+        // The dialog's quoted total is the same list's.
+        assert_eq!(models::bytes_for(&missing_models(&st, true, Some(ModelId::AuraFace))), total);
+        // Faces unticked: nothing to fetch, indexing starts.
+        assert_eq!(begin_first_index(&st, None), Begin::Index);
+        // Nothing here: all three.
+        let none = models_here(false, false);
+        assert_eq!(rows(&begin_first_index(&none, Some(ModelId::AuraFace))), vec![ModelId::Siglip2, models::FACE_DETECTOR, ModelId::AuraFace]);
+        assert_eq!(rows(&begin_first_index(&none, None)), vec![ModelId::Siglip2]);
+    }
+
+    #[test]
+    fn another_face_model_than_the_one_in_place_is_fetched() {
+        // AuraFace's set is in place; SFace picked: its set is listed (the
+        // status can't tell the detector apart), and the catch-up's
+        // faces-only total leaves search out.
+        let st = models_here(true, true);
+        assert!(face_ready(&st, ModelId::AuraFace) && !face_ready(&st, ModelId::SFace));
+        assert_eq!(missing_models(&st, false, Some(ModelId::SFace)), models::face_set(ModelId::SFace).to_vec());
+        assert!(missing_models(&models_here(false, true), false, Some(ModelId::AuraFace)).is_empty());
+    }
+
+    #[test]
+    fn a_row_whose_model_is_in_place_stops_waiting() {
+        // Listed from an older status: the detector's row waits while
+        // SFace downloads; once the status has SFace's set in place, it
+        // is done and nothing is downloading any more.
+        let mut st = models_here(true, false);
+        let Begin::Download(mut list) = begin_first_index(&st, Some(ModelId::SFace)) else { panic!("rows expected") };
+        record_download(&mut list, Download { model: ModelId::SFace, done: 39, total: 39, state: DownloadState::Checked });
+        settle_downloads(&mut list, &st);
+        assert_eq!(list[0].state, DownloadState::Waiting, "not in place yet");
+        st.faces.model = Some(ModelId::SFace);
+        st.faces.installed = true;
+        settle_downloads(&mut list, &st);
+        assert!(list.iter().all(|d| d.state == DownloadState::Checked && d.done == d.total), "{list:?}");
+        // A row that is downloading is left to its own reports.
+        let mut busy = vec![Download { model: ModelId::Siglip2, done: 5, total: 9, state: DownloadState::Downloading }];
+        settle_downloads(&mut busy, &models_here(true, true));
+        assert_eq!(busy[0].state, DownloadState::Downloading);
+    }
+
+    #[test]
+    fn a_new_download_after_finished_ones_starts_a_fresh_list() {
+        // The first index's rows, all done; then a face model change
+        // fetches SFace: the status bar's total is SFace's alone.
+        let mut list = vec![
+            Download { model: ModelId::Siglip2, done: 9, total: 9, state: DownloadState::Checked },
+            Download { model: ModelId::AuraFace, done: 7, total: 7, state: DownloadState::Checked },
+        ];
+        record_download(&mut list, Download { model: ModelId::SFace, done: 0, total: 4, state: DownloadState::Downloading });
+        assert_eq!(list.iter().map(|d| d.model).collect::<Vec<_>>(), vec![ModelId::SFace]);
+        // While it runs, later reports update its row.
+        record_download(&mut list, Download { model: ModelId::SFace, done: 4, total: 4, state: DownloadState::Checked });
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].state, DownloadState::Checked);
+        // A queued row joins a running list rather than replacing it.
+        let mut running = vec![Download { model: ModelId::Yunet, done: 1, total: 2, state: DownloadState::Downloading }];
+        record_download(&mut running, Download { model: ModelId::AuraFace, done: 0, total: 7, state: DownloadState::Waiting });
+        assert_eq!(running.len(), 2);
     }
 }
