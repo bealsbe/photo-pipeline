@@ -150,22 +150,26 @@ fn prepare_raw(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileErro
 /// [`DETECT_MIN_LONG_EDGE`]), orient it, judge it and normalise it.
 fn finish(jpeg: Vec<u8>, orientation: u8, source: Source, key: Key, capture: Option<NaiveDateTime>, meta: ShotMeta, faces: bool) -> Result<Prepared, FileError> {
     let (w, h) = decode::jpeg_dimensions(&jpeg).ok_or_else(|| FileError::other("not a readable JPEG"))?;
-    let denom = if faces {
-        [8, 4, 2].into_iter().find(|&d| w.max(h) / d >= DETECT_MIN_LONG_EDGE && w.min(h) / d >= INPUT_SIZE).unwrap_or(1)
-    } else {
-        [8, 4, 2].into_iter().find(|&d| w.min(h) / d >= INPUT_SIZE).unwrap_or(1)
-    };
+    // The search input and the accident rule work on a small decode (a
+    // DCT reduction is nearly free); the detector's canvas, when wanted,
+    // on a second, larger one.  Measuring accidents on the large decode
+    // cost more than the detector itself.
+    let denom = [8, 4, 2].into_iter().find(|&d| w.min(h) / d >= INPUT_SIZE).unwrap_or(1);
     let px = decode::decode_jpeg_full_scaled(&jpeg, denom).map_err(FileError::other)?;
     let accidental = accidental(&px, orientation, source);
     let px = decode::apply_orientation(px, orientation);
     let input = normalise(&px);
-    let face_prep = faces.then(|| {
+    let face_prep = if faces {
+        let big_denom = [8, 4, 2].into_iter().find(|&d| w.max(h) / d >= DETECT_MIN_LONG_EDGE).unwrap_or(1);
+        let big = if big_denom == denom { px } else { decode::apply_orientation(decode::decode_jpeg_full_scaled(&jpeg, big_denom).map_err(FileError::other)?, orientation) };
         // The full preview's oriented size, which the decoded size scales
         // to (the DCT reduction rounds up).
         let swap = orientation >= 5;
         let (fw, fh) = if swap { (h, w) } else { (w, h) };
-        FacePrep { canvas: face::canvas(&px), width: fw, height: fh, source: FaceSource::Jpeg { data: jpeg, orientation } }
-    });
+        Some(FacePrep { canvas: face::canvas(&big), width: fw, height: fh, source: FaceSource::Jpeg { data: jpeg, orientation } })
+    } else {
+        None
+    };
     Ok(Prepared { key, capture, meta, accidental, input, faces: face_prep })
 }
 

@@ -360,8 +360,11 @@ impl Models {
         let mut out = Vec::with_capacity(canvases.len());
         for batch in canvases.chunks(DETECT_BATCH) {
             let n = batch.len();
-            let data: Vec<f32> = batch.iter().flat_map(|c| c.planes.iter().map(|&b| b as f32)).collect();
-            let shape = vec![n as i64, 3, DET_SIZE as i64, DET_SIZE as i64];
+            // Always a full batch (black canvases at the end), so the
+            // card sees one tensor shape and compiles its kernels once.
+            let mut data: Vec<f32> = batch.iter().flat_map(|c| c.planes.iter().map(|&b| b as f32)).collect();
+            data.resize(DETECT_BATCH * CANVAS_LEN, 0.0);
+            let shape = vec![DETECT_BATCH as i64, 3, DET_SIZE as i64, DET_SIZE as i64];
             let outputs = session.run(ort::inputs![name.as_str() => Tensor::from_array((shape, data))?])?;
             // Each output is flattened over the batch: image i's cells are
             // the i-th block of `cells(stride)`.
@@ -393,13 +396,18 @@ impl Models {
     pub fn recognise(&mut self, crops: &[&Pixels]) -> ort::Result<Vec<Vec<f32>>> {
         let fm = self.face.as_mut().ok_or_else(|| ort::Error::new("this helper has no face model"))?;
         let mut out = Vec::with_capacity(crops.len());
-        for batch in crops.chunks(fm.batch.max(1)) {
+        let size = fm.batch.max(1);
+        let per = (3 * ALIGNED * ALIGNED) as usize;
+        for batch in crops.chunks(size) {
             let n = batch.len();
-            let data: Vec<f32> = batch.iter().flat_map(|c| face::face_input(c, fm.norm)).collect();
-            let shape = vec![n as i64, 3, ALIGNED as i64, ALIGNED as i64];
+            // A full batch every time (blank crops at the end): one shape
+            // for the card.
+            let mut data: Vec<f32> = batch.iter().flat_map(|c| face::face_input(c, fm.norm)).collect();
+            data.resize(size * per, 0.0);
+            let shape = vec![size as i64, 3, ALIGNED as i64, ALIGNED as i64];
             let outputs = fm.session.run(ort::inputs![fm.input.as_str() => Tensor::from_array((shape, data))?])?;
-            let (rows, dim) = pooled(&outputs, n)?;
-            out.extend(rows.chunks_exact(dim).map(normalised));
+            let (rows, dim) = pooled(&outputs, size)?;
+            out.extend(rows.chunks_exact(dim).take(n).map(normalised));
         }
         Ok(out)
     }
