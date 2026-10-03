@@ -178,17 +178,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_costs_match_the_plan() {
-        // The library's fursuit photos: ~1.4 hours on the card, ~15 on the
-        // processor; an event day minutes on the card, over an hour on the
-        // processor.
+    fn the_costs_match_the_measurements() {
+        // The library's fursuit photos, with the helper's own graphs
+        // measured (plan, "As built — phase 4"): about 3.5 hours on the
+        // card, about two days on the processor; an event day a quarter
+        // of an hour on the card, over four hours on the processor.
         let n = 42_180;
-        assert_eq!(estimate::describe_seconds(head_seconds(n, Device::Gpu)), "about 1.4 hours");
-        assert_eq!(estimate::describe_seconds(head_seconds(n, Device::Cpu)), "about 15 hours");
-        assert_eq!(estimate::describe_seconds(head_seconds(EVENT_DAY_PHOTOS, Device::Gpu)), "about 7 minutes");
-        assert!(head_seconds(EVENT_DAY_PHOTOS, Device::Cpu) > 3600.0, "over an hour a day on the processor");
-        assert_eq!(describe_cost(n, Device::Cpu), "about 15 hours on the processor");
-        assert_eq!(describe_cost(n, Device::Gpu), "about 1.4 hours with the graphics card");
+        let gpu = head_seconds(n, Device::Gpu) / 3600.0;
+        let cpu = head_seconds(n, Device::Cpu) / 3600.0;
+        assert!((3.0..4.0).contains(&gpu), "{gpu} h on the card");
+        assert!((50.0..55.0).contains(&cpu), "{cpu} h on the processor");
+        assert!((10.0 * 60.0..20.0 * 60.0).contains(&head_seconds(EVENT_DAY_PHOTOS, Device::Gpu)), "a quarter of an hour an event day on the card");
+        assert!(head_seconds(EVENT_DAY_PHOTOS, Device::Cpu) > 4.0 * 3600.0, "over four hours a day on the processor");
+        assert!(describe_cost(n, Device::Cpu).ends_with(" on the processor"), "{}", describe_cost(n, Device::Cpu));
+        assert_eq!(describe_cost(n, Device::Gpu), format!("{} with the graphics card", estimate::describe_seconds(head_seconds(n, Device::Gpu))));
         assert_eq!(estimate::describe_bytes(head_bytes_read(n)), "about 15 GB");
         // Before indexing, three shots in four.
         assert_eq!(photos_to_look_at(&HeadsStatus::default(), 56_710), 42_532);
@@ -409,13 +412,17 @@ impl HeadTiles {
 }
 
 /// The head cache of one library: detections per photo looked at, a
-/// vector per head, a tile per head.
+/// vector per head, a tile per head.  The vectors (1 536 wide, f32 in
+/// memory: about 420 MB for the ~68 000 heads a library of 56 000 shots
+/// is expected to hold) are read only when the fursuit work asks for
+/// them ([`HeadStore::vectors`]), never when the library opens, and can
+/// be let go ([`HeadStore::release_vectors`]).
 #[allow(dead_code)] // Phase 4: used by the engine's head step once the per-kind step lands (the lead's next checkpoint).
 pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
     pub scanned: HashMap<Key, Vec<HeadDetection>>,
-    pub vectors: HeadVectors,
+    vectors: Option<HeadVectors>,
     tiles: Arc<Mutex<HeadTiles>>,
 }
 
@@ -436,7 +443,7 @@ impl HeadStore {
     /// Load the cache in `dir` (empty where there is nothing, or files of
     /// another detector rule or model).
     pub fn load(dir: &Path) -> HeadStore {
-        let mut store = HeadStore { dir: dir.to_path_buf(), scanned: HashMap::new(), vectors: HeadVectors::default(), tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
+        let mut store = HeadStore { dir: dir.to_path_buf(), scanned: HashMap::new(), vectors: None, tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
         if let Ok(data) = fs::read(Self::heads_file(dir)) {
             let bs = blocks(&data);
             if bs.first().is_some_and(|h| Self::read_heads_header(h)) {
@@ -448,21 +455,40 @@ impl HeadStore {
                 }
             }
         }
-        store.load_vectors();
         store.load_tiles();
         store
     }
 
-    fn load_vectors(&mut self) {
-        self.vectors = HeadVectors::default();
-        let Ok(data) = fs::read(Self::vectors_file(&self.dir)) else { return };
+    /// The vectors, read from the file the first time they are asked for
+    /// (the memory is built only when the fursuit work needs it).
+    pub fn vectors(&mut self) -> &HeadVectors {
+        if self.vectors.is_none() {
+            self.vectors = Some(Self::read_vectors(&self.dir));
+        }
+        self.vectors.as_ref().expect("just loaded")
+    }
+
+    /// Whether the vectors are in memory.
+    pub fn vectors_loaded(&self) -> bool {
+        self.vectors.is_some()
+    }
+
+    /// Let the vectors go (they are read again when next asked for).
+    pub fn release_vectors(&mut self) {
+        self.vectors = None;
+    }
+
+    fn read_vectors(dir: &Path) -> HeadVectors {
+        let mut v = HeadVectors::default();
+        let Ok(data) = fs::read(Self::vectors_file(dir)) else { return v };
         let bs = blocks(&data);
-        let Some(dim) = bs.first().and_then(|h| Self::read_vectors_header(h)) else { return };
-        self.vectors.dim = dim;
+        let Some(dim) = bs.first().and_then(|h| Self::read_vectors_header(h)) else { return v };
+        v.dim = dim;
         for b in &bs[1..] {
             let Some(rows) = HeadVectors::read_block(b, dim) else { break };
-            self.vectors.push(&rows);
+            v.push(&rows);
         }
+        v
     }
 
     fn load_tiles(&mut self) {
@@ -582,11 +608,15 @@ impl HeadStore {
         let dets: Vec<HeadDetection> = heads.iter().map(|h| HeadDetection { bbox: h.bbox, score: h.score, size_px: h.size as f32, sharpness: h.sharpness }).collect();
         Self::append(&Self::heads_file(&self.dir), &Self::heads_header(), &Self::heads_block(&[(key, dets.clone())]))?;
         self.scanned.insert(key, dets);
-        let rows: Vec<(FaceRef, Vec<f32>)> = heads.iter().filter(|h| !h.vector.is_empty()).map(|h| (FaceRef::new(key, h.bbox), h.vector.clone())).filter(|(r, _)| !self.vectors.by_ref.contains_key(r)).collect();
+        // New rows go to the file; into memory too only while the
+        // vectors are loaded (else they are read with the rest later).
+        let rows: Vec<(FaceRef, Vec<f32>)> = heads.iter().filter(|h| !h.vector.is_empty()).map(|h| (FaceRef::new(key, h.bbox), h.vector.clone())).filter(|(r, _)| !self.vectors.as_ref().is_some_and(|v| v.by_ref.contains_key(r))).collect();
         if !rows.is_empty() {
             let dim = rows[0].1.len();
             Self::append(&Self::vectors_file(&self.dir), &Self::vectors_header(dim), &HeadVectors::block(&rows))?;
-            self.vectors.push(&rows);
+            if let Some(v) = &mut self.vectors {
+                v.push(&rows);
+            }
         }
         self.add_tiles(key, heads)
     }
@@ -667,20 +697,25 @@ impl HeadStore {
         fsutil::atomic_write(&Self::heads_file(&dir), &out, true)?;
         private_file(&Self::heads_file(&dir));
         let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
-        let rows: Vec<(FaceRef, Vec<f32>)> = (0..self.vectors.len()).filter(|&i| live.contains(&self.vectors.refs[i])).map(|i| (self.vectors.refs[i], self.vectors.row(i).to_vec())).collect();
+        let was_loaded = self.vectors.is_some();
+        let all = self.vectors.take().unwrap_or_else(|| Self::read_vectors(&dir));
+        let rows: Vec<(FaceRef, Vec<f32>)> = (0..all.len()).filter(|&i| live.contains(&all.refs[i])).map(|i| (all.refs[i], all.row(i).to_vec())).collect();
         let vfile = Self::vectors_file(&dir);
         if rows.is_empty() {
             let _ = fs::remove_file(&vfile);
         } else {
-            let mut out = framed(&Self::vectors_header(self.vectors.dim));
+            let mut out = framed(&Self::vectors_header(all.dim));
             for chunk in rows.chunks(1024) {
                 out.extend(framed(&HeadVectors::block(chunk)));
             }
             fsutil::atomic_write(&vfile, &out, true)?;
             private_file(&vfile);
         }
-        self.vectors = HeadVectors::default();
-        self.vectors.push(&rows);
+        if was_loaded {
+            let mut v = HeadVectors::default();
+            v.push(&rows);
+            self.vectors = Some(v);
+        }
         let (path, kept): (PathBuf, Vec<(FaceRef, Vec<u8>)>) = {
             let index = self.tiles.lock();
             let mut kept = Vec::new();
@@ -714,7 +749,7 @@ impl HeadStore {
             let _ = fs::remove_file(p);
         }
         self.scanned.clear();
-        self.vectors = HeadVectors::default();
+        self.vectors = None;
         self.tiles.lock().offsets.clear();
     }
 
@@ -1134,11 +1169,19 @@ mod store_tests {
         assert_eq!((s.looked_at(), s.found()), (0, 0));
         s.add(key(1), &[head(0.1, 300, &[1.0, 0.0]), head(0.5, 120, &[0.0, 1.0])]).unwrap();
         s.add(key(2), &[]).unwrap();
-        assert_eq!((s.looked_at(), s.found(), s.vectors.len()), (2, 2, 2));
-        let again = HeadStore::load(&d);
-        assert_eq!((again.looked_at(), again.found(), again.vectors.len(), again.vectors.dim), (2, 2, 2, 2));
+        assert!(!s.vectors_loaded(), "writing never builds the vector memory");
+        assert_eq!((s.looked_at(), s.found(), s.vectors().len()), (2, 2, 2));
+        let mut again = HeadStore::load(&d);
+        assert!(!again.vectors_loaded(), "opening the library reads no vectors");
+        assert_eq!((again.looked_at(), again.found()), (2, 2));
         let r = again.heads_of(&key(1))[0].head_ref(key(1));
-        assert_eq!(again.vectors.row(again.vectors.by_ref[&r]), &[1.0, 0.0]);
+        let v = again.vectors();
+        assert_eq!((v.len(), v.dim), (2, 2));
+        assert_eq!(v.row(v.by_ref[&r]), &[1.0, 0.0]);
+        again.release_vectors();
+        assert!(!again.vectors_loaded());
+        again.add(key(3), &[head(0.3, 150, &[0.0, 1.0])]).unwrap();
+        assert_eq!(again.vectors().len(), 3, "a row written while released is read with the rest");
         assert_eq!(again.tiles().lock().read(&r).unwrap(), vec![0xFF, 0xD8, 0xFF, 0xD9]);
         assert!(again.detection(&r).unwrap().clarity() > again.heads_of(&key(1))[1].clarity(), "the larger head is clearer");
         for f in ["heads.bin", "headvecs-dinov2-base.bin", "headtiles.bin"] {
@@ -1148,7 +1191,7 @@ mod store_tests {
         // Only the live photos are kept; a big drop compacts the files.
         let mut s = again;
         s.retain(&HashSet::from([key(2)]));
-        assert_eq!((s.looked_at(), s.found(), s.vectors.len()), (1, 0, 0));
+        assert_eq!((s.looked_at(), s.found(), s.vectors().len()), (1, 0, 0));
         assert!(!d.join("headvecs-dinov2-base.bin").exists() && !d.join("headtiles.bin").exists());
         assert_eq!(HeadStore::load(&d).looked_at(), 1);
         s.forget_all();
@@ -1164,8 +1207,8 @@ mod store_tests {
         fs::create_dir_all(&d).unwrap();
         fs::write(d.join("faces.bin"), b"PPFACED\0garbage").unwrap();
         fs::write(d.join("facevecs-auraface-v1.bin"), b"PPFACEV\0garbage").unwrap();
-        let s = HeadStore::load(&d);
-        assert_eq!((s.looked_at(), s.vectors.len()), (0, 0));
+        let mut s = HeadStore::load(&d);
+        assert_eq!((s.looked_at(), s.vectors().len()), (0, 0));
         assert_eq!(HeadStore::bytes_in(&d), 0, "face bytes are not head bytes");
         let _ = fs::remove_dir_all(&d);
     }

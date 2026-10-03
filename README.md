@@ -517,6 +517,19 @@ doesn't match (`src/ml/models.rs` holds the pins).  Phase 1 uses one model:
 | Model | Files | Size | Licence | Source |
 |---|---|---|---|---|
 | SigLIP 2 ViT-B/16, 256 px (Google) | image tower (fp32), text tower (fp16), tokenizer | 971 MB | Apache-2.0 | Hugging Face `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js export of `google/siglip2-base-patch16-256` |
+| OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
+| DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
+
+The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
+asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
+DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
+token) that tells one suit from another.  The head cache lives beside the
+index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
+by the user alone, vectors stored as f16); for grouping and the Fursuits
+tab the vectors are held in memory as f32, **about 420 MB for the ~68 000
+heads a library of 56 000 shots is expected to hold**, built only when
+that work needs it, never at start-up (the user's decision, 2026-10-03:
+full size, not the 768-wide CLS half that measured as well).
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the

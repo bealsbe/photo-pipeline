@@ -1915,6 +1915,25 @@ and rarely at 0.14; this is the number to revisit if the user wants more
 cross-day matches (a looser cut for the review only, never for *Find
 more*).
 
+**The user's decisions (2026-10-03), on these numbers:**
+
+- *Cross-day matching:* accepted as it is.  `SUGGEST_CUT` stays 0.17
+  everywhere and `STRICT_CUT` 0.14 for *Find more*; no looser cut across
+  days.  A suit seen on another day mostly comes through a Y in the
+  review.
+- *Vector size:* **full size kept**, 1 536 wide, f32 rows for the
+  grouping: about 420 MB resident for the ~68 000 heads the library is
+  expected to hold (faces: ~40 MB).  Built only when the fursuit work
+  needs it (a regroup, the Fursuits tab), never at start-up; the real
+  resident size is to be reported once the engine wiring lands.  For
+  the record, the CLS half alone (768 wide) scored as well on the same
+  258 answers, slightly better in places (under 0.14: 24 of 26 asked;
+  under 0.17: 46 of 67 = 69 %; cross-day under 0.14: 6 of 6; cluster
+  purity at 0.14: 17 % mixed), and the mean-patch half clearly worse
+  (under 0.14: 27 of 60); the choice was made for the full vector
+  anyway, and is one line (`ml::heads::pool_tokens`) if memory ever
+  presses.
+
 ### The head step (helper side)
 
 `ml::heads`: OWLv2 B/16 ensemble (Xenova's export of Google's weights)

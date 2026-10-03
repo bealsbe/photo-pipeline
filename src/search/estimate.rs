@@ -100,13 +100,17 @@ pub fn face_model_change_seconds(shots_with_faces: usize, faces: usize, device: 
 }
 
 /// Seconds per fursuit photo for the head step (OWLv2 over the preview,
-/// then DINOv2 on each head; plan §3.4, §3.7): the study's PyTorch
-/// numbers, 0.12 s on the card and 1.3 s on the processor, until the
-/// helper's own run is measured (`ml::heads` tests).  Provisional.
+/// then DINOv2 on each head), **measured with the helper's own graphs**
+/// on the study's previews (2026-10-03, `ml::heads` ignored test): on the
+/// card 0.17 s for OWLv2 one photo at a time plus the heads' DINOv2; on
+/// the processor (8 threads) 4.0 s for OWLv2 and 4.5 s in all, three and
+/// a half times the study's PyTorch figure, so the library's ~42 000
+/// fursuit photos are about 50 hours there (decision 11: it asks every
+/// time).
 #[allow(dead_code)] // Phase 4: the Fursuits tab's invitation; called when it lands.
-pub const HEAD_SECONDS_PER_PHOTO_GPU: f64 = 0.12;
+pub const HEAD_SECONDS_PER_PHOTO_GPU: f64 = 0.3;
 #[allow(dead_code)] // Phase 4: as above.
-pub const HEAD_SECONDS_PER_PHOTO_CPU: f64 = 1.3;
+pub const HEAD_SECONDS_PER_PHOTO_CPU: f64 = 4.5;
 
 /// Seconds to look for heads in `photos` fursuit photos on `device`,
 /// beyond reading them.
@@ -183,16 +187,16 @@ mod tests {
 
     /// Plan §3.7: faces add a few minutes on the card and 4–15 on the
     /// processor; a catch-up is bound by reading the previews again.
-    /// Decision 11: about 15 hours on the processor for the library's
-    /// fursuit photos (74 % of 56 710 ≈ 42 000), over an hour an event day;
-    /// about 1.4 hours on the card.
+    /// Measured (plan, "As built — phase 4"): about 50 hours on the
+    /// processor for the library's fursuit photos (74 % of 56 710 ≈
+    /// 42 000), over four hours an event day; about 3.5 hours on the card.
     #[test]
-    fn head_estimates_follow_the_plan() {
+    fn head_estimates_follow_the_measurements() {
         let photos = 42_000;
         let cpu = head_catch_up_seconds(photos, Device::Cpu) / 3600.0;
         let gpu = head_catch_up_seconds(photos, Device::Gpu) / 3600.0;
-        assert!((15.0..16.0).contains(&cpu), "{cpu} h");
-        assert!((1.3..1.5).contains(&gpu), "{gpu} h");
+        assert!((50.0..55.0).contains(&cpu), "{cpu} h");
+        assert!((3.0..4.0).contains(&gpu), "{gpu} h");
         assert!(head_catch_up_seconds(3_500, Device::Cpu) > 3600.0, "an event day is over an hour on the processor");
         assert!(head_catch_up_seconds(100, Device::Gpu) >= head_seconds(100, Device::Gpu), "never under the work itself");
     }
