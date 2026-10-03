@@ -576,34 +576,102 @@ pub fn private_dir(path: &Path) {
 
 // ---- Grouping (pure) ------------------------------------------------------
 
-/// How far (cosine distance, 1 − cosine) a face may be from a group's
-/// prototype and still belong, per face model: the study's cut-offs
-/// (AuraFace 0.6, SFace 0.5; InsightFace as Immich's 0.5), to be moved by
-/// phase 0's comparison.
-pub fn cutoff_for(model: crate::ml::models::ModelId) -> f32 {
-    match model {
+/// A kind's cut-offs, as cosine distances (1 − cosine).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Cutoffs {
+    /// Within this of a group's prototype a face belongs to it (the
+    /// automatic groups).
+    pub group: f32,
+    /// Within this of a subject's confirmed members a face is offered
+    /// for review.
+    pub suggest: f32,
+    /// *Find more*: the same, stricter.
+    pub strict: f32,
+}
+
+/// The cut-offs per face model: the study's (AuraFace 0.6, SFace 0.5;
+/// InsightFace as Immich's 0.5), to be moved by phase 0's comparison;
+/// *Find more* at three quarters of it.  Phase 4 adds its head model's.
+pub fn cutoff_for(model: crate::ml::models::ModelId) -> Cutoffs {
+    let c = match model {
         crate::ml::models::ModelId::AuraFace => 0.6,
         crate::ml::models::ModelId::SFace => 0.5,
         _ => 0.5,
-    }
+    };
+    Cutoffs { group: c, suggest: c, strict: c * STRICT_SHARE }
 }
 
 /// *Find more*'s stricter cut-off: a share of the model's.
 pub const STRICT_SHARE: f32 = 0.75;
 
-/// Vectors the grouping reads: `dim` floats per row, unit length.
-pub struct Rows<'a> {
-    pub dim: usize,
-    pub data: &'a [f32],
+/// Vectors the grouping reads: `dim` values per row, unit length, as
+/// f32 or as f16 bits (a kind with wide vectors keeps them as f16 in
+/// memory; the dot products decode on the fly).
+#[derive(Clone, Copy)]
+pub enum Rows<'a> {
+    F32 { dim: usize, data: &'a [f32] },
+    F16 { dim: usize, data: &'a [u16] },
 }
 
 impl Rows<'_> {
-    pub fn len(&self) -> usize {
-        if self.dim == 0 { 0 } else { self.data.len() / self.dim }
+    pub fn dim(&self) -> usize {
+        match self {
+            Rows::F32 { dim, .. } | Rows::F16 { dim, .. } => *dim,
+        }
     }
 
-    pub fn row(&self, i: usize) -> &[f32] {
-        &self.data[i * self.dim..(i + 1) * self.dim]
+    pub fn len(&self) -> usize {
+        let dim = self.dim();
+        if dim == 0 {
+            return 0;
+        }
+        match self {
+            Rows::F32 { data, .. } => data.len() / dim,
+            Rows::F16 { data, .. } => data.len() / dim,
+        }
+    }
+
+    /// Row `i` as f32.
+    pub fn row_vec(&self, i: usize) -> Vec<f32> {
+        let dim = self.dim();
+        match self {
+            Rows::F32 { data, .. } => data[i * dim..(i + 1) * dim].to_vec(),
+            Rows::F16 { data, .. } => data[i * dim..(i + 1) * dim].iter().map(|&h| crate::search::query::f16_to_f32(h)).collect(),
+        }
+    }
+
+    /// The dot product of row `i` with `v`.
+    pub fn dot(&self, i: usize, v: &[f32]) -> f32 {
+        let dim = self.dim();
+        match self {
+            Rows::F32 { data, .. } => dot(&data[i * dim..(i + 1) * dim], v),
+            Rows::F16 { data, .. } => data[i * dim..(i + 1) * dim].iter().zip(v).map(|(&h, y)| crate::search::query::f16_to_f32(h) * y).sum(),
+        }
+    }
+
+    /// Add row `i` into `sum`.
+    pub fn add_into(&self, i: usize, sum: &mut [f32]) {
+        let dim = self.dim();
+        match self {
+            Rows::F32 { data, .. } => {
+                for (s, x) in sum.iter_mut().zip(&data[i * dim..(i + 1) * dim]) {
+                    *s += x;
+                }
+            }
+            Rows::F16 { data, .. } => {
+                for (s, &h) in sum.iter_mut().zip(&data[i * dim..(i + 1) * dim]) {
+                    *s += crate::search::query::f16_to_f32(h);
+                }
+            }
+        }
+    }
+
+    /// Every row as f32, row-major (a copy for a worker).
+    pub fn to_f32(&self) -> Vec<f32> {
+        match self {
+            Rows::F32 { data, .. } => data.to_vec(),
+            Rows::F16 { data, .. } => data.iter().map(|&h| crate::search::query::f16_to_f32(h)).collect(),
+        }
     }
 }
 
@@ -649,19 +717,19 @@ pub fn cluster(rows: &Rows<'_>, order: &[usize], cutoff: f32) -> Vec<Cluster> {
         if i >= rows.len() {
             continue;
         }
-        let v = rows.row(i);
+        let v = rows.row_vec(i);
         let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
-        match nearest(&centroids, v) {
+        match nearest(&centroids, &v) {
             Some((k, d)) if d <= cutoff => {
                 clusters[k].members.push(i);
-                for (s, x) in sums[k].iter_mut().zip(v) {
+                for (s, x) in sums[k].iter_mut().zip(&v) {
                     *s += x;
                 }
                 clusters[k].centroid = unit(sums[k].clone());
             }
             _ => {
-                clusters.push(Cluster { members: vec![i], centroid: v.to_vec() });
-                sums.push(v.to_vec());
+                clusters.push(Cluster { members: vec![i], centroid: v.clone() });
+                sums.push(v);
             }
         }
     }
@@ -715,11 +783,9 @@ fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
         *clusters = groups
             .into_values()
             .map(|members| {
-                let mut sum = vec![0f32; rows.dim];
+                let mut sum = vec![0f32; rows.dim()];
                 for &m in &members {
-                    for (s, x) in sum.iter_mut().zip(rows.row(m)) {
-                        *s += x;
-                    }
+                    rows.add_into(m, &mut sum);
                 }
                 Cluster { members, centroid: unit(sum) }
             })
@@ -735,20 +801,20 @@ pub fn assign(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutof
         if i >= rows.len() {
             continue;
         }
-        let v = rows.row(i);
+        let v = rows.row_vec(i);
         let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
-        match nearest(&centroids, v) {
+        match nearest(&centroids, &v) {
             Some((k, d)) if d <= cutoff => {
                 let c = &mut clusters[k];
                 let n = c.members.len() as f32;
                 let mut sum: Vec<f32> = c.centroid.iter().map(|x| x * n).collect();
-                for (s, x) in sum.iter_mut().zip(v) {
+                for (s, x) in sum.iter_mut().zip(&v) {
                     *s += x;
                 }
                 c.members.push(i);
                 c.centroid = unit(sum);
             }
-            _ => clusters.push(Cluster { members: vec![i], centroid: v.to_vec() }),
+            _ => clusters.push(Cluster { members: vec![i], centroid: v }),
         }
     }
 }
@@ -762,7 +828,7 @@ pub fn sureness(distance: f32, cutoff: f32) -> f32 {
 /// The smallest distance from `v` to any of `members`' rows (a subject's
 /// prototypes are its confirmed faces).
 pub fn distance_to_members(rows: &Rows<'_>, members: &[usize], v: &[f32]) -> Option<f32> {
-    members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - dot(rows.row(m), v)).min_by(f32::total_cmp)
+    members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - rows.dot(m, v)).min_by(f32::total_cmp)
 }
 
 /// Candidates for a subject's review: rows in `pool` within `cutoff` of
@@ -775,7 +841,7 @@ pub fn candidates(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f3
             if i >= rows.len() {
                 return None;
             }
-            let d = distance_to_members(rows, members, rows.row(i))?;
+            let d = distance_to_members(rows, members, &rows.row_vec(i))?;
             (d <= cutoff).then_some((i, d))
         })
         .collect();
@@ -969,8 +1035,15 @@ mod tests {
     #[test]
     fn clustering_finds_the_people_and_leaves_loners_alone() {
         let (data, dim) = people_rows(8, 3);
-        let rows = Rows { dim, data: &data };
+        let rows = Rows::F32 { dim, data: &data };
         assert_eq!(rows.len(), 27);
+        // The same rows as f16 bits answer the same, within rounding.
+        let half: Vec<u16> = data.iter().map(|&x| crate::search::query::f32_to_f16(x)).collect();
+        let rows16 = Rows::F16 { dim, data: &half };
+        assert_eq!(rows16.len(), 27);
+        assert!((rows16.dot(3, &rows.row_vec(3)) - 1.0).abs() < 1e-2);
+        assert!(rows16.row_vec(5).iter().zip(&rows.row_vec(5)).all(|(a, b)| (a - b).abs() < 1e-3));
+        assert_eq!(rows16.to_f32().len(), data.len());
         let order: Vec<usize> = (0..rows.len()).collect();
         let clusters = cluster(&rows, &order, 0.5);
         let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
@@ -1002,14 +1075,15 @@ mod tests {
         assert!(cands.iter().all(|&(i, d)| i < 8 && d <= 0.5));
         assert!(cands.windows(2).all(|w| w[0].1 <= w[1].1), "nearest first");
         assert!(candidates(&rows, &members, &pool, 0.5 * STRICT_SHARE).len() <= 6);
-        assert_eq!(distance_to_members(&rows, &[], rows.row(0)), None);
+        assert_eq!(distance_to_members(&rows, &[], &rows.row_vec(0)), None);
         // One suggestion per burst, in order of arrival.
         let grouped = per_burst(vec![("a", Some(1)), ("b", None), ("c", Some(2)), ("d", Some(1)), ("e", Some(2))]);
         assert_eq!(grouped, [vec!["a", "d"], vec!["b"], vec!["c", "e"]]);
         let id = cluster_id(&FaceRef::new(Key([1; 16]), [0.1, 0.2, 0.3, 0.4]));
         assert_eq!(id, cluster_id(&FaceRef::new(Key([1; 16]), [0.1001, 0.2, 0.3, 0.4])), "stable within rounding");
         assert_ne!(id, cluster_id(&FaceRef::new(Key([2; 16]), [0.1, 0.2, 0.3, 0.4])));
-        assert!(cutoff_for(crate::ml::models::ModelId::AuraFace) > cutoff_for(crate::ml::models::ModelId::SFace));
+        let c = cutoff_for(crate::ml::models::ModelId::AuraFace);
+        assert!(c.group > cutoff_for(crate::ml::models::ModelId::SFace).group && c.strict < c.suggest && c.suggest == c.group);
     }
 
     /// Two clusters of one person started apart (a split order) are merged

@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::subjects::{self, Cluster, FaceRef, Kind, Rows, SubjectsFile};
+use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Rows, SubjectsFile};
 
 /// What a kind's step gives the grouping.
 pub trait KindStep: Send {
@@ -22,13 +22,14 @@ pub trait KindStep: Send {
     /// Every detection with a vector, in row order (stable between
     /// regroups: rows are appended; a rewrite starts the rows over).
     fn refs(&self) -> &[FaceRef];
-    /// The vectors, one unit row per ref.
+    /// The vectors, one unit row per ref, as f32 or f16 bits.
     fn rows(&self) -> Rows<'_>;
     /// How clear a view a detection is on its own (size, sharpness,
     /// score), 0..1.
     fn clarity(&self, r: &FaceRef) -> f32;
-    /// The model's cut-off (cosine distance) for one person, suit or pet.
-    fn cutoff(&self) -> f32;
+    /// The model's cut-offs (cosine distances) for one person, suit or
+    /// pet: for the automatic groups, for suggestions, for *Find more*.
+    fn cutoffs(&self) -> Cutoffs;
 }
 
 /// What a regroup works on: a copy of the step's data, so the worker
@@ -40,7 +41,7 @@ pub struct RegroupJob {
     pub dim: usize,
     pub data: Vec<f32>,
     pub clarity: Vec<f32>,
-    pub cutoff: f32,
+    pub cutoffs: Cutoffs,
     pub file: SubjectsFile,
 }
 
@@ -118,7 +119,7 @@ impl Grouped {
         let confirmed = file.confirmed(step.kind());
         let new: Vec<usize> = (self.rows..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i])).collect();
         let rows = step.rows();
-        subjects::assign(&mut self.clusters, &rows, &new, step.cutoff());
+        subjects::assign(&mut self.clusters, &rows, &new, step.cutoffs().group);
         self.sureness.resize(refs.len(), 1.0);
         self.rows = refs.len();
         self.refresh_ids(refs, &|r| step.clarity(r));
@@ -139,10 +140,10 @@ pub fn job(step: &dyn KindStep, file: &SubjectsFile, generation: u64) -> Regroup
         kind: step.kind(),
         generation,
         refs: step.refs().to_vec(),
-        dim: rows.dim,
-        data: rows.data.to_vec(),
+        dim: rows.dim(),
+        data: rows.to_f32(),
         clarity: step.refs().iter().map(|r| step.clarity(r)).collect(),
-        cutoff: step.cutoff(),
+        cutoffs: step.cutoffs(),
         file: file.clone(),
     }
 }
@@ -151,17 +152,17 @@ pub fn job(step: &dyn KindStep, file: &SubjectsFile, generation: u64) -> Regroup
 /// not confirmed to a subject, clearest first; sureness per row;
 /// suggestion counts per subject of the kind.
 pub fn regroup(j: &RegroupJob) -> Regrouped {
-    let rows = Rows { dim: j.dim, data: &j.data };
+    let rows = Rows::F32 { dim: j.dim, data: &j.data };
     let n = rows.len().min(j.refs.len());
     let confirmed = j.file.confirmed(j.kind);
     let mut order: Vec<usize> = (0..n).filter(|&i| !confirmed.contains_key(&j.refs[i])).collect();
     order.sort_by(|&a, &b| j.clarity[b].total_cmp(&j.clarity[a]).then(a.cmp(&b)));
-    let clusters = subjects::cluster(&rows, &order, j.cutoff);
+    let clusters = subjects::cluster(&rows, &order, j.cutoffs.group);
     let mut sureness = vec![1.0f32; n];
     for c in &clusters {
         for &m in &c.members {
-            let d = 1.0 - c.centroid.iter().zip(rows.row(m)).map(|(a, b)| a * b).sum::<f32>();
-            sureness[m] = subjects::sureness(d, j.cutoff);
+            let d = 1.0 - rows.dot(m, &c.centroid);
+            sureness[m] = subjects::sureness(d, j.cutoffs.group);
         }
     }
     // Confirmed rows: how sure against the subject's other members.
@@ -172,8 +173,8 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
         let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
         for &m in &members {
             let others: Vec<usize> = members.iter().copied().filter(|&o| o != m).collect();
-            if let Some(d) = subjects::distance_to_members(&rows, &others, rows.row(m)) {
-                sureness[m] = subjects::sureness(d, j.cutoff);
+            if let Some(d) = subjects::distance_to_members(&rows, &others, &rows.row_vec(m)) {
+                sureness[m] = subjects::sureness(d, j.cutoffs.suggest);
             }
         }
         if members.is_empty() {
@@ -181,7 +182,7 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
         }
         let rejected: HashSet<usize> = s.rejected.iter().filter_map(|r| by_ref.get(r).copied()).collect();
         let open: Vec<usize> = pool.iter().copied().filter(|i| !rejected.contains(i)).collect();
-        let count = subjects::candidates(&rows, &members, &open, j.cutoff).len();
+        let count = subjects::candidates(&rows, &members, &open, j.cutoffs.suggest).len();
         suggestion_counts.insert(s.id.clone(), count);
     }
     Regrouped { kind: j.kind, generation: j.generation, rows: n, clusters, sureness, suggestion_counts }
@@ -224,13 +225,13 @@ mod tests {
             &self.refs
         }
         fn rows(&self) -> Rows<'_> {
-            Rows { dim: 8, data: &self.data }
+            Rows::F32 { dim: 8, data: &self.data }
         }
         fn clarity(&self, r: &FaceRef) -> f32 {
             r.bbox[2]
         }
-        fn cutoff(&self) -> f32 {
-            0.5
+        fn cutoffs(&self) -> Cutoffs {
+            Cutoffs { group: 0.5, suggest: 0.5, strict: 0.375 }
         }
     }
 

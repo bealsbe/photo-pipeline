@@ -71,14 +71,15 @@ impl Detection {
     }
 }
 
-/// The face vectors of one model, in memory (f32 here, f16 on disk).
+/// The face vectors of one model, in memory as on disk: f16 bits (a
+/// regroup works on an f32 copy of its own).
 #[derive(Default)]
 pub struct FaceVectors {
     pub dim: usize,
     pub refs: Vec<FaceRef>,
     pub by_ref: HashMap<FaceRef, usize>,
-    /// `refs.len() × dim`, row-major, unit rows.
-    pub data: Vec<f32>,
+    /// `refs.len() × dim`, row-major, unit rows, as f16 bits.
+    pub data: Vec<u16>,
 }
 
 impl FaceVectors {
@@ -86,8 +87,9 @@ impl FaceVectors {
         self.refs.len()
     }
 
-    pub fn row(&self, i: usize) -> &[f32] {
-        &self.data[i * self.dim..(i + 1) * self.dim]
+    /// Row `i` as f32.
+    pub fn row(&self, i: usize) -> Vec<f32> {
+        self.data[i * self.dim..(i + 1) * self.dim].iter().map(|&h| f16_to_f32(h)).collect()
     }
 
     fn push(&mut self, rows: &[(FaceRef, Vec<f32>)]) -> usize {
@@ -104,8 +106,7 @@ impl FaceVectors {
             }
             self.by_ref.insert(*r, self.refs.len());
             self.refs.push(*r);
-            // Through f16 and back, so memory equals the file.
-            self.data.extend(v.iter().map(|&x| f16_to_f32(f32_to_f16(x))));
+            self.data.extend(v.iter().map(|&x| f32_to_f16(x)));
             added += 1;
         }
         added
@@ -479,7 +480,7 @@ impl FaceStore {
         private_file(&Self::faces_file(&dir));
         // Vectors of the live faces.
         let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
-        let rows: Vec<(FaceRef, Vec<f32>)> = (0..self.vectors.len()).filter(|&i| live.contains(&self.vectors.refs[i])).map(|i| (self.vectors.refs[i], self.vectors.row(i).to_vec())).collect();
+        let rows: Vec<(FaceRef, Vec<f32>)> = (0..self.vectors.len()).filter(|&i| live.contains(&self.vectors.refs[i])).map(|i| (self.vectors.refs[i], self.vectors.row(i))).collect();
         let vfile = Self::vectors_file(&dir, self.model);
         if rows.is_empty() {
             let _ = fs::remove_file(&vfile);
@@ -571,14 +572,14 @@ impl KindStep for FaceStore {
     }
 
     fn rows(&self) -> subjects::Rows<'_> {
-        subjects::Rows { dim: self.vectors.dim, data: &self.vectors.data }
+        subjects::Rows::F16 { dim: self.vectors.dim, data: &self.vectors.data }
     }
 
     fn clarity(&self, r: &FaceRef) -> f32 {
         self.detection(r).map_or(0.0, Detection::clarity)
     }
 
-    fn cutoff(&self) -> f32 {
+    fn cutoffs(&self) -> subjects::Cutoffs {
         subjects::cutoff_for(self.model)
     }
 }
@@ -933,12 +934,13 @@ impl People {
                 let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
                 let confirmed = self.file.confirmed(Kind::Person);
                 let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
-                let cutoff = store.cutoff() * if strict { subjects::STRICT_SHARE } else { 1.0 };
+                let cutoffs = store.cutoffs();
+                let cutoff = if strict { cutoffs.strict } else { cutoffs.suggest };
                 subjects::candidates(&rows, &members, &pool, cutoff)
             }
             GroupId::Cluster(cid) => {
                 let c = self.grouped.cluster(*cid).ok_or(Refused::StaleGroup)?;
-                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - c.centroid.iter().zip(rows.row(m)).map(|(a, b)| a * b).sum::<f32>())).collect();
+                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
                 v.sort_by(|a, b| a.1.total_cmp(&b.1));
                 v
             }

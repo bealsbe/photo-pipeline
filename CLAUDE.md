@@ -84,6 +84,18 @@ cargo test --release  # unit tests; must pass with zero warnings
   (size + first 64 KB), not paths.  Tests needing models are ignored
   behind `PP_MODEL_DIR`; nothing in `cargo test` may touch the real cache
   or download anything (inject `Config { models_ready, index_dir }`).
+- **People (`src/search/faces.rs`, `src/search/step.rs`,
+  `src/model/subjects.rs`, `src/ml/face.rs`):** faces are found in the
+  helper, in the same read as the search vector, on the chosen device
+  only.  Detections, vectors and tiles are cache beside the index (files
+  0600); the user's names and answers are `subjects.json` and point at
+  detections (`FaceRef`: content key and box in thousandths), never at
+  group numbers.  Grouping is `search::step` over a `KindStep`, the same
+  code for every kind and **never across kinds** (`Refused::MixedKinds`;
+  tests in `subjects.rs`, `faces.rs`, `step.rs`).  A face pass
+  (`PassKind::Faces`) starts only from a command, never from a pass's
+  end.  Nothing about faces is ever written into photos or sidecars, and
+  no face, name or vector goes into the repository.
 - **Placeholders, not this machine:** tests and docs use `192.0.2.x`
   (RFC 5737), `example.com`, `/mnt/nas`, `/home/me` and made-up file
   names — never paths, addresses, file names or terminal output copied from
