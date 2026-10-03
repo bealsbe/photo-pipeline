@@ -85,7 +85,21 @@ pub struct Settings {
     /// The last [`RECENT_SEARCHES`] queries, newest first (§7a.3).
     /// *Forget them* in Preferences clears it.
     pub search_recent: Vec<String>,
+
+    // People, fursuits and pets (§7a.5).
+    /// The tab People, fursuits and pets opens on: 0 people, 1 fursuits,
+    /// 2 pets.
+    pub subjects_tab: u8,
+    /// Preferences ▸ Search ▸ *Find people's faces* (on, decision 9).
+    pub find_faces: bool,
+    /// Preferences ▸ Search ▸ *Smallest group to show*: 3, 5 or 10 photos;
+    /// smaller groups fold away under *Smaller groups*.
+    pub smallest_group: u32,
 }
+
+/// The sizes *Smallest group to show* offers, and its default.
+pub const GROUP_SIZES: [u32; 3] = [3, 5, 10];
+pub const SMALLEST_GROUP: u32 = 5;
 
 /// How many recent searches are kept.
 
@@ -133,6 +147,9 @@ impl Default for Settings {
             search_closeness: crate::search::CLOSENESS_DEFAULT,
             search_index_exports: true,
             search_recent: Vec::new(),
+            subjects_tab: 0,
+            find_faces: true,
+            smallest_group: SMALLEST_GROUP,
         }
     }
 }
@@ -150,6 +167,12 @@ impl Settings {
         self.search_recent.retain(|r| r != q);
         self.search_recent.insert(0, q.to_string());
         self.search_recent.truncate(RECENT_SEARCHES);
+    }
+
+    /// The smallest group the People tab shows: one of the sizes offered,
+    /// else the default.
+    pub fn smallest_group(&self) -> usize {
+        (if GROUP_SIZES.contains(&self.smallest_group) { self.smallest_group } else { SMALLEST_GROUP }) as usize
     }
 
     /// Preferences ▸ *Forget them*.
@@ -359,6 +382,18 @@ mod tests {
         let py = Settings::from_qsettings("[filter]\npruned=true\nmarked_only=false\n");
         assert!(py.filter_pruned && !py.filter_marked_only && !py.filter_pruned_only);
         assert!(!Settings::from_qsettings("[filter]\npruned=false\n").filter_pruned);
+    }
+
+    #[test]
+    fn people_are_found_by_default_and_small_groups_fold_under_five() {
+        let s = Settings::default();
+        assert!(s.find_faces, "decision 9: on by default");
+        assert_eq!((s.smallest_group(), s.subjects_tab), (5, 0));
+        assert_eq!(Settings { smallest_group: 10, ..Settings::default() }.smallest_group(), 10);
+        assert_eq!(Settings { smallest_group: 7, ..Settings::default() }.smallest_group(), 5, "a size not offered reads as the default");
+        // A settings file from before people keeps the defaults.
+        let old: Settings = serde_json::from_str(r#"{"view_index": 2}"#).unwrap();
+        assert!(old.find_faces && old.smallest_group() == 5);
     }
 
     #[test]

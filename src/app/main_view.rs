@@ -100,6 +100,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         }
         View::Calendar => calendar::view(app, keyboard_ok),
         View::Search => search::view(app, keyboard_ok),
+        View::Subjects => super::subjects::view(app, keyboard_ok),
     };
     // Background work shows as a sweep along the content's top edge.
     let busy = app.scanning
@@ -109,13 +110,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
             // export's is quiet: the status bar only).
             View::Search => {
                 app.search.pending.is_some()
-                    || app.search.thumbs.pending() > 0
+                    || app.search.pane.thumbs.pending() > 0
                     || app.search.status.pass.as_ref().is_some_and(|p| p.kind != crate::search::PassKind::NewExports && app.search.status.stopped.is_none())
+            }
+            // Looking for faces, or a person's photos on their way.
+            View::Subjects => {
+                app.subjects.faces.pass.is_some()
+                    || app.subjects.person.as_ref().is_some_and(|p| p.pending.is_some() || p.pane.thumbs.pending() > 0)
+                    || (app.subjects.faces.on && app.search.status.pass.as_ref().is_some_and(|p| p.kind == crate::search::PassKind::FirstIndex))
             }
             _ => app.thumbs.pending() > 0 || app.quality.analysing(),
         };
     // Quick look covers the grid (an empty layer keeps the stack's shape).
-    let quick_look = super::quicklook::view(app).filter(|_| matches!(app.view, View::Grid | View::Search)).unwrap_or_else(|| space().into());
+    let quick_look = super::quicklook::view(app).filter(|_| matches!(app.view, View::Grid | View::Search | View::Subjects)).unwrap_or_else(|| space().into());
     // The Hints menu opens over the content, under its control.
     let hints_menu = hints_ui::menu_layer(app).filter(|_| !app.view.is_library()).unwrap_or_else(|| space().into());
     col = col.push(stack![content, quick_look, ActivityBar::new(busy), hints_menu].width(Length::Fill).height(Length::Fill));
@@ -151,6 +158,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         layers.push(dialogs::view(app, modal));
     }
     if let Some(dialog) = app.main_id.and_then(|id| super::bulk::overlay(app, id)) {
+        layers.push(dialog);
+    }
+    if let Some(dialog) = super::subjects::overlay(app) {
         layers.push(dialog);
     }
     if let Some(steps) = search_setup::steps_layer(app) {
@@ -212,6 +222,7 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
         Cmd::GridView => Some(app.view == View::Grid),
         Cmd::CalendarView => Some(app.view == View::Calendar),
         Cmd::Search => Some(app.view == View::Search),
+        Cmd::Subjects => Some(app.view == View::Subjects),
         Cmd::FolderBar => Some(app.folder_bar_visible),
         Cmd::FileNames => Some(app.show_names),
         Cmd::SideMenu => Some(app.side_expanded),
@@ -219,7 +230,8 @@ pub fn cmd_checked(app: &App, cmd: Cmd) -> Option<bool> {
         Cmd::ToReview => Some(app.filter.to_review),
         Cmd::QuickLook => Some(app.quicklook.is_some()),
         Cmd::AdvanceAfterMark => Some(app.settings.viewer_advance),
-        Cmd::StackBursts if app.view == View::Search => Some(app.search.all_stacked()),
+        Cmd::StackBursts if app.view == View::Search => Some(app.search.pane.all_stacked()),
+        Cmd::StackBursts if app.view == View::Subjects => app.subjects.pane().map(|p| p.all_stacked()),
         Cmd::StackBursts => Some(app.stacking.all()),
         Cmd::ProblemsOnly => Some(app.filter.hint == Some(crate::model::hints::HintFilter::Problems)),
         _ => None,
@@ -239,14 +251,16 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     if cmd == Cmd::QuickLook {
         return match app.view {
             View::Grid => !app.derived.visible.is_empty(),
-            View::Search => !app.search.layout.tiles.is_empty(),
+            View::Search => !app.search.pane.layout.tiles.is_empty(),
+            View::Subjects => app.subjects.pane().is_some_and(|p| !p.layout.tiles.is_empty()),
             _ => false,
         };
     }
     if cmd == Cmd::StackBurst {
         return match app.view {
             View::Grid => app.focused_burst().is_some(),
-            View::Search => app.search.focused_burst(),
+            View::Search => app.search.pane.focused_burst(),
+            View::Subjects => app.subjects.pane().is_some_and(|p| p.focused_burst()),
             _ => false,
         };
     }
@@ -259,6 +273,9 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     }
     if cmd == Cmd::KeepThisPruneRest {
         return analysed && super::viewer_burst::can_open(app);
+    }
+    if cmd == Cmd::SelectMode && app.view == View::Subjects {
+        return app.subjects.page() == super::subjects::Page::Overview && super::subjects::has_groups(app, app.subjects.tab);
     }
     !(app.view.is_library() && matches!(cmd, Cmd::SelectMode | Cmd::PruneSelected | Cmd::MarkSelected | Cmd::ToReview))
 }

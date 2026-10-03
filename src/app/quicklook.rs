@@ -1,7 +1,7 @@
 //! Quick look (Space in the grid): the focused photo large, over the grid,
 //! inside the main window — a check without opening the viewer.  It serves
-//! the search page's results too, read-only (no P, M or U), as the
-//! library's photos are.
+//! the search page's results and a person's photos too, read-only (no P, M
+//! or U), as the library's photos are.
 //!
 //! It steps through the grid's open days in grid order and takes the grid's
 //! selection along (scrolling the grid beneath to follow), so closing lands
@@ -19,6 +19,7 @@ use iced::keyboard::{self, Key, key::Named};
 use iced::widget::image as iimage;
 use iced::{Element, Point, Rectangle, Size, Task};
 
+use super::results_pane::Pane;
 use super::{App, Message, View, viewer, viewer_burst};
 use crate::imaging::loader::FullImage;
 use crate::model::collection::{Collection, RecordId};
@@ -34,6 +35,32 @@ pub enum Place {
     Grid,
     /// The search page's results (read-only).
     Search,
+    /// A person's photos (read-only).
+    Person,
+}
+
+impl Place {
+    /// A library list: read-only.
+    fn library(self) -> bool {
+        self != Place::Grid
+    }
+}
+
+/// The list of library photos `place` shows.
+fn pane(app: &App, place: Place) -> Option<&Pane> {
+    match place {
+        Place::Grid => None,
+        Place::Search => Some(&app.search.pane),
+        Place::Person => app.subjects.pane(),
+    }
+}
+
+fn pane_mut(app: &mut App, place: Place) -> Option<&mut Pane> {
+    match place {
+        Place::Grid => None,
+        Place::Search => Some(&mut app.search.pane),
+        Place::Person => app.subjects.pane_mut(),
+    }
 }
 
 pub struct QuickLook {
@@ -108,10 +135,10 @@ impl Nav {
     fn of(app: &App, place: Place) -> Nav {
         match place {
             Place::Grid => Nav::new(app.derived.sections.iter().filter(|s| !app.grid.collapsed.contains(&s.date)).map(|s| s.ids.as_slice())),
-            Place::Search => {
-                let s = &app.search;
-                Nav::new(s.layout.sections.iter().filter(|x| !s.collapsed.contains(&x.date)).map(|x| x.ids.as_slice()))
-            }
+            place => match pane(app, place) {
+                Some(s) => Nav::new(s.layout.sections.iter().filter(|x| !s.collapsed.contains(&x.date)).map(|x| x.ids.as_slice())),
+                None => Nav::new(std::iter::empty()),
+            },
         }
     }
 
@@ -175,6 +202,7 @@ fn place_here(app: &App) -> Option<Place> {
     match app.view {
         View::Grid => Some(Place::Grid),
         View::Search if app.search.has_results() => Some(Place::Search),
+        View::Subjects if app.subjects.pane().is_some_and(|p| p.results.is_some()) => Some(Place::Person),
         _ => None,
     }
 }
@@ -187,7 +215,7 @@ fn place(app: &App) -> Place {
 fn coll(app: &App, place: Place) -> &Collection {
     match place {
         Place::Grid => &app.coll,
-        Place::Search => app.search.results.as_ref().map_or(&app.coll, |r| &r.coll),
+        place => pane(app, place).and_then(|p| p.results.as_ref()).map_or(&app.coll, |r| &r.coll),
     }
 }
 
@@ -203,9 +231,9 @@ pub fn toggle(app: &mut App) -> Task<Message> {
     }
     let Some(place) = place_here(app) else { return Task::none() };
     let nav = Nav::of(app, place);
-    let (anchor, selection) = match place {
-        Place::Grid => (app.grid.anchor, &app.grid.selection),
-        Place::Search => (app.search.anchor, &app.search.selection),
+    let (anchor, selection) = match pane(app, place) {
+        None => (app.grid.anchor, &app.grid.selection),
+        Some(p) => (p.anchor, &p.selection),
     };
     let Some(i) = focus(&nav, anchor, selection) else { return Task::none() };
     crate::profile::mark("to first frame");
@@ -232,7 +260,11 @@ pub fn close(app: &mut App) -> Task<Message> {
             select(app, q.place, nav.ids[i]);
             reveal(app, q.place, nav.ids[i], q.viewport);
         }
-        None if q.place == Place::Search => app.search.selection.clear(),
+        None if q.place.library() => {
+            if let Some(p) = pane_mut(app, q.place) {
+                p.selection.clear();
+            }
+        }
         None if !app.grid.select_mode => app.grid.selection.clear(),
         None => {}
     }
@@ -251,9 +283,9 @@ pub fn follow(app: &mut App) -> Task<Message> {
     if nav.ids.contains(&id) {
         return Task::none();
     }
-    let tile = match place {
-        Place::Grid => app.tile_of(id),
-        Place::Search => app.search.layout.tile_of(id),
+    let tile = match pane(app, place) {
+        None => app.tile_of(id),
+        Some(p) => p.layout.tile_of(id),
     };
     match tile.and_then(|t| nav.ids.iter().position(|&x| x == t)) {
         Some(i) => show(app, &nav, i, false),
@@ -273,8 +305,7 @@ fn step(app: &mut App, mv: Move) -> Task<Message> {
 /// The grid's selection follows the photo shown (only the focus, in
 /// select mode, so a selection being built survives).
 fn select(app: &mut App, place: Place, id: RecordId) {
-    if place == Place::Search {
-        let s = &mut app.search;
+    if let Some(s) = pane_mut(app, place) {
         s.selection = [id].into();
         s.anchor = Some(id);
         return;
@@ -287,8 +318,7 @@ fn select(app: &mut App, place: Place, id: RecordId) {
 
 /// Scroll the grid beneath so `id` is in view when quick look closes.
 fn reveal(app: &mut App, place: Place, id: RecordId, viewport: Size) {
-    if place == Place::Search {
-        let s = &mut app.search;
+    if let Some(s) = pane_mut(app, place) {
         s.reveal = (s.reveal.0 + 1, Some(id));
         return;
     }
@@ -382,8 +412,10 @@ fn enter_land(app: &App) -> viewer_burst::Land {
 pub fn open_viewer(app: &mut App, land: viewer_burst::Land) -> Task<Message> {
     let Some((id, hint, place)) = app.quicklook.as_ref().map(|q| (q.id, q.hint, q.place)) else { return Task::none() };
     let closed = close(app);
-    if place == Place::Search {
-        return Task::batch([closed, super::search::open_viewer(app, id)]);
+    match place {
+        Place::Search => return Task::batch([closed, super::search::open_viewer(app, id)]),
+        Place::Person => return Task::batch([closed, super::subjects::open_viewer(app, id)]),
+        Place::Grid => {}
     }
     let mut items = app.derived.visible.clone();
     let index = match items.iter().position(|&x| x == id) {
@@ -547,9 +579,9 @@ pub fn debug_state(app: &App) -> String {
 
 /// (1-based position, count) of `id` among the grid's open days.
 fn position(app: &App, id: RecordId) -> Option<(usize, usize)> {
-    let (sections, collapsed) = match place(app) {
-        Place::Grid => (&app.derived.sections, &app.grid.collapsed),
-        Place::Search => (&app.search.layout.sections, &app.search.collapsed),
+    let (sections, collapsed) = match pane(app, place(app)) {
+        None => (&app.derived.sections, &app.grid.collapsed),
+        Some(p) => (&p.layout.sections, &p.collapsed),
     };
     let open = sections.iter().filter(|s| !collapsed.contains(&s.date));
     let (mut before, mut found, mut total) = (0, None, 0);
@@ -567,7 +599,8 @@ fn position(app: &App, id: RecordId) -> Option<(usize, usize)> {
 
 pub fn view(app: &App) -> Option<Element<'_, Message>> {
     let q = app.quicklook.as_ref()?;
-    let search = q.place == Place::Search;
+    let library = pane(app, q.place);
+    let search = library.is_some();
     let r = coll(app, q.place).get(q.id)?;
     let types = if r.is_paired() {
         vec![("RAW", t::RAW), ("JPG", t::JPG)]
@@ -577,9 +610,9 @@ pub fn view(app: &App) -> Option<Element<'_, Message>> {
             FileType::Jpg => vec![("JPG", t::JPG)],
         }
     };
-    let thumbs = if search { &app.search.thumbs } else { &app.thumbs };
-    let burst = if search {
-        app.search.layout.frames_of(q.id).and_then(|f| Some((f.iter().position(|&x| x == q.id)? + 1, f.len())))
+    let thumbs = library.map_or(&app.thumbs, |p| &p.thumbs);
+    let burst = if let Some(p) = library {
+        p.layout.frames_of(q.id).and_then(|f| Some((f.iter().position(|&x| x == q.id)? + 1, f.len())))
     } else {
         app.bursts.of(q.id).zip(app.bursts.frame_index(q.id)).map(|(b, i)| (i + 1, app.bursts.frames(b).len()))
     };

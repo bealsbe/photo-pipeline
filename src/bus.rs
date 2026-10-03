@@ -108,6 +108,9 @@ pub enum BgEvent {
     SearchThings(Arc<Vec<crate::search::Thing>>),
     /// A model download's progress (`crate::ml::download`).
     ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
+    /// People, fursuits and pets: groups, a group's faces, its suggestions,
+    /// the faces status (`crate::app::people`).
+    People(crate::app::people::Event),
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
@@ -149,6 +152,7 @@ impl BgEvent {
             BgEvent::SearchResults { .. } => "SearchResults",
             BgEvent::SearchThings(_) => "SearchThings",
             BgEvent::ModelDownload { .. } => "ModelDownload",
+            BgEvent::People(_) => "People",
         }
     }
 }

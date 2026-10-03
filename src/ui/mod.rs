@@ -12,6 +12,7 @@ pub mod paint;
 pub mod quick_look;
 pub mod side_menu;
 pub mod stamp;
+pub mod subject_tile;
 pub mod symbols;
 pub mod tags;
 pub mod theme;

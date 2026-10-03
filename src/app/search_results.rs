@@ -56,6 +56,9 @@ pub struct Results {
     pub animal: Option<String>,
     /// What the engine understood of the words, and applied.
     pub understood: Parsed,
+    /// The people the search is within (their chips), by name: their
+    /// photos, clearest first with no words, else best first.
+    pub who: Vec<String>,
     /// Hits whose files the library index doesn't hold (moved since).
     pub missing: usize,
 }
@@ -129,7 +132,7 @@ pub fn build(seq: u64, words: String, hits: &[Hit], answer: Answer<'_>, lookup: 
     let fursuits = take(answer.fursuits);
     coll.build_pairs();
     let animal = answer.animal.filter(|_| !fursuits.is_empty());
-    Results { seq, words, coll: Arc::new(coll), found, fursuits, animal, understood: answer.understood, missing }
+    Results { seq, words, coll: Arc::new(coll), found, fursuits, animal, understood: answer.understood, who: Vec::new(), missing }
 }
 
 /// What the grid shows of the results.
@@ -193,7 +196,7 @@ impl Layout {
 /// The results' lists: the best matches, and the fursuits left out after
 /// them when `fursuits` is on (a section of their own, never mixed in).
 pub fn parts(r: &Results, fursuits: bool) -> Vec<Part<'_>> {
-    let mut parts = vec![Part { found: &r.found, date: RESULTS_DAY, label: results_heading(&r.understood).into() }];
+    let mut parts = vec![Part { found: &r.found, date: RESULTS_DAY, label: results_heading(&r.understood, &r.who).into() }];
     if fursuits && !r.fursuits.is_empty() {
         parts.push(Part { found: &r.fursuits, date: FURSUITS_DAY, label: fursuits_heading(r.animal.as_deref()) });
     }
@@ -480,16 +483,32 @@ pub fn every_photo(p: &Parsed) -> Option<DateRange> {
     p.dates.filter(|_| p.words.trim().is_empty())
 }
 
-/// The results' heading: by match, or in the order taken for dates alone.
-pub fn results_heading(p: &Parsed) -> &'static str {
-    if every_photo(p).is_some() { "In the order they were taken" } else { "Best matches first" }
+/// A search within people's photos with no words: their photos clearest
+/// first (decision UI 12), the dates only narrowing them.
+pub fn clearest(p: &Parsed, who: &[String]) -> bool {
+    !who.is_empty() && p.words.trim().is_empty()
 }
 
-/// The count beside the field: "46 photos", or "312 photos from Jun 2026"
-/// for dates alone; `so_far` while indexing still reaches older days.
-pub fn count_caption(p: &Parsed, n: usize, so_far: bool) -> String {
+/// The results' heading: by match, clearest first for a person's photos,
+/// or in the order taken for dates alone.
+pub fn results_heading(p: &Parsed, who: &[String]) -> &'static str {
+    if clearest(p, who) {
+        "Clearest first"
+    } else if every_photo(p).is_some() {
+        "In the order they were taken"
+    } else {
+        "Best matches first"
+    }
+}
+
+/// The count beside the field: "46 photos", "312 photos, clearest first"
+/// for a person's photos, or "312 photos from Jun 2026" for dates alone;
+/// `so_far` while indexing still reaches older days.
+pub fn count_caption(p: &Parsed, who: &[String], n: usize, so_far: bool) -> String {
     let mut s = crate::util::plural(n as u64, "photo");
-    if let Some(d) = every_photo(p) {
+    if clearest(p, who) {
+        s.push_str(", clearest first");
+    } else if let Some(d) = every_photo(p) {
         s = format!("{s} from {}", d.label());
     }
     if so_far {
@@ -504,6 +523,14 @@ pub fn nothing_found(r: &Results, so_far: Option<usize>) -> (String, String) {
     let p = &r.understood;
     let words = r.looks_like();
     let n = so_far.map(|n| crate::util::thousands(n as u64));
+    if !r.who.is_empty() {
+        let who = and_list(&r.who);
+        return match (clearest(p, &r.who), p.dates) {
+            (true, Some(d)) => (format!("No photos of {who} from {}", d.label()), "Try other dates.".into()),
+            (true, None) => (format!("No photos of {who} yet"), "Their photos come back as you confirm them in the review.".into()),
+            (false, _) => (format!("No photo of {who} looks like “{words}”"), "Try another word, or fewer words.".into()),
+        };
+    }
     match (every_photo(p), p.dates, n) {
         (Some(d), _, Some(n)) => (format!("None of the {n} photos indexed so far are from {}", d.label()), "Results fill in as indexing reaches older days.".into()),
         (Some(d), _, None) if !p.exclude.is_empty() => {
@@ -523,6 +550,14 @@ pub fn nothing_found(r: &Results, so_far: Option<usize>) -> (String, String) {
 pub fn end_lines(r: &Results) -> (String, &'static str) {
     const CLOSENESS: &str = "Preferences ▸ Search sets how close a match must be.";
     let p = &r.understood;
+    if !r.who.is_empty() {
+        let who = and_list(&r.who);
+        return match (clearest(p, &r.who), p.dates) {
+            (true, Some(d)) => (format!("That's every photo of {who} from {}.", d.label()), "The ones least sure come last."),
+            (true, None) => (format!("That's every photo of {who}."), "The ones least sure come last, where a wrong one is easy to spot."),
+            (false, _) => (format!("That's everything of {who} that looks like “{}”.", r.looks_like()), CLOSENESS),
+        };
+    }
     match (every_photo(p), p.dates) {
         (Some(d), _) => (format!("That's every photo from {}.", d.label()), "Accidental frames, such as empty or dark ones, are left out."),
         (None, Some(d)) => (format!("That's everything from {} that looks like “{}”.", d.label(), r.looks_like()), CLOSENESS),
@@ -571,6 +606,7 @@ mod tests {
             fursuits,
             animal: Some("dog".into()),
             understood: parse("dogs"),
+            who: Vec::new(),
             missing: 0,
         }
     }
@@ -741,6 +777,7 @@ mod tests {
             fursuits: Vec::new(),
             animal: None,
             understood: parse(query),
+            who: Vec::new(),
             missing: 0,
         }
     }
@@ -750,14 +787,14 @@ mod tests {
         let r = answered("jun 2026", 312);
         assert_eq!(every_photo(&r.understood).map(|d| d.label()).as_deref(), Some("Jun 2026"));
         assert_eq!(understood_lines(&r.understood).0.as_deref(), Some("Every photo from Jun 2026"));
-        assert_eq!(count_caption(&r.understood, 312, false), "312 photos from Jun 2026");
-        assert_eq!(count_caption(&r.understood, 312, true), "312 photos from Jun 2026 so far");
+        assert_eq!(count_caption(&r.understood, &[], 312, false), "312 photos from Jun 2026");
+        assert_eq!(count_caption(&r.understood, &[], 312, true), "312 photos from Jun 2026 so far");
         let l = layout(&parts(&r, false), |_| true);
         assert_eq!(l.sections[0].label, "In the order they were taken");
         let (end, quiet) = end_lines(&r);
         assert_eq!(end, "That's every photo from Jun 2026.");
         // Nothing says these are matches, best first.
-        for line in [&l.sections[0].label, &end, quiet, &count_caption(&r.understood, 312, false)] {
+        for line in [&l.sections[0].label, &end, quiet, &count_caption(&r.understood, &[], 312, false)] {
             assert!(!line.to_lowercase().contains("best") && !line.to_lowercase().contains("looks like"), "{line}");
         }
         // With words left out, still every photo from the dates, but those.
@@ -770,7 +807,7 @@ mod tests {
         let r = answered("fireworks jun 2026", 4);
         assert_eq!(every_photo(&r.understood), None);
         assert_eq!(understood_lines(&r.understood).0.as_deref(), Some("Only Jun 2026"));
-        assert_eq!(count_caption(&r.understood, 4, false), "4 photos");
+        assert_eq!(count_caption(&r.understood, &[], 4, false), "4 photos");
         assert_eq!(layout(&parts(&r, false), |_| true).sections[0].label, "Best matches first");
         assert_eq!(end_lines(&r).0, "That's everything from Jun 2026 that looks like “fireworks”.");
         assert_eq!(nothing_found(&r, None).0, "Nothing from Jun 2026 looks like “fireworks”");
@@ -778,6 +815,26 @@ mod tests {
         // to show every photo of.
         assert_eq!(every_photo(&parse("@Alice")), None);
         assert_eq!(every_photo(&parse("-crowds")), None);
+    }
+
+    #[test]
+    fn a_persons_photos_come_clearest_first_and_words_rank_within_them() {
+        let mut r = answered("", 312);
+        r.who = vec!["Person A".into()];
+        assert_eq!(count_caption(&r.understood, &r.who, 312, false), "312 photos, clearest first");
+        assert_eq!(layout(&parts(&r, false), |_| true).sections[0].label, "Clearest first");
+        assert_eq!(end_lines(&r).0, "That's every photo of Person A.");
+        let mut r = answered("camera", 4);
+        r.who = vec!["Person A".into()];
+        assert_eq!(layout(&parts(&r, false), |_| true).sections[0].label, "Best matches first");
+        assert_eq!(count_caption(&r.understood, &r.who, 4, false), "4 photos");
+        assert_eq!(end_lines(&r).0, "That's everything of Person A that looks like “camera”.");
+        assert_eq!(nothing_found(&r, None).0, "No photo of Person A looks like “camera”");
+        // Dates beside a person narrow their photos, still clearest first.
+        let mut r = answered("jun 2024", 0);
+        r.who = vec!["Person A".into(), "Person B".into()];
+        assert_eq!(nothing_found(&r, None).0, "No photos of Person A and Person B from Jun 2024");
+        assert_eq!(results_heading(&r.understood, &r.who), "Clearest first");
     }
 
     #[test]
