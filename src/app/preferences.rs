@@ -1177,6 +1177,7 @@ fn storage_section(app: &App) -> Element<'_, Message> {
                 "What analysing found in each folder (sharpness, exposure, fingerprints), so its hints show at once and analysing again reads only new photos.",
             ),
             search_index_row(app),
+            heads_row(app),
             models_row(app),
             unsaved_row(app),
         ],
@@ -1209,6 +1210,27 @@ fn search_index_row(app: &App) -> Element<'_, Message> {
     ]
     .spacing(2);
     setting("Search index", about.into(), row![size_column(value, sub), rebuild, clear].spacing(t::S1).align_y(Alignment::Center).into())
+}
+
+/// The fursuit heads found: their boxes, vectors and tiles, beside the
+/// search index.  Not a cache (it holds what the names point at), so it is
+/// forgotten from Preferences ▸ Fursuits, which asks first.
+fn heads_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let h = &app.search.status.heads;
+    let (value, sub) = match p.search_storage() {
+        None => ("…".to_string(), Some("counting".to_string())),
+        Some(s) if s.heads_bytes == 0 => ("Empty".to_string(), Some("none found yet".to_string())),
+        Some(s) => (util::fmt_bytes(s.heads_bytes), Some(util::plural(h.found as u64, "head"))),
+    };
+    let about = column![
+        text("The fursuit heads found in your photos, so the Fursuits tab and its reviews read no photos. Forget them in Preferences ▸ Fursuits.").size(t::T_SMALL).color(t::INK3),
+        text(crate::search::index::cache_dir().map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
+    ]
+    .spacing(2);
+    // Lines up with the rows' buttons (it has none: it isn't a cache).
+    let gap = Space::new().width(clear_btn_width() + t::S1 + clear_btn_width());
+    setting("Fursuit heads", about.into(), row![size_column(value, sub), gap].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
 fn models_row(app: &App) -> Element<'_, Message> {

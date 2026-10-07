@@ -2190,8 +2190,8 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects, also_fursuits: _ } => {
-                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects };
+                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects, also_fursuits } => {
+                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects, also_fursuits };
                     // A person's page asks with numbers of its own.
                     if seq >= subjects_person::SEQ_BASE {
                         tasks.push(subjects_person::on_results(self, seq, reply));

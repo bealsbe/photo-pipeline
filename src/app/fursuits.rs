@@ -643,6 +643,18 @@ mod tests {
         f.groups().into_iter().find(|g| g.name.as_deref() == Some("Fursuit 1")).unwrap().id
     }
 
+    /// The head models are listed for download only while missing, and the
+    /// pages name them from the registry.
+    #[test]
+    fn head_models_are_rows_only_while_missing() {
+        let mut st = Status::default();
+        assert_eq!(missing_models(&st), models::FURSUIT_MODELS.to_vec());
+        assert!(models::bytes_for(&missing_models(&st)) > 900_000_000, "the pair is about a gigabyte");
+        st.heads.models_installed = true;
+        assert!(missing_models(&st).is_empty(), "in place: no row waits for a download that never comes");
+        assert_eq!(models_name(), "OWLv2 and DINOv2");
+    }
+
     #[test]
     fn heads_are_only_on_fursuit_photos_and_group_by_suit() {
         let f = fursuits(false);

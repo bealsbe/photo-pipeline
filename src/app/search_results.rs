@@ -425,6 +425,23 @@ pub fn nameable(all: &super::people::Subjects, kinds: &[Kind]) -> Vec<Nameable> 
     out
 }
 
+/// A typed `@name` that is both a person's and a fursuit's searches the
+/// person (the user's decision, "the one you picked"); the fursuits of the
+/// same name among `found` people's names are offered beside the results,
+/// never mixed into them.  `found`: the groups typed names resolved to.
+pub fn shared_fursuits(found: &[super::people::GroupId], names: &[Nameable]) -> Vec<(String, super::people::GroupId)> {
+    let mut out: Vec<(String, super::people::GroupId)> = Vec::new();
+    for id in found {
+        let Some(person) = names.iter().find(|n| &n.id == id && n.kind == Kind::Person) else { continue };
+        for f in names.iter().filter(|n| n.kind == Kind::Fursuit && n.name.eq_ignore_ascii_case(&person.name)) {
+            if !out.iter().any(|(_, g)| g == &f.id) {
+                out.push((f.name.clone(), f.id.clone()));
+            }
+        }
+    }
+    out
+}
+
 /// At most this many names of each kind while typing.
 const MAX_NAMES: usize = 6;
 
@@ -879,6 +896,23 @@ mod tests {
         assert_eq!(v.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["A", "B"], "most photos first; no unnamed, hidden or fursuit");
         let both = nameable(&all, &[SKind::Person, SKind::Fursuit]);
         assert_eq!(both.last().map(|n| n.kind), Some(SKind::Fursuit), "each kind's after the last's, never mixed");
+    }
+
+    /// A typed name a person and a fursuit share searches the person; the
+    /// fursuit is offered beside it, and only for names the field took.
+    #[test]
+    fn a_name_both_kinds_have_offers_the_fursuit_beside_the_person() {
+        let n = |id: u64, kind, name: &str| Nameable { kind, id: GroupId::Cluster(id), name: name.into(), photos: 5 };
+        let names = vec![n(1, SKind::Person, "Alex"), n(2, SKind::Person, "Sam"), n(3, SKind::Fursuit, "alex"), n(4, SKind::Fursuit, "Rex")];
+        // The person was found: the fursuit of that name (any case) is offered.
+        assert_eq!(shared_fursuits(&[GroupId::Cluster(1)], &names), vec![("alex".to_string(), GroupId::Cluster(3))]);
+        // No fursuit of that name: nothing.
+        assert!(shared_fursuits(&[GroupId::Cluster(2)], &names).is_empty());
+        // A fursuit picked itself offers nothing (the one you picked).
+        assert!(shared_fursuits(&[GroupId::Cluster(3)], &names).is_empty());
+        // Typed, the shared name resolves to the person, never the fursuit.
+        let (found, rest) = crate::app::search::resolve_names("@Alex camera", &names);
+        assert_eq!((found, rest.trim().to_string()), (vec![GroupId::Cluster(1)], "camera".to_string()));
     }
 
     #[test]

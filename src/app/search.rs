@@ -161,6 +161,9 @@ pub struct Search {
     pub chips: Vec<super::people::GroupId>,
     /// The chips of the search shown, as it ran.
     ran_chips: Vec<super::people::GroupId>,
+    /// Fursuits named like a person whose typed name the search took: the
+    /// page offers them beside the results (never in them).
+    pub also_fursuits: Vec<(String, super::people::GroupId)>,
     /// The completions list is open under the field.
     pub completions: bool,
     /// What it offers for the query (made on each keystroke, from memory).
@@ -214,6 +217,9 @@ pub enum Msg {
     Run(String),
     /// A chip's ×.
     RemoveChip(usize),
+    /// *Search for the fursuit instead*: a fursuit named like the person a
+    /// typed name found takes that person's place.
+    AlsoFursuit(super::people::GroupId),
     CloseList,
     Back,
     OpenDay,
@@ -263,6 +269,7 @@ impl Search {
             query: String::new(),
             chips: Vec::new(),
             ran_chips: Vec::new(),
+            also_fursuits: Vec::new(),
             completions: false,
             offer: res::Offer::default(),
             hi: None,
@@ -458,6 +465,7 @@ fn run(app: &mut App, words: String) -> Task<Message> {
     let names = nameables(app);
     let (found, words) = resolve_names(&words, &names);
     let s = &mut app.search;
+    s.also_fursuits = res::shared_fursuits(&found, &names);
     for id in found {
         if !s.chips.contains(&id) && s.chips.len() < MAX_CHIPS {
             s.chips.push(id);
@@ -532,6 +540,9 @@ pub struct Reply {
     /// The groups the search was narrowed to: its chips, and the `@name`s
     /// that named someone (a name that named nobody is missing).
     pub subjects: Arc<Vec<super::people::GroupId>>,
+    /// Fursuits named like a person a typed `@name` found: offered beside
+    /// the results, never in them.
+    pub also_fursuits: Arc<Vec<(String, super::people::GroupId)>>,
 }
 
 /// A query's answer: build its records on a worker.
@@ -547,6 +558,12 @@ pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
         return Task::none();
     }
     app.search.error = None;
+    // The engine's own offer for a typed name both kinds have.
+    for (name, id) in reply.also_fursuits.iter() {
+        if !app.search.also_fursuits.iter().any(|(_, g)| g == id) {
+            app.search.also_fursuits.push((name.clone(), id.clone()));
+        }
+    }
     let Some(index) = app.calendar.index.clone() else {
         return Task::done(m(Msg::Built(seq, None)));
     };
@@ -727,6 +744,18 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 s.chips.remove(i);
             }
             iced::widget::operation::focus::<Message>(FIELD)
+        }
+        Msg::AlsoFursuit(id) => {
+            let Some(name) = app.subjects.group(&id).and_then(|g| g.name.clone()) else { return Task::none() };
+            // The person of that name leaves; the fursuit takes its place.
+            let all = app.subjects.all.clone();
+            let s = &mut app.search;
+            s.chips.retain(|c| !all.group(c).is_some_and(|g| g.kind == super::people::Kind::Person && g.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&name))));
+            if !s.chips.contains(&id) && s.chips.len() < MAX_CHIPS {
+                s.chips.push(id);
+            }
+            let q = s.query.clone();
+            run(app, q)
         }
         Msg::Submit => {
             let s = &app.search;
@@ -1330,7 +1359,8 @@ fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     let u = &r.understood;
     let unknown = &r.unknown;
     let (dates, leave) = res::understood_lines(u);
-    if dates.is_none() && leave.is_none() && r.unknown.is_empty() {
+    let also = &app.search.also_fursuits;
+    if dates.is_none() && leave.is_none() && r.unknown.is_empty() && also.is_empty() {
         return None;
     }
     let item = |g: Glyph, words: String| row![icons::view(g, 14.0, t::INK3), text(words).size(t::T_SMALL).color(t::INK2)].spacing(6).align_y(Alignment::Center);
@@ -1344,6 +1374,15 @@ fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     if !unknown.is_empty() {
         let names: Vec<String> = unknown.iter().map(|n| format!("@{n}")).collect();
         r = r.push(item(Glyph::Info, format!("No one is named {}, so nothing matches", res::and_list(&names))));
+    }
+    // A typed name both a person and a fursuit have searched the person:
+    // the fursuit is offered here, never mixed into the results.
+    for (name, id) in also {
+        let link = button(text("Search for the fursuit instead").size(t::T_SMALL).font(paint::MEDIUM))
+            .padding(Padding::from([0.0, 4.0]))
+            .style(style::link().style())
+            .on_press(m(Msg::AlsoFursuit(id.clone())));
+        r = r.push(row![item(Glyph::Fursuit, format!("There's also a fursuit called {name}.")), link].spacing(t::S1).align_y(Alignment::Center));
     }
     Some(column![container(r.wrap().vertical_spacing(t::S1)).padding(Padding::from([t::S2, t::S3])).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into())
 }
