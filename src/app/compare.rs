@@ -144,7 +144,7 @@ impl Compare {
 fn selected(app: &App) -> Vec<RecordId> {
     match app.view {
         View::Grid => app.derived.visible.iter().copied().filter(|id| app.grid.selection.contains(id)).collect(),
-        View::Calendar | View::Search => Vec::new(),
+        View::Calendar | View::Search | View::Subjects => Vec::new(),
     }
 }
 
@@ -152,7 +152,7 @@ fn selected(app: &App) -> Vec<RecordId> {
 pub fn can_open(app: &App) -> bool {
     let n = match app.view {
         View::Grid => app.grid.selection.len(),
-        View::Calendar | View::Search => 0,
+        View::Calendar | View::Search | View::Subjects => 0,
     };
     (2..=MAX_PANES).contains(&n)
 }

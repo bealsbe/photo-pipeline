@@ -17,6 +17,11 @@
 //!   keeps its own: Tab and Shift+Tab move a focus ring, Space or Enter
 //!   presses, ← and → change the thumbnail size and how close search
 //!   matches must be, Esc closes.
+//! - **People** (with Search): *Find people's faces* (on; turning it off
+//!   offers, inline, to forget what was found), the face model with
+//!   *Change…* (every face recognised again, names kept), the smallest
+//!   group to show, and *Forget all…* behind a confirmation that says what
+//!   is deleted.
 //! - **Search** (`search_prefs` words): where models run, how close
 //!   matches must be (a slider with a reset to the default), indexing new
 //!   exports, and the recent searches.  Its index and models show in
@@ -74,6 +79,17 @@ pub enum Control {
     ClosenessReset,
     IndexExports,
     ForgetSearches,
+    /// *Find people's faces*.
+    FindFaces,
+    /// The inline offer after turning faces off: keep or forget them.
+    KeepFaces,
+    ForgetFaces,
+    /// *Face model* ▸ *Change…*.
+    FaceModel,
+    /// *Smallest group to show*: 3, 5 or 10 photos.
+    SmallestGroup(usize),
+    /// *Forget all…* (people).
+    ForgetPeople,
     Open(Cache),
     Clear(Cache),
     SearchRebuild,
@@ -106,6 +122,14 @@ impl Control {
             Control::ClosenessReset => "pref-closeness-reset",
             Control::IndexExports => "pref-index-exports",
             Control::ForgetSearches => "pref-forget-searches",
+            Control::FindFaces => "pref-find-faces",
+            Control::KeepFaces => "pref-keep-faces",
+            Control::ForgetFaces => "pref-forget-faces",
+            Control::FaceModel => "pref-face-model",
+            Control::SmallestGroup(3) => "pref-smallest-3",
+            Control::SmallestGroup(10) => "pref-smallest-10",
+            Control::SmallestGroup(_) => "pref-smallest-5",
+            Control::ForgetPeople => "pref-forget-people",
             Control::SearchRebuild => "pref-search-rebuild",
             Control::SearchClear => "pref-search-clear",
             Control::ModelsOpen => "pref-models-open",
@@ -144,6 +168,10 @@ pub enum Msg {
     Reveal(Control),
     /// Count the sizes again (after the engine cleared or deleted).
     Recount,
+    /// A face model picked in *Change the face model*.
+    PickFaceModel(crate::ml::models::ModelId),
+    /// Change to it (or cancel: `false`).
+    ChangeFaceModel(bool),
 }
 
 /// What a confirmation asks about.
@@ -153,6 +181,8 @@ pub enum Ask {
     SearchRebuild,
     SearchClear,
     ModelsDelete,
+    /// Forget every face found and every name given.
+    ForgetPeople,
 }
 
 /// The Preferences window and what it has counted.
@@ -173,6 +203,10 @@ pub struct Prefs {
     last_clear: Option<(Cache, Cleared)>,
     /// What a confirmation is asking about.
     confirm: Option<Ask>,
+    /// *Find people's faces* was just turned off: offer to forget them.
+    faces_offer: bool,
+    /// *Change the face model* is open, with the model picked.
+    face_change: Option<crate::ml::models::ModelId>,
 }
 
 impl Prefs {
@@ -189,6 +223,8 @@ impl Prefs {
             clearing: None,
             last_clear: None,
             confirm: None,
+            faces_offer: false,
+            face_change: None,
         }
     }
 
@@ -212,7 +248,7 @@ impl Prefs {
             .collect();
         let journal = self.survey.as_ref().map(|s| format!("{:?}", s.journal)).unwrap_or_else(|| "…".into());
         format!(
-            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] search={:?} journal={journal} last_clear={:?}",
+            "open={} focus={:?} ring={} confirm={:?} clearing={:?} counting={} sizes=[{}] search={:?} journal={journal} last_clear={:?} faces_offer={} face_change={:?}",
             self.window.is_some(),
             self.focus,
             self.ring,
@@ -222,6 +258,8 @@ impl Prefs {
             sizes.join(", "),
             self.search_storage(),
             self.last_clear,
+            self.faces_offer,
+            self.face_change,
         )
     }
 }
@@ -387,6 +425,23 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Reveal(c) if matches!(c, Control::SearchDevice(_)) => reveal_search_section(),
         Msg::Reveal(c) => reveal(c),
         Msg::Recount => recount(app),
+        Msg::PickFaceModel(f) => {
+            if app.prefs.face_change.is_some() {
+                app.prefs.face_change = Some(f);
+            }
+            Task::none()
+        }
+        Msg::ChangeFaceModel(go) => {
+            let Some(f) = app.prefs.face_change.take() else { return Task::none() };
+            if !go || super::subjects::face_model(app) == f {
+                return Task::none();
+            }
+            app.settings.face_model = f;
+            app.settings.save_in_background();
+            app.search.link.set_face_model(f);
+            let name = crate::ml::models::info(f).name;
+            app.show_status(format!("Recognising every face again with {name}. Names and the photos you confirmed are kept."), 8000)
+        }
     }
 }
 
@@ -418,6 +473,11 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
         Ask::ModelsDelete => {
             link.delete_models();
             "Deleted the downloaded model."
+        }
+        Ask::ForgetPeople => {
+            link.forget_all();
+            app.subjects.crops.clear();
+            "Forgot every face found and every name given. Your photos are not changed."
         }
         Ask::Cache(_) => return Task::none(),
     };
@@ -495,6 +555,47 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             app.settings.save_in_background();
             app.show_status("Recent searches forgotten.", 4000)
         }
+        Control::FindFaces => {
+            let on = !app.settings.find_faces;
+            app.settings.find_faces = on;
+            app.settings.save_in_background();
+            app.search.link.set_find_faces(on);
+            // Off, with faces already found: offer to forget them.
+            let f = &app.search.status.faces;
+            app.prefs.faces_offer = !on && (f.found > 0 || f.named > 0);
+            Task::none()
+        }
+        Control::KeepFaces => {
+            app.prefs.faces_offer = false;
+            app.show_status("Finding faces is off. The faces found and the names you gave are kept.", 5000)
+        }
+        Control::ForgetFaces => {
+            app.prefs.faces_offer = false;
+            app.search.link.forget_all();
+            app.subjects.crops.clear();
+            app.show_status("Finding faces is off, and the faces found and the names you gave are forgotten.", 6000)
+        }
+        Control::FaceModel => {
+            if app.settings.find_faces {
+                let now = super::subjects::face_model(app);
+                // The dialog opens on another model: the one in use is
+                // already in use.
+                let other = crate::ml::models::face_models().map(|m| m.id).find(|&m| m != now).unwrap_or(now);
+                app.prefs.face_change = Some(other);
+            }
+            Task::none()
+        }
+        Control::SmallestGroup(n) => {
+            app.settings.people_min_photos = n;
+            app.settings.save_in_background();
+            Task::none()
+        }
+        Control::ForgetPeople => {
+            if people_to_forget(app) {
+                app.prefs.confirm = Some(Ask::ForgetPeople);
+            }
+            Task::none()
+        }
         Control::SearchRebuild | Control::SearchClear | Control::ModelsDelete => {
             if search_action_ready(app, c) {
                 app.prefs.confirm = Some(match c {
@@ -535,6 +636,12 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
 
 fn clearable(p: &Prefs, c: Cache) -> bool {
     p.clearing.is_none() && p.usage(c).is_some_and(|u| u.files > 0)
+}
+
+/// Something about people is kept: faces found or names given.
+fn people_to_forget(app: &App) -> bool {
+    let f = &app.search.status.faces;
+    f.found > 0 || f.named > 0 || !app.subjects.all.groups.is_empty()
 }
 
 fn models_exist(p: &Prefs) -> bool {
@@ -586,6 +693,17 @@ fn controls(app: &App) -> Vec<Control> {
     if !app.settings.search_recent.is_empty() {
         v.push(Control::ForgetSearches);
     }
+    v.push(Control::FindFaces);
+    if app.prefs.faces_offer {
+        v.extend([Control::KeepFaces, Control::ForgetFaces]);
+    }
+    if app.settings.find_faces {
+        v.push(Control::FaceModel);
+    }
+    v.extend(crate::settings::PEOPLE_MIN_PHOTOS_CHOICES.iter().map(|&n| Control::SmallestGroup(n)));
+    if people_to_forget(app) {
+        v.push(Control::ForgetPeople);
+    }
     if !settings::global_menu_forced_off() {
         v.push(Control::GlobalMenu);
     }
@@ -617,6 +735,13 @@ fn controls(app: &App) -> Vec<Control> {
 
 /// A key press in the Preferences window.
 pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Message> {
+    if app.prefs.face_change.is_some() {
+        return match key {
+            Key::Named(Named::Escape) => update(app, Msg::ChangeFaceModel(false)),
+            Key::Named(Named::Enter) => update(app, Msg::ChangeFaceModel(true)),
+            _ => Task::none(),
+        };
+    }
     if app.prefs.confirm.is_some() {
         return match key {
             Key::Named(Named::Escape) => update(app, Msg::ConfirmCancel),
@@ -774,6 +899,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         viewer(app),
         folders(app),
         search_section(app),
+        people_section(app),
         desktop(app),
         storage_section(app),
         kit::caption(format!(
@@ -802,6 +928,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let mut layers: Vec<Element<'_, Message>> = vec![base.into()];
     if let Some(ask) = p.confirm {
         layers.push(confirm_view(app, ask));
+    }
+    if let Some(f) = p.face_change {
+        layers.push(face_model_view(app, f));
     }
     stack(layers).width(Length::Fill).height(Length::Fill).into()
 }
@@ -912,7 +1041,7 @@ fn folders(app: &App) -> Element<'_, Message> {
             ),
             setting(
                 "Copies for editing",
-                path_about(edit_copy.as_deref(), "Where Copy marked RAWs for editing puts them. Not chosen yet: it asks the first time."),
+                path_about(edit_copy.as_deref(), "Where Copy marked photos for editing puts them. Not chosen yet: it asks the first time."),
                 change(Control::EditCopyFolder, edit_copy.is_some()),
             ),
             setting(
@@ -1184,6 +1313,149 @@ fn search_section(app: &App) -> Element<'_, Message> {
     container(search).id(SEARCH_SECTION).width(Length::Fill).into()
 }
 
+/// People, with Search: whether faces are found, with which model, the
+/// smallest group to show, and forgetting what was found.
+fn people_section(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let s = &app.settings;
+    let f = &app.search.status.faces;
+    let on = s.find_faces;
+    let mut find = column![about(format!(
+        "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight.",
+        s.people_min_photos()
+    ))]
+    .spacing(t::S2);
+    if p.faces_offer {
+        let n = util::plural(f.found as u64, "face");
+        let names = match f.named {
+            0 => String::new(),
+            1 => ", and the 1 name you gave".to_string(),
+            k => format!(", and the {k} names you gave"),
+        };
+        let offer = row![
+            text(format!("No new faces will be looked for. Forget the {n} already found{names}?")).size(t::T_SMALL).color(t::INK2).width(Length::Fill),
+            focusable(p, Control::KeepFaces, kit::btn("Keep them", style::ghost(), Some(m(Msg::Press(Control::KeepFaces))))),
+            focusable(p, Control::ForgetFaces, kit::btn("Forget them", style::danger(), Some(m(Msg::Press(Control::ForgetFaces))))),
+        ]
+        .spacing(t::S2)
+        .align_y(Alignment::Center);
+        find = find.push(container(offer).padding(Padding::from([t::S2, t::S3])).style(style::group()));
+    }
+    let model = super::subjects::face_model(app);
+    let mi = crate::ml::models::info(model);
+    let model_about = if f.model.is_some() {
+        format!(
+            "{}: {}, {}. Changing it recognises every face again; names and the photos you confirmed are kept.",
+            short_name(mi.name),
+            super::search_setup::size(mi.kept_bytes()),
+            super::search_setup::capital(mi.licence)
+        )
+    } else {
+        format!("{} unless you pick another when faces are first looked for. {}", mi.name, mi.what)
+    };
+    let change = focusable(p, Control::FaceModel, kit::btn("Change…", style::secondary(), (on && f.model.is_some()).then(|| m(Msg::Press(Control::FaceModel)))));
+    let sizes: Vec<Element<'_, Message>> = crate::settings::PEOPLE_MIN_PHOTOS_CHOICES
+        .iter()
+        .map(|&n| focusable(p, Control::SmallestGroup(n), kit::segment_compact(format!("{n} photos"), s.people_min_photos() == n, m(Msg::Press(Control::SmallestGroup(n))))).into())
+        .collect();
+    let kept = if f.found == 0 && f.named == 0 {
+        "Nothing found yet.".to_string()
+    } else {
+        format!("{} found, {} named.", util::plural(f.found as u64, "face"), util::thousands(f.named as u64))
+    };
+    let forget = focusable(p, Control::ForgetPeople, kit::btn("Forget all…", style::secondary(), people_to_forget(app).then(|| m(Msg::Press(Control::ForgetPeople)))));
+    let people = section(
+        "People",
+        Some("Faces in your photos, grouped so you can name the people you want to find. Fursuits and pets come later, each with a switch of its own."),
+        vec![
+            setting("Find people's faces", find.into(), switch(p, Control::FindFaces, on, true)),
+            setting("Face model", about(model_about), change.into()),
+            setting("Smallest group to show", about("Smaller groups wait under Smaller groups on the People tab, so an event's strangers stay out of the way."), kit::segmented(sizes)),
+            setting(
+                "People found",
+                about(format!("{kept} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
+                forget,
+            ),
+        ],
+    );
+    container(people).id("pref-section-people").width(Length::Fill).into()
+}
+
+/// A model's name without what follows a comma ("InsightFace").
+fn short_name(name: &str) -> &str {
+    name.split(',').next().unwrap_or(name).trim()
+}
+
+/// *Change the face model*: the models, how long finding the faces again
+/// takes, and that names are kept.
+fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_, Message> {
+    use crate::ml::models;
+    let st = &app.search.status;
+    let f = &st.faces;
+    let now = f.model;
+    let device = st.device.chosen;
+    // About a photo in four holds a face; never more photos than faces.
+    let with_faces = (st.indexed_shots / 4).min(f.found).max(f.found.min(1));
+    let secs = estimate::face_model_change_seconds(with_faces, f.found, device, picked);
+    let names = match f.named {
+        0 => "Names you give later are kept the same way.".to_string(),
+        1 => "The 1 name you gave is kept, and matched again from the faces you confirmed.".to_string(),
+        n => format!("The {n} names you gave are kept, and matched again from the faces you confirmed."),
+    };
+    let mut list = column![].spacing(2).padding(2);
+    for mi in models::face_models() {
+        let on = mi.id == picked;
+        let mut top = row![text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
+        if mi.recommended {
+            top = top.push(text("Recommended").size(t::T_SMALL).color(t::SIGNAL));
+        }
+        if now == Some(mi.id) {
+            top = top.push(text("In use now").size(t::T_SMALL).color(t::INK3));
+        }
+        top = top.push(Space::new().width(Length::Fill));
+        top = top.push(text(super::search_setup::size(mi.bytes())).size(t::T_SMALL).color(t::INK2));
+        let licence = format!("Licence: {}: {}. From {}, its publisher.", super::search_setup::capital(mi.licence), mi.licence_plain, mi.publisher);
+        let what = mi.what.split_whitespace().collect::<Vec<_>>().join(" ");
+        let col = column![top, text(what).size(t::T_SMALL).color(t::INK2), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
+        let dot = container(if on { Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() })) } else { Space::new().into() })
+            .width(16)
+            .height(16)
+            .center(16)
+            .style(move |_| container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(if on { t::SIGNAL } else { t::LINE_HI }, 1.0, 8.0), ..Default::default() });
+        let id = mi.id;
+        list = list.push(
+            iced::widget::button(row![dot, col].spacing(t::S3))
+                .width(Length::Fill)
+                .padding(Padding::from([7.0, 12.0]))
+                .style(move |_t, status| {
+                    let hot = matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+                    iced::widget::button::Style { background: (on || hot).then_some(Background::Color(t::RAISED)), text_color: t::INK, border: Border { radius: t::R_CONTROL.into(), ..Border::default() }, ..iced::widget::button::Style::default() }
+                })
+                .on_press(m(Msg::PickFaceModel(id))),
+        );
+    }
+    let same = now == Some(picked);
+    let go = if same { "Already in use".to_string() } else { format!("Find faces again with {}", short_name(models::info(picked).name)) };
+    let content = column![
+        dialogs::header("Change the face model?", None),
+        kit::secondary(format!(
+            "Every face found is recognised again with the new model: {} {} {}. {names} A model not downloaded yet is fetched first ({}).",
+            estimate::describe_seconds(secs),
+            if device == Device::Gpu { "with" } else { "on" },
+            device.phrase(),
+            super::search_setup::size(models::info(picked).bytes())
+        )),
+        container(list).width(Length::Fill).style(style::group()),
+        Space::new().height(t::S1),
+        dialogs::footer(
+            vec![],
+            vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::ChangeFaceModel(false)))).into(), kit::btn(go, style::primary(), (!same).then(|| m(Msg::ChangeFaceModel(true)))).into()],
+        ),
+    ]
+    .spacing(t::S3);
+    dialogs::backdrop(dialogs::frame_fit(content.into(), 560.0))
+}
+
 fn count_word(c: Cache, n: u64) -> String {
     match c {
         Cache::Thumbs => util::plural(n, "thumbnail"),
@@ -1359,6 +1631,23 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             "Clear the index",
             true,
         ),
+        Ask::ForgetPeople => {
+            let f = &app.search.status.faces;
+            let names = match f.named {
+                0 => String::new(),
+                1 => " and the 1 name you gave".to_string(),
+                n => format!(" and the {n} names you gave"),
+            };
+            (
+                "Forget all people?",
+                format!(
+                    "This deletes the {} found in your photos{names}, with every answer from the reviews. Your photos are not changed. To find faces again later, ask on the People tab.",
+                    util::plural(f.found as u64, "face")
+                ),
+                "Forget all",
+                true,
+            )
+        }
         _ => (
             "Delete the downloaded model?",
             format!(

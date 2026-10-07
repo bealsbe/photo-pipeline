@@ -6,6 +6,10 @@
 //!   in plain words, what indexing reads and how long it takes, then shows
 //!   the download, and a checksum or connection failure.  Its rows come
 //!   from the model registry, so later phases add rows, not dialogs.
+//!   Faces are found in the same pass, on unless turned off, with the face
+//!   model the user picks (AuraFace chosen until then; InsightFace's
+//!   licence said plainly, in the warning tone).  From the People tab the
+//!   same dialog asks for the faces alone.
 //! - **Then stay quiet.**  The first index is a line in the status bar with
 //!   × to stop (click it for the steps); after an export, adding the new
 //!   photos is a quieter line with no ×.
@@ -52,7 +56,7 @@ pub fn capital(s: &str) -> String {
 }
 
 /// A size known exactly, in the dialog's round figures ("785 MB").
-fn size(n: u64) -> String {
+pub fn size(n: u64) -> String {
     estimate::describe_bytes(n).trim_start_matches("about ").to_string()
 }
 
@@ -93,26 +97,145 @@ pub fn costs(app: &App) -> Costs {
     }
 }
 
+// ── what is still to download ───────────────────────────────────────────────
+
+/// `model`'s files (the detector's and its own) are in place, as the
+/// status knows: it says so only for the face model the engine has
+/// chosen, so another one counts as missing.
+pub fn face_ready(st: &Status, model: ModelId) -> bool {
+    st.faces.installed && st.faces.model == Some(model)
+}
+
+/// The models still to fetch, as the status knows them: the search model
+/// unless it is in place (when `search` asks for it), and the detector
+/// with `face` unless that same model's set is.  The dialog's sizes,
+/// its "Downloaded" labels and the rows it shows all come from here.
+pub fn missing_models(st: &Status, search: bool, face: Option<ModelId>) -> Vec<ModelId> {
+    let mut out = Vec::new();
+    if search && !st.models_installed {
+        out.extend(search_models());
+    }
+    if let Some(f) = face.filter(|&f| !face_ready(st, f)) {
+        out.extend(models::face_set(f));
+    }
+    out
+}
+
+/// What *Download and index* does next.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Begin {
+    /// Everything is in place: the dialog closes and indexing starts.
+    Index,
+    /// The rows to show, waiting, until the engine reports on each: only
+    /// the models it will fetch, so none waits for a report that never
+    /// comes.
+    Download(Vec<Download>),
+}
+
+pub fn begin_first_index(st: &Status, face: Option<ModelId>) -> Begin {
+    let missing = missing_models(st, true, face);
+    if missing.is_empty() {
+        return Begin::Index;
+    }
+    Begin::Download(missing.into_iter().map(|id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect())
+}
+
+/// A download reported.  A new download after the last ones finished
+/// starts a fresh list, so the status bar's total is this download's.
+pub fn record_download(rows: &mut Vec<Download>, d: Download) {
+    if !d.state.is_final() && rows.iter().all(|x| x.state.is_final()) {
+        rows.clear();
+    }
+    match rows.iter_mut().find(|x| x.model == d.model) {
+        Some(x) => *x = d,
+        None => rows.push(d),
+    }
+}
+
+/// Rows still waiting for a model the status now says is in place are
+/// done: the engine reports only what it fetches, and a row the dialog
+/// listed from an older status (another face model chosen, say) would
+/// otherwise wait for ever.
+pub fn settle_downloads(rows: &mut [Download], st: &Status) {
+    for x in rows.iter_mut().filter(|x| x.state == DownloadState::Waiting) {
+        let in_place = match x.model {
+            ModelId::Siglip2 => st.models_installed,
+            m if m == models::FACE_DETECTOR => st.faces.installed,
+            m => face_ready(st, m),
+        };
+        if in_place {
+            x.done = x.total;
+            x.state = DownloadState::Checked;
+        }
+    }
+}
+
 // ── the download dialog ─────────────────────────────────────────────────────
 
 pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
+    let fallback = (false, app.settings.find_faces, super::subjects::face_model(app));
     let s = &mut app.search;
     match msg {
-        DialogMsg::Download | DialogMsg::Retry => {
-            let ids = search_models();
-            if s.status.models_installed {
-                s.dialog = None;
-                s.link.start_first_index(&ids);
-                return app.show_status("Indexing the library. Search works on the newest days within a minute.", 6000);
+        DialogMsg::Faces => {
+            if let Some(d) = s.dialog.as_mut().filter(|d| !d.faces_only) {
+                d.faces = !d.faces;
             }
-            // The rows show at once, waiting, until the engine reports.
-            s.downloads = ids.iter().map(|&id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect();
-            s.dialog = Some(Dialog { stage: Stage::Progress, sums: false });
-            s.link.start_first_index(&ids);
             Task::none()
         }
+        DialogMsg::FaceModel(m) => {
+            if let Some(d) = s.dialog.as_mut().filter(|d| d.faces) {
+                d.face_model = m;
+            }
+            Task::none()
+        }
+        DialogMsg::Download | DialogMsg::Retry => {
+            let ask = s.dialog.as_ref().map(|d| (d.faces_only, d.faces, d.face_model));
+            let (faces_only, faces, model) = ask.unwrap_or(fallback);
+            // The face model picked is the one Preferences shows from now.
+            if app.settings.face_model != model || app.settings.find_faces != (faces || faces_only) {
+                app.settings.face_model = model;
+                app.settings.find_faces = faces || faces_only;
+                app.settings.save_in_background();
+            }
+            if faces_only {
+                // The library is indexed: find faces in it, with the
+                // model picked (its download first, then the catch-up).
+                let s = &mut app.search;
+                s.dialog = None;
+                s.link.set_find_faces(true);
+                s.link.set_face_model(model);
+                s.link.find_faces();
+                return app.show_status(format!("Finding faces in the library with {}. Groups appear on the People tab as they are found.", models::info(model).name), 8000);
+            }
+            let face = faces.then_some(model);
+            let s = &mut app.search;
+            let ids = models::models_for(face);
+            s.link.set_find_faces(faces);
+            if face.is_some() {
+                s.link.set_face_model(model);
+            }
+            match begin_first_index(&s.status, face) {
+                Begin::Index => {
+                    s.dialog = None;
+                    s.link.start_first_index(&ids);
+                    let faces_too = if face.is_some() { " Faces are found in the same pass." } else { "" };
+                    app.show_status(format!("Indexing the library. Search works on the newest days within a minute.{faces_too}"), 6000)
+                }
+                Begin::Download(rows) => {
+                    // The rows show at once, waiting, until the engine
+                    // reports.
+                    s.downloads = rows;
+                    if let Some(d) = s.dialog.as_mut() {
+                        d.stage = Stage::Progress;
+                    }
+                    s.link.start_first_index(&ids);
+                    Task::none()
+                }
+            }
+        }
         DialogMsg::Show => {
-            s.dialog = Some(Dialog { stage: Stage::Progress, sums: false });
+            let d = Dialog::new(Stage::Progress, &app.settings);
+            app.search.dialog = Some(d);
             Task::none()
         }
         DialogMsg::Cancel => {
@@ -158,9 +281,9 @@ pub fn dialog_key(app: &mut App, key: &Key) -> Task<Message> {
 
 pub fn dialog(app: &App) -> Option<Element<'_, Message>> {
     let dl = app.search.dialog.as_ref()?;
-    let w = (app.window_size_width() - 48.0).min(660.0);
+    let w = (app.window_size_width() - 48.0).min(700.0);
     let body = match dl.stage {
-        Stage::Ask => ask_view(app, dl.sums),
+        Stage::Ask => ask_view(app, dl),
         Stage::Progress => progress_view(app),
     };
     Some(dialogs::backdrop(dialogs::frame_fit(body, w)))
@@ -203,46 +326,153 @@ fn fact<'a>(k: &'a str, v: String, sub: Option<&'a str>) -> Element<'a, Message>
     row![text(k).size(t::T_SMALL).color(t::INK3).width(84), words].spacing(t::S3).padding(Padding::from([8.0, 12.0])).into()
 }
 
-fn ask_view(app: &App, sums: bool) -> Element<'_, Message> {
+/// A radio's dot.
+fn radio_dot<'a>(on: bool, enabled: bool) -> Element<'a, Message> {
+    let edge = if on && enabled { t::SIGNAL } else { t::LINE_HI };
+    let inner: Element<'a, Message> = if on {
+        container(Space::new())
+            .width(8)
+            .height(8)
+            .style(move |_| iced::widget::container::Style { background: Some(Background::Color(if enabled { t::SIGNAL } else { t::INK4 })), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() })
+            .into()
+    } else {
+        Space::new().into()
+    };
+    container(inner).width(16).height(16).center(16).style(move |_| iced::widget::container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(edge, 1.0, 8.0), ..Default::default() }).into()
+}
+
+/// A tick box with its label, for *Find people's faces*.
+fn tick<'a>(on: bool, label: &'a str, msg: Message) -> Element<'a, Message> {
+    let mark: Element<'a, Message> = if on { icons::view(Glyph::Check, 12.0, t::ON_SIGNAL) } else { Space::new().into() };
+    let bx = container(mark)
+        .width(16)
+        .height(16)
+        .center(16)
+        .style(move |_| iced::widget::container::Style { background: Some(Background::Color(if on { t::SIGNAL } else { t::DEEP })), border: style::border(if on { iced::Color::TRANSPARENT } else { t::LINE_HI }, 1.0, 3.0), ..Default::default() });
+    button(row![bx, kit::heading(label)].spacing(8).align_y(Alignment::Center)).padding(0).style(|_t, _s| button::Style::default()).on_press(msg).into()
+}
+
+/// One face model the user can pick: its name, size, how it did and how
+/// long it takes here, its licence in plain words and where it comes from
+/// (a restrictive licence in the warning tone).
+fn face_row<'a>(app: &App, mi: &models::ModelInfo, on: bool, enabled: bool, installed: bool, catch_up: bool) -> Element<'a, Message> {
     let st = &app.search.status;
+    let shots = st.library_shots.max(st.indexed_shots);
+    let device = st.device.chosen;
+    let secs = if catch_up { estimate::face_catch_up_seconds(shots, device, mi.id) } else { estimate::face_seconds(shots, device, mi.id) };
+    let speed = format!("{} for this library {} {}.", capital(&estimate::describe_seconds(secs)), if device == Device::Gpu { "with" } else { "on" }, device.phrase());
+    let ink = |c: iced::Color| if enabled { c } else { alpha(c, 0.45) };
+    let mut top = row![text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(ink(t::INK))].spacing(8).align_y(Alignment::Center);
+    if mi.recommended {
+        top = top.push(text("Recommended").size(t::T_SMALL).color(ink(t::SIGNAL)));
+    }
+    top = top.push(Space::new().width(Length::Fill));
+    top = top.push(text(if installed { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(ink(t::INK2)));
+    let licence = format!("Licence: {}: {}. From {}, its publisher.", capital(mi.licence), mi.licence_plain, mi.publisher);
+    let what = mi.what.split_whitespace().collect::<Vec<_>>().join(" ");
+    let col = column![
+        top,
+        text(format!("{what} {speed}")).size(t::T_SMALL).color(ink(t::INK2)),
+        text(licence).size(t::T_SMALL).color(ink(if mi.restricted { t::WARN } else { t::INK3 })),
+    ]
+    .spacing(2)
+    .width(Length::Fill);
+    let r = row![radio_dot(on, enabled), col].spacing(t::S3).align_y(Alignment::Start);
+    let id = mi.id;
+    button(r)
+        .width(Length::Fill)
+        .padding(Padding::from([7.0, 12.0]))
+        .style(move |_t, status| {
+            let hot = enabled && matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style { background: (on && enabled || hot).then_some(Background::Color(t::RAISED)), text_color: t::INK, border: Border { radius: t::R_CONTROL.into(), ..Border::default() }, ..button::Style::default() }
+        })
+        .on_press_maybe(enabled.then_some(d(DialogMsg::FaceModel(id))))
+        .into()
+}
+
+fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
+    let st = &app.search.status;
+    let faces_st = &st.faces;
     let c = costs(app);
     let ready = st.models_installed;
-    let title = if ready { "Index the library?" } else { "Download the search model and index the library?" };
-    let mut col = column![
-        dialogs::header(title, None),
-        kit::secondary("Search runs on this computer, with a model downloaded once from its publisher. Nothing about your photos is sent anywhere."),
-    ]
-    .spacing(t::S2 + 2.0);
-    // The rows, under their roles.
-    let mut role = "";
-    let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    for mi in models::search_models() {
-        if mi.role != role {
-            if !rows.is_empty() {
-                col = col.push(group(std::mem::take(&mut rows)));
+    let faces = dl.faces || dl.faces_only;
+    let model = models::info(dl.face_model);
+    // What *Download* fetches: the same list its rows will show.
+    let total = models::bytes_for(&missing_models(st, !dl.faces_only, faces.then_some(dl.face_model)));
+    let title = match (dl.faces_only, total > 0) {
+        (true, true) => "Download a face model and find faces?",
+        (true, false) => "Find faces in the library?",
+        (false, true) => "Download the models and index the library?",
+        (false, false) => "Index the library?",
+    };
+    let lede = if dl.faces_only {
+        "Faces are found on this computer, with a model downloaded once from its publisher. Nothing about your photos is sent anywhere."
+    } else {
+        "Search and face finding run on this computer, with models downloaded once from their publishers. Nothing about your photos is sent anywhere."
+    };
+    let mut col = column![dialogs::header(title, None), kit::secondary(lede)].spacing(t::S2 + 2.0);
+    // Search's rows, under their role.
+    if !dl.faces_only {
+        let mut role = "";
+        let mut rows: Vec<Element<'_, Message>> = Vec::new();
+        for mi in models::search_models() {
+            if mi.role != role {
+                if !rows.is_empty() {
+                    col = col.push(group(std::mem::take(&mut rows)));
+                }
+                role = mi.role;
+                col = col.push(row![kit::heading(mi.role), kit::caption(if mi.required { "Always used." } else { "" })].spacing(t::S2).align_y(Alignment::Center));
             }
-            role = mi.role;
-            col = col.push(row![kit::heading(mi.role), kit::caption(if mi.required { "Always used." } else { "" })].spacing(t::S2).align_y(Alignment::Center));
+            rows.push(model_row(mi, ready));
         }
-        rows.push(model_row(mi, ready));
+        if !rows.is_empty() {
+            col = col.push(group(rows));
+        }
     }
-    if !rows.is_empty() {
-        col = col.push(group(rows));
+    // Faces: on unless unticked, with the model picked.
+    let head: Element<'_, Message> = if dl.faces_only { kit::heading("Faces").into() } else { tick(dl.faces, "Find people's faces", d(DialogMsg::Faces)) };
+    col = col.push(row![head, kit::caption("Groups faces alike so you can name people. Pick the model:")].spacing(t::S2).align_y(Alignment::Center));
+    let rows: Vec<Element<'_, Message>> = models::face_models()
+        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, face_ready(st, mi.id), dl.faces_only))
+        .collect();
+    let mut list = column![].spacing(2).padding(2);
+    for r in rows {
+        list = list.push(r);
     }
+    col = col.push(container(list).width(Length::Fill).style(style::group()));
+    let finder = models::info(models::FACE_DETECTOR);
+    col = col.push(kit::caption(format!(
+        "{} ({}, {}, from {}) finds the faces for whichever model you pick, so changing the model later keeps the faces and their names. Nothing is named for you.",
+        finder.name,
+        size(finder.bytes()),
+        finder.licence,
+        finder.publisher
+    )));
     let runs = match (st.device.chosen, &st.device.name) {
         (Device::Gpu, Some(name)) => format!("The graphics card ({name}), checked against the processor first"),
         (Device::Gpu, None) => "The graphics card, checked against the processor first".to_string(),
         (Device::Cpu, _) => "The processor".to_string(),
     };
+    let device = st.device.chosen;
+    let shots = st.library_shots.max(st.indexed_shots);
     let mut facts = Vec::new();
-    if !ready {
-        facts.push(fact("Downloads", format!("{} in all, once", c.download), None));
+    if total > 0 {
+        facts.push(fact("Downloads", format!("{} in all, once", size(total)), None));
     }
     facts.push(fact("Reads", capital(&c.read), None));
     facts.push(fact("Runs on", runs, Some("Preferences ▸ Search chooses the graphics card or the processor.")));
-    facts.push(fact("Takes", format!("{}. Search works on the newest days within a minute.", c.takes), None));
+    let takes = if dl.faces_only {
+        let todo = st.indexed_shots.saturating_sub(faces_st.looked_at);
+        format!("{} {} {}. Groups appear on the People tab as they are found.", capital(&estimate::describe_seconds(estimate::face_catch_up_seconds(todo, device, dl.face_model))), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
+    } else if faces {
+        let secs = estimate::seconds(shots, device) + estimate::face_seconds(shots, device, dl.face_model);
+        format!("{} for search and faces {} {}. Search works on the newest days within a minute.", capital(&estimate::describe_seconds(secs)), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
+    } else {
+        format!("{}. Search works on the newest days within a minute.", c.takes)
+    };
+    facts.push(fact("Takes", takes, None));
     col = col.push(group(facts));
-    let sums_link = button(text(if sums { "Hide sources and checksums" } else { "Show sources and checksums" }).size(t::T_SMALL))
+    let sums_link = button(text(if dl.sums { "Hide sources and checksums" } else { "Show sources and checksums" }).size(t::T_SMALL))
         .padding(Padding::from([0.0, 4.0]))
         .style(style::link().style())
         .on_press(d(DialogMsg::Sums));
@@ -255,31 +485,54 @@ fn ask_view(app: &App, sums: bool) -> Element<'_, Message> {
         .spacing(t::S2)
         .align_y(Alignment::Center),
     );
-    if sums {
+    if dl.sums {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
-        for mi in models::search_models() {
-            for f in mi.files {
-                rows.push(
-                    column![
-                        text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
-                        text(f.url).size(t::T_SMALL).color(t::INK3),
-                        text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
-                    ]
-                    .spacing(1)
-                    .padding(Padding::from([6.0, 12.0]))
-                    .into(),
-                );
+        if !dl.faces_only {
+            for mi in models::search_models() {
+                for f in mi.files {
+                    rows.push(
+                        column![
+                            text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                            text(f.url).size(t::T_SMALL).color(t::INK3),
+                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                        ]
+                        .spacing(1)
+                        .padding(Padding::from([6.0, 12.0]))
+                        .into(),
+                    );
+                }
+            }
+        }
+        if faces {
+            for mi in [finder, model] {
+                for f in mi.files {
+                    rows.push(
+                        column![
+                            text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                            text(f.url).size(t::T_SMALL).color(t::INK3),
+                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                        ]
+                        .spacing(1)
+                        .padding(Padding::from([6.0, 12.0]))
+                        .into(),
+                    );
+                }
             }
         }
         col = col.push(group(rows));
     }
-    let go = if ready { "Index the library".to_string() } else { format!("Download {} and index", c.download) };
+    let go = match (dl.faces_only, total > 0) {
+        (true, true) => format!("Download {} and find faces", size(total)),
+        (true, false) => "Find faces".to_string(),
+        (false, true) => format!("Download {} and index", size(total)),
+        (false, false) => "Index the library".to_string(),
+    };
     col = col.push(Space::new().height(t::S1));
     col = col.push(dialogs::footer(
         vec![],
         vec![kit::btn("Cancel", style::secondary(), Some(d(DialogMsg::Cancel))).into(), kit::btn(go, style::primary(), Some(d(DialogMsg::Download))).into()],
     ));
-    col.into()
+    iced::widget::scrollable(col).style(style::scroll).into()
 }
 
 fn progress_view(app: &App) -> Element<'_, Message> {
@@ -321,10 +574,12 @@ fn progress_view(app: &App) -> Element<'_, Message> {
         return col.into();
     }
     let done = !s.downloads.is_empty() && s.downloads.iter().all(|x| x.state == DownloadState::Checked);
-    let (title, body) = if done {
-        ("Search model ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got.")
-    } else {
-        ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar.")
+    let several = s.downloads.len() > 1;
+    let (title, body) = match (done, several) {
+        (true, false) => ("Search model ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
+        (true, true) => ("Models ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
+        (false, false) => ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar."),
+        (false, true) => ("Downloading the models", "Indexing starts as soon as the models are in place. You can close this: the downloads carry on, with their progress in the status bar."),
     };
     let rows = s
         .downloads
@@ -400,7 +655,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         let (done, total) = s.downloads.iter().fold((0u64, 0u64), |(a, b), x| (a + x.done, b + x.total));
         let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
         let content = row![
-            words("Downloading the search model".into()),
+            words(if s.downloads.len() > 1 { "Downloading the models".into() } else { "Downloading the search model".into() }),
             text(progress_bytes(done, total)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
             bar(frac, Some(56.0)),
         ]
@@ -452,7 +707,12 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
                 row![words("Adding new photos to search".into()), text(of).size(t::T_SMALL).color(t::INK2), b].spacing(t::S2).align_y(Alignment::Center).into()
             }
             kind => {
-                let label = if kind == PassKind::Rebuild { "Rebuilding the search index" } else { "Indexing" };
+                let label = match kind {
+                    PassKind::Rebuild => "Rebuilding the search index",
+                    PassKind::Faces if st.faces.unrecognised > 0 => "Recognising faces again",
+                    PassKind::Faces => "Finding faces",
+                    _ => "Indexing",
+                };
                 let content =
                     row![words(label.into()), text(of).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK), bar(frac, Some(56.0))].spacing(t::S2).align_y(Alignment::Center);
                 let b = button(content).padding(Padding::from([0.0, 6.0])).style(style::ghost().style()).on_press(m(Msg::Steps(!s.steps)));
@@ -528,9 +788,16 @@ pub fn steps_layer(app: &App) -> Option<Element<'_, Message>> {
     let frac = if p.total == 0 { 0.0 } else { p.done as f32 / p.total as f32 };
     let left = estimate::describe_seconds(estimate::seconds(p.total.saturating_sub(p.done), s.status.device.chosen));
     let detail = format!("{} of {} photos, newest first. {} left.", util::thousands(p.done as u64), util::thousands(p.total as u64), capital(&left));
+    // The first index finds faces in the same pass; a faces pass of its
+    // own is the one step.
+    let (glyph, what) = match p.kind {
+        PassKind::Faces => (Glyph::Person, if s.status.faces.unrecognised > 0 { "Faces, with the new model" } else { "Faces" }),
+        PassKind::FirstIndex if s.status.faces.on => (Glyph::Search, "Search and faces"),
+        _ => (Glyph::Search, "Search"),
+    };
     let step = row![
-        icons::view(Glyph::Search, 16.0, t::INK3),
-        column![text("Search").size(t::T_BODY).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
+        icons::view(glyph, 16.0, t::INK3),
+        column![text(what).size(t::T_BODY).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
         bar(frac, Some(80.0)),
     ]
     .spacing(t::S3)
@@ -717,5 +984,103 @@ mod tests {
         assert_eq!(size(971_000_000), "971 MB");
         assert!(!size(models::bytes_for(&[ModelId::Siglip2])).starts_with("about"));
         assert_eq!(capital("about 7 minutes with the graphics card"), "About 7 minutes with the graphics card");
+    }
+
+    /// Nothing indexed; `search` and `faces` say which models are in
+    /// place (the faces' for AuraFace, the engine's chosen model).
+    fn models_here(search: bool, faces: bool) -> Status {
+        let mut st = status(None, 0, 634);
+        st.first_index_asked = false;
+        st.models_installed = search;
+        st.faces = crate::search::FacesStatus { on: true, model: Some(ModelId::AuraFace), installed: faces, ..Default::default() };
+        st
+    }
+
+    fn rows(b: &Begin) -> Vec<ModelId> {
+        match b {
+            Begin::Index => Vec::new(),
+            Begin::Download(rows) => rows.iter().map(|d| d.model).collect(),
+        }
+    }
+
+    #[test]
+    fn with_every_model_in_place_the_dialog_closes_and_indexing_starts() {
+        // The do-not-break pass: all three models here, faces ticked.  The
+        // rows used to list them all, waiting for reports that never came.
+        let st = models_here(true, true);
+        assert_eq!(begin_first_index(&st, Some(ModelId::AuraFace)), Begin::Index);
+        assert_eq!(begin_first_index(&st, None), Begin::Index);
+        assert!(missing_models(&st, true, Some(ModelId::AuraFace)).is_empty(), "the dialog quotes nothing to download");
+    }
+
+    #[test]
+    fn with_search_in_place_only_the_face_rows_show_and_the_total_is_theirs() {
+        // The upgrade: search's model here, the face models not.
+        let st = models_here(true, false);
+        let begin = begin_first_index(&st, Some(ModelId::AuraFace));
+        assert_eq!(rows(&begin), vec![models::FACE_DETECTOR, ModelId::AuraFace]);
+        let Begin::Download(list) = begin else { unreachable!() };
+        let total: u64 = list.iter().map(|d| d.total).sum();
+        assert_eq!(total, models::bytes_for(&models::face_set(ModelId::AuraFace)));
+        assert!(list.iter().all(|d| d.state == DownloadState::Waiting && d.done == 0));
+        // The dialog's quoted total is the same list's.
+        assert_eq!(models::bytes_for(&missing_models(&st, true, Some(ModelId::AuraFace))), total);
+        // Faces unticked: nothing to fetch, indexing starts.
+        assert_eq!(begin_first_index(&st, None), Begin::Index);
+        // Nothing here: all three.
+        let none = models_here(false, false);
+        assert_eq!(rows(&begin_first_index(&none, Some(ModelId::AuraFace))), vec![ModelId::Siglip2, models::FACE_DETECTOR, ModelId::AuraFace]);
+        assert_eq!(rows(&begin_first_index(&none, None)), vec![ModelId::Siglip2]);
+    }
+
+    #[test]
+    fn another_face_model_than_the_one_in_place_is_fetched() {
+        // AuraFace's set is in place; SFace picked: its set is listed (the
+        // status can't tell the detector apart), and the catch-up's
+        // faces-only total leaves search out.
+        let st = models_here(true, true);
+        assert!(face_ready(&st, ModelId::AuraFace) && !face_ready(&st, ModelId::SFace));
+        assert_eq!(missing_models(&st, false, Some(ModelId::SFace)), models::face_set(ModelId::SFace).to_vec());
+        assert!(missing_models(&models_here(false, true), false, Some(ModelId::AuraFace)).is_empty());
+    }
+
+    #[test]
+    fn a_row_whose_model_is_in_place_stops_waiting() {
+        // Listed from an older status: the detector's row waits while
+        // SFace downloads; once the status has SFace's set in place, it
+        // is done and nothing is downloading any more.
+        let mut st = models_here(true, false);
+        let Begin::Download(mut list) = begin_first_index(&st, Some(ModelId::SFace)) else { panic!("rows expected") };
+        record_download(&mut list, Download { model: ModelId::SFace, done: 39, total: 39, state: DownloadState::Checked });
+        settle_downloads(&mut list, &st);
+        assert_eq!(list[0].state, DownloadState::Waiting, "not in place yet");
+        st.faces.model = Some(ModelId::SFace);
+        st.faces.installed = true;
+        settle_downloads(&mut list, &st);
+        assert!(list.iter().all(|d| d.state == DownloadState::Checked && d.done == d.total), "{list:?}");
+        // A row that is downloading is left to its own reports.
+        let mut busy = vec![Download { model: ModelId::Siglip2, done: 5, total: 9, state: DownloadState::Downloading }];
+        settle_downloads(&mut busy, &models_here(true, true));
+        assert_eq!(busy[0].state, DownloadState::Downloading);
+    }
+
+    #[test]
+    fn a_new_download_after_finished_ones_starts_a_fresh_list() {
+        // The first index's rows, all done; then a face model change
+        // fetches SFace: the status bar's total is SFace's alone.
+        let mut list = vec![
+            Download { model: ModelId::Siglip2, done: 9, total: 9, state: DownloadState::Checked },
+            Download { model: ModelId::AuraFace, done: 7, total: 7, state: DownloadState::Checked },
+        ];
+        record_download(&mut list, Download { model: ModelId::SFace, done: 0, total: 4, state: DownloadState::Downloading });
+        assert_eq!(list.iter().map(|d| d.model).collect::<Vec<_>>(), vec![ModelId::SFace]);
+        // While it runs, later reports update its row.
+        record_download(&mut list, Download { model: ModelId::SFace, done: 4, total: 4, state: DownloadState::Checked });
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].state, DownloadState::Checked);
+        // A queued row joins a running list rather than replacing it.
+        let mut running = vec![Download { model: ModelId::Yunet, done: 1, total: 2, state: DownloadState::Downloading }];
+        record_download(&mut running, Download { model: ModelId::AuraFace, done: 0, total: 7, state: DownloadState::Waiting });
+        assert_eq!(running.len(), 2);
     }
 }

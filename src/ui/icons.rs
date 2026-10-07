@@ -22,7 +22,7 @@ pub enum Glyph {
     Library,
     /// Export into the library.
     Export,
-    /// Copy RAWs out for editing.
+    /// Copy photos out for editing.
     EditCopy,
     /// Review pruned files (the trash).
     Trash,
@@ -91,6 +91,26 @@ pub enum Glyph {
     Clock,
     /// A word left out of a search: a ring with a bar across.
     LeaveOut,
+    /// People, fursuits and pets: a person's head beside a paw.
+    Subjects,
+    /// A person: a head on shoulders.
+    Person,
+    /// A fursuit: a head with full ears and a muzzle.
+    Fursuit,
+    /// A pet: a paw print.
+    Paw,
+    /// Merge groups: two lines joining.
+    Merge,
+    /// Move out of a group: one line parting.
+    Split,
+    /// Hide: an eye crossed out.
+    Hide,
+    /// Name or rename: a pencil.
+    Pencil,
+    /// More actions: three dots.
+    More,
+    /// A new group, or add: a plus.
+    Plus,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -247,6 +267,12 @@ impl Pen<'_> {
         if let Some(p) = PathBuilder::from_circle(cx * self.u, cy * self.u, r * self.u) {
             self.pm.fill_path(&p, &self.paint, FillRule::Winding, Transform::identity(), None);
         }
+    }
+
+    /// A path in SVG's notation on the 24 grid, stroked.
+    fn path(&mut self, d: &str) {
+        let pb = svg_path(d, self.u);
+        self.stroke(pb);
     }
 
     /// Circular arc from `a0` to `a1` degrees (0 = east, clockwise on screen).
@@ -540,7 +566,183 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.circle(12.0, 12.0, 8.5);
             p.line(&[(8.0, 12.0), (16.0, 12.0)]);
         }
+        Subjects => {
+            p.circle(7.6, 7.8, 3.0);
+            p.path("M2.6 19c.5-3.4 2.5-5.3 5-5.3 1.1 0 2 .3 2.8.9");
+            p.path("M17 14c1.8 0 3.4 1.6 3.4 3.1 0 1.1-.8 1.8-1.7 1.8-.6 0-1-.4-1.7-.4s-1.1.4-1.7.4c-.9 0-1.7-.7-1.7-1.8 0-1.5 1.6-3.1 3.4-3.1z");
+            for (x, y) in [(12.9, 12.2), (15.3, 9.6), (18.7, 9.6), (21.1, 12.2)] {
+                p.dot(x, y, 1.15);
+            }
+        }
+        Person => {
+            p.circle(12.0, 8.5, 3.5);
+            p.path("M5 20c.8-3.8 3.6-6 7-6s6.2 2.2 7 6");
+        }
+        Fursuit => {
+            // Full ears, cheek ruffs and a muzzle with its nose.
+            p.path("M5.9 10.3C4.5 7.8 3.9 5.2 4 2.9c2.6.5 4.8 1.9 6.3 3.4q1.7-.4 3.4 0c1.5-1.5 3.7-2.9 6.3-3.4.1 2.3-.5 4.9-1.9 7.4.8 1.1 1.2 2.4 1.2 3.8l1.9 1.1-2.1.5.8 1.4-1.9-.2c-1.2 2.3-3.4 3.6-6 3.6s-4.8-1.3-6-3.6l-1.9.2.8-1.4-2.1-.5 1.9-1.1c0-1.4.4-2.7 1.2-3.8z");
+            p.path("M6.2 5.4c.6 1.1 1.3 2 2.2 2.7M17.8 5.4c-.6 1.1-1.3 2-2.2 2.7M10.9 14.7h2.2L12 16zM12 16c-.3.9-1 1.3-1.8 1.1M12 16c.3.9 1 1.3 1.8 1.1");
+            p.dot(9.2, 11.8, 1.1);
+            p.dot(14.8, 11.8, 1.1);
+        }
+        Paw => {
+            p.path("M12 12c2.6 0 4.9 2.3 4.9 4.4 0 1.6-1.1 2.6-2.5 2.6-.9 0-1.5-.5-2.4-.5s-1.5.5-2.4.5c-1.4 0-2.5-1-2.5-2.6 0-2.1 2.3-4.4 4.9-4.4z");
+            for (x, y) in [(5.6, 10.6), (9.4, 6.6), (14.6, 6.6), (18.4, 10.6)] {
+                p.dot(x, y, 1.6);
+            }
+        }
+        Merge => p.path("M6 4v4.5c0 3.5 6 4.5 6 8.5v3M18 4v4.5c0 3.5-6 4.5-6 8.5"),
+        Split => p.path("M12 4v4c0 3.5-6 4.5-6 8.5V20M12 8c0 3.5 6 4.5 6 8.5V20"),
+        Hide => {
+            p.path("M3 12s3.5-6 9-6c1.6 0 3 .5 4.2 1.2M21 12s-3.5 6-9 6c-1.6 0-3-.5-4.2-1.2");
+            p.line(&[(4.0, 4.0), (20.0, 20.0)]);
+            p.path("M9.9 9.9a3 3 0 0 0 4.2 4.2");
+        }
+        Pencil => {
+            p.closed(&[(4.0, 20.0), (8.0, 20.0), (19.0, 9.0), (15.0, 5.0), (4.0, 16.0)]);
+            p.line(&[(13.0, 7.0), (17.0, 11.0)]);
+        }
+        More => {
+            for x in [6.0, 12.0, 18.0] {
+                p.dot(x, 12.0, 1.5);
+            }
+        }
+        Plus => {
+            p.line(&[(12.0, 5.0), (12.0, 19.0)]);
+            p.line(&[(5.0, 12.0), (19.0, 12.0)]);
+        }
     }
+}
+
+/// A small SVG path reader for the 24-grid icons: M, L, H, V, C, S, Q and
+/// Z, absolute or relative, and A only as a quarter-turn-free arc drawn as
+/// its chord's bulge (`a r r 0 0 s dx dy`, enough for the eye's lid).
+fn svg_path(d: &str, u: f32) -> PathBuilder {
+    let mut pb = PathBuilder::new();
+    // Tokens: commands and numbers ("-.4", ".6", "1.2.3" = 1.2 .3).
+    let mut toks: Vec<String> = Vec::new();
+    let mut num = String::new();
+    let flush = |num: &mut String, toks: &mut Vec<String>| {
+        if !num.is_empty() {
+            toks.push(std::mem::take(num));
+        }
+    };
+    for ch in d.chars() {
+        match ch {
+            c if c.is_ascii_alphabetic() => {
+                flush(&mut num, &mut toks);
+                toks.push(c.to_string());
+            }
+            '-' => {
+                flush(&mut num, &mut toks);
+                num.push('-');
+            }
+            '.' if num.contains('.') => {
+                flush(&mut num, &mut toks);
+                num.push('.');
+            }
+            c if c.is_ascii_digit() || c == '.' => num.push(c),
+            _ => flush(&mut num, &mut toks),
+        }
+    }
+    flush(&mut num, &mut toks);
+    let (mut x, mut y) = (0.0f32, 0.0f32);
+    let (mut sx, mut sy) = (0.0f32, 0.0f32);
+    // The last control point, for S.
+    let mut last_c: Option<(f32, f32)> = None;
+    let mut i = 0;
+    let mut cmd = 'M';
+    let nums = |i: &mut usize, n: usize| -> Option<Vec<f32>> {
+        let mut v = Vec::with_capacity(n);
+        for _ in 0..n {
+            v.push(toks.get(*i)?.parse::<f32>().ok()?);
+            *i += 1;
+        }
+        Some(v)
+    };
+    while i < toks.len() {
+        if let Some(c) = toks[i].chars().next().filter(|c| c.is_ascii_alphabetic()) {
+            cmd = c;
+            i += 1;
+            if c == 'z' || c == 'Z' {
+                pb.close();
+                (x, y) = (sx, sy);
+                last_c = None;
+                continue;
+            }
+        }
+        let rel = cmd.is_ascii_lowercase();
+        let (ox, oy) = if rel { (x, y) } else { (0.0, 0.0) };
+        match cmd.to_ascii_uppercase() {
+            'M' => {
+                let Some(v) = nums(&mut i, 2) else { break };
+                (x, y) = (ox + v[0], oy + v[1]);
+                (sx, sy) = (x, y);
+                pb.move_to(x * u, y * u);
+                // Pairs after a move are lines.
+                cmd = if rel { 'l' } else { 'L' };
+                last_c = None;
+            }
+            'L' => {
+                let Some(v) = nums(&mut i, 2) else { break };
+                (x, y) = (ox + v[0], oy + v[1]);
+                pb.line_to(x * u, y * u);
+                last_c = None;
+            }
+            'H' => {
+                let Some(v) = nums(&mut i, 1) else { break };
+                x = if rel { x + v[0] } else { v[0] };
+                pb.line_to(x * u, y * u);
+                last_c = None;
+            }
+            'V' => {
+                let Some(v) = nums(&mut i, 1) else { break };
+                y = if rel { y + v[0] } else { v[0] };
+                pb.line_to(x * u, y * u);
+                last_c = None;
+            }
+            'C' => {
+                let Some(v) = nums(&mut i, 6) else { break };
+                let (x1, y1, x2, y2, ex, ey) = (ox + v[0], oy + v[1], ox + v[2], oy + v[3], ox + v[4], oy + v[5]);
+                pb.cubic_to(x1 * u, y1 * u, x2 * u, y2 * u, ex * u, ey * u);
+                last_c = Some((x2, y2));
+                (x, y) = (ex, ey);
+            }
+            'S' => {
+                let Some(v) = nums(&mut i, 4) else { break };
+                let (x1, y1) = last_c.map_or((x, y), |(cx, cy)| (2.0 * x - cx, 2.0 * y - cy));
+                let (x2, y2, ex, ey) = (ox + v[0], oy + v[1], ox + v[2], oy + v[3]);
+                pb.cubic_to(x1 * u, y1 * u, x2 * u, y2 * u, ex * u, ey * u);
+                last_c = Some((x2, y2));
+                (x, y) = (ex, ey);
+            }
+            'Q' => {
+                let Some(v) = nums(&mut i, 4) else { break };
+                let (x1, y1, ex, ey) = (ox + v[0], oy + v[1], ox + v[2], oy + v[3]);
+                pb.quad_to(x1 * u, y1 * u, ex * u, ey * u);
+                last_c = None;
+                (x, y) = (ex, ey);
+            }
+            'A' => {
+                // rx ry rotation large sweep x y: drawn as a quadratic
+                // bulging by the radius' sagitta (small arcs only).
+                let Some(v) = nums(&mut i, 7) else { break };
+                let (ex, ey) = (ox + v[5], oy + v[6]);
+                let (mx, my) = ((x + ex) / 2.0, (y + ey) / 2.0);
+                let (dx, dy) = (ex - x, ey - y);
+                let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+                let r = v[0].max(len / 2.0);
+                let sag = r - (r * r - len * len / 4.0).max(0.0).sqrt();
+                let side = if v[4] > 0.5 { 1.0 } else { -1.0 };
+                let (nx, ny) = (-dy / len * side, dx / len * side);
+                pb.quad_to((mx - nx * sag * 2.0) * u, (my - ny * sag * 2.0) * u, ex * u, ey * u);
+                last_c = None;
+                (x, y) = (ex, ey);
+            }
+            _ => break,
+        }
+    }
+    pb
 }
 
 /// tiny-skia stores premultiplied RGBA; iced wants straight alpha.
@@ -567,7 +769,8 @@ mod tests {
             Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
-            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut,
+            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut, Subjects, Person, Fursuit, Paw,
+            Merge, Split, Hide, Pencil, More, Plus,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");

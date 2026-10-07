@@ -593,7 +593,7 @@ fn target(app: &App) -> Option<RecordId> {
     };
     match app.view {
         View::Grid => pick(app.grid.anchor, &app.grid.selection),
-        View::Calendar | View::Search => None,
+        View::Calendar | View::Search | View::Subjects => None,
     }
 }
 

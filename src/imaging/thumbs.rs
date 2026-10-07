@@ -44,6 +44,8 @@ pub type OwnerId = u32;
 pub const OWNER_MAIN: OwnerId = 1;
 pub const OWNER_CALENDAR: OwnerId = 2;
 pub const OWNER_SEARCH: OwnerId = 3;
+/// A person's photos (People, fursuits and pets).
+pub const OWNER_PERSON: OwnerId = 4;
 
 /// One mip level of a thumbnail, ready for the GPU.
 #[derive(Clone, Debug)]

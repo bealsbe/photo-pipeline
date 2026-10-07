@@ -70,10 +70,13 @@ enum Cmd {
     Undo,
     /// A regroup finished on its worker (either kind; `kind` says).
     Regrouped(Box<super::step::Regrouped>),
-    // Fursuits (phase 4, decision 11).
+    // Fursuits (phase 4, decision 11).  Sent by the fursuit API, which
+    // the pages call once they switch from their stand-in.
+    #[allow(dead_code)]
     SetFindHeads(bool),
     FindHeads,
     AnswerHeads(bool),
+    #[allow(dead_code)]
     StopHeads,
     FindMore { seq: u64, group: GroupId },
     Shutdown,
@@ -124,14 +127,34 @@ pub struct Config {
     /// The user's subjects file (`~/.local/share/photo-pipeline/subjects.json`
     /// by default; `None` keeps it in memory only, for tests).
     pub subjects_path: Option<PathBuf>,
+    /// Fetches models (`ml::download::execute`; a double in tests, which
+    /// must never reach the network).
+    pub downloader: Downloader,
 }
+
+/// Downloads the given models, reporting progress, and returns the ids
+/// that ended checked.
+pub type Downloader = Arc<dyn Fn(&[ModelId], &AtomicBool, &mut dyn FnMut(BgEvent)) -> Vec<ModelId> + Send + Sync>;
 
 impl Config {
     /// The app's: the real helper, the registry, the cache, the user's
-    /// data folder.
+    /// data folder, the real downloads.
     pub fn real() -> Config {
-        Config { factory: Client::factory(), installed: Box::new(models::installed), index_dir: None, subjects_path: super::faces::default_file_path() }
+        Config {
+            factory: Client::factory(),
+            installed: Box::new(models::installed),
+            index_dir: None,
+            subjects_path: super::faces::default_file_path(),
+            downloader: Arc::new(|ids, cancel, emit| crate::ml::download::execute(ids, cancel, emit)),
+        }
     }
+}
+
+/// A downloader for tests that must never fetch anything: it fails the
+/// test if asked.
+#[cfg(test)]
+pub fn no_downloads() -> Downloader {
+    Arc::new(|ids, _, _| panic!("a test asked to download {ids:?}"))
 }
 
 impl Engine {
@@ -150,7 +173,7 @@ impl Engine {
         let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())), tiles: Mutex::new(None), head_tiles: Mutex::new(None) });
         let s = shared.clone();
         let me = tx.clone();
-        let Config { factory, installed, index_dir, subjects_path } = config;
+        let Config { factory, installed, index_dir, subjects_path, downloader } = config;
         std::thread::Builder::new()
             .name("search-engine".into())
             .spawn(move || {
@@ -161,6 +184,7 @@ impl Engine {
                     shared: s,
                     factory,
                     installed,
+                    downloader,
                     index_dir,
                     device,
                     index_exports,
@@ -231,10 +255,7 @@ impl Engine {
     }
 }
 
-/// The people API (phase 3): what the *Subjects* page calls.  The page is
-/// being built against it, so until it lands nothing in the binary calls
-/// these; the allowance goes when it does.
-#[allow(dead_code)]
+/// The people API (phase 3): what the *Subjects* page calls.
 impl Engine {
     /// The *Subjects* page's state as last built (a cheap clone; no I/O).
     /// Also sent as `BgEvent::Subjects` whenever it changes.
@@ -351,8 +372,14 @@ impl Engine {
         }
     }
 
-    // ---- Fursuits (phase 4, decision 11) ----
+}
 
+/// The fursuit API (phase 4, decision 11): what the Fursuits tab,
+/// Preferences and the review call.  The pages switch to it from their
+/// stand-in when phase 4 merges; until then nothing in the binary calls
+/// these, and the allowance goes when it does.
+#[allow(dead_code)]
+impl Engine {
     /// Preferences ▸ *Find fursuit heads*.  Off: no scan starts (what was
     /// found stays until *Forget all*).
     pub fn set_find_heads(&self, on: bool) {
@@ -514,6 +541,7 @@ struct Worker {
     shared: Arc<Shared>,
     factory: EmbedderFactory,
     installed: Box<dyn Fn(ModelId) -> bool + Send>,
+    downloader: Downloader,
     index_dir: Option<PathBuf>,
     device: Device,
     index_exports: bool,
@@ -642,14 +670,20 @@ impl Worker {
                     if ok.iter().any(|m| m.is_face_model() || *m == ModelId::Yunet) {
                         self.drop_embedder();
                     }
-                    if self.first_index_pending && ok.contains(&ModelId::Siglip2) {
-                        self.first_index_pending = false;
+                    // The first index waits for search's model, which may
+                    // have been in place all along (only the face models
+                    // were fetched): what matters is that it is ready now,
+                    // not that it was in this download.  A download that
+                    // failed or was cancelled leaves it missing, and
+                    // nothing starts.  Faces still missing (their download
+                    // failed) don't hold search back: the pass runs without
+                    // them, and the tab offers the catch-up.
+                    let first = std::mem::take(&mut self.first_index_pending);
+                    if first && self.models_ready() {
                         self.start_pass(PassKind::FirstIndex);
-                    } else {
-                        self.first_index_pending = false;
                     }
                     if let Some(change) = self.face_pass_pending.take() {
-                        if self.faces_ready() {
+                        if self.faces_ready() && self.models_ready() {
                             self.start_face_pass(change);
                         }
                     }
@@ -673,6 +707,7 @@ impl Worker {
                         d.cancel();
                     }
                     self.first_index_pending = false;
+                    self.face_pass_pending = None;
                 }
                 Cmd::TryCardAgain => {
                     self.drop_embedder();
@@ -1487,11 +1522,11 @@ impl Worker {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = crate::ml::download::DownloadHandle::from_flag(cancel.clone());
-        let (bus, me) = (self.bus.clone(), self.me.clone());
+        let (bus, me, downloader) = (self.bus.clone(), self.me.clone(), self.downloader.clone());
         std::thread::Builder::new()
             .name("model-download".into())
             .spawn(move || {
-                let ok = crate::ml::download::execute(&missing, &cancel, &mut |ev| drop(bus.unbounded_send(ev)));
+                let ok = downloader(&missing, &cancel, &mut |ev| drop(bus.unbounded_send(ev)));
                 let _ = me.send(Cmd::DownloadsDone(ok));
             })
             .expect("spawn model-download");
@@ -2028,7 +2063,7 @@ mod tests {
     #[test]
     fn the_status_starts_from_the_saved_preferences_and_a_query_answers() {
         let (bus, _rx) = crate::bus::channel();
-        let config = Config { factory: Box::new(|_| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None };
+        let config = Config { factory: Box::new(|_| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Cpu, false, true, ModelId::AuraFace, false, config);
         let s = e.status();
         assert_eq!(s.device.chosen, Device::Cpu);
@@ -2184,7 +2219,7 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("device-rule", 6);
         let (factory, asked) = logging_factory(true);
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 6);
@@ -2220,7 +2255,7 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("round-trip", 12);
         let (factory, asked) = logging_factory(false);
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 12);
@@ -2268,7 +2303,7 @@ mod tests {
         // Clear removes it all.
         let (bus2, _rx2) = crate::bus::channel();
         let (factory, _) = logging_factory(false);
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         e2.clear_index();
@@ -2292,6 +2327,123 @@ mod tests {
         Arc::new(crate::model::library_index::index_from_tree(root, &scanned.tree, &store, &cancel).unwrap())
     }
 
+    /// Models in place, except the face ones: `have_faces` says whether
+    /// YuNet and AuraFace are installed; the downloader double flips it
+    /// when asked to fetch them (or, with `succeed` false, fetches
+    /// nothing, as a failed or cancelled download).
+    fn faces_arrive_later(succeed: bool) -> (Box<dyn Fn(ModelId) -> bool + Send>, Downloader, Arc<AtomicBool>, Arc<Mutex<Vec<ModelId>>>) {
+        let have_faces = Arc::new(AtomicBool::new(false));
+        let asked: Arc<Mutex<Vec<ModelId>>> = Arc::new(Mutex::new(Vec::new()));
+        let (h, a) = (have_faces.clone(), asked.clone());
+        let installed: Box<dyn Fn(ModelId) -> bool + Send> = Box::new(move |id| id == ModelId::Siglip2 || h.load(std::sync::atomic::Ordering::Relaxed));
+        let (h, a2) = (have_faces.clone(), asked.clone());
+        let downloader: Downloader = Arc::new(move |ids, _, _| {
+            a2.lock().extend_from_slice(ids);
+            if succeed {
+                h.store(true, std::sync::atomic::Ordering::Relaxed);
+                ids.to_vec()
+            } else {
+                Vec::new()
+            }
+        });
+        drop(a);
+        (installed, downloader, have_faces, asked)
+    }
+
+    /// The user's upgrade path: search's model is in place already and
+    /// only the face models are fetched.  The first index must start when
+    /// they arrive (search was ready all along), with faces on; and when
+    /// their download fails, search still indexes, without faces.
+    #[test]
+    fn the_first_index_starts_when_only_the_face_models_were_missing() {
+        for succeed in [true, false] {
+            let (bus, _rx) = crate::bus::channel();
+            let (lib, d) = library(if succeed { "faces-arrive" } else { "faces-fail" }, 5);
+            let (factory, _) = logging_factory(false);
+            let (installed, downloader, _have, asked) = faces_arrive_later(succeed);
+            let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
+            let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
+            e.on_library(lib.clone());
+            wait_for(&e, "the library", |s| s.library_shots == 5);
+            assert!(e.status().models_installed && !e.status().faces.installed);
+            e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
+            let s = wait_for(&e, "the first index after the download", |s| s.indexed_shots == 5 && s.pass.is_none());
+            assert_eq!(asked.lock().clone(), [ModelId::Yunet, ModelId::AuraFace], "only the missing models were fetched");
+            assert_eq!((s.faces.installed, s.faces.looked_at), (succeed, if succeed { 5 } else { 0 }), "succeed={succeed}: {s:?}");
+            assert!(s.stopped.is_none() && s.faces.on);
+            e.shutdown();
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The catch-up asked for with the face model missing: fetched, then
+    /// the catch-up runs over the indexed photos.
+    #[test]
+    fn the_catch_up_starts_when_only_the_face_model_was_missing() {
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library("catch-up-arrives", 4);
+        let (factory, _) = logging_factory(false);
+        let (installed, downloader, _have, asked) = faces_arrive_later(true);
+        let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 4);
+        // Search alone first (faces unticked in the dialog).
+        e.start_first_index(&models::models_for(None));
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+        assert_eq!((s.faces.on, s.faces.looked_at), (false, 0));
+        assert!(asked.lock().is_empty(), "nothing to fetch for search alone");
+        e.set_find_faces(true);
+        e.find_faces();
+        let s = wait_for(&e, "the catch-up after the download", |s| s.faces.looked_at == 4 && s.pass.is_none());
+        assert_eq!(asked.lock().clone(), [ModelId::Yunet, ModelId::AuraFace]);
+        assert!(s.faces.installed && s.stopped.is_none() && s.indexed_shots == 4);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The face catch-up covers every indexed photo not yet looked at for
+    /// faces (the user, 2026-10-03): photos indexed while face finding was
+    /// off, new exports included, and it runs only when asked.
+    #[test]
+    fn the_face_catch_up_covers_every_photo_indexed_without_faces() {
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library("face-catch-up", 6);
+        let (factory, _) = logging_factory(false);
+        // Faces on and the models in place: the first index looks at
+        // every photo.
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 6);
+        e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 6 && s.pass.is_none());
+        assert_eq!((s.faces.on, s.faces.looked_at), (true, 6));
+        // Faces off; two exports arrive and are indexed without faces.
+        e.set_find_faces(false);
+        wait_for(&e, "faces off", |s| !s.faces.on);
+        let day = d.join("lib/2025/Mar-2025/12-Mar-2025/JPG");
+        std::fs::write(day.join("0006.JPG"), "new").unwrap();
+        std::fs::write(day.join("0007.JPG"), "newer").unwrap();
+        e.on_library(rescan(&d.join("lib")));
+        let s = wait_for(&e, "the new exports", |s| s.indexed_shots == 8 && s.pass.is_none());
+        assert_eq!(s.faces.looked_at, 6, "nothing is looked at for faces while the setting is off");
+        // Nothing happens on its own; the catch-up, when asked, takes the two.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(e.status().faces.looked_at, 6);
+        e.set_find_faces(true);
+        e.find_faces();
+        let s = wait_for(&e, "the catch-up", |s| s.faces.looked_at == 8 && s.pass.is_none());
+        assert_eq!((s.indexed_shots, s.stopped), (8, None));
+        // Asked again with nothing left: no pass starts.
+        e.find_faces();
+        std::thread::sleep(Duration::from_millis(100));
+        let s = e.status();
+        assert!(s.pass.is_none() && s.faces.looked_at == 8);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// A file the helper can't read is read once: the first index ends
     /// and no pass follows it, a library check with nothing new starts
     /// nothing, the failure is kept on disk, and only a change to the
@@ -2304,7 +2456,7 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.fail_paths_containing = Some("0003".into());
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -2357,7 +2509,7 @@ mod tests {
         f.fail_paths_containing = Some("0001".into());
         f.fail_errno = Some(libc::EIO);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -2386,7 +2538,7 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.delay = Duration::from_millis(100);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -2553,7 +2705,7 @@ mod tests {
         let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
         let (bus, _rx) = crate::bus::channel();
         let (lib, d) = library_of("heads-cpu", &files);
-        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Cpu, true, false, ModelId::AuraFace, true, config);
         e.on_library(lib);
         wait_for(&e, "the library", |s| s.library_shots == 4);
@@ -2583,7 +2735,7 @@ mod tests {
         let (bus2, _rx2) = crate::bus::channel();
         let (lib2, d2) = library_of("heads-gpu", &files);
         let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
-        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d2.join("index")), subjects_path: None };
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d2.join("index")), subjects_path: None, downloader: no_downloads() };
         let e2 = Engine::with_config(bus2, Device::Gpu, true, false, ModelId::AuraFace, true, config);
         e2.on_library(lib2);
         wait_for(&e2, "the library", |s| s.library_shots == 4);
@@ -2617,7 +2769,7 @@ mod tests {
         let path = d.join("subjects.json");
         file.save(&path).unwrap();
         let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
-        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(path) };
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(path), downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 3);
@@ -2676,7 +2828,7 @@ mod tests {
             log.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 14);
@@ -2816,7 +2968,7 @@ mod tests {
             log2.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         let things = Events::new(&rx2).things(&e2);

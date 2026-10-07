@@ -508,7 +508,7 @@ fn people_library() {
     let (bus, rx) = crate::bus::channel();
     let subjects_path = out.join("subjects.json");
     let _ = std::fs::remove_file(&subjects_path);
-    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()) };
+    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()), downloader: crate::search::engine::no_downloads() };
     let engine = Engine::with_config(bus, device, true, true, face_model, false, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
@@ -678,7 +678,7 @@ fn fursuits_library() {
     let (bus, rx) = crate::bus::channel();
     let subjects_path = out.join("subjects.json");
     let _ = std::fs::remove_file(&subjects_path);
-    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()) };
+    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: Some(subjects_path.clone()), downloader: crate::search::engine::no_downloads() };
     let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, true, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
@@ -829,7 +829,7 @@ fn library_queries() {
     let lib = Arc::new(library_index::index_from_tree(&root, &scanned.tree, &store, &cancelled).unwrap());
     eprintln!("library: {} shots in {} days", lib.total_shots, lib.len());
     let (bus, rx) = crate::bus::channel();
-    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: None };
+    let config = Config { factory: Client::factory(), installed: Box::new(|_| true), index_dir: Some(out.join("index")), subjects_path: None, downloader: crate::search::engine::no_downloads() };
     let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, false, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
