@@ -62,7 +62,6 @@ enum Cmd {
     Merge { into: GroupId, others: Vec<GroupId> },
     SetHidden(GroupId, bool),
     Forget(SubjectId),
-    ForgetAll,
     /// Sent by the fursuit API block below; the pages call it once they
     /// switch from their stand-in.
     #[allow(dead_code)]
@@ -315,11 +314,6 @@ impl Engine {
         self.send(Cmd::Forget(id));
     }
 
-    /// Preferences ▸ Storage ▸ *Forget all*: every face found, every
-    /// vector and tile, and the subjects file (§10).
-    pub fn forget_all(&self) {
-        self.send(Cmd::ForgetAll);
-    }
 
     /// A group's faces, clearest first: `BgEvent::SubjectFaces { seq, .. }`.
     pub fn faces(&self, seq: u64, group: GroupId) {
@@ -867,15 +861,6 @@ impl Worker {
                 Cmd::Forget(id) => {
                     let r = self.people.forget(&id);
                     self.after_edit(r);
-                }
-                Cmd::ForgetAll => {
-                    self.people.forget_all();
-                    self.people.reset_grouping();
-                    self.cancel_scan();
-                    self.fursuits.forget_all();
-                    self.fursuits.reset_grouping();
-                    self.refresh_counts();
-                    self.publish_subjects();
                 }
                 Cmd::ForgetKind(kind) => {
                     self.people.forget_kind(kind);

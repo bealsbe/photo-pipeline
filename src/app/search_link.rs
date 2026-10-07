@@ -258,10 +258,11 @@ impl Link {
         }
     }
 
-    /// Forget every face found and every name given.
+    /// Forget every face found and every name given; fursuits (and pets)
+    /// are not touched.
     pub fn forget_all(&self) {
         match self {
-            Link::Engine(e) => e.forget_all(),
+            Link::Engine(e) => e.forget_kind(Kind::Person),
             Link::Fake(f) => f.change(|s| {
                 s.people.forget_all();
                 s.edits.retain(|k| *k != Kind::Person);
@@ -486,14 +487,15 @@ impl Link {
     /// Forget every fursuit head found and every fursuit name given;
     /// people are not touched.
     pub fn forget_all_fursuits(&self) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.forget_kind(Kind::Fursuit),
+            Link::Fake(f) => f.change(|s| {
                 s.fursuits.forget_all();
                 s.edits.retain(|k| *k != Kind::Fursuit);
                 s.status.heads.step = fursuits::Step::Idle;
                 s.status.heads.skipped = 0;
                 s.refresh_people();
-            });
+            }),
         }
     }
 

@@ -919,18 +919,6 @@ impl People {
         }
     }
 
-    /// *Forget all*: the user's file and the face cache go.
-    pub fn forget_all(&mut self) {
-        self.file = SubjectsFile::default();
-        self.undo.clear();
-        if let Some(p) = &self.file_path {
-            let _ = std::fs::remove_file(p);
-        }
-        if let Some(s) = &mut self.store {
-            s.forget_all();
-        }
-    }
-
     /// Build the page's snapshot: subjects (named first, most photos
     /// first), then clusters.  `resolve` turns a detection into a
     /// [`Face`] with its shot (the engine's resolver); detections of
@@ -1261,7 +1249,8 @@ mod tests {
         assert_eq!(p.photos_of(&a).unwrap().len(), 3);
         assert_eq!(p.answer(&a, vec![], Some(true)), Err(Refused::Nothing));
         assert_eq!(p.clarity(&face(1)), 0.0, "no cache: unknown clarity");
-        p.forget_all();
+        // People were the only kind: forgetting them takes the file too.
+        p.forget_kind(Kind::Person);
         assert!(!path.exists() && p.file.subjects.is_empty() && p.undo().is_none());
         let _ = std::fs::remove_dir_all(&d);
     }

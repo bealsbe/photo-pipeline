@@ -626,7 +626,9 @@ fn people_library() {
     engine.undo();
     let snap = wait_subjects(&mut stream, &|s| !s.groups.iter().any(|g| g.name.is_some()));
     assert!(snap.groups.iter().all(|g| g.name.is_none()));
-    engine.forget_all();
+    // Every kind forgotten: the file goes when no subject remains.
+    engine.forget_kind(crate::model::subjects::Kind::Person);
+    engine.forget_kind(crate::model::subjects::Kind::Fursuit);
     let snap = wait_subjects(&mut stream, &|s| s.faces_found == 0);
     eprintln!("after forget all: {} groups, {} faces, subjects file exists {}", snap.groups.len(), snap.faces_found, subjects_path.exists());
     assert!(snap.groups.is_empty() && !subjects_path.exists());
@@ -800,7 +802,9 @@ fn fursuits_library() {
     });
     eprintln!("@name: {} photos in {:.0} ms; resident {:.0} MB", hits.len(), t.elapsed().as_secs_f64() * 1000.0, rss_mb());
     assert_eq!(hits.len(), named.photos);
-    engine.forget_all();
+    // Every kind forgotten: the file goes when no subject remains.
+    engine.forget_kind(crate::model::subjects::Kind::Person);
+    engine.forget_kind(crate::model::subjects::Kind::Fursuit);
     std::thread::sleep(Duration::from_millis(500));
     engine.shutdown();
     assert!(!subjects_path.exists(), "forget all removes the file");
