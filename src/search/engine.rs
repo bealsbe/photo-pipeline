@@ -62,9 +62,6 @@ enum Cmd {
     Merge { into: GroupId, others: Vec<GroupId> },
     SetHidden(GroupId, bool),
     Forget(SubjectId),
-    /// Sent by the fursuit API block below; the pages call it once they
-    /// switch from their stand-in.
-    #[allow(dead_code)]
     ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
     MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId> },
