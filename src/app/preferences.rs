@@ -490,7 +490,7 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
             "Forgot every fursuit head found and every fursuit name given. Your photos are not changed."
         }
         Ask::ForgetPeople => {
-            link.forget_all();
+            link.forget_all_people();
             app.subjects.crops.clear();
             "Forgot every face found and every name given. Your photos are not changed."
         }
@@ -586,7 +586,7 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
         }
         Control::ForgetFaces => {
             app.prefs.faces_offer = false;
-            app.search.link.forget_all();
+            app.search.link.forget_all_people();
             app.subjects.crops.clear();
             app.show_status("Finding faces is off, and the faces found and the names you gave are forgotten.", 6000)
         }

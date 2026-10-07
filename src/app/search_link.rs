@@ -260,7 +260,7 @@ impl Link {
 
     /// Forget every face found and every name given; fursuits (and pets)
     /// are not touched.
-    pub fn forget_all(&self) {
+    pub fn forget_all_people(&self) {
         match self {
             Link::Engine(e) => e.forget_kind(Kind::Person),
             Link::Fake(f) => f.change(|s| {
