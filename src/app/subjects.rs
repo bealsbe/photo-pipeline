@@ -596,7 +596,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 app.search.link.set_hidden(id, true);
             }
             let text = if ids.len() == 1 {
-                format!("{} is hidden. Its photos still come up when you search for it by name.", label(&app.subjects, &ids[0]))
+                match app.subjects.group(&ids[0]).and_then(|g| g.name.clone()) {
+                    Some(n) => format!("{n} is hidden. Their photos still come up when you search for them by name."),
+                    None => "The group is hidden. Find it under Hidden.".to_string(),
+                }
             } else {
                 format!("{} hidden. Find them under Hidden.", util::plural(ids.len() as u64, "group"))
             };
@@ -834,7 +837,10 @@ fn header(app: &App) -> Element<'_, Message> {
     let caption = match kind {
         Kind::Person => {
             let a = arrange(&s.all, kind, app.settings.people_min_photos());
-            if a.named.is_empty() && !a.to_name.is_empty() {
+            if !app.search.status.faces.on && has_groups(app, kind) {
+                // Kept from before it was turned off: say why no more come.
+                "Finding faces is off, so new photos aren't looked at. Preferences ▸ People turns it on.".to_string()
+            } else if a.named.is_empty() && !a.to_name.is_empty() {
                 "Faces were found while indexing. Name the people you want to find.".to_string()
             } else if a.named.is_empty() && a.to_name.is_empty() {
                 String::new()
@@ -850,11 +856,11 @@ fn header(app: &App) -> Element<'_, Message> {
         title = title.push(kit::caption(caption));
     }
     let mut r = row![container(title).padding(Padding { left: t::S2, ..Padding::ZERO }), Space::new().width(Length::Fill), tabs(app)].align_y(Alignment::Center).spacing(t::S2);
-    if has_groups(app, kind) {
-        let look = if s.select_mode { style::toggle(true, t::SIGNAL) } else { style::ghost() };
-        let b = kit::icon_text_btn(Glyph::Select, "Select", if s.select_mode { t::SIGNAL } else { t::INK2 }, look, Some(m(Msg::SelectMode)));
-        r = r.push(tip(b, "Pick several groups, to merge or hide them  (S, or Ctrl+click)", true));
-    }
+    // Always there (quiet without groups), so the tabs never move.
+    let can = has_groups(app, kind) && s.page() == Page::Overview;
+    let look = if s.select_mode { style::toggle(true, t::SIGNAL) } else { style::ghost() };
+    let b = kit::icon_text_btn(Glyph::Select, "Select", if s.select_mode { t::SIGNAL } else { t::INK2 }, look, can.then(|| m(Msg::SelectMode)));
+    r = r.push(tip(b, "Pick several groups, to merge or hide them  (S, or Ctrl+click)", true));
     container(r.padding(Padding::from([0.0, t::S3]))).height(HEADER_H).center_y(HEADER_H).width(Length::Fill).style(style::fill(t::MOUNT)).into()
 }
 
@@ -903,8 +909,11 @@ pub fn state(app: &App, kind: Kind) -> State {
     if !f.on {
         return State::Off;
     }
-    if st.indexed_shots == 0 && st.pass.is_none() {
+    if st.indexed_shots == 0 && st.pass.is_none() && !app.search.downloading() {
         return State::NotIndexed;
+    }
+    if app.search.downloading() {
+        return State::Looking;
     }
     if st.pass.is_some() && st.stopped.is_none() {
         return State::Looking;
@@ -934,7 +943,7 @@ fn overview(app: &App) -> Element<'_, Message> {
                 Some(("Index the library…", m(Msg::IndexLibrary))),
                 None,
             ),
-            State::Off => message(Glyph::Person, "Finding faces is off", "Turn it on in Preferences ▸ Search to find the people in your photos.".into(), Some(("Open Preferences", m(Msg::OpenPrefs))), None),
+            State::Off => message(Glyph::Person, "Finding faces is off", "Turn it on in Preferences ▸ People to find the people in your photos.".into(), Some(("Open Preferences", m(Msg::OpenPrefs))), None),
             State::CatchUp => catch_up(app),
             State::Looking => looking(app),
             State::NoFaces => message(Glyph::Person, "No faces found yet", "No one was found in the photos indexed. New exports are looked at as they are added.".into(), None, None),
@@ -1055,7 +1064,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         row![icons::view(Glyph::Person, 26.0, t::INK), text("Find the people in your photos").size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
         text(about).size(t::T_BODY).color(t::INK2),
         container(group).width(Length::Fill).style(style::group()),
-        text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ Search.").size(t::T_SMALL).color(t::INK3),
+        text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ People.").size(t::T_SMALL).color(t::INK3),
         action,
     ]
     .spacing(14)
@@ -1069,7 +1078,12 @@ fn catch_up(app: &App) -> Element<'_, Message> {
 
 /// Faces are being looked for and none is grouped yet.
 fn looking(app: &App) -> Element<'_, Message> {
-    let col = column![progress_strip(app, Kind::Person).unwrap_or_else(|| Space::new().into()), later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")];
+    let body = if app.search.downloading() {
+        later(Glyph::Person, "Downloading the models", "Faces are found as the library is indexed, which starts once the models are in place. Groups appear here as they are found.")
+    } else {
+        later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")
+    };
+    let col = column![progress_strip(app, Kind::Person).unwrap_or_else(|| Space::new().into()), body];
     container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
@@ -1092,7 +1106,7 @@ fn progress_strip(app: &App, kind: Kind) -> Option<Element<'_, Message>> {
             let what = if f.unrecognised > 0 { "Recognising the faces again with the new model" } else { "Finding faces" };
             (format!("{what}: {} of {}", util::thousands(p.done as u64), util::plural(p.total as u64, "photo")), p.done, p.total)
         }
-        Some(p) if f.on && p.kind != PassKind::NewExports => {
+        Some(p) if f.on && p.kind == PassKind::FirstIndex => {
             (format!("Indexing finds faces as it goes: {} of {} so far", util::thousands(p.done as u64), util::plural(p.total as u64, "photo")), p.done, p.total)
         }
         _ => return None,
@@ -1134,7 +1148,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let size = if small { tile::SMALL_CROP } else { tile::TILE_CROP };
     let handle = s.crops.get(&g.cover.face, px(app, size), Framing::Face);
     let crop = tile::crop(handle, size, shape(g.kind));
-    let name = if small && !g.hidden { None } else { g.name.clone().or_else(|| g.hidden.then(|| "Unnamed".to_string())) };
+    let name = if small && !g.hidden { None } else { g.name.clone() };
     let count = if g.hidden { "Show".to_string() } else { util::plural(g.photos as u64, "photo") };
     let on = if g.hidden { m(Msg::Unhide(g.id.clone())) } else { m(Msg::Tile(g.id.clone())) };
     let picked = s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
@@ -1202,7 +1216,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     if !a.small.is_empty() {
         folds = folds.push(tip(
             disclose("Smaller groups", a.small.len(), s.small_open, m(Msg::Small(!s.small_open))),
-            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ Search sets the size.", app.settings.people_min_photos()),
+            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ People sets the size.", app.settings.people_min_photos()),
             true,
         ));
         any = true;

@@ -17,7 +17,7 @@ use chrono::NaiveDate;
 
 use super::index::{PathMap, Vectors};
 use super::Stopped;
-use crate::ml::client::{Embedder, Embedding, FileError, HelperError};
+use crate::ml::client::{Embedder, Embedding, FaceSpot, FileError, HelperError, KnownFaces, Want};
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, MTime};
 use crate::ops::netfs::{self, Failure};
@@ -40,6 +40,9 @@ pub struct Job {
     pub size: u64,
     pub mtime: MTime,
     pub day: NaiveDate,
+    /// Faces already found in it, to recognise again with the chosen
+    /// model (a face-model change, phase 3); `None` in every other pass.
+    pub known: Option<Vec<FaceSpot>>,
 }
 
 /// What a check of the library against the index found.
@@ -80,7 +83,7 @@ pub fn plan(index: &LibraryIndex, paths: &PathMap, vectors: &Vectors) -> Plan {
                 out.unreadable += 1;
                 continue;
             }
-            out.jobs.push(Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date });
+            out.jobs.push(Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date, known: None });
         }
     }
     out
@@ -105,6 +108,9 @@ pub struct Request {
     pub jobs: Vec<Job>,
     /// Shots in the library, for the progress line.
     pub total: usize,
+    /// What the helper gives for each shot: the search vector, and the
+    /// faces when they are on (phase 3).
+    pub want: Want,
 }
 
 /// Part of a pass's results.
@@ -121,7 +127,20 @@ pub struct Batch {
     pub oldest_day: Option<NaiveDate>,
     /// The helper stopped on the processor and was started again.
     pub restarted: bool,
+    /// The embedded shots were looked at for faces (the request asked):
+    /// a shot with none found still counts as scanned.
+    pub faces_scanned: bool,
     pub finished: Option<Finished>,
+}
+
+/// What a chunk of jobs asks the helper for: the pass's want, except
+/// that jobs carrying known faces ask for those to be recognised again.
+pub fn want_for(chunk: &[Job], want: &Want) -> Want {
+    if chunk.iter().any(|j| j.known.is_some()) {
+        Want::known(chunk.iter().filter_map(|j| j.known.as_ref().map(|k| KnownFaces { path: j.path.clone(), faces: k.clone() })).collect())
+    } else {
+        want.clone()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -192,7 +211,9 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
         }
         let chunk = &req.jobs[i..(i + BATCH).min(req.jobs.len())];
         let files: Vec<(PathBuf, FileType)> = chunk.iter().map(|j| (j.path.clone(), j.file_type)).collect();
-        let results = match embedder.embed_images(&files) {
+        let want = want_for(chunk, &req.want);
+        batch.faces_scanned = want.faces != crate::ml::client::FaceAsk::None;
+        let results = match embedder.embed_images(&files, &want) {
             Ok(r) => r,
             Err(HelperError::Restarted) => {
                 batch.restarted = true;
@@ -237,7 +258,8 @@ pub fn execute(req: Request, embedder: &dyn Embedder, already: usize, cancel: &A
         if batch.embedded.len() + batch.failed.len() >= BATCH || last.elapsed() >= Duration::from_millis(EMIT_MS) {
             let done = batch.done;
             let oldest = batch.oldest_day;
-            emit(std::mem::replace(&mut batch, Batch { total: req.total, done, oldest_day: oldest, ..Batch::default() }));
+            let scanned = batch.faces_scanned;
+            emit(std::mem::replace(&mut batch, Batch { total: req.total, done, oldest_day: oldest, faces_scanned: scanned, ..Batch::default() }));
             last = Instant::now();
         }
     }
@@ -316,7 +338,7 @@ pub mod tests {
         fn device_report(&self) -> (Option<String>, SelfCheck) {
             (Some(format!("Fake {}", self.device.label())), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
         }
-        fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<ImageResult>, HelperError> {
+        fn embed_images(&self, files: &[(PathBuf, FileType)], _want: &Want) -> Result<Vec<ImageResult>, HelperError> {
             let calls = self.calls.fetch_add(1, Ordering::Relaxed) + 1;
             if self.card_fails_after.is_some_and(|n| calls > n) {
                 return Err(HelperError::Card(CardFailure::Crashed));
@@ -342,7 +364,7 @@ pub mod tests {
                             let base = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap().and_hms_opt(14, 30, 0).unwrap();
                             let capture = base + chrono::Duration::milliseconds(n * 200);
                             let meta = ShotMeta { subsec_ms: Some(((n * 200) % 1000) as u16), sequence: None, focus: None, camera: 7 };
-                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: Some(capture), meta, accidental: false, vector: Fake::vector_for(p) })
+                            Ok(Embedding { key: Key::of(1, p.as_os_str().as_encoded_bytes()), capture: Some(capture), meta, accidental: false, vector: Fake::vector_for(p), faces: Vec::new() })
                         },
                     }
                 })
@@ -364,7 +386,7 @@ pub mod tests {
 
     pub fn job(n: usize, day: NaiveDate) -> Job {
         let path = PathBuf::from(format!("/mnt/nas/lib/{day}/JPG/{n:04}.JPG"));
-        Job { rel: path.strip_prefix("/mnt/nas/lib").unwrap().to_path_buf(), path, file_type: FileType::Jpg, size: 100 + n as u64, mtime: MTime::from_unix(1_700_000_000, 0), day }
+        Job { rel: path.strip_prefix("/mnt/nas/lib").unwrap().to_path_buf(), path, file_type: FileType::Jpg, size: 100 + n as u64, mtime: MTime::from_unix(1_700_000_000, 0), day, known: None }
     }
 
     fn run(req: Request, fake: &Fake) -> (Vec<Batch>, Finished) {
@@ -379,7 +401,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..70).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.fail_paths_containing = Some("0007".into());
-        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 70 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 70, want: Want::search() }, &fake);
         assert!(fin.complete && fin.stopped.is_none(), "{fin:?}");
         assert_eq!((fin.embedded, fin.failed), (69, 1));
         assert_eq!(fake.calls.load(Ordering::Relaxed), 3, "32 + 32 + 6");
@@ -395,7 +417,7 @@ pub mod tests {
         let jobs: Vec<Job> = (0..100).map(|n| job(n, day)).collect();
         let mut fake = Fake::new(Device::Gpu);
         fake.card_fails_after = Some(1);
-        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 100 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs, total: 100, want: Want::search() }, &fake);
         assert!(!fin.complete);
         assert_eq!(fin.stopped, Some(Stopped::Card(CardFailure::Crashed)));
         assert_eq!(fin.embedded, 32, "what was done is kept");
@@ -409,11 +431,11 @@ pub mod tests {
         let jobs: Vec<Job> = (0..10).map(|n| job(n, day)).collect();
         let fake = Fake::new(Device::Cpu);
         fake.restart_once.store(true, Ordering::Relaxed);
-        let (batches, fin) = run(Request { root: "/".into(), jobs: jobs.clone(), total: 10 }, &fake);
+        let (batches, fin) = run(Request { root: "/".into(), jobs: jobs.clone(), total: 10, want: Want::search() }, &fake);
         assert!(fin.complete && fin.embedded == 10);
         assert!(batches.iter().any(|b| b.restarted));
         let cancel = AtomicBool::new(true);
-        let fin = execute(Request { root: "/".into(), jobs, total: 10 }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
+        let fin = execute(Request { root: "/".into(), jobs, total: 10, want: Want::search() }, &Fake::new(Device::Cpu), 0, &cancel, &AtomicUsize::new(0), &mut |_| {});
         assert_eq!(fin.stopped, Some(Stopped::Cancelled));
         assert_eq!(fin.embedded, 0);
     }

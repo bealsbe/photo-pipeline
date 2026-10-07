@@ -660,7 +660,7 @@ impl Fake {
                 status.stopped = Some(Stopped::Card(f));
             }
         }
-        status.faces = FacesStatus { on: find_faces, model: indexed.then_some(face_model), installed: indexed, ..FacesStatus::default() };
+        status.faces = FacesStatus { on: find_faces, model: Some(face_model), installed: indexed, ..FacesStatus::default() };
         let people = FakePeople::new(true);
         status.heads = fursuits::HeadsStatus { on: true, models_installed: indexed, ..fursuits::HeadsStatus::default() };
         let state = FakeState {
@@ -701,8 +701,8 @@ impl Fake {
         people: impl FnOnce(&mut FakePeople, &Subjects) -> Result<(), String>,
         fursuits: impl FnOnce(&mut FakeFursuits, &Subjects) -> Result<(), String>,
     ) {
-        {
-            let mut s = self.state.lock();
+        // The counts in the status (named, found) change with the groups.
+        self.change(|s| {
             let snap = s.subjects.clone();
             let fursuit = s.fursuits.owns(id);
             let before = s.fursuits.undo_depth();
@@ -714,10 +714,7 @@ impl Fake {
                 Ok(()) => {}
             }
             s.refresh_people();
-            // Publish the head counts with the groups.
-            self.publish(&s);
-        }
-        self.publish_people();
+        });
     }
 
     fn publish(&self, s: &FakeState) {
@@ -833,17 +830,19 @@ impl Fake {
     fn start_first_index(&self, ids: &[ModelId]) {
         let faces = models::face_model_in(ids);
         self.change(|s| {
+            // As the engine: only what isn't in place is fetched (and
+            // reported); with everything here, indexing starts at once.
+            let begin = super::search_setup::begin_first_index(&s.status, faces);
             s.status.faces.on = faces.is_some();
-            if faces.is_some() {
-                s.status.faces.model = faces;
-                s.status.faces.installed = true;
+            if let Some(f) = faces {
+                s.status.faces.installed = super::search_setup::face_ready(&s.status, f);
+                s.status.faces.model = Some(f);
             }
             s.status.first_index_asked = true;
             s.status.stopped = None;
-            if !s.status.models_installed {
-                s.downloads = ids.iter().map(|&id| (id, 0, models::info(id).bytes(), DownloadState::Waiting)).collect();
-            } else {
-                s.resume();
+            match begin {
+                super::search_setup::Begin::Index => s.resume(),
+                super::search_setup::Begin::Download(rows) => s.downloads = rows.into_iter().map(|d| (d.model, 0, d.total, DownloadState::Waiting)).collect(),
             }
         });
     }
@@ -883,8 +882,11 @@ impl Fake {
         self.change(|st| {
             let s = &mut st.status;
             match word {
-                "notindexed" => {
-                    s.models_installed = false;
+                // Nothing indexed; `models` with every model already in
+                // place, `search-model` with only search's.
+                "notindexed" | "models" | "search-model" => {
+                    s.models_installed = word != "notindexed";
+                    s.faces.installed = word == "models";
                     s.indexed_shots = 0;
                     s.first_index_asked = false;
                     s.pass = None;
@@ -952,6 +954,7 @@ impl Fake {
                 "faces-catchup" => {
                     s.faces = FacesStatus { on: true, model: None, installed: false, ..FacesStatus::default() };
                     st.people.forget_all();
+                    st.people.name_first = false;
                     st.refresh_people();
                 }
                 "faces-off" => {
@@ -1234,6 +1237,9 @@ fn step(s: &mut FakeState) {
         }
         if s.downloads.iter().all(|d| d.3 == DownloadState::Checked) {
             s.status.models_installed = true;
+            if s.status.faces.on {
+                s.status.faces.installed = true;
+            }
             // The head models come with them when finding heads is on.
             s.status.heads.models_installed |= s.status.heads.on;
             if s.status.device.chosen == Device::Gpu {

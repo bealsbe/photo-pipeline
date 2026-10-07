@@ -479,8 +479,13 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
         ]
         .spacing(8)
         .align_y(Alignment::Center);
-        let look = style::toggle(chosen, tone);
-        let look = if chosen { look } else { style::Look { fg: tone, hover_fg: tone, border: alpha(tone, 0.45), hover_border: alpha(tone, 0.7), bg: alpha(tone, 0.1), hover_bg: alpha(tone, 0.18), ..look } };
+        // Chosen, it fills with its tone, as a mark lights its toggle.
+        let look = style::toggle(true, tone);
+        let look = if chosen {
+            style::Look { bg: alpha(tone, 0.3), hover_bg: alpha(tone, 0.36), border: tone, hover_border: tone, ..look }
+        } else {
+            style::Look { fg: tone, hover_fg: tone, border: alpha(tone, 0.45), hover_border: alpha(tone, 0.7), bg: alpha(tone, 0.08), hover_bg: alpha(tone, 0.16), ..look }
+        };
         button(container(content).center(Length::Fill)).width(150).height(38).padding(0).style(look.style()).on_press(rm(Msg::Answer(yes))).into()
     };
     let one = r.kind.one();

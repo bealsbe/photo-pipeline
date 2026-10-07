@@ -22,13 +22,13 @@ use chrono::{NaiveDate, NaiveDateTime};
 use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
-use super::faces::People;
+use super::faces::{FaceStore, People};
 use super::index::{Index, Key, PathEntry, Record};
 use super::parse::{self, Parsed};
 use super::tags::{Tags, VocabVectors};
 use super::{FacesStatus, Hit, PassKind, PassProgress, Status, Stopped, Thing, pass, query, vocab};
 use crate::bus::{BgEvent, Bus};
-use crate::ml::client::{Client, Embedder, EmbedderFactory, HelperError, StartError};
+use crate::ml::client::{Client, Embedder, EmbedderFactory, HelperError, Spec, StartError, Want};
 use crate::ml::models::{self, ModelId};
 use crate::ml::{CardFailure, Device, SelfCheck};
 use crate::model::bursts::Bursts;
@@ -67,6 +67,8 @@ enum Cmd {
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
     Suggestions { seq: u64, group: GroupId },
     Undo,
+    /// A regroup finished on its worker.
+    Regrouped(Box<super::step::Regrouped>),
     Shutdown,
 }
 
@@ -74,9 +76,13 @@ enum Cmd {
 /// call [`storage`] on a worker).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Storage {
+    /// The search index's files (the face files apart).
     pub index_bytes: u64,
     pub index_shots: usize,
     pub models_bytes: u64,
+    /// The faces found, their vectors and tiles (the *People* row; the
+    /// user's names live elsewhere and aren't counted).
+    pub faces_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -91,6 +97,8 @@ struct Shared {
     things: Mutex<Arc<Vec<Thing>>>,
     /// The *Subjects* page's state, as last built.
     subjects: Mutex<Arc<Subjects>>,
+    /// The face tiles' index, for `Engine::crop` on any thread.
+    tiles: Mutex<Option<Arc<Mutex<super::faces::TileIndex>>>>,
 }
 
 /// What the engine is built on; tests swap the pieces that touch the
@@ -105,14 +113,34 @@ pub struct Config {
     /// The user's subjects file (`~/.local/share/photo-pipeline/subjects.json`
     /// by default; `None` keeps it in memory only, for tests).
     pub subjects_path: Option<PathBuf>,
+    /// Fetches models (`ml::download::execute`; a double in tests, which
+    /// must never reach the network).
+    pub downloader: Downloader,
 }
+
+/// Downloads the given models, reporting progress, and returns the ids
+/// that ended checked.
+pub type Downloader = Arc<dyn Fn(&[ModelId], &AtomicBool, &mut dyn FnMut(BgEvent)) -> Vec<ModelId> + Send + Sync>;
 
 impl Config {
     /// The app's: the real helper, the registry, the cache, the user's
-    /// data folder.
+    /// data folder, the real downloads.
     pub fn real() -> Config {
-        Config { factory: Client::factory(), installed: Box::new(models::installed), index_dir: None, subjects_path: super::faces::default_file_path() }
+        Config {
+            factory: Client::factory(),
+            installed: Box::new(models::installed),
+            index_dir: None,
+            subjects_path: super::faces::default_file_path(),
+            downloader: Arc::new(|ids, cancel, emit| crate::ml::download::execute(ids, cancel, emit)),
+        }
     }
+}
+
+/// A downloader for tests that must never fetch anything: it fails the
+/// test if asked.
+#[cfg(test)]
+pub fn no_downloads() -> Downloader {
+    Arc::new(|ids, _, _| panic!("a test asked to download {ids:?}"))
 }
 
 impl Engine {
@@ -127,10 +155,10 @@ impl Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
         let faces = FacesStatus { on: find_faces, model: Some(face_model), ..FacesStatus::default() };
         let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, faces, ..Status::default() };
-        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())) });
+        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())), tiles: Mutex::new(None) });
         let s = shared.clone();
         let me = tx.clone();
-        let Config { factory, installed, index_dir, subjects_path } = config;
+        let Config { factory, installed, index_dir, subjects_path, downloader } = config;
         std::thread::Builder::new()
             .name("search-engine".into())
             .spawn(move || {
@@ -141,6 +169,7 @@ impl Engine {
                     shared: s,
                     factory,
                     installed,
+                    downloader,
                     index_dir,
                     device,
                     index_exports,
@@ -163,6 +192,10 @@ impl Engine {
                     face_model,
                     people: People::load(subjects_path),
                     restrict: None,
+                    face_pass_pending: None,
+                    subjects_sent: None,
+                    regroup_running: false,
+                    regroup_wanted: false,
                 }
                 .run()
             })
@@ -302,7 +335,11 @@ impl Engine {
     /// reads the cached tile, else the photo's preview; call it on a
     /// worker, never the UI thread.
     pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
-        super::faces::crop_from_photo(face, px, framing)
+        let tiles = self.shared.tiles.lock().clone();
+        match tiles {
+            Some(t) => super::faces::crop(Some(&t.lock()), face, px, framing),
+            None => super::faces::crop(None, face, px, framing),
+        }
     }
 }
 
@@ -380,6 +417,8 @@ pub fn storage(library_root: Option<&Path>) -> Storage {
     if let Some(dir) = library_root.and_then(super::index::dir_for) {
         out.index_bytes = dir_bytes(&dir);
         out.index_shots = super::index::count_rows(&dir);
+        out.faces_bytes = FaceStore::bytes_in(&dir);
+        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes);
     }
     if let Some(dir) = models::models_dir() {
         out.models_bytes = dir_bytes(&dir);
@@ -429,6 +468,7 @@ struct Worker {
     shared: Arc<Shared>,
     factory: EmbedderFactory,
     installed: Box<dyn Fn(ModelId) -> bool + Send>,
+    downloader: Downloader,
     index_dir: Option<PathBuf>,
     device: Device,
     index_exports: bool,
@@ -470,6 +510,14 @@ struct Worker {
     /// The photos the running query is narrowed to (its subjects), while
     /// it runs.
     restrict: Option<HashSet<Key>>,
+    /// A face pass waiting for its models: the catch-up (`false`) or a
+    /// model change (`true`).
+    face_pass_pending: Option<bool>,
+    /// When the *Subjects* snapshot was last sent (throttled in a pass).
+    subjects_sent: Option<Instant>,
+    /// A regroup is on its worker; another was asked for meanwhile.
+    regroup_running: bool,
+    regroup_wanted: bool,
 }
 
 const TEXT_CACHE: usize = 64;
@@ -505,11 +553,27 @@ impl Worker {
                     self.download = None;
                     self.vocab_tried = false;
                     self.refresh_installed();
-                    if self.first_index_pending && ok.contains(&ModelId::Siglip2) {
-                        self.first_index_pending = false;
+                    // A helper started without the face models loads them
+                    // only when started again.
+                    if ok.iter().any(|m| m.is_face_model() || *m == ModelId::Yunet) {
+                        self.drop_embedder();
+                    }
+                    // The first index waits for search's model, which may
+                    // have been in place all along (only the face models
+                    // were fetched): what matters is that it is ready now,
+                    // not that it was in this download.  A download that
+                    // failed or was cancelled leaves it missing, and
+                    // nothing starts.  Faces still missing (their download
+                    // failed) don't hold search back: the pass runs without
+                    // them, and the tab offers the catch-up.
+                    let first = std::mem::take(&mut self.first_index_pending);
+                    if first && self.models_ready() {
                         self.start_pass(PassKind::FirstIndex);
-                    } else {
-                        self.first_index_pending = false;
+                    }
+                    if let Some(change) = self.face_pass_pending.take() {
+                        if self.faces_ready() && self.models_ready() {
+                            self.start_face_pass(change);
+                        }
                     }
                 }
                 Cmd::StopIndexing => {
@@ -523,6 +587,7 @@ impl Worker {
                         d.cancel();
                     }
                     self.first_index_pending = false;
+                    self.face_pass_pending = None;
                 }
                 Cmd::TryCardAgain => {
                     self.drop_embedder();
@@ -562,6 +627,13 @@ impl Worker {
                     if let Some(ix) = &mut self.index {
                         let _ = ix.clear();
                     }
+                    // Unnamed detections are cache and go with it (§10);
+                    // the user's file stays.
+                    if let Some(store) = &mut self.people.store {
+                        store.forget_all();
+                    }
+                    self.people.reset_grouping();
+                    self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
@@ -581,6 +653,11 @@ impl Worker {
                         ix.set_first_index_asked();
                         let _ = ix.save_paths();
                     }
+                    if let Some(store) = &mut self.people.store {
+                        store.forget_all();
+                    }
+                    self.people.reset_grouping();
+                    self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
                     self.update(|s| {
@@ -610,17 +687,25 @@ impl Worker {
                 }
                 Cmd::SetFaceModel(model) => {
                     if models::face_models().any(|m| m.id == model) && model != self.face_model {
+                        // The faces found and the user's work stay; the
+                        // vectors are made again with the new model.
+                        if matches!(self.pass.as_ref().map(|p| p.kind), Some(PassKind::Faces)) {
+                            self.cancel_pass();
+                        }
                         self.face_model = model;
+                        if let Some(store) = &mut self.people.store {
+                            store.set_model(model);
+                        }
+                        self.people.reset_grouping();
+                        self.drop_embedder();
                         self.update(|s| s.faces.model = Some(model));
                         self.refresh_installed();
+                        self.refresh_counts();
+                        self.publish_subjects();
+                        self.face_pass_or_download(true);
                     }
                 }
-                Cmd::FindFaces => {
-                    // The catch-up pass comes with the face cache; for now
-                    // the models it needs are fetched.
-                    let wanted = models::models_for(Some(self.face_model));
-                    self.download_missing(&wanted);
-                }
+                Cmd::FindFaces => self.face_pass_or_download(false),
                 Cmd::NameGroup(id, name) => {
                     let r = self.people.name_group(&id, name);
                     self.after_edit(r.map(|_| ()));
@@ -643,6 +728,8 @@ impl Worker {
                 }
                 Cmd::ForgetAll => {
                     self.people.forget_all();
+                    self.people.reset_grouping();
+                    self.refresh_counts();
                     self.publish_subjects();
                 }
                 Cmd::Faces { seq, group } => {
@@ -659,12 +746,30 @@ impl Worker {
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::Suggestions { seq, group } => {
-                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(Vec::new()) });
+                    self.ensure_resolver();
+                    let list = match self.people.suggestions(&group, &|f| self.resolve_face(f), false) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            eprintln!("subjects: suggestions refused: {e}");
+                            Vec::new()
+                        }
+                    };
+                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
                 }
                 Cmd::Undo => {
                     if let Some(what) = self.people.undo() {
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
                         self.publish_subjects();
+                        self.start_regroup();
+                    }
+                }
+                Cmd::Regrouped(r) => {
+                    self.regroup_running = false;
+                    if self.people.apply_regroup(*r) {
+                        self.publish_subjects();
+                    }
+                    if std::mem::take(&mut self.regroup_wanted) {
+                        self.start_regroup();
                     }
                 }
                 Cmd::Shutdown => break,
@@ -692,6 +797,11 @@ impl Worker {
         ids.iter().copied().filter(|&id| !(self.installed)(id)).collect()
     }
 
+    /// The detector and the chosen face model are in place.
+    fn faces_ready(&self) -> bool {
+        self.missing(&models::face_set(self.face_model)).is_empty()
+    }
+
     /// Which models are in place: search's, and the detector with the
     /// chosen face model (stats files, on this thread).
     fn refresh_installed(&mut self) {
@@ -706,14 +816,48 @@ impl Worker {
     /// After a subjects edit: a refusal is logged (nothing changed); any
     /// outcome republishes the page's state.
     fn after_edit(&mut self, result: Result<(), Refused>) {
-        if let Err(e) = result {
-            eprintln!("subjects: refused: {e}");
+        match result {
+            Err(e) => eprintln!("subjects: refused: {e}"),
+            // Members and rejections moved: the clusters and the
+            // suggestion counts follow, on the worker.
+            Ok(()) => self.start_regroup(),
+        }
+        self.publish_subjects();
+    }
+
+    /// Group the faces again on a worker thread (`Cmd::Regrouped` brings
+    /// the result); one at a time, the next asked for meanwhile running
+    /// after.
+    fn start_regroup(&mut self) {
+        if self.regroup_running {
+            self.regroup_wanted = true;
+            return;
+        }
+        let Some(job) = self.people.regroup_job() else { return };
+        self.regroup_running = true;
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("subjects-regroup".into())
+            .spawn(move || {
+                let _t = crate::profile::span("subjects", "regroup");
+                let r = super::step::regroup(&job);
+                let _ = me.send(Cmd::Regrouped(Box::new(r)));
+            })
+            .expect("spawn subjects-regroup");
+    }
+
+    /// While a pass runs, the snapshot is rebuilt at most every
+    /// [`THINGS_EVERY`]; `now` forces it (the pass ended).
+    fn publish_subjects_throttled(&mut self, now: bool) {
+        if !now && self.subjects_sent.is_some_and(|t| t.elapsed() < THINGS_EVERY) {
+            return;
         }
         self.publish_subjects();
     }
 
     /// Rebuild the *Subjects* snapshot and send it.
     fn publish_subjects(&mut self) {
+        self.subjects_sent = Some(Instant::now());
         self.ensure_resolver();
         let snapshot = self.people.build_snapshot(&|f| self.resolve_face(f));
         self.people.set_snapshot(snapshot.clone());
@@ -731,7 +875,7 @@ impl Worker {
         let rec = self.index.as_ref().and_then(|ix| ix.vectors.by_key.get(&f.key).map(|&i| &ix.vectors.records[i]));
         let capture = rec.and_then(|rec| rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64))).unwrap_or(shot.mtime);
         let confirmed = self.people.file.member_of(Kind::Person, f).is_some();
-        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: 0.0, confirmed })
+        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: self.people.clarity(f), confirmed })
     }
 
     fn publish(&self) {
@@ -774,16 +918,30 @@ impl Worker {
         let root_changed = self.index.as_ref().is_none_or(|ix| ix.root != lib.root);
         if root_changed {
             self.cancel_pass();
-            self.index = self.index_dir.clone().or_else(|| super::index::dir_for(&lib.root)).map(|dir| Index::load(&lib.root, &dir, models::info(ModelId::Siglip2)));
+            let dir = self.index_dir.clone().or_else(|| super::index::dir_for(&lib.root));
+            self.index = dir.as_ref().map(|dir| Index::load(&lib.root, dir, models::info(ModelId::Siglip2)));
+            // The face cache lives beside the index.
+            let store = dir.as_ref().map(|dir| FaceStore::load(dir, self.face_model));
+            *self.shared.tiles.lock() = store.as_ref().map(FaceStore::tiles);
+            self.people.store = store;
             self.resolver = None;
         }
         let live: HashSet<PathBuf> = lib.days.values().flat_map(|d| d.files.iter().map(|f| pass::rel_path(&lib.root, &f.path))).collect();
         if let Some(ix) = &mut self.index {
             ix.retain_paths(&live);
+            if let Some(store) = &mut self.people.store {
+                let keys: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
+                store.retain(&keys);
+            }
         }
         self.library = Some(lib);
         self.resolver = None;
         self.refresh_counts();
+        if root_changed {
+            self.people.reset_grouping();
+            self.start_regroup();
+        }
+        self.publish_subjects();
         if root_changed {
             self.vocab_tried = false;
         }
@@ -866,11 +1024,85 @@ impl Worker {
     fn refresh_counts(&self) {
         let (indexed, asked) = self.index.as_ref().map_or((0, false), |ix| (ix.len(), ix.paths.first_index_asked));
         let shots = self.library.as_ref().map_or(0, |l| l.total_shots);
+        let (looked_at, found, unrecognised) = self.people.store.as_ref().map_or((0, 0, 0), |s| (s.looked_at(), s.found(), s.unrecognised()));
         self.update(|s| {
             s.library_shots = shots;
             s.indexed_shots = indexed;
             s.first_index_asked = asked;
+            s.faces.looked_at = looked_at;
+            s.faces.found = found;
+            s.faces.unrecognised = unrecognised;
         });
+    }
+
+    /// The jobs of a face pass over photos already indexed: for the
+    /// catch-up, every indexed shot not looked at yet; for a model
+    /// change, every shot whose faces lack vectors, carrying them.
+    fn face_jobs(&self, change: bool) -> Vec<pass::Job> {
+        let (Some(lib), Some(ix), Some(store)) = (&self.library, &self.index, &self.people.store) else { return Vec::new() };
+        let needing: HashMap<Key, Vec<crate::ml::client::FaceSpot>> = if change { store.needing_vectors().into_iter().collect() } else { HashMap::new() };
+        let mut jobs = Vec::new();
+        for day in lib.days.values().rev() {
+            for shot in day.shots() {
+                let rep = shot.iter().find(|&&i| day.files[i].file_type == FileType::Jpg).or(shot.first());
+                let Some(&i) = rep else { continue };
+                let fe = &day.files[i];
+                let rel = pass::rel_path(&lib.root, &fe.path);
+                let Some(key) = ix.paths.key_for(&rel, fe.size, &fe.mtime) else { continue };
+                if !ix.vectors.contains(&key) {
+                    continue;
+                }
+                let known = if change {
+                    match needing.get(&key) {
+                        Some(spots) => Some(spots.clone()),
+                        None => continue,
+                    }
+                } else {
+                    if store.scanned.contains_key(&key) {
+                        continue;
+                    }
+                    None
+                };
+                jobs.push(pass::Job { path: fe.path.clone(), file_type: fe.file_type, rel, size: fe.size, mtime: fe.mtime, day: day.date, known });
+            }
+        }
+        jobs
+    }
+
+    /// A face pass (`PassKind::Faces`) over photos already indexed: the
+    /// catch-up (`change` false) or the vectors again after a model
+    /// change.  Only ever started by a command, never by a pass's end, so
+    /// it can't start itself over.
+    fn start_face_pass(&mut self, change: bool) {
+        if self.pass.is_some() || !self.faces_ready() {
+            return;
+        }
+        let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
+        let jobs = self.face_jobs(change);
+        if jobs.is_empty() {
+            self.refresh_counts();
+            return;
+        }
+        let Some(embedder) = self.image_embedder() else { return };
+        let (tx, rx) = crossbeam_channel::unbounded::<pass::Batch>();
+        let total = jobs.len();
+        let req = pass::Request { root, jobs, total, want: Want::faces_only() };
+        let handle = pass::start(req, embedder, 0, move |b| drop(tx.send(b)));
+        self.pass = Some(Running { handle, kind: PassKind::Faces, batches: rx });
+        self.update(|s| {
+            s.pass = Some(PassProgress { kind: PassKind::Faces, done: 0, total, oldest_day: None });
+            s.stopped = None;
+        });
+    }
+
+    /// A face pass wants its models first: start it when they arrive.
+    fn face_pass_or_download(&mut self, change: bool) {
+        if self.faces_ready() {
+            self.start_face_pass(change);
+        } else {
+            self.face_pass_pending = Some(change);
+            self.download_missing(&models::models_for(Some(self.face_model)));
+        }
     }
 
     /// The library against the index: what is to be indexed, less what
@@ -945,11 +1177,11 @@ impl Worker {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let handle = crate::ml::download::DownloadHandle::from_flag(cancel.clone());
-        let (bus, me) = (self.bus.clone(), self.me.clone());
+        let (bus, me, downloader) = (self.bus.clone(), self.me.clone(), self.downloader.clone());
         std::thread::Builder::new()
             .name("model-download".into())
             .spawn(move || {
-                let ok = crate::ml::download::execute(&missing, &cancel, &mut |ev| drop(bus.unbounded_send(ev)));
+                let ok = downloader(&missing, &cancel, &mut |ev| drop(bus.unbounded_send(ev)));
                 let _ = me.send(Cmd::DownloadsDone(ok));
             })
             .expect("spawn model-download");
@@ -974,7 +1206,7 @@ impl Worker {
         if let Some(e) = &self.embedder {
             return Some(e.clone());
         }
-        match (self.factory)(self.device, false) {
+        match (self.factory)(Spec::images(self.device, self.find_faces.then_some(self.face_model))) {
             Ok(e) => {
                 let (name, check) = e.device_report();
                 self.update(|s| {
@@ -1027,7 +1259,8 @@ impl Worker {
         let total = plan.total;
         // Done before this pass: indexed, and skipped as unreadable.
         let already = plan.unchanged + plan.unreadable;
-        let req = pass::Request { root, jobs: plan.jobs, total };
+        let want = if self.find_faces && self.faces_ready() { Want::with_faces() } else { Want::search() };
+        let req = pass::Request { root, jobs: plan.jobs, total, want };
         let handle = pass::start(req, embedder, already, move |b| drop(tx.send(b)));
         self.pass = Some(Running { handle, kind, batches: rx });
         self.update(|s| {
@@ -1046,6 +1279,13 @@ impl Worker {
         let kind = p.kind;
         self.absorb(&batch);
         self.refresh_tags();
+        if batch.faces_scanned {
+            self.refresh_counts();
+            self.publish_subjects_throttled(batch.finished.is_some());
+            if batch.finished.is_some() {
+                self.start_regroup();
+            }
+        }
         let indexed = self.index.as_ref().map_or(0, Index::len);
         if let Some(fin) = &batch.finished {
             self.pass = None;
@@ -1103,6 +1343,20 @@ impl Worker {
             }
             self.resolver = None;
         }
+        // The faces found (or recognised again) go into the face cache,
+        // and join the clusters as they come (the full regroup runs when
+        // the pass ends).
+        if batch.faces_scanned {
+            if let Some(store) = &mut self.people.store {
+                for (job, e) in &batch.embedded {
+                    let r = if job.known.is_some() { store.add_vectors(e.key, &e.faces) } else { store.add(e.key, &e.faces) };
+                    if let Err(err) = r {
+                        eprintln!("faces: couldn't write the face cache: {err}");
+                    }
+                }
+            }
+            self.people.assign_new();
+        }
         // What couldn't be embedded isn't tried again at this pass's end;
         // a file whose own content is the trouble is remembered, so it
         // isn't read again at every check until it changes.
@@ -1131,7 +1385,7 @@ impl Worker {
                 return Ok(e);
             }
         }
-        match (self.factory)(Device::Cpu, true) {
+        match (self.factory)(Spec::text_only()) {
             Ok(e) => {
                 self.text_embedder = Some(e.clone());
                 Ok(e)
@@ -1434,7 +1688,7 @@ mod tests {
     #[test]
     fn the_status_starts_from_the_saved_preferences_and_a_query_answers() {
         let (bus, _rx) = crate::bus::channel();
-        let config = Config { factory: Box::new(|_, _| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None };
+        let config = Config { factory: Box::new(|_| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Cpu, false, true, ModelId::AuraFace, config);
         let s = e.status();
         assert_eq!(s.device.chosen, Device::Cpu);
@@ -1563,7 +1817,8 @@ mod tests {
     fn logging_factory(gpu_fails: bool) -> (EmbedderFactory, Arc<Mutex<Vec<(Device, bool)>>>) {
         let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
-        let factory: EmbedderFactory = Box::new(move |device, text_only| {
+        let factory: EmbedderFactory = Box::new(move |spec: Spec| {
+            let (device, text_only) = (spec.device, spec.text_only);
             log.lock().push((device, text_only));
             if text_only {
                 return Ok(Arc::new(Fake::new(Device::Cpu)) as Arc<dyn Embedder>);
@@ -1583,7 +1838,7 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("device-rule", 6);
         let (factory, asked) = logging_factory(true);
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 6);
@@ -1619,7 +1874,7 @@ mod tests {
         let (bus, rx) = crate::bus::channel();
         let (lib, d) = library("round-trip", 12);
         let (factory, asked) = logging_factory(false);
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 12);
@@ -1667,7 +1922,7 @@ mod tests {
         // Clear removes it all.
         let (bus2, _rx2) = crate::bus::channel();
         let (factory, _) = logging_factory(false);
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         e2.clear_index();
@@ -1680,7 +1935,7 @@ mod tests {
     /// A factory that hands out one `Fake`, kept so the test can read its
     /// call count.
     fn one_fake(fake: Arc<Fake>) -> EmbedderFactory {
-        Box::new(move |_, _| Ok(fake.clone() as Arc<dyn Embedder>))
+        Box::new(move |_| Ok(fake.clone() as Arc<dyn Embedder>))
     }
 
     /// Scan a scratch library again (after its files changed).
@@ -1689,6 +1944,123 @@ mod tests {
         let scanned = crate::model::library_cache::scan(root, None, true, &cancel, &|_| {}).unwrap().unwrap();
         let store = Mutex::new(crate::model::library_cache::Store::new(root.to_path_buf()));
         Arc::new(crate::model::library_index::index_from_tree(root, &scanned.tree, &store, &cancel).unwrap())
+    }
+
+    /// Models in place, except the face ones: `have_faces` says whether
+    /// YuNet and AuraFace are installed; the downloader double flips it
+    /// when asked to fetch them (or, with `succeed` false, fetches
+    /// nothing, as a failed or cancelled download).
+    fn faces_arrive_later(succeed: bool) -> (Box<dyn Fn(ModelId) -> bool + Send>, Downloader, Arc<AtomicBool>, Arc<Mutex<Vec<ModelId>>>) {
+        let have_faces = Arc::new(AtomicBool::new(false));
+        let asked: Arc<Mutex<Vec<ModelId>>> = Arc::new(Mutex::new(Vec::new()));
+        let (h, a) = (have_faces.clone(), asked.clone());
+        let installed: Box<dyn Fn(ModelId) -> bool + Send> = Box::new(move |id| id == ModelId::Siglip2 || h.load(std::sync::atomic::Ordering::Relaxed));
+        let (h, a2) = (have_faces.clone(), asked.clone());
+        let downloader: Downloader = Arc::new(move |ids, _, _| {
+            a2.lock().extend_from_slice(ids);
+            if succeed {
+                h.store(true, std::sync::atomic::Ordering::Relaxed);
+                ids.to_vec()
+            } else {
+                Vec::new()
+            }
+        });
+        drop(a);
+        (installed, downloader, have_faces, asked)
+    }
+
+    /// The user's upgrade path: search's model is in place already and
+    /// only the face models are fetched.  The first index must start when
+    /// they arrive (search was ready all along), with faces on; and when
+    /// their download fails, search still indexes, without faces.
+    #[test]
+    fn the_first_index_starts_when_only_the_face_models_were_missing() {
+        for succeed in [true, false] {
+            let (bus, _rx) = crate::bus::channel();
+            let (lib, d) = library(if succeed { "faces-arrive" } else { "faces-fail" }, 5);
+            let (factory, _) = logging_factory(false);
+            let (installed, downloader, _have, asked) = faces_arrive_later(succeed);
+            let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
+            let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+            e.on_library(lib.clone());
+            wait_for(&e, "the library", |s| s.library_shots == 5);
+            assert!(e.status().models_installed && !e.status().faces.installed);
+            e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
+            let s = wait_for(&e, "the first index after the download", |s| s.indexed_shots == 5 && s.pass.is_none());
+            assert_eq!(asked.lock().clone(), [ModelId::Yunet, ModelId::AuraFace], "only the missing models were fetched");
+            assert_eq!((s.faces.installed, s.faces.looked_at), (succeed, if succeed { 5 } else { 0 }), "succeed={succeed}: {s:?}");
+            assert!(s.stopped.is_none() && s.faces.on);
+            e.shutdown();
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The catch-up asked for with the face model missing: fetched, then
+    /// the catch-up runs over the indexed photos.
+    #[test]
+    fn the_catch_up_starts_when_only_the_face_model_was_missing() {
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library("catch-up-arrives", 4);
+        let (factory, _) = logging_factory(false);
+        let (installed, downloader, _have, asked) = faces_arrive_later(true);
+        let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 4);
+        // Search alone first (faces unticked in the dialog).
+        e.start_first_index(&models::models_for(None));
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+        assert_eq!((s.faces.on, s.faces.looked_at), (false, 0));
+        assert!(asked.lock().is_empty(), "nothing to fetch for search alone");
+        e.set_find_faces(true);
+        e.find_faces();
+        let s = wait_for(&e, "the catch-up after the download", |s| s.faces.looked_at == 4 && s.pass.is_none());
+        assert_eq!(asked.lock().clone(), [ModelId::Yunet, ModelId::AuraFace]);
+        assert!(s.faces.installed && s.stopped.is_none() && s.indexed_shots == 4);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The face catch-up covers every indexed photo not yet looked at for
+    /// faces (the user, 2026-10-03): photos indexed while face finding was
+    /// off, new exports included, and it runs only when asked.
+    #[test]
+    fn the_face_catch_up_covers_every_photo_indexed_without_faces() {
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library("face-catch-up", 6);
+        let (factory, _) = logging_factory(false);
+        // Faces on and the models in place: the first index looks at
+        // every photo.
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 6);
+        e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
+        let s = wait_for(&e, "the first index", |s| s.indexed_shots == 6 && s.pass.is_none());
+        assert_eq!((s.faces.on, s.faces.looked_at), (true, 6));
+        // Faces off; two exports arrive and are indexed without faces.
+        e.set_find_faces(false);
+        wait_for(&e, "faces off", |s| !s.faces.on);
+        let day = d.join("lib/2025/Mar-2025/12-Mar-2025/JPG");
+        std::fs::write(day.join("0006.JPG"), "new").unwrap();
+        std::fs::write(day.join("0007.JPG"), "newer").unwrap();
+        e.on_library(rescan(&d.join("lib")));
+        let s = wait_for(&e, "the new exports", |s| s.indexed_shots == 8 && s.pass.is_none());
+        assert_eq!(s.faces.looked_at, 6, "nothing is looked at for faces while the setting is off");
+        // Nothing happens on its own; the catch-up, when asked, takes the two.
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(e.status().faces.looked_at, 6);
+        e.set_find_faces(true);
+        e.find_faces();
+        let s = wait_for(&e, "the catch-up", |s| s.faces.looked_at == 8 && s.pass.is_none());
+        assert_eq!((s.indexed_shots, s.stopped), (8, None));
+        // Asked again with nothing left: no pass starts.
+        e.find_faces();
+        std::thread::sleep(Duration::from_millis(100));
+        let s = e.status();
+        assert!(s.pass.is_none() && s.faces.looked_at == 8);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// A file the helper can't read is read once: the first index ends
@@ -1703,7 +2075,7 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.fail_paths_containing = Some("0003".into());
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -1756,7 +2128,7 @@ mod tests {
         f.fail_paths_containing = Some("0001".into());
         f.fail_errno = Some(libc::EIO);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -1785,7 +2157,7 @@ mod tests {
         let mut f = Fake::new(Device::Gpu);
         f.delay = Duration::from_millis(100);
         let fake = Arc::new(f);
-        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
@@ -1863,7 +2235,7 @@ mod tests {
         fn device_report(&self) -> (Option<String>, SelfCheck) {
             (Some("Axes card".into()), SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 })
         }
-        fn embed_images(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+        fn embed_images(&self, files: &[(PathBuf, FileType)], _want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
             Ok(files
                 .iter()
                 .map(|(p, _)| {
@@ -1876,6 +2248,7 @@ mod tests {
                         meta: crate::model::record::ShotMeta::default(),
                         accidental: stem.contains("accident"),
                         vector: Axes::unit(&Axes::parts_of(&stem)),
+                        faces: Vec::new(),
                     };
                     crate::ml::client::ImageResult { path: p.clone(), result: Ok(embedding) }
                 })
@@ -1945,11 +2318,12 @@ mod tests {
         );
         let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
         let log = asked.clone();
-        let factory: EmbedderFactory = Box::new(move |device, text_only| {
+        let factory: EmbedderFactory = Box::new(move |spec: Spec| {
+            let (device, text_only) = (spec.device, spec.text_only);
             log.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None };
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 14);
@@ -2084,11 +2458,12 @@ mod tests {
         let (bus2, rx2) = crate::bus::channel();
         let asked2: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
         let log2 = asked2.clone();
-        let factory: EmbedderFactory = Box::new(move |device, text_only| {
+        let factory: EmbedderFactory = Box::new(move |spec: Spec| {
+            let (device, text_only) = (spec.device, spec.text_only);
             log2.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         let things = Events::new(&rx2).things(&e2);

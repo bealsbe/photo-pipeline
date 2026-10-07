@@ -378,10 +378,16 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   names too).  Dates alone (`jun 2026`, or `jun 2026 -fursuit`: all of
   June but what a search for *fursuit* would find) show every photo from
   them, in the order they were taken rather than best first ("312 photos
-  from Jun 2026"), accidental frames left out.  `@Name` is for a person,
-  fursuit or pet you have named, which comes in a later phase: for now
-  the strip says so and the other words are searched; a name or a
-  `-word` on its own searches nothing, and the page says why.
+  from Jun 2026"), accidental frames left out.  `-word` on its own
+  searches nothing, and the page says why.
+- **`@name`: someone you named.**  Typing `@` lists the people you have
+  named, with their faces and how many photos; Enter or Tab takes one, and
+  it becomes a chip in the field (× or Backspace in an empty field removes
+  it; up to three).  A chip alone shows that person's photos, clearest
+  first; words beside it rank their photos best first (*@Name beach*).  A
+  name no one has ("No one is named "…"") finds nothing, and the page says
+  so.  Recent searches keep the chips as `@"Name"`.  Fursuits and pets
+  come later.
 - **What was understood.**  A quiet strip over the results says what was
   applied besides the words ("Only Jun 2024", "Every photo from Jun
   2026", "Leaving out crowd"), so you can see why they look as they do.
@@ -389,7 +395,8 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   knows the library holds (*cameras 96*, *fireworks 24*, *food 21*), most
   photos first; a click searches one.  The list holds objects and scenes
   only: people, fursuits and pets never appear in it, or in the list
-  under the field; they get pages of their own later.  Photos that
+  under the field; people have a page of their own (below), and fursuits
+  and pets come later.  Photos that
   plainly show the thing you searched for come first, then the rest by
   similarity.  The start page also shows your recent searches and a few
   ways to search.
@@ -418,6 +425,9 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   with its size, its licence in plain words and its publisher, with the
   sources and SHA-256 checksums a click away, then shows the download.  A
   file that doesn't match its checksum is deleted and the dialog says so.
+  *Find people's faces* is ticked there by default, with the face model to
+  pick (see *People* below); untick it and only the search model is
+  fetched.
 - **Indexing** runs in the background, newest days first: the status bar
   shows how far it has got, with × to stop (what is indexed is kept) and a
   click for its steps.  A search while it runs looks at the photos indexed
@@ -435,9 +445,73 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   against the processor first, or the processor, with what each costs),
   *How close matches must be* (a slider from closer to looser, with a reset
   to the default, good matches), *Index new exports*, the search model, and
-  the recent searches.
+  the recent searches.  **Preferences ▸ People:** *Find people's faces*
+  (on by default; turning it off asks whether to keep or forget the faces
+  already found), *Face model* with *Change…*, *Smallest group to show*
+  (3, 5 or 10 photos) and *Forget all…*.
 - **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
   explaining itself.
+
+### People
+
+**People, fursuits and pets** (Ctrl+4, on the side rail under Search, or in
+the View menu) is where the faces found while indexing are grouped, so you
+can name the people you want to find.  Its header has *People | Fursuits |
+Pets*; only People works in this phase, and the other two tabs say they
+come later.  A tab shows one kind only, so a merge, a move or a suggestion
+never crosses kinds.  Nothing is ever named for you.
+
+- **The People tab** shows the people you named, then *Groups to name*,
+  largest first: each a round face crop with its name (or "Unnamed") and
+  how many photos.  Groups of fewer photos than *Smallest group to show*
+  (5 by default) fold away under *Smaller groups*, so an event's strangers
+  stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
+  move between groups, Enter opens one, F2 names it.
+- **Picking several:** *Select* (S), or Ctrl+click, picks groups; a strip
+  says how many with *Merge…* and *Hide*.  Merging asks which name to
+  keep (the named one by default).  Ctrl+Z takes back the last change to
+  people (a name, a merge, a move, an answer), and the status bar says
+  what it undid.
+- **A person's page is a search for them.**  Their chip sits in the
+  field, so words typed beside it rank their photos best first; with no
+  words, their photos come clearest first, in the results grid with dates
+  under them and bursts stacked (G opens one).  Read-only, like search: P,
+  M and U do nothing.  *Open day ›* shows the selected photo's day in the
+  calendar, whose back button returns to the person.
+- **The band** under the header holds the person: their name (a click or
+  F2 renames; an unnamed group opens with its name field ready, and a name
+  that already exists offers *Merge into …* first), how many photos and
+  how many more may show them, *Photos | Faces*, *Review N suggestions*
+  (Y), and ⋯ for *Merge into…*, *Hide* and *Forget this person…*.
+- **Faces** shows every face in the group, clearest first; pick the wrong
+  ones and *Move to…* someone else, a new group, or out (*Not this
+  person*), which also stops them being suggested again.
+- **"Same person?": the review.**  One suggestion at a time, large,
+  between the person's confirmed faces and the whole photo with the face
+  outlined.  **Y** and **N** answer, in the keep and prune colours; the
+  answer is stamped on the crop the way marks are and, with *Advance after
+  marking* on, the next comes after the same short beat as in the viewer.
+  One answer covers a whole burst.  No moves the photo out of the person
+  when it was in.  ← → (A D) step, Enter opens the photo, Ctrl+Z takes the
+  last answer back, Esc stops.  An unnamed group can be checked the same
+  way (*Check this group*).
+- **Before faces were looked for** (a library indexed before this
+  phase), the tab says what finding them costs (what is downloaded, read
+  and how long it takes) and runs it only when asked; it goes through the
+  indexed library newest days first, in the background, with its own line
+  in the status bar.
+- **The face model** is picked in the download dialog and changed in
+  Preferences ▸ People.  AuraFace (Apache-2.0, the most accurate in tests
+  here) is picked by default; SFace (Apache-2.0) is the smallest and
+  fastest; InsightFace's model, the one Immich uses, has the best
+  published scores but is for non-commercial research only, which the
+  dialog says in plain words.  YuNet finds the faces for whichever model
+  you pick.  Changing the model recognises every face again; the names
+  you gave and the faces you confirmed are kept.
+- **Forget:** *Forget this person…* removes one name and its answers (their
+  faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
+  deletes every face found and every name, behind a plain confirmation.
+  Your photos are never changed, and nothing is written into the library.
 
 ### How it works
 
@@ -512,19 +586,90 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 
 Downloaded once, after a dialog that names each file, its size and licence;
 every file is checked against its SHA-256 before use and deleted if it
-doesn't match (`src/ml/models.rs` holds the pins).  Phase 1 uses one model:
+doesn't match (`src/ml/models.rs` holds the pins).  Search uses one model;
+people's faces use a detector and one of three recognition models, the
+user's choice:
 
 | Model | Files | Size | Licence | Source |
 |---|---|---|---|---|
 | SigLIP 2 ViT-B/16, 256 px (Google) | image tower (fp32), text tower (fp16), tokenizer | 971 MB | Apache-2.0 | Hugging Face `onnx-community/siglip2-base-patch16-256-ONNX`, the transformers.js export of `google/siglip2-base-patch16-256` |
+| YuNet, 2023 March (OpenCV) | face detector, for every face model | 0.2 MB | MIT | OpenCV Zoo `face_detection_yunet_2023mar.onnx` |
+| AuraFace v1 (fal), recommended | face recognition, 512-d | 261 MB | Apache-2.0 | Hugging Face `fal/AuraFace-v1`, `glintr100.onnx` alone |
+| SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
+| InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the
-processor.  The fp16 text tower's answers equal fp32's.
+processor.  The fp16 text tower's answers equal fp32's.  YuNet's published
+file declares a 640 × 640 input although the network runs at any size: the
+helper makes those dims symbolic in memory after the digest check (the file
+on disk stays the publisher's) and runs it on a 1 024-px canvas.
+InsightFace's model is never pre-selected; its licence is shown in plain
+words in the dialog, and it is downloaded only from InsightFace's release,
+never re-hosted here.
 
 ONNX Runtime comes through the `ort` crate (pinned release candidate); the
 first build downloads it (~120 MB) into `~/.cache/ort.pyke.io` and puts
 `libwebgpu_dawn.so` beside the binary.
+
+## People
+
+Phase 3 of the plan: faces are found and grouped so the library can be
+searched by person.  The *Subjects* page (Ctrl+4) is the UI's; this is what
+the engine does underneath (`src/search/faces.rs`, `src/search/step.rs`,
+`src/model/subjects.rs`, `src/ml/face.rs`).
+
+- **On by default** (Preferences ▸ People ▸ *Find people's faces*).  While
+  photos are indexed, the helper looks for faces in the same read of each
+  preview as the search vector: YuNet finds faces and their five landmarks
+  on a 1 024-px canvas; faces of score ≥ 0.9 and ≥ 40 px (on the full
+  preview) are cut from the full preview, aligned to the ArcFace template,
+  recognised by the chosen model, and given a 128-px tile.  All of it runs
+  where search runs: on the graphics card by default, with each face
+  session self-checked against the processor first; a card that fails
+  stops the work and is reported, never worked around.
+- **Catch-up.**  A library indexed before faces existed, or with faces
+  off, is looked at only when asked (*Find faces in the N photos
+  indexed*): the previews are read again and nothing in the search index
+  changes.  Changing the face model keeps every face found and recomputes
+  only the vectors, from the stored landmarks.
+- **Groups.**  Faces not yet confirmed to anyone are clustered (clearest
+  first, by the model's cut-off), incrementally as batches arrive and
+  fully on a worker thread when a pass ends or a decision changes.  Groups
+  under the minimum (Preferences ▸ People ▸ *Smallest group to show*: 3, 5
+  or 10 photos) fold under *Smaller groups*.
+- **The user's decisions** — names, merges, splits, hides, "not this
+  person" — point at detections (a photo's content key and the face's box
+  in thousandths), not at group numbers, so they survive a regroup, a
+  face-model change and a rebuild.  They live in
+  `~/.local/share/photo-pipeline/subjects.json`, apart from the caches;
+  Ctrl+Z takes the last one back.  Suggestions for a person are the faces
+  within the cut-off of its confirmed members, not confirmed elsewhere and
+  not rejected for it, nearest first, one per burst; answering Yes adds
+  them, No makes sure they are never suggested again.
+- **A person's photos** come clearest first: half how clear the face is
+  (its size, sharpness and detection score), half how sure its membership
+  is, so doubtful ones sink to the bottom.  `@Name` in a search narrows
+  to that person's photos (with words, best first within them; a name
+  nobody has narrows to nothing).
+- **Kinds never mix.**  People, fursuits (phase 4) and pets (phase 5)
+  have their own detections, vectors, groups and suggestions; a merge, a
+  move or a suggestion across kinds is refused, and tests hold it.
+- **Privacy.**  Face data stays on this computer, in files only the user
+  can read (`faces.bin`, `facevecs-<model>.bin`, `tiles.bin` beside the
+  search index, mode 0600); nothing is written into photos, sidecars or
+  exports.  *Clear* (the search index) drops the unnamed detections;
+  Preferences ▸ Storage ▸ *Forget all* drops everything, the names
+  included.
+- **Measured** (this machine): on 1 010 of the study's previews YuNet at
+  1 024 px finds 140 faces in 119 photos (the study found 145 at full
+  size); with faces on, the card takes about 15 ms a photo whichever
+  model, the processor 12–15 (SFace, InsightFace, AuraFace in that
+  order); on a scratch library of 634 shots read from the share, the
+  first index with faces took 50 s and gave 56 faces in 35 groups.  Of
+  the three models, AuraFace gave the cleanest groups on the sample (no
+  group of the detector's false faces among its largest), so it stays
+  the recommended one.
 
 ## File safety
 
@@ -555,6 +700,14 @@ waits a few seconds, then says where they are.
 The one destructive path is the same as in the Python app: a **Move** export
 of a *cropped JPG* writes the cropped re-encode and then deletes the uncropped
 original.  RAWs are never re-encoded.
+
+**Copy marked photos for editing** (Ctrl+Shift+E) copies the RAWs, the JPGs or
+both of every marked shot into one folder.  The dialog has a box for each
+(RAW files is ticked at first, and one box always stays ticked; the choice is
+remembered).  A marked file brings its partner of the wanted kind, a shot with
+none of it is listed and not copied, and pruned shots are left out.  Nothing
+is overwritten; a taken name gets `_1`, `_2`.  A crop is written as an `.xmp`
+sidecar for a RAW only, and a JPG is copied as it is.
 
 ## Differences from the Python app
 

@@ -2,11 +2,12 @@
 //! engine keeps about faces beside the search index, and the *Subjects*
 //! page's state built from it and from the user's file.
 //!
-//! - The **cache** (recomputable, under the library's index folder, files
-//!   readable by the user alone): the detections YuNet found in each
-//!   indexed photo, the face vectors of the chosen model, and a small
-//!   tile of each face for the page.  A face-model change keeps the
-//!   detections and recomputes the vectors alone.
+//! - The **cache** ([`FaceStore`], recomputable, under the library's index
+//!   folder, files readable by the user alone): the detections YuNet found
+//!   in each indexed photo (`faces.bin`), the face vectors of the chosen
+//!   model (`facevecs-<model>.bin`) and a small tile of each face for the
+//!   page (`tiles.bin`).  A face-model change keeps the detections and
+//!   the tiles and recomputes the vectors alone.
 //! - The **user's file** (`crate::model::subjects::SubjectsFile`): names,
 //!   merges, splits, hides and "not this person", pointing at detections.
 //! - [`People`]: both together on the engine's thread, with the clusters
@@ -14,29 +15,633 @@
 //!
 //! Nothing here is written into photos, sidecars or exports (§10).
 
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
+
+use super::index::{Key, blocks, framed};
+use super::query::{f16_to_f32, f32_to_f16};
 use crate::imaging::decode;
-use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH};
+use crate::ml::client::{FaceFound, FaceSpot};
+use crate::ml::face;
+use crate::ml::models::{self, ModelId};
+use crate::model::binfile::{Reader, Writer};
+use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
+use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, private_dir, private_file};
+use crate::ops::fsutil;
+
+const FACES_MAGIC: &[u8; 8] = b"PPFACED\0";
+const FACES_VERSION: u32 = 1;
+const VECS_MAGIC: &[u8; 8] = b"PPFACEV\0";
+const VECS_VERSION: u32 = 1;
+const TILE_MAGIC: u32 = 0x5050_5449;
+/// The detector and the canvas rule the detections were made with; a
+/// change means the photos are looked at again.
+pub const DETECTOR_VERSION: u32 = 1;
+/// Dropped entries beyond this share get the files rewritten on load.
+const COMPACT_SHARE: f64 = 0.1;
+
+/// A face as the detector found it, kept per photo.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Detection {
+    pub bbox: [f32; 4],
+    pub landmarks: [[f32; 2]; 5],
+    pub score: f32,
+    pub size_px: f32,
+    pub sharpness: f32,
+}
+
+impl Detection {
+    pub fn face_ref(&self, key: Key) -> FaceRef {
+        FaceRef::new(key, self.bbox)
+    }
+
+    /// How clear a view this is, before the grouping adds how sure the
+    /// match is (UI 12).
+    pub fn clarity(&self) -> f32 {
+        face::clarity(self.size_px, self.sharpness, self.score)
+    }
+
+    pub fn spot(&self) -> FaceSpot {
+        FaceSpot { bbox: self.bbox, landmarks: self.landmarks, score: self.score }
+    }
+}
+
+/// The face vectors of one model, in memory as on disk: f16 bits (a
+/// regroup works on an f32 copy of its own).
+#[derive(Default)]
+pub struct FaceVectors {
+    pub dim: usize,
+    pub refs: Vec<FaceRef>,
+    pub by_ref: HashMap<FaceRef, usize>,
+    /// `refs.len() × dim`, row-major, unit rows, as f16 bits.
+    pub data: Vec<u16>,
+}
+
+impl FaceVectors {
+    pub fn len(&self) -> usize {
+        self.refs.len()
+    }
+
+    /// Row `i` as f32.
+    pub fn row(&self, i: usize) -> Vec<f32> {
+        self.data[i * self.dim..(i + 1) * self.dim].iter().map(|&h| f16_to_f32(h)).collect()
+    }
+
+    fn push(&mut self, rows: &[(FaceRef, Vec<f32>)]) -> usize {
+        let mut added = 0;
+        for (r, v) in rows {
+            if v.is_empty() || self.by_ref.contains_key(r) {
+                continue;
+            }
+            if self.dim == 0 {
+                self.dim = v.len();
+            }
+            if v.len() != self.dim {
+                continue;
+            }
+            self.by_ref.insert(*r, self.refs.len());
+            self.refs.push(*r);
+            self.data.extend(v.iter().map(|&x| f32_to_f16(x)));
+            added += 1;
+        }
+        added
+    }
+
+    fn block(rows: &[(FaceRef, Vec<f32>)]) -> Vec<u8> {
+        let dim = rows.first().map_or(0, |(_, v)| v.len());
+        let mut w = Writer(Vec::with_capacity(16 + rows.len() * (24 + dim * 2)));
+        w.u32(rows.len() as u32);
+        for (r, v) in rows {
+            w.0.extend_from_slice(&r.key.0);
+            for t in r.thousandths() {
+                w.u16(t);
+            }
+            for &x in v {
+                w.u16(f32_to_f16(x));
+            }
+        }
+        w.seal()
+    }
+
+    fn read_block(data: &[u8], dim: usize) -> Option<Vec<(FaceRef, Vec<f32>)>> {
+        let mut r = Reader::open(data)?;
+        let n = r.count(16 + 8 + dim * 2)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let key = Key(r.take(16)?.try_into().ok()?);
+            let mut t = [0u16; 4];
+            for x in &mut t {
+                *x = r.u16()?;
+            }
+            let bbox = t.map(|v| v as f32 / 1000.0);
+            let mut v = Vec::with_capacity(dim);
+            for _ in 0..dim {
+                v.push(f16_to_f32(r.u16()?));
+            }
+            out.push((FaceRef::new(key, bbox), v));
+        }
+        r.done().then_some(out)
+    }
+}
+
+/// Where each face's tile lies in `tiles.bin`, for reading one at a time
+/// from any thread (`Engine::crop`).
+#[derive(Default)]
+pub struct TileIndex {
+    path: PathBuf,
+    offsets: HashMap<FaceRef, (u64, u32)>,
+}
+
+impl TileIndex {
+    /// A face's tile (JPEG bytes), read from the file.
+    pub fn read(&self, r: &FaceRef) -> Option<Vec<u8>> {
+        use std::os::unix::fs::FileExt;
+        let &(offset, len) = self.offsets.get(r)?;
+        let f = fs::File::open(&self.path).ok()?;
+        let mut buf = vec![0u8; len as usize];
+        f.read_exact_at(&mut buf, offset).ok()?;
+        Some(buf)
+    }
+}
+
+/// The face cache of one library: detections per photo, vectors per face
+/// for the chosen model, tiles.
+pub struct FaceStore {
+    dir: PathBuf,
+    model: ModelId,
+    /// Photos looked at, with the faces found in each (maybe none).
+    pub scanned: HashMap<Key, Vec<Detection>>,
+    pub vectors: FaceVectors,
+    tiles: Arc<Mutex<TileIndex>>,
+}
+
+impl FaceStore {
+    fn faces_file(dir: &Path) -> PathBuf {
+        dir.join("faces.bin")
+    }
+
+    fn vectors_file(dir: &Path, model: ModelId) -> PathBuf {
+        dir.join(format!("facevecs-{}.bin", model.dir_name()))
+    }
+
+    fn tiles_file(dir: &Path) -> PathBuf {
+        dir.join("tiles.bin")
+    }
+
+    /// Load the cache in `dir` for `model` (empty where there is nothing,
+    /// or files of another detector or model).
+    pub fn load(dir: &Path, model: ModelId) -> FaceStore {
+        let mut store = FaceStore { dir: dir.to_path_buf(), model, scanned: HashMap::new(), vectors: FaceVectors::default(), tiles: Arc::new(Mutex::new(TileIndex { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
+        if let Ok(data) = fs::read(Self::faces_file(dir)) {
+            let bs = blocks(&data);
+            if bs.first().is_some_and(|h| Self::read_faces_header(h)) {
+                for b in &bs[1..] {
+                    let Some(entries) = Self::read_faces_block(b) else { break };
+                    for (k, d) in entries {
+                        store.scanned.insert(k, d);
+                    }
+                }
+            }
+        }
+        store.load_vectors();
+        store.load_tiles();
+        store
+    }
+
+    fn load_vectors(&mut self) {
+        self.vectors = FaceVectors::default();
+        let Ok(data) = fs::read(Self::vectors_file(&self.dir, self.model)) else { return };
+        let bs = blocks(&data);
+        let Some(dim) = bs.first().and_then(|h| Self::read_vectors_header(h, self.model)) else { return };
+        self.vectors.dim = dim;
+        for b in &bs[1..] {
+            let Some(rows) = FaceVectors::read_block(b, dim) else { break };
+            self.vectors.push(&rows);
+        }
+    }
+
+    fn load_tiles(&mut self) {
+        let mut index = self.tiles.lock();
+        index.offsets.clear();
+        let Ok(data) = fs::read(&index.path) else { return };
+        let mut i = 0usize;
+        while i + 32 <= data.len() {
+            let magic = u32::from_le_bytes(data[i..i + 4].try_into().expect("4 bytes"));
+            if magic != TILE_MAGIC {
+                break;
+            }
+            let key = Key(data[i + 4..i + 20].try_into().expect("16 bytes"));
+            let mut t = [0u16; 4];
+            for (j, x) in t.iter_mut().enumerate() {
+                *x = u16::from_le_bytes(data[i + 20 + 2 * j..i + 22 + 2 * j].try_into().expect("2 bytes"));
+            }
+            let len = u32::from_le_bytes(data[i + 28..i + 32].try_into().expect("4 bytes"));
+            let start = i + 32;
+            let Some(end) = start.checked_add(len as usize).filter(|&e| e <= data.len()) else { break };
+            index.offsets.insert(FaceRef::new(key, t.map(|v| v as f32 / 1000.0)), (start as u64, len));
+            i = end;
+        }
+    }
+
+    fn faces_header() -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.0.extend_from_slice(FACES_MAGIC);
+        w.u32(FACES_VERSION);
+        w.u32(DETECTOR_VERSION);
+        w.seal()
+    }
+
+    fn read_faces_header(data: &[u8]) -> bool {
+        let Some(mut r) = Reader::open(data) else { return false };
+        r.take(8) == Some(FACES_MAGIC) && r.u32() == Some(FACES_VERSION) && r.u32() == Some(DETECTOR_VERSION) && r.done()
+    }
+
+    fn faces_block(entries: &[(Key, Vec<Detection>)]) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.u32(entries.len() as u32);
+        for (k, dets) in entries {
+            w.0.extend_from_slice(&k.0);
+            w.u16(dets.len() as u16);
+            for d in dets {
+                for v in d.bbox {
+                    w.u32(v.to_bits());
+                }
+                for lm in d.landmarks {
+                    w.u32(lm[0].to_bits());
+                    w.u32(lm[1].to_bits());
+                }
+                w.u32(d.score.to_bits());
+                w.u32(d.size_px.to_bits());
+                w.u32(d.sharpness.to_bits());
+            }
+        }
+        w.seal()
+    }
+
+    fn read_faces_block(data: &[u8]) -> Option<Vec<(Key, Vec<Detection>)>> {
+        let mut r = Reader::open(data)?;
+        let n = r.count(18)?;
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let key = Key(r.take(16)?.try_into().ok()?);
+            let m = r.u16()? as usize;
+            let mut dets = Vec::with_capacity(m);
+            for _ in 0..m {
+                let f = |r: &mut Reader<'_>| r.u32().map(f32::from_bits);
+                let bbox = [f(&mut r)?, f(&mut r)?, f(&mut r)?, f(&mut r)?];
+                let mut landmarks = [[0f32; 2]; 5];
+                for lm in &mut landmarks {
+                    *lm = [f(&mut r)?, f(&mut r)?];
+                }
+                dets.push(Detection { bbox, landmarks, score: f(&mut r)?, size_px: f(&mut r)?, sharpness: f(&mut r)? });
+            }
+            out.push((key, dets));
+        }
+        r.done().then_some(out)
+    }
+
+    fn vectors_header(model: ModelId, dim: usize) -> Vec<u8> {
+        let mut w = Writer(Vec::new());
+        w.0.extend_from_slice(VECS_MAGIC);
+        w.u32(VECS_VERSION);
+        w.bytes(model.dir_name().as_bytes());
+        w.bytes(models::info(model).weights_sha256().as_bytes());
+        w.u32(dim as u32);
+        w.seal()
+    }
+
+    fn read_vectors_header(data: &[u8], model: ModelId) -> Option<usize> {
+        let mut r = Reader::open(data)?;
+        if r.take(8)? != VECS_MAGIC || r.u32()? != VECS_VERSION {
+            return None;
+        }
+        if r.bytes()? != model.dir_name().as_bytes() || r.bytes()? != models::info(model).weights_sha256().as_bytes() {
+            return None;
+        }
+        let dim = r.u32()? as usize;
+        (r.done() && dim > 0).then_some(dim)
+    }
+
+    /// Append framed blocks to a file (made private), writing `header`
+    /// first when the file is new or empty.
+    fn append(path: &Path, header: &[u8], block: &[u8]) -> io::Result<()> {
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+            private_dir(dir);
+        }
+        let fresh = fs::metadata(path).map_or(true, |m| m.len() == 0);
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(path)?;
+        private_file(path);
+        if fresh {
+            f.write_all(&framed(header))?;
+        }
+        f.write_all(&framed(block))?;
+        f.sync_data()
+    }
+
+    /// Switch to another model's vectors (the detections and tiles stay).
+    pub fn set_model(&mut self, model: ModelId) {
+        if model != self.model {
+            self.model = model;
+            self.load_vectors();
+        }
+    }
+
+    /// Record a photo looked at, with the faces found (maybe none): the
+    /// detections, their vectors and their tiles.
+    pub fn add(&mut self, key: Key, faces: &[FaceFound]) -> io::Result<()> {
+        let dets: Vec<Detection> = faces.iter().map(|f| Detection { bbox: f.bbox, landmarks: f.landmarks, score: f.score, size_px: f.size_px, sharpness: f.sharpness }).collect();
+        Self::append(&Self::faces_file(&self.dir), &Self::faces_header(), &Self::faces_block(&[(key, dets.clone())]))?;
+        self.scanned.insert(key, dets);
+        self.add_vectors(key, faces)?;
+        self.add_tiles(key, faces)
+    }
+
+    /// Record faces' vectors (a model change: the detections are known).
+    pub fn add_vectors(&mut self, key: Key, faces: &[FaceFound]) -> io::Result<()> {
+        let rows: Vec<(FaceRef, Vec<f32>)> = faces.iter().filter(|f| !f.vector.is_empty()).map(|f| (FaceRef::new(key, f.bbox), f.vector.clone())).filter(|(r, _)| !self.vectors.by_ref.contains_key(r)).collect();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let dim = rows[0].1.len();
+        Self::append(&Self::vectors_file(&self.dir, self.model), &Self::vectors_header(self.model, dim), &FaceVectors::block(&rows))?;
+        self.vectors.push(&rows);
+        Ok(())
+    }
+
+    fn add_tiles(&mut self, key: Key, faces: &[FaceFound]) -> io::Result<()> {
+        let mut index = self.tiles.lock();
+        let new: Vec<(FaceRef, &[u8])> = faces.iter().filter(|f| !f.tile.is_empty()).map(|f| (FaceRef::new(key, f.bbox), f.tile.as_slice())).filter(|(r, _)| !index.offsets.contains_key(r)).collect();
+        if new.is_empty() {
+            return Ok(());
+        }
+        if let Some(dir) = index.path.parent() {
+            fs::create_dir_all(dir)?;
+            private_dir(dir);
+        }
+        let mut f = fs::OpenOptions::new().create(true).append(true).open(&index.path)?;
+        private_file(&index.path);
+        let mut at = f.metadata()?.len();
+        let mut buf = Vec::new();
+        for (r, jpeg) in new {
+            buf.clear();
+            buf.extend_from_slice(&TILE_MAGIC.to_le_bytes());
+            buf.extend_from_slice(&r.key.0);
+            for t in r.thousandths() {
+                buf.extend_from_slice(&t.to_le_bytes());
+            }
+            buf.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+            buf.extend_from_slice(jpeg);
+            f.write_all(&buf)?;
+            index.offsets.insert(r, (at + 32, jpeg.len() as u32));
+            at += buf.len() as u64;
+        }
+        f.sync_data()
+    }
+
+    /// Photos whose faces lack vectors under the current model, with the
+    /// faces to recognise again (a model change).
+    pub fn needing_vectors(&self) -> Vec<(Key, Vec<FaceSpot>)> {
+        let mut out: Vec<(Key, Vec<FaceSpot>)> = self
+            .scanned
+            .iter()
+            .filter_map(|(k, dets)| {
+                let missing: Vec<FaceSpot> = dets.iter().filter(|d| !self.vectors.by_ref.contains_key(&d.face_ref(*k))).map(Detection::spot).collect();
+                (!missing.is_empty()).then(|| (*k, missing))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    pub fn faces_of(&self, key: &Key) -> &[Detection] {
+        self.scanned.get(key).map_or(&[], Vec::as_slice)
+    }
+
+    pub fn detection(&self, r: &FaceRef) -> Option<&Detection> {
+        self.faces_of(&r.key).iter().find(|d| d.face_ref(r.key) == *r)
+    }
+
+    /// Photos looked at.
+    pub fn looked_at(&self) -> usize {
+        self.scanned.len()
+    }
+
+    /// Faces found.
+    pub fn found(&self) -> usize {
+        self.scanned.values().map(Vec::len).sum()
+    }
+
+    /// Faces without a vector under the current model.
+    pub fn unrecognised(&self) -> usize {
+        self.scanned.iter().flat_map(|(k, d)| d.iter().map(move |d| d.face_ref(*k))).filter(|r| !self.vectors.by_ref.contains_key(r)).count()
+    }
+
+    /// Every face, as (ref, detection).
+    pub fn all(&self) -> impl Iterator<Item = (FaceRef, &Detection)> {
+        self.scanned.iter().flat_map(|(k, dets)| dets.iter().map(move |d| (d.face_ref(*k), d)))
+    }
+
+    /// The tile index, shared with `Engine::crop` on other threads.
+    pub fn tiles(&self) -> Arc<Mutex<TileIndex>> {
+        self.tiles.clone()
+    }
+
+    /// Keep only the photos in `live` (the library's), rewriting the files
+    /// when many went.
+    pub fn retain(&mut self, live: &HashSet<Key>) {
+        let before = self.scanned.len();
+        self.scanned.retain(|k, _| live.contains(k));
+        let dropped = before - self.scanned.len();
+        if dropped > 0 && dropped as f64 > COMPACT_SHARE * before as f64 {
+            if let Err(e) = self.rewrite() {
+                eprintln!("faces: couldn't compact the face cache: {e}");
+            }
+        }
+    }
+
+    /// Rewrite the three files from memory.
+    fn rewrite(&mut self) -> io::Result<()> {
+        let dir = self.dir.clone();
+        fs::create_dir_all(&dir)?;
+        private_dir(&dir);
+        // Detections.
+        let mut out = framed(&Self::faces_header());
+        let entries: Vec<(Key, Vec<Detection>)> = self.scanned.iter().map(|(k, d)| (*k, d.clone())).collect();
+        for chunk in entries.chunks(1024) {
+            out.extend(framed(&Self::faces_block(chunk)));
+        }
+        fsutil::atomic_write(&Self::faces_file(&dir), &out, true)?;
+        private_file(&Self::faces_file(&dir));
+        // Vectors of the live faces.
+        let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
+        let rows: Vec<(FaceRef, Vec<f32>)> = (0..self.vectors.len()).filter(|&i| live.contains(&self.vectors.refs[i])).map(|i| (self.vectors.refs[i], self.vectors.row(i))).collect();
+        let vfile = Self::vectors_file(&dir, self.model);
+        if rows.is_empty() {
+            let _ = fs::remove_file(&vfile);
+        } else {
+            let mut out = framed(&Self::vectors_header(self.model, self.vectors.dim));
+            for chunk in rows.chunks(1024) {
+                out.extend(framed(&FaceVectors::block(chunk)));
+            }
+            fsutil::atomic_write(&vfile, &out, true)?;
+            private_file(&vfile);
+        }
+        self.vectors = FaceVectors::default();
+        self.vectors.push(&rows);
+        // Tiles of the live faces.
+        let (path, kept): (PathBuf, Vec<(FaceRef, Vec<u8>)>) = {
+            let index = self.tiles.lock();
+            let mut kept = Vec::new();
+            for r in index.offsets.keys().filter(|r| live.contains(r)) {
+                if let Some(bytes) = index.read(r) {
+                    kept.push((*r, bytes));
+                }
+            }
+            (index.path.clone(), kept)
+        };
+        let mut buf = Vec::new();
+        let mut offsets = HashMap::new();
+        for (r, jpeg) in &kept {
+            let at = buf.len() as u64;
+            buf.extend_from_slice(&TILE_MAGIC.to_le_bytes());
+            buf.extend_from_slice(&r.key.0);
+            for t in r.thousandths() {
+                buf.extend_from_slice(&t.to_le_bytes());
+            }
+            buf.extend_from_slice(&(jpeg.len() as u32).to_le_bytes());
+            buf.extend_from_slice(jpeg);
+            offsets.insert(*r, (at + 32, jpeg.len() as u32));
+        }
+        if buf.is_empty() {
+            let _ = fs::remove_file(&path);
+        } else {
+            fsutil::atomic_write(&path, &buf, true)?;
+            private_file(&path);
+        }
+        self.tiles.lock().offsets = offsets;
+        Ok(())
+    }
+
+    /// *Forget all* and *Clear*: every file goes.
+    pub fn forget_all(&mut self) {
+        let _ = fs::remove_file(Self::faces_file(&self.dir));
+        let _ = fs::remove_file(Self::tiles_file(&self.dir));
+        if let Ok(rd) = fs::read_dir(&self.dir) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("facevecs-") {
+                    let _ = fs::remove_file(e.path());
+                }
+            }
+        }
+        self.scanned.clear();
+        self.vectors = FaceVectors::default();
+        self.tiles.lock().offsets.clear();
+    }
+
+    /// Bytes the face files in an index folder take (the Storage row's
+    /// *People*; a stat walk, on a worker).
+    pub fn bytes_in(dir: &Path) -> u64 {
+        let mut n = 0;
+        for p in [Self::faces_file(dir), Self::tiles_file(dir)] {
+            n += fs::metadata(p).map_or(0, |m| m.len());
+        }
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.flatten() {
+                if e.file_name().to_string_lossy().starts_with("facevecs-") {
+                    n += e.metadata().map_or(0, |m| m.len());
+                }
+            }
+        }
+        n
+    }
+}
+
+impl KindStep for FaceStore {
+    fn kind(&self) -> Kind {
+        Kind::Person
+    }
+
+    fn refs(&self) -> &[FaceRef] {
+        &self.vectors.refs
+    }
+
+    fn rows(&self) -> subjects::Rows<'_> {
+        subjects::Rows::F16 { dim: self.vectors.dim, data: &self.vectors.data }
+    }
+
+    fn clarity(&self, r: &FaceRef) -> f32 {
+        self.detection(r).map_or(0.0, Detection::clarity)
+    }
+
+    fn cutoffs(&self) -> subjects::Cutoffs {
+        subjects::cutoff_for(self.model)
+    }
+}
 
 /// The people state the engine's thread owns.
 pub struct People {
     /// Where the user's file lives (`subjects::default_path`, or a test's).
     pub file_path: Option<PathBuf>,
     pub file: SubjectsFile,
+    /// The face cache, once the library's index folder is known.
+    pub store: Option<FaceStore>,
+    /// The people's clusters and sureness, from the last regroup and the
+    /// faces assigned since.
+    pub grouped: Grouped,
     /// Earlier states of the file with what changed them, newest last.
     undo: Vec<(SubjectsFile, String)>,
     /// The snapshot last built.
     pub snapshot: Arc<Subjects>,
-    generation: u64,
+    /// Moves on with every regroup: cluster ids are valid within one.
+    pub generation: u64,
 }
 
 impl People {
     /// Load the user's file (none is empty).
     pub fn load(file_path: Option<PathBuf>) -> People {
         let file = file_path.as_deref().map(SubjectsFile::load).unwrap_or_default();
-        People { file_path, file, undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
+        People { file_path, file, store: None, grouped: Grouped::default(), undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
+    }
+
+    /// A regroup's input for the worker, stamped with the next generation.
+    pub fn regroup_job(&mut self) -> Option<RegroupJob> {
+        let store = self.store.as_ref()?;
+        if store.vectors.len() == 0 {
+            return None;
+        }
+        self.generation += 1;
+        Some(step::job(store, &self.file, self.generation))
+    }
+
+    /// Take a regroup's result (an older generation's is dropped), then
+    /// assign the faces that arrived meanwhile.
+    pub fn apply_regroup(&mut self, r: Regrouped) -> bool {
+        if r.generation != self.generation || r.kind != Kind::Person {
+            return false;
+        }
+        let Some(store) = &self.store else { return false };
+        self.grouped.apply(r, store.refs(), &|f| store.clarity(f));
+        self.grouped.assign_new(store, &self.file);
+        true
+    }
+
+    /// Faces that arrived since the last regroup join the clusters.
+    pub fn assign_new(&mut self) {
+        if let Some(store) = &self.store {
+            self.grouped.assign_new(store, &self.file);
+        }
+    }
+
+    /// The grouping starts over (the vectors were rebuilt).
+    pub fn reset_grouping(&mut self) {
+        self.grouped = Grouped::default();
+        self.generation += 1;
     }
 
     /// Record the state before an edit, so [`People::undo`] can restore
@@ -82,9 +687,12 @@ impl People {
     }
 
     /// A cluster's faces for the current generation (none: stale or
-    /// unknown).  Clusters arrive with the grouping (a later commit).
-    fn cluster_members(&self, _id: &GroupId) -> Option<Vec<FaceRef>> {
-        None
+    /// unknown).
+    fn cluster_members(&self, id: &GroupId) -> Option<Vec<FaceRef>> {
+        let GroupId::Cluster(id) = id else { return None };
+        let store = self.store.as_ref()?;
+        let c = self.grouped.cluster(*id)?;
+        Some(c.members.iter().filter_map(|&m| store.refs().get(m).copied()).collect())
     }
 
     /// A group's confirmed or clustered faces.
@@ -264,12 +872,15 @@ impl People {
         Ok(sid)
     }
 
-    /// *Forget all*: the user's file goes (the caller deletes the cache).
+    /// *Forget all*: the user's file and the face cache go.
     pub fn forget_all(&mut self) {
         self.file = SubjectsFile::default();
         self.undo.clear();
         if let Some(p) = &self.file_path {
             let _ = std::fs::remove_file(p);
+        }
+        if let Some(s) = &mut self.store {
+            s.forget_all();
         }
     }
 
@@ -280,16 +891,65 @@ impl People {
     /// counted.
     pub fn build_snapshot(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>) -> Arc<Subjects> {
         let mut groups: Vec<Group> = Vec::new();
+        let group_of = |id: GroupId, kind: Kind, name: Option<String>, hidden: bool, cover: Option<FaceRef>, members: &[FaceRef], suggestions: usize| -> Option<Group> {
+            let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
+            let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
+            let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
+            let days = faces.iter().map(|f| f.day).collect::<HashSet<_>>().len();
+            Some(Group { id, kind, name, hidden, photos, days, cover, suggestions })
+        };
         for s in &self.file.subjects {
-            let faces: Vec<Face> = s.members.iter().filter_map(resolve).collect();
-            let Some(cover) = s.cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity))) else { continue };
-            let photos = faces.iter().map(|f| f.face.key).collect::<std::collections::HashSet<_>>().len();
-            let days = faces.iter().map(|f| f.day).collect::<std::collections::HashSet<_>>().len();
-            groups.push(Group { id: GroupId::Subject(s.id.clone()), kind: s.kind, name: s.name.clone(), hidden: s.hidden, photos, days, cover, suggestions: 0 });
+            let suggestions = self.grouped.suggestion_counts.get(&s.id).copied().unwrap_or(0);
+            groups.extend(group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions));
         }
-        groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
+        if let Some(store) = &self.store {
+            let refs = store.refs();
+            for (c, &id) in self.grouped.clusters.iter().zip(&self.grouped.ids) {
+                let members: Vec<FaceRef> = c.members.iter().filter_map(|&m| refs.get(m).copied()).collect();
+                groups.extend(group_of(GroupId::Cluster(id), Kind::Person, None, false, None, &members, 0));
+            }
+        }
+        groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what)| what.clone());
-        Arc::new(Subjects { generation: self.generation, groups, faces_found: 0, undoable })
+        let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
+        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable })
+    }
+
+    /// Suggestions for review (UI 6): for a subject, the faces within
+    /// the cut-off (the strict one with `strict`) of its confirmed
+    /// members that are confirmed nowhere and not rejected for it, nearest
+    /// first, one entry per burst; for a cluster, its own members to
+    /// check, surest first, one entry per burst.  Never another kind's.
+    pub fn suggestions(&self, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>, strict: bool) -> Result<Vec<Vec<Face>>, Refused> {
+        let Some(store) = &self.store else { return Ok(Vec::new()) };
+        let refs = store.refs();
+        let rows = store.rows();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let ordered: Vec<(usize, f32)> = match id {
+            GroupId::Subject(sid) => {
+                let s = self.file.get(sid).ok_or_else(|| Refused::NoSuchSubject(sid.clone()))?;
+                if s.kind != Kind::Person {
+                    return Ok(Vec::new());
+                }
+                let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
+                let confirmed = self.file.confirmed(Kind::Person);
+                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+                let cutoffs = store.cutoffs();
+                let cutoff = if strict { cutoffs.strict } else { cutoffs.suggest };
+                subjects::candidates(&rows, &members, &pool, cutoff)
+            }
+            GroupId::Cluster(cid) => {
+                let c = self.grouped.cluster(*cid).ok_or(Refused::StaleGroup)?;
+                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
+                v.sort_by(|a, b| a.1.total_cmp(&b.1));
+                v
+            }
+        };
+        let faces: Vec<(Face, Option<u64>)> = ordered.iter().filter_map(|&(i, _)| resolve(refs.get(i)?)).map(|f| {
+            let b = f.burst;
+            (f, b)
+        }).collect();
+        Ok(subjects::per_burst(faces))
     }
 
     /// Keep a snapshot built with [`People::build_snapshot`].
@@ -311,16 +971,31 @@ impl People {
     }
 
     /// The photos (keys) a group's faces are in.
-    pub fn photos_of(&self, id: &GroupId) -> Result<std::collections::HashSet<crate::search::index::Key>, Refused> {
+    pub fn photos_of(&self, id: &GroupId) -> Result<HashSet<Key>, Refused> {
         let (_, members) = self.members(id)?;
         Ok(members.iter().map(|f| f.key).collect())
     }
 
+    /// A face's clarity (UI 12): how clear a view it is and how sure its
+    /// membership is; 0 when unknown.
+    pub fn clarity(&self, r: &FaceRef) -> f32 {
+        let Some(store) = &self.store else { return 0.0 };
+        let visual = store.clarity(r);
+        match store.vectors.by_ref.get(r) {
+            Some(&row) => self.grouped.clarity_of(row, visual),
+            None => 0.5 * visual,
+        }
+    }
+
     /// The clarity of the clearest face in each of `keys` (UI 12's order
-    /// for a subject's page).  Clarity comes with the face cache (a later
-    /// commit); until then every photo is equally clear.
-    pub fn clarity_by_photo(&self, keys: &std::collections::HashSet<crate::search::index::Key>) -> std::collections::HashMap<crate::search::index::Key, f32> {
-        keys.iter().map(|k| (*k, 0.0)).collect()
+    /// for a subject's page).
+    pub fn clarity_by_photo(&self, keys: &HashSet<Key>) -> HashMap<Key, f32> {
+        keys.iter()
+            .map(|k| {
+                let best = self.store.as_ref().map_or(0.0, |s| s.faces_of(k).iter().map(|d| self.clarity(&d.face_ref(*k))).fold(0.0, f32::max));
+                (*k, best)
+            })
+            .collect()
     }
 }
 
@@ -328,12 +1003,27 @@ fn plural(n: usize, word: &str) -> String {
     if n == 1 { word.to_string() } else { format!("{word}s") }
 }
 
-/// A face's pixels from its photo's own preview, for `Engine::crop` when
-/// no tile is cached: reads the file (call on a worker), decodes the
-/// preview, orients it, and cuts the face's square (a margin around the
-/// box) or fits the whole preview, as `px`×`px` RGBA.
-pub fn crop_from_photo(face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
+/// A face's pixels for `Engine::crop`: the cached tile when there is one
+/// and the framing is the face's; else from the photo's own preview
+/// (reads the file: call on a worker).  `px`×`px` RGBA, or fitted for
+/// [`Framing::Photo`].
+pub fn crop(tiles: Option<&TileIndex>, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
     let px = px.clamp(8, 2048);
+    if framing == Framing::Face {
+        if let Some(jpeg) = tiles.and_then(|t| t.read(&face.face)) {
+            if let Ok(decoded) = decode::decode_jpeg_full_scaled(&jpeg, 1) {
+                let out = decode::resize_to(&decoded, px, px);
+                return Some((px, px, decode::to_rgba(out)));
+            }
+        }
+    }
+    crop_from_photo(face, px, framing)
+}
+
+/// A face's pixels from its photo's own preview: decodes the preview,
+/// orients it, and cuts the face's square (a margin around the box) or
+/// fits the whole preview.
+pub fn crop_from_photo(face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
     let path = face.jpg.as_deref().or(face.raw.as_deref())?;
     let oriented = preview_pixels(path, face.jpg.is_some(), px.max(400))?;
     let out = match framing {
@@ -396,7 +1086,6 @@ pub fn default_file_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::search::index::Key;
     use chrono::NaiveDate;
 
     fn face(n: u8) -> FaceRef {
@@ -406,6 +1095,83 @@ mod tests {
     fn resolve(f: &FaceRef) -> Option<Face> {
         let day = NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
         Some(Face { face: *f, jpg: Some(PathBuf::from(format!("/mnt/nas/lib/{}.JPG", f.key.0[0]))), raw: None, day, capture: day.and_hms_opt(12, 0, 0).unwrap(), burst: None, clarity: f.key.0[0] as f32, confirmed: true })
+    }
+
+    pub fn found(x: f32, size: f32, v: &[f32]) -> FaceFound {
+        FaceFound { bbox: [x, 0.2, 0.1, 0.15], landmarks: [[x + 0.02, 0.25]; 5], score: 0.95, size_px: size, sharpness: 300.0, vector: v.to_vec(), tile: vec![0xff, 0xd8, 1, 2, 3] }
+    }
+
+    #[test]
+    fn the_cache_keeps_detections_vectors_and_tiles_apart_and_private() {
+        let d = std::env::temp_dir().join(format!("pp-facestore-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let dir = d.join("cache");
+        let mut s = FaceStore::load(&dir, ModelId::AuraFace);
+        assert_eq!((s.looked_at(), s.found()), (0, 0));
+        let (k1, k2, k3) = (Key([1; 16]), Key([2; 16]), Key([3; 16]));
+        s.add(k1, &[found(0.1, 80.0, &[1.0, 0.0, 0.0, 0.0]), found(0.5, 40.0, &[0.0, 1.0, 0.0, 0.0])]).unwrap();
+        s.add(k2, &[]).unwrap();
+        assert_eq!((s.looked_at(), s.found(), s.vectors.len()), (2, 2, 2));
+        assert!(s.scanned.contains_key(&k2) && !s.scanned.contains_key(&k3));
+        let r = s.faces_of(&k1)[0].face_ref(k1);
+        assert_eq!(s.vectors.row(s.vectors.by_ref[&r]), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(s.tiles().lock().read(&r).unwrap(), [0xff, 0xd8, 1, 2, 3]);
+        assert!(s.detection(&r).unwrap().clarity() > s.detection(&s.faces_of(&k1)[1].face_ref(k1)).unwrap().clarity(), "the larger face is clearer");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for f in ["faces.bin", "facevecs-auraface-v1.bin", "tiles.bin"] {
+                assert_eq!(std::fs::metadata(dir.join(f)).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
+            }
+            assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        // Back from disk, the same.
+        let back = FaceStore::load(&dir, ModelId::AuraFace);
+        assert_eq!(back.scanned, s.scanned);
+        assert_eq!(back.vectors.row(back.vectors.by_ref[&r]), [1.0, 0.0, 0.0, 0.0]);
+        assert_eq!(back.tiles().lock().offsets.len(), 2);
+        assert!(FaceStore::bytes_in(&dir) > 0);
+        // Another model: the detections and tiles stay, the vectors are
+        // wanted again; recognising again fills them without new tiles.
+        let mut other = FaceStore::load(&dir, ModelId::SFace);
+        assert_eq!((other.looked_at(), other.vectors.len(), other.unrecognised()), (2, 0, 2));
+        let need = other.needing_vectors();
+        assert_eq!(need.len(), 1);
+        assert_eq!(need[0].1.len(), 2);
+        other.add_vectors(k1, &[found(0.1, 80.0, &[0.5, 0.5]), found(0.5, 40.0, &[0.5, -0.5])]).unwrap();
+        assert_eq!((other.vectors.dim, other.unrecognised()), (2, 0));
+        assert!(other.needing_vectors().is_empty());
+        assert_eq!(other.tiles().lock().offsets.len(), 2);
+        assert_eq!(FaceStore::load(&dir, ModelId::AuraFace).vectors.dim, 4, "the first model's vectors are untouched");
+        // Photos that left the library go at the next load's compaction.
+        let mut s = FaceStore::load(&dir, ModelId::AuraFace);
+        s.retain(&[k2].into_iter().collect());
+        assert_eq!((s.looked_at(), s.vectors.len(), s.tiles().lock().offsets.len()), (1, 0, 0));
+        let back = FaceStore::load(&dir, ModelId::AuraFace);
+        assert_eq!((back.looked_at(), back.vectors.len(), back.tiles().lock().offsets.len()), (1, 0, 0));
+        // Forget all: nothing left on disk.
+        let mut s = back;
+        s.forget_all();
+        assert_eq!(FaceStore::bytes_in(&dir), 0);
+        assert!(!dir.join("faces.bin").exists() && !dir.join("tiles.bin").exists() && !dir.join("facevecs-auraface-v1.bin").exists() && !dir.join("facevecs-sface-2021dec.bin").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_torn_tail_loses_only_the_last_block() {
+        let d = std::env::temp_dir().join(format!("pp-facetorn-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut s = FaceStore::load(&d, ModelId::AuraFace);
+        s.add(Key([1; 16]), &[found(0.1, 80.0, &[1.0, 0.0])]).unwrap();
+        s.add(Key([2; 16]), &[found(0.3, 80.0, &[0.0, 1.0])]).unwrap();
+        for f in ["faces.bin", "facevecs-auraface-v1.bin", "tiles.bin"] {
+            let p = d.join(f);
+            let data = std::fs::read(&p).unwrap();
+            std::fs::write(&p, &data[..data.len() - 3]).unwrap();
+        }
+        let back = FaceStore::load(&d, ModelId::AuraFace);
+        assert_eq!((back.looked_at(), back.vectors.len(), back.tiles().lock().offsets.len()), (1, 1, 1));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -447,6 +1213,7 @@ mod tests {
         assert_eq!(p.subject_of(&a).unwrap().members.len(), 3);
         assert_eq!(p.photos_of(&a).unwrap().len(), 3);
         assert_eq!(p.answer(&a, vec![], Some(true)), Err(Refused::Nothing));
+        assert_eq!(p.clarity(&face(1)), 0.0, "no cache: unknown clarity");
         p.forget_all();
         assert!(!path.exists() && p.file.subjects.is_empty() && p.undo().is_none());
         let _ = std::fs::remove_dir_all(&d);
@@ -469,6 +1236,6 @@ mod tests {
         assert_eq!(p.named(Kind::Person, "someone"), [person.clone()]);
         assert!(p.named(Kind::Fursuit, "someone").is_empty(), "a name is of one kind");
         let snap = p.build_snapshot(&resolve);
-        assert_eq!(snap.groups.iter().map(|g| g.kind).collect::<std::collections::HashSet<_>>().len(), 3);
+        assert_eq!(snap.groups.iter().map(|g| g.kind).collect::<HashSet<_>>().len(), 3);
     }
 }

@@ -85,6 +85,9 @@
 //! pkey tab                    # a key press in the Preferences window
 //! prefs search-gpu|search-cpu|checkcard|closeness-reset|exports|forget
 //! prefs search-rebuild|search-clear|models-delete|models-open
+//! prefs find-faces|keep-faces|forget-faces|face-model|forget-people
+//! prefs smallest 3            # Smallest group to show: 3, 5 or 10
+//! prefs facepick 1|facego|facecancel   # the face model dialog
 //!                             # Preferences ▸ Search and its Storage rows
 //! prefs closeness 4.5         # set how close matches must be (the slider)
 //! prefs show-search           # open Preferences at its Search section
@@ -117,7 +120,9 @@
 //!                             # notindexed, indexed, indexing [n],
 //!                             # export [n], pause, resume, cardcrash,
 //!                             # selfcheck, nocard, away [share],
-//!                             # restarted, waiting [n], mismatch, offline
+//!                             # restarted, waiting [n], mismatch, offline,
+//!                             # models (all in place, nothing indexed),
+//!                             # search-model (only search's in place)
 //! search wait 5000            # wait (up to 5 s) for the query in flight
 //! search dump                 # print the page's state
 //! search fake people          # the stand-in's people: people (two named),
@@ -923,6 +928,12 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "search-clear" => Some(Control::SearchClear),
         "models-delete" => Some(Control::ModelsDelete),
         "models-open" => Some(Control::ModelsOpen),
+        "find-faces" => Some(Control::FindFaces),
+        "keep-faces" => Some(Control::KeepFaces),
+        "forget-faces" => Some(Control::ForgetFaces),
+        "face-model" => Some(Control::FaceModel),
+        "forget-people" => Some(Control::ForgetPeople),
+        "smallest" => Some(Control::SmallestGroup(rest.parse().unwrap_or(5))),
         "close-button" => Some(Control::Close),
         _ => None,
     };
@@ -935,6 +946,12 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Some(id) => app.update(Message::CloseRequested(id)),
             None => Task::none(),
         },
+        "facepick" => match crate::ml::models::face_models().nth(rest.parse().unwrap_or(0)) {
+            Some(mi) => app.update(Message::Prefs(Msg::PickFaceModel(mi.id))),
+            None => Task::none(),
+        },
+        "facego" => app.update(Message::Prefs(Msg::ChangeFaceModel(true))),
+        "facecancel" => app.update(Message::Prefs(Msg::ChangeFaceModel(false))),
         "thumbsize" => {
             let t = app.update(Message::Prefs(Msg::ThumbSize(rest.parse().unwrap_or(180.0))));
             Task::batch([t, app.update(Message::Prefs(Msg::ThumbSizeDone))])

@@ -114,7 +114,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
             View::Search => {
                 app.search.pending.is_some()
                     || app.search.pane.thumbs.pending() > 0
-                    || app.search.status.pass.as_ref().is_some_and(|p| p.kind != crate::search::PassKind::NewExports && app.search.status.stopped.is_none())
+                    || app.search.status.pass.as_ref().is_some_and(|p| matches!(p.kind, crate::search::PassKind::FirstIndex | crate::search::PassKind::Rebuild) && app.search.status.stopped.is_none())
             }
             // Looking for faces, or a person's photos on their way.
             View::Subjects => {

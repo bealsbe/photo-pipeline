@@ -48,6 +48,9 @@ wgpu = { version = "27", default-features = false, features = ["std", "vulkan"] 
 # Model downloads: HTTPS with rustls, checked against pinned SHA-256s.
 ureq = "3"
 sha2 = "0.11"
+# InsightFace ships its models in a zip; the one file kept is inflated
+# from it (plain deflate, already in the tree through png).
+flate2 = "1"
 # The search model's text tokenizer (Gemma's SentencePiece, from its
 # tokenizer.json); no C regex engine.
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }

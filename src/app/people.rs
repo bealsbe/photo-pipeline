@@ -86,7 +86,7 @@ pub fn by_name<'a>(all: &'a Subjects, kind: Kind, name: &str) -> Option<&'a Grou
 /// A short tag for a group in the test driver's dumps.
 pub fn short(id: &GroupId) -> String {
     match id {
-        GroupId::Subject(s) => format!("s{}", &s.0[..s.0.len().min(6)]),
+        GroupId::Subject(s) => format!("s{}", &s.0[s.0.len().saturating_sub(4)..]),
         GroupId::Cluster(c) => format!("c{c}"),
     }
 }
@@ -369,7 +369,7 @@ impl FakePeople {
             let faces: Vec<Face> = g.members.iter().filter_map(|&k| self.face_of(k, g.confirmed.contains(&k))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
-            let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
+            let suggestions = if g.name.is_some() { self.suggestions_of(g, usize::MAX).len() } else { 0 };
             groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), days: days.len(), cover, suggestions });
         }
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
@@ -403,7 +403,7 @@ impl FakePeople {
     /// The faces that may show `g`'s person, one entry per press: the ones
     /// held back, then a few look-alikes; never a member or one answered
     /// No.
-    fn suggestions_of(&self, g: &FakeGroup) -> Vec<Vec<Face>> {
+    fn suggestions_of(&self, g: &FakeGroup, at_most: usize) -> Vec<Vec<Face>> {
         let have: HashSet<Key> = g.members.iter().copied().collect();
         let mut by_press: BTreeMap<(u64, u64), Vec<Face>> = BTreeMap::new();
         for s in &self.shots[..self.looked_at] {
@@ -428,7 +428,7 @@ impl FakePeople {
                 v.sort_by(|a, b| b.clarity.total_cmp(&a.clarity));
                 v
             })
-            .take(24)
+            .take(at_most)
             .collect()
     }
 
@@ -437,7 +437,7 @@ impl FakePeople {
     pub fn suggestions(&self, id: &GroupId) -> Vec<Vec<Face>> {
         let Some(g) = self.group(id) else { return Vec::new() };
         if g.name.is_some() {
-            return self.suggestions_of(g);
+            return self.suggestions_of(g, usize::MAX);
         }
         let mut by_press: BTreeMap<u64, Vec<Face>> = BTreeMap::new();
         for f in self.faces(id) {
@@ -852,7 +852,8 @@ mod tests {
         let s = p.snapshot();
         let a = s.groups.iter().find(|g| g.name.as_deref() == Some("Person A")).unwrap().id.clone();
         let list = p.suggestions(&a);
-        assert!(!list.is_empty() && list.len() <= 24);
+        assert!(!list.is_empty());
+        assert_eq!(list.len(), s.group(&a).unwrap().suggestions, "the count the band shows is the list the review offers");
         // One entry per press: its frames together.
         for entry in &list {
             assert!(entry.iter().all(|f| f.burst == entry[0].burst));

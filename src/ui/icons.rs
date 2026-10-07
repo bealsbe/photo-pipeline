@@ -22,7 +22,7 @@ pub enum Glyph {
     Library,
     /// Export into the library.
     Export,
-    /// Copy RAWs out for editing.
+    /// Copy photos out for editing.
     EditCopy,
     /// Review pruned files (the trash).
     Trash,

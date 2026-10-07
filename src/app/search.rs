@@ -142,7 +142,8 @@ pub enum Coverage {
 
 pub fn coverage(st: &Status) -> Coverage {
     match &st.pass {
-        Some(p) if p.kind != PassKind::NewExports => Coverage::Growing,
+        // A faces pass reads photos already indexed: search sees them all.
+        Some(p) if matches!(p.kind, PassKind::FirstIndex | PassKind::Rebuild) => Coverage::Growing,
         None if st.stopped.is_some() && st.first_index_asked && st.indexed_shots < st.library_shots => Coverage::Stopped,
         _ => Coverage::Whole,
     }
@@ -595,6 +596,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
+    super::search_setup::settle_downloads(&mut app.search.downloads, &app.search.status);
     let mut tasks = vec![super::subjects::on_status(app, &old), super::subjects_fursuits::on_status(app, &old)];
     let st = &app.search.status;
     if st.stopped.is_some() && old.stopped != st.stopped {
@@ -612,7 +614,8 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let start = app.search.pass_start;
     app.search.pass_start = super::search_setup::pass_start(start, &app.search.status);
     let st = &app.search.status;
-    if let (Some(p), None, None) = (&old.pass, &st.pass, &st.stopped) {
+    // (A faces pass's end is the People page's to say.)
+    if let (Some(p), None, None) = (old.pass.as_ref().filter(|p| p.kind != PassKind::Faces), &st.pass, &st.stopped) {
         let ended = super::search_setup::pass_ended(p, start, st);
         app.search.steps = false;
         // A pass of new exports that added nothing says nothing.
@@ -635,11 +638,7 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
 pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: DownloadState) -> Task<Message> {
     let s = &mut app.search;
     let failed = super::search_setup::failed(&state);
-    let d = Download { model, done, total, state };
-    match s.downloads.iter_mut().find(|x| x.model == model) {
-        Some(x) => *x = d,
-        None => s.downloads.push(d),
-    }
+    super::search_setup::record_download(&mut s.downloads, Download { model, done, total, state });
     // A failure shows in the dialog, reopened if it was closed.
     if failed {
         s.dialog = Some(Dialog::new(Stage::Progress, &app.settings));
@@ -1440,14 +1439,17 @@ fn start_page(app: &App) -> Element<'_, Message> {
     let newest = app.calendar.index.as_ref().and_then(|ix| ix.days.keys().next_back().copied());
     let (year, m0) = newest.map_or((2024, 5), |d| (d.year(), d.month0()));
     let month = crate::search::parse::date_text(year, Some(m0 + 1));
-    let examples = column![
+    let mut examples = column![
         example("red car at night".into(), "Photos that look like the words, best match first".into()),
         example("fireworks -crowd".into(), "Leave a word out: fireworks, without the crowd".into()),
         example(format!("fireworks {year}"), format!("Only those dates: {year}, {month}, apr–jun {year}")),
         example(month.clone(), "Every photo from those dates, in the order they were taken".into()),
-    ]
-    .spacing(10)
-    .padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
+    ];
+    // Someone named, once there is: their photos, clearest first.
+    if let Some(n) = nameables(app).into_iter().next() {
+        examples = examples.push(example(chip_text(&n.name), "Photos of someone you named, clearest first; add words to narrow them".into()));
+    }
+    let examples = examples.spacing(10).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 18.0 });
     col = col.push(examples);
     col = col.push(
         container(text("Search goes by what a photo shows, not its file or folder name. Results are read-only, like the calendar's days: Open day › takes you to a photo's day.").size(t::T_SMALL).color(t::PHOTO_INK3))
@@ -1552,8 +1554,17 @@ fn invitation(app: &App) -> Element<'_, Message> {
             Some("Search works on the newest days within a minute. You can keep culling, and stop it from the status bar. Preferences ▸ Search chooses the graphics card or the processor."),
         ),
     ];
-    if !st.models_installed {
-        facts.push(fact("Downloads", format!("The search model, once: {}", costs.download), None));
+    // What the dialog will fetch: search's model unless it's here, a face
+    // model unless the one chosen is.
+    let face_missing = app.settings.find_faces && !st.faces.installed;
+    let download = match (!st.models_installed, face_missing) {
+        (true, true) => Some(format!("The search model and a face model you pick, once: {} for search", costs.download)),
+        (true, false) => Some(format!("The search model, once: {}", costs.download)),
+        (false, true) => Some("A face model you pick, once; the next step lists each with its size".to_string()),
+        (false, false) => None,
+    };
+    if let Some(line) = download {
+        facts.push(fact("Downloads", line, None));
     }
     facts.push(fact("Keeps", format!("{}, on this computer, readable only by you. Nothing about your photos is sent anywhere.", super::search_setup::capital(&costs.kept)), None));
     let mut group = column![];
@@ -1571,7 +1582,11 @@ fn invitation(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
     explained(
         "Search the library by what's in your photos",
-        "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns.",
+        if app.settings.find_faces {
+            "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns. In the same pass it finds faces, so you can name people and search for them."
+        } else {
+            "Type what you're looking for, such as a camera, fireworks or a red car at night. To find photos that way, Photo Pipeline first looks at each photo in the library once and keeps what it learns."
+        },
         Some(container(group).width(Length::Fill).style(style::group()).into()),
         "After this, each export is added on its own, in the background.",
         action.into(),
@@ -1585,7 +1600,11 @@ fn preparing(app: &App) -> Element<'_, Message> {
     let (line, action): (String, Element<'_, Message>) = if s.downloading() {
         let (done, total) = s.downloads.iter().fold((0, 0), |(a, b), d| (a + d.done, b + d.total));
         (
-            format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total)),
+            if s.downloads.len() > 1 {
+                format!("Downloading the models: {}. Indexing starts as soon as they're in place.", super::search_setup::progress_bytes(done, total))
+            } else {
+                format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total))
+            },
             kit::btn("Show the download", style::secondary(), Some(m(Msg::Dialog(DialogMsg::Show)))).into(),
         )
     } else {

@@ -354,7 +354,7 @@ fn read_header(data: &[u8], model: &ModelInfo) -> Option<usize> {
 }
 
 /// Frame a sealed block in the file: its length, then the block.
-fn framed(block: &[u8]) -> Vec<u8> {
+pub(crate) fn framed(block: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(4 + block.len());
     out.extend_from_slice(&(block.len() as u32).to_le_bytes());
     out.extend_from_slice(block);
@@ -362,7 +362,7 @@ fn framed(block: &[u8]) -> Vec<u8> {
 }
 
 /// Split a file into its framed blocks, stopping at a torn tail.
-fn blocks(data: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn blocks(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     let mut i = 0;
     while i + 4 <= data.len() {
