@@ -1019,9 +1019,17 @@ impl Fake {
                         Some("resume") => fursuits::Why::Resume,
                         _ => fursuits::Why::NewExports,
                     };
+                    // The photos asked about are tagged and not looked at
+                    // yet, as the engine's are, so skipping leaves them
+                    // offered on the tab.
+                    let tagged = st.fursuits.tagged_in(s.indexed_shots);
+                    let photos = photos.min(tagged);
                     s.heads.on = true;
                     s.heads.models_installed = true;
+                    s.heads.skipped = 0;
                     s.heads.step = fursuits::Step::Asking(fursuits::Offer { photos, why });
+                    st.fursuits.scan(tagged - photos);
+                    st.refresh_people();
                 }
                 "heads-skipped" => {
                     let tagged = st.fursuits.tagged_in(s.indexed_shots);

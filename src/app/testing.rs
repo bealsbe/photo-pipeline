@@ -91,6 +91,8 @@
 //!                             # Preferences ▸ Search and its Storage rows
 //! prefs closeness 4.5         # set how close matches must be (the slider)
 //! prefs show-search           # open Preferences at its Search section
+//! prefs show-fursuits|show-storage   # ... at Fursuits' last row, Storage's
+//!                             # models row
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
@@ -972,6 +974,8 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
+        "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
+        "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),
         "editcopy" => app.update(Message::FolderPicked(super::FolderTarget::EditCopySetting, Some(rest.into()))),

@@ -483,7 +483,7 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
         }
         Ask::ModelsDelete => {
             link.delete_models();
-            "Deleted the downloaded model."
+            "Deleted the downloaded models."
         }
         Ask::ForgetFursuits => {
             link.forget_all_fursuits();
@@ -1220,7 +1220,7 @@ fn heads_row(app: &App) -> Element<'_, Message> {
     let h = &app.search.status.heads;
     let (value, sub) = match p.search_storage() {
         None => ("…".to_string(), Some("counting".to_string())),
-        Some(s) if s.heads_bytes == 0 => ("Empty".to_string(), Some("none found yet".to_string())),
+        Some(s) if s.heads_bytes == 0 => ("Empty".to_string(), Some("nothing saved yet".to_string())),
         Some(s) => (util::fmt_bytes(s.heads_bytes), Some(util::plural(h.found as u64, "head"))),
     };
     let about = column![
@@ -1238,13 +1238,13 @@ fn models_row(app: &App) -> Element<'_, Message> {
     let (value, sub) = match p.search_storage() {
         None => ("…".to_string(), Some("counting".to_string())),
         Some(s) if s.models_bytes == 0 => ("None".to_string(), Some("nothing downloaded".to_string())),
-        Some(s) => (util::fmt_bytes(s.models_bytes), Some("the search model".to_string())),
+        Some(s) => (util::fmt_bytes(s.models_bytes), Some("search, faces, heads".to_string())),
     };
     let open = focusable(p, Control::ModelsOpen, kit::btn("Open", style::ghost(), models_exist(p).then(|| m(Msg::Press(Control::ModelsOpen)))));
     let delete = focusable(p, Control::ModelsDelete, kit::btn("Delete…", style::secondary(), search_action_ready(app, Control::ModelsDelete).then(|| m(Msg::Press(Control::ModelsDelete)))));
     let path = crate::ml::models::models_dir().map(|d| tilde(&d)).unwrap_or_default();
     let about = column![
-        text("The search model. Deleted, it downloads again, after asking, when it's next needed.").size(t::T_SMALL).color(t::INK3),
+        text("The models search, faces and fursuit heads use. Deleted, each downloads again, after asking, when it's next needed.").size(t::T_SMALL).color(t::INK3),
         text(path).size(t::T_SMALL).color(t::INK4)
     ]
     .spacing(2);
@@ -1809,9 +1809,9 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             )
         }
         _ => (
-            "Delete the downloaded model?",
+            "Delete the downloaded models?",
             format!(
-                "{} is freed. Search keeps working on what is indexed; indexing new photos, or the next index, asks to download it again.",
+                "{} is freed. Search keeps working on what is indexed; indexing new photos, or the next index, asks to download them again.",
                 if models > 0 { util::fmt_bytes(models) } else { "Its space".to_string() }
             ),
             "Delete",

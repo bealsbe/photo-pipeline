@@ -183,7 +183,7 @@ pub fn body(app: &App) -> Element<'_, Message> {
         State::Off => subj::message(
             Glyph::Fursuit,
             "Finding fursuit heads is off",
-            "Turn it on in Preferences ▸ Search to look for the fursuits in your photos.".into(),
+            "Turn it on in Preferences ▸ Fursuits to look for the fursuits in your photos.".into(),
             Some(("Open Preferences", m(Msg::OpenPrefs))),
             None,
         ),
@@ -271,7 +271,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         text(if device == Device::Cpu {
             "After this, each export's photos with fursuits are offered as they are added, with what looking at them costs on the processor."
         } else {
-            "After this, heads in new exports are found as they are added. Finding fursuit heads can be turned off in Preferences ▸ Search."
+            "After this, heads in new exports are found as they are added. Finding fursuit heads can be turned off in Preferences ▸ Fursuits."
         })
         .size(t::T_SMALL)
         .color(t::INK3),

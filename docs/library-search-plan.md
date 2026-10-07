@@ -2414,3 +2414,13 @@ heads-catchup|heads-off|heads-running [n]|heads-asking [photos]
   the test driver writing its screenshots; the regroup (17 ms) and the
   vocabulary (7 s) are on the engine's worker.  The run also caught the
   review's count reading "19 photo to checks" (fixed for both kinds).
+- A last tour on the stand-in under `PP_PROFILE=1` (the tab, a page,
+  *Heads*, the review, *Find more*, the processor's card and strip,
+  skipping, a running scan, a failed card, the catch-up and its dialog,
+  Preferences, Storage, `@`, a shared name): no slow update but the
+  driver's screenshots (`update:Bg` at most 14 ms).  It caught, and these
+  are fixed: the off and catch-up pages sent the user to Preferences ▸
+  Search for the switch (it is in Preferences ▸ Fursuits); *Downloaded
+  models* still said "the search model" (it holds the face and head
+  models too, and Delete removes them all); the stand-in's skipped scan
+  left nothing to offer.
