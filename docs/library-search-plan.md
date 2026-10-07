@@ -2299,3 +2299,118 @@ Kinds never mix: a head is a `FaceRef` of `Kind::Fursuit` subjects only;
 its vectors are 1 536 wide where faces are 512; its files, requests and
 replies are its own; the store ignores face files in the same folder
 (tested).
+
+## As built — phase 4 (UI): fursuits
+
+The Fursuits tab and the head step as the user sees them (§7a.4–7a.8,
+decision 11), on phase 3's pages and the phase 4 backend's API.
+
+### Where it lives
+
+- `src/app/subjects_fursuits.rs`: the tab's own states (no library, not
+  indexed, off, the catch-up offer, looking, the processor's question, a
+  failed card, no heads), its caption, the head step's card over the
+  groups, the processor's strip under the folder bar in any view, the
+  status bar's line with ×, and their messages (`Message::Fursuits`).
+- `src/app/fursuits.rs`: `search::heads` re-exported, the registry's
+  pair as the pages name and count it (`models_name`, `missing_models`,
+  `library_photos`), and the stand-in `FakeFursuits`.
+- `src/app/fursuit_art.rs`: the stand-in's grey cartoon heads (the
+  approved mockup's drawing: fox, cat, bear, rabbit, dragon and dog ears;
+  masks, blazes and spots; three greys), and made-up photos with a suit
+  at its box.  Greys only; no photo of anyone.
+- Hooks, kept narrow, in phase 3's files: the Fursuits tab's body and
+  caption (`subjects::overview`, `header`), the progress strip by kind,
+  *Find more* on a fursuit's band and the review's end page
+  (`Link::find_more`), the dialog's fursuit tick and rows, Preferences ▸
+  Fursuits and a *Fursuit heads* storage row, `NAMED_KINDS` with
+  fursuits, and the test driver's `fursuits …` and `search fake
+  fursuits|heads-…`.
+
+### As designed, with these differences
+
+- **The glyph** is the mockup's head; shown at 18 px or less (the tabs,
+  buttons) it draws a simpler outline with the eyes and a solid nose,
+  since the inner-ear lines and the muzzle ran into a blob.  The paw
+  print stays the Pets tab's, so the two kinds never look alike (open
+  question 1).
+- **The processor asks every time** (decision 11): whenever a scan would
+  start (after the first index, after an export, carrying on after a
+  stop) the step waits as `Step::Asking`, and the page asks in a strip
+  under the folder bar in any view, and as a card on the tab, with the
+  photos and the cost from the measured estimates: *Find fursuit heads* /
+  *Skip this time*.  Ticking *Find fursuit heads* in the first-index
+  dialog is not the answer (open question 2): the dialog starts it
+  unticked on the processor (§7a.4), and the scan still asks when it
+  would start.  Skipped photos are offered again from the tab and
+  Preferences, with their cost.
+- **Find more** (strict) is a button on a named fursuit's band beside
+  *Review N suggestions*, and the review's end page calls the same
+  `find_more`; the status bar says how many it found, or that nothing
+  more is close enough.
+- **A failed card** is said once: the banner in every view, and the
+  tab's card (with *Try the card again* and *Preferences*, never the
+  processor) only once the banner is put away.
+- **A typed `@name` both kinds share** searches the person (the user's
+  decision); the page spots the fursuit of that name itself (it turns
+  typed names into chips before the engine sees them) and also takes the
+  engine's `also_fursuits`: the understood strip says "There's also a
+  fursuit called Alex." with *Search for the fursuit instead*, which puts
+  the fursuit's chip in the person's place.  Never mixed into the
+  results.
+- **Forget all, per kind:** Preferences ▸ People's *Forget all…* calls
+  `forget_kind(Person)` and Preferences ▸ Fursuits' calls
+  `forget_kind(Fursuit)`; each leaves the other kind's names and answers
+  alone.  The engine's all-kinds `forget_all` had no caller left and was
+  removed (Clear and Rebuild still empty both caches and keep the user's
+  file, §10).
+- **The download dialog** lists the registry's pair (OWLv2, DINOv2) under
+  *Find fursuit heads*, a cost line, totals and sources; only the missing
+  models are download rows (the same rule as phase 3's fix for faces).
+  The heads-only form serves the tab's catch-up.
+- **Storage:** a read-only *Fursuit heads* row with the head cache's
+  size; forgetting is in Preferences ▸ Fursuits.
+
+### The stand-in
+
+`FakeFursuits` sits beside `FakePeople` on the same shots and keys (so a
+photo of a person and a suit is one photo): heads only on shots "tagged"
+fursuit, a press showing one suit, sometimes two heads a photo; suits in
+look-alike pairs so automatic groups mix a little, as the study found;
+named suits' suggestions a few at a time, *Find more* letting the next
+few through (look-alikes after the first round), until nothing more.
+Edits go to the stand-in of the group's kind, and Ctrl+Z takes back the
+newest edit of either.  `search fake fursuits|fursuits-first|
+heads-catchup|heads-off|heads-running [n]|heads-asking [photos]
+[first|export|resume]|heads-skipped [n]|heads-cardcrash` set its states.
+
+### Checked
+
+- `cargo test --release`: zero warnings; tests for the stand-in's rules
+  (heads only on fursuit photos, mixing, strict Find more, answers per
+  press, merges and moves never across kinds), the art (greys only), the
+  glyph (ears, eyes and nose at every size, open between the ears), the
+  processor's question (states the cost, never offers the card), the
+  head models as download rows only while missing, and a name both kinds
+  share offering the fursuit beside the person.
+- Headless on the stand-in: every state of the tab, a fursuit's page and
+  heads, naming with *Merge into*, the review with Yes and No, the
+  processor's strip and card, skipping, the catch-up offer and its
+  dialog on both devices, a failed card, Preferences and Storage, and
+  `@` completing people and fursuits under their own headings.
+- Headless on the real engine (a throwaway home with the search and face
+  models linked in, 165 photos of one convention day as a scratch
+  library, the card): the dialog lists only the fursuit pair as
+  downloads (963 MB), with search and AuraFace "Downloaded"; the pair
+  downloads and checks, then indexing runs search, faces and the head
+  step, which starts unasked on the card after the first index
+  (124 photos tagged fursuit, 149 heads); the status bar shows *Finding
+  fursuit heads 80 of 124* with ×; the tab shows two groups to name
+  (24 and 12 photos) and 103 smaller ones; a group's page, *Heads* and
+  "Same fursuit as this group?" work on real heads.  The 24-photo group
+  holds more than one suit (a red cat and a black dragon among them),
+  which the page's line "it may hold more than one fursuit" and the
+  review are for.  `PP_PROFILE=1` over the run: the only slow updates are
+  the test driver writing its screenshots; the regroup (17 ms) and the
+  vocabulary (7 s) are on the engine's worker.  The run also caught the
+  review's count reading "19 photo to checks" (fixed for both kinds).

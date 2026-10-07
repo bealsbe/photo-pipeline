@@ -1353,7 +1353,11 @@ pub fn debug_state(app: &App) -> String {
         app.view,
         s.page(),
         s.tab,
-        state(app, s.tab),
+        // The Fursuits tab's states are its own.
+        match s.tab {
+            Kind::Fursuit => format!("{:?}", super::subjects_fursuits::state(app)),
+            kind => format!("{:?}", state(app, kind)),
+        },
         names(&a.named),
         names(&a.to_name).into_iter().take(8).collect::<Vec<_>>(),
         a.small.len(),
