@@ -147,7 +147,7 @@ pub struct Status {
     /// People's faces (phase 3).
     pub faces: FacesStatus,
     /// The fursuit-head step (phase 4): on or off, how far, what it waits
-    /// for (`heads`).
+    /// for.
     pub heads: heads::HeadsStatus,
 }
 

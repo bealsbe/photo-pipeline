@@ -53,10 +53,10 @@ pub enum Link {
 
 impl Link {
     /// The engine, or the stand-in when `PP_SEARCH_FAKE` is set.
-    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: crate::ml::models::ModelId) -> Link {
+    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: crate::ml::models::ModelId, find_heads: bool) -> Link {
         match std::env::var("PP_SEARCH_FAKE") {
-            Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed", find_faces, face_model)),
-            Err(_) => Link::Engine(Arc::new(Engine::new(bus, device, index_exports, find_faces, face_model))),
+            Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed", find_faces, face_model, find_heads)),
+            Err(_) => Link::Engine(Arc::new(Engine::new(bus, device, index_exports, find_faces, face_model, find_heads))),
         }
     }
 
@@ -334,19 +334,20 @@ impl Link {
     /// under the cut-off; nothing new means nothing more is close enough);
     /// for people the same as `suggestions`.
     pub fn find_more(&self, seq: u64, id: &GroupId) {
-        if let Link::Fake(f) = self {
-            {
-                let mut s = f.state.lock();
-                if s.fursuits.owns(id) {
-                    s.fursuits.find_more(id);
-                    s.refresh_people();
+        match self {
+            Link::Engine(e) => e.find_more(seq, id.clone()),
+            Link::Fake(f) => {
+                {
+                    let mut s = f.state.lock();
+                    if s.fursuits.owns(id) {
+                        s.fursuits.find_more(id);
+                        s.refresh_people();
+                    }
                 }
+                f.publish_people();
+                self.suggestions(seq, id);
             }
-            f.publish_people();
         }
-        // The engine's fursuit side lands with the phase 4 backend; until
-        // then it answers as for people.
-        self.suggestions(seq, id);
     }
 
     /// Take back the last edit to people (`BgEvent::SubjectsUndone`, then
@@ -420,18 +421,18 @@ impl Link {
         }
     }
 
-    // ── fursuit heads (the stand-in answers until the phase 4 backend's
-    //    API lands; the engine's arms do nothing yet) ──
+    // ── fursuit heads (decision 11) ──
 
     /// Preferences ▸ *Find fursuit heads* (and the download dialog's tick).
     pub fn set_find_heads(&self, on: bool) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.set_find_heads(on),
+            Link::Fake(f) => f.change(|s| {
                 s.status.heads.on = on;
                 if !on {
                     s.status.heads.step = fursuits::Step::Idle;
                 }
-            });
+            }),
         }
     }
 
@@ -439,23 +440,25 @@ impl Link {
     /// the Fursuits tab or Preferences, after the cost was shown): the head
     /// models first if missing, then the scan, on either device.
     pub fn find_heads(&self) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.find_heads(),
+            Link::Fake(f) => f.change(|s| {
                 let h = &mut s.status.heads;
                 h.on = true;
                 h.models_installed = true;
                 h.skipped = 0;
                 let total = h.unscanned();
                 h.step = fursuits::Step::Scanning { why: fursuits::Why::CatchUp, done: 0, total };
-            });
+            }),
         }
     }
 
     /// The answer to a head scan waiting on the processor: start it, or
     /// skip it (its photos wait for a later catch-up).
     pub fn answer_heads(&self, start: bool) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.answer_heads(start),
+            Link::Fake(f) => f.change(|s| {
                 let h = &mut s.status.heads;
                 let fursuits::Step::Asking(o) = h.step else { return };
                 h.step = if start {
@@ -464,18 +467,19 @@ impl Link {
                     h.skipped += o.photos;
                     fursuits::Step::Idle
                 };
-            });
+            }),
         }
     }
 
     /// × on a head scan: stop it, keeping what was found.
     pub fn stop_heads(&self) {
-        if let Link::Fake(f) = self {
-            f.change(|s| {
+        match self {
+            Link::Engine(e) => e.stop_heads(),
+            Link::Fake(f) => f.change(|s| {
                 if s.status.heads.scanning() {
                     s.status.heads.step = fursuits::Step::Idle;
                 }
-            });
+            }),
         }
     }
 
@@ -640,7 +644,7 @@ impl FakeState {
 }
 
 impl Fake {
-    fn new(bus: Bus, device: Device, index_exports: bool, indexed: bool, find_faces: bool, face_model: ModelId) -> Fake {
+    fn new(bus: Bus, device: Device, index_exports: bool, indexed: bool, find_faces: bool, face_model: ModelId, find_heads: bool) -> Fake {
         let mut status = Status {
             index_exports,
             device: DeviceStatus { chosen: device, name: (device == Device::Gpu).then(|| FAKE_CARD.to_string()), self_check: SelfCheck::NotRun },
@@ -662,7 +666,7 @@ impl Fake {
         }
         status.faces = FacesStatus { on: find_faces, model: Some(face_model), installed: indexed, ..FacesStatus::default() };
         let people = FakePeople::new(true);
-        status.heads = fursuits::HeadsStatus { on: true, models_installed: indexed, ..fursuits::HeadsStatus::default() };
+        status.heads = fursuits::HeadsStatus { on: find_heads, models_installed: indexed, ..fursuits::HeadsStatus::default() };
         let state = FakeState {
             status,
             downloads: Vec::new(),
@@ -1061,6 +1065,7 @@ impl Fake {
                     fursuits: Arc::new(Vec::new()),
                     animal: None,
                     subjects: Arc::new(within),
+                    also_fursuits: Arc::new(Vec::new()),
                 });
                 return;
             }
@@ -1108,6 +1113,7 @@ impl Fake {
                     fursuits: Arc::new(fursuits),
                     animal,
                     subjects: Arc::new(Vec::new()),
+                    also_fursuits: Arc::new(Vec::new()),
                 });
             })
             .ok();
@@ -1171,6 +1177,7 @@ impl Fake {
             fursuits: Arc::new(Vec::new()),
             animal: None,
             subjects: Arc::new(subjects.to_vec()),
+            also_fursuits: Arc::new(Vec::new()),
         });
     }
 }

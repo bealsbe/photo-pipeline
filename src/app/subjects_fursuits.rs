@@ -243,7 +243,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
     if !h.models_installed {
         facts.push(subj::fact(
             "Downloads",
-            format!("{}, once: {}", fursuits::HEAD_MODELS.name, super::search_setup::size(fursuits::HEAD_MODELS.bytes)),
+            format!("{}, once: {}", fursuits::models_name(), super::search_setup::size(crate::ml::models::bytes_for(&fursuits::missing_models(&app.search.status)))),
             Some("The next step lists them with their licences.".into()),
         ));
     }
@@ -504,12 +504,16 @@ mod tests {
             let (title, detail) = ask_words(Offer { photos: 42_180, why });
             assert!(title.ends_with('?'), "{title}");
             assert!(title.contains("42,180"), "{title}");
-            assert!(detail.contains("about 15 hours on the processor"), "{detail}");
+            // The processor's cost, as the estimates measure it (hours, for
+            // the library's fursuit photos).
+            let cost = fursuits::describe_cost(42_180, Device::Cpu);
+            assert!(cost.contains("hours on the processor"), "{cost}");
+            assert!(detail.contains(&cost), "{detail}");
             assert!(!detail.to_lowercase().contains("graphics card"), "the question never offers the card as a way round: {detail}");
         }
         let (title, detail) = ask_words(Offer { photos: 412, why: Why::NewExports });
         assert_eq!(title, "Find fursuit heads in the 412 new photos with fursuits?");
-        assert!(detail.starts_with("Search already has them. This takes about 9 minutes on the processor"), "{detail}");
+        assert!(detail.starts_with(&format!("Search already has them. This takes {}", fursuits::describe_cost(412, Device::Cpu))), "{detail}");
         let (title, _) = ask_words(Offer { photos: 1, why: Why::NewExports });
         assert_eq!(title, "Find fursuit heads in the 1 new photo with fursuits?");
     }

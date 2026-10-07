@@ -45,6 +45,13 @@ pub enum ModelId {
     InsightFace,
     /// SFace (OpenCV Zoo, 2021 December): the smallest and fastest.
     SFace,
+    /// OWLv2 B/16 (ensemble checkpoint): finds fursuit heads by the words
+    /// "a fursuit head" (phase 4, decision 11).  The image tower, the text
+    /// tower and the box head in one graph, with its CLIP tokenizer.
+    Owlv2,
+    /// DINOv2 base: tells one fursuit from another from a head crop
+    /// (phase 4).  Its vectors are kept apart from every other kind's.
+    Dinov2,
 }
 
 impl ModelId {
@@ -56,6 +63,8 @@ impl ModelId {
             ModelId::AuraFace => "auraface-v1",
             ModelId::InsightFace => "insightface-buffalo-l",
             ModelId::SFace => "sface-2021dec",
+            ModelId::Owlv2 => "owlv2-b16-ensemble",
+            ModelId::Dinov2 => "dinov2-base",
         }
     }
 
@@ -63,7 +72,16 @@ impl ModelId {
     pub fn is_face_model(self) -> bool {
         matches!(self, ModelId::AuraFace | ModelId::InsightFace | ModelId::SFace)
     }
+
+    /// One of the fursuit head step's models (phase 4).
+    pub fn is_fursuit_model(self) -> bool {
+        matches!(self, ModelId::Owlv2 | ModelId::Dinov2)
+    }
 }
+
+/// The fursuit head step's models (phase 4): the detector and the
+/// embedding, both or neither.
+pub const FURSUIT_MODELS: [ModelId; 2] = [ModelId::Owlv2, ModelId::Dinov2];
 
 /// The face detector every face model uses.
 pub const FACE_DETECTOR: ModelId = ModelId::Yunet;
@@ -225,8 +243,44 @@ pub const SFACE_FILES: &[ModelFile] = &[ModelFile {
     archive: None,
 }];
 
-/// Every model, in the dialog's order: search, the face detector, then
-/// the face choices (the recommended one first).
+const OWLV2_BASE: &str = "https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/main/";
+const DINOV2_BASE: &str = "https://huggingface.co/onnx-community/dinov2-base/resolve/main/";
+
+/// OWLv2 B/16 ensemble as the transformers.js export Hugging Face's staff
+/// maintain of Google's `owlv2-base-patch16-ensemble` (Apache-2.0): the
+/// fp32 graph (measured here against the study's PyTorch boxes: the same
+/// heads, scores within 0.02) and its CLIP tokenizer.  Pinned 2026-10-02.
+pub const OWLV2_FILES: &[ModelFile] = &[
+    ModelFile {
+        file: "model.onnx",
+        url: "https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/main/onnx/model.onnx",
+        sha256: "a58f0efe148481660a0b1e4843b59cf7af52c8d2965afb6abc98a252c63552d2",
+        bytes: 614_400_346,
+        archive: None,
+    },
+    ModelFile {
+        file: "tokenizer.json",
+        url: "https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/main/tokenizer.json",
+        sha256: "bbce3185c27ac4daf41ea2dfc864785bdcd1a42815e7646324af20edd671a578",
+        bytes: 2_224_254,
+        archive: None,
+    },
+];
+
+/// DINOv2 base as the transformers.js export of Meta's `dinov2-base`
+/// (Apache-2.0), fp32: its CLS and mean patch token equal the study's
+/// (cosine 1.000 on the study's crops).  Pinned 2026-10-02.
+pub const DINOV2_FILES: &[ModelFile] = &[ModelFile {
+    file: "model.onnx",
+    url: "https://huggingface.co/onnx-community/dinov2-base/resolve/main/onnx/model.onnx",
+    sha256: "320d1012a6fc65b101fc85ca30ee7a47b2e4f6a2e8bd78fb9d7036def0e30cb0",
+    bytes: 346_627_111,
+    archive: None,
+}];
+
+/// Every model, in the dialog's order: search, the face detector, the
+/// face choices (the recommended one first), then the fursuit head step's
+/// two.
 pub const ALL: &[ModelInfo] = &[
     ModelInfo {
         id: ModelId::Siglip2,
@@ -308,6 +362,38 @@ pub const ALL: &[ModelInfo] = &[
         recommended: false,
         restricted: true,
     },
+    ModelInfo {
+        id: ModelId::Owlv2,
+        role: "Fursuits",
+        name: "OWLv2, base size",
+        what: "Finds fursuit heads in the photos tagged as fursuits.",
+        licence: "Apache-2.0",
+        licence_plain: "free for any use",
+        publisher: "Google",
+        source_url: OWLV2_BASE,
+        required: false,
+        files: OWLV2_FILES,
+        preprocess_version: 1,
+        choice: None,
+        recommended: false,
+        restricted: false,
+    },
+    ModelInfo {
+        id: ModelId::Dinov2,
+        role: "Fursuits",
+        name: "DINOv2, base size",
+        what: "Tells one fursuit from another, from its head.",
+        licence: "Apache-2.0",
+        licence_plain: "free for any use",
+        publisher: "Meta",
+        source_url: DINOV2_BASE,
+        required: false,
+        files: DINOV2_FILES,
+        preprocess_version: 1,
+        choice: None,
+        recommended: false,
+        restricted: false,
+    },
 ];
 
 /// The registry entry for `id`.
@@ -344,6 +430,17 @@ pub fn models_for(face_model: Option<ModelId>) -> Vec<ModelId> {
 /// The face model among `ids`, if one.
 pub fn face_model_in(ids: &[ModelId]) -> Option<ModelId> {
     ids.iter().copied().find(|id| id.is_face_model())
+}
+
+/// The fursuit head step's rows (the dialog's *Fursuits* pair, phase 4).
+pub fn fursuit_models() -> impl Iterator<Item = &'static ModelInfo> {
+    ALL.iter().filter(|m| m.id.is_fursuit_model())
+}
+
+/// The dialog asked for fursuit heads: both of the step's models are among
+/// `ids`.
+pub fn fursuits_in(ids: &[ModelId]) -> bool {
+    FURSUIT_MODELS.iter().all(|m| ids.contains(m))
 }
 
 /// `~/.cache/photo_pipeline/models/`
@@ -432,6 +529,25 @@ mod tests {
         assert_eq!(info(ModelId::Yunet).bytes() / 1_000, 232);
         assert_eq!(info(ModelId::SFace).bytes() / 1_000_000, 38);
         assert_eq!(info(ModelId::AuraFace).bytes() / 1_000_000, 260);
+    }
+
+    /// Decision 11 and 13: the fursuit head step's two models are a pair of
+    /// their own rows, Apache-2.0, from maintained ONNX exports, pinned.
+    #[test]
+    fn the_fursuit_models_are_a_pinned_apache_pair() {
+        let rows: Vec<&ModelInfo> = fursuit_models().collect();
+        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), FURSUIT_MODELS);
+        assert!(rows.iter().all(|m| m.role == "Fursuits" && m.licence == "Apache-2.0" && !m.required && !m.restricted && m.choice.is_none()));
+        assert!(rows.iter().all(|m| !m.id.is_face_model()), "never a face model");
+        assert!(ALL.iter().filter(|m| !m.id.is_fursuit_model()).all(|m| m.role != "Fursuits"));
+        assert_eq!(info(ModelId::Owlv2).bytes() / 1_000_000, 616, "the graph and its tokenizer");
+        assert_eq!(info(ModelId::Dinov2).bytes() / 1_000_000, 346);
+        assert_eq!(bytes_for(&FURSUIT_MODELS) / 1_000_000, 963);
+        assert!(fursuits_in(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]));
+        assert!(!fursuits_in(&[ModelId::Siglip2, ModelId::Owlv2]), "half the pair is no step");
+        assert_eq!(serde_json::to_string(&ModelId::Owlv2).unwrap(), "\"owlv2\"");
+        assert_eq!(serde_json::to_string(&ModelId::Dinov2).unwrap(), "\"dinov2\"");
+        assert_eq!(models_for(None), [ModelId::Siglip2], "search alone, as before");
     }
 
     #[test]

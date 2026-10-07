@@ -255,9 +255,9 @@ mod tests {
         assert!(b.input.iter().all(|&v| v <= -0.9));
         // Not a JPEG at all.
         std::fs::write(d.join("bad.jpg"), b"nope").unwrap();
-        let e = prepare(&d.join("bad.jpg"), FileType::Jpg, false).unwrap_err();
+        let Err(e) = prepare(&d.join("bad.jpg"), FileType::Jpg, false) else { panic!("not a JPEG, yet prepared") };
         assert!(e.errno.is_none() && !e.message.is_empty());
-        let gone = prepare(&d.join("missing.jpg"), FileType::Jpg, false).unwrap_err();
+        let Err(gone) = prepare(&d.join("missing.jpg"), FileType::Jpg, false) else { panic!("a missing file, yet prepared") };
         assert_eq!(gone.errno, Some(libc::ENOENT));
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -15,32 +15,25 @@ use chrono::NaiveDate;
 pub use crate::search::heads::*;
 
 use super::people::{Face, FaceRef, Group, GroupId, Kind, Shot, SubjectId, shots_of};
+use crate::ml::models::{self, ModelId};
 use crate::model::library_index::LibraryIndex;
+use crate::search::Status;
 use crate::search::index::Key;
 use crate::util;
 
-/// The head models as the download dialog lists them (one row: they are
-/// fetched and used together), until the registry's own rows land.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct HeadModels {
-    pub name: &'static str,
-    pub what: &'static str,
-    pub licence: &'static str,
-    pub licence_plain: &'static str,
-    pub publisher: &'static str,
-    pub sources: &'static [&'static str],
-    pub bytes: u64,
+/// The head step's models (the registry's *Fursuits* pair), named as the
+/// pages say them: "OWLv2 and DINOv2".
+pub fn models_name() -> String {
+    let names: Vec<&str> = models::fursuit_models().map(|m| m.name.split(',').next().unwrap_or(m.name).trim()).collect();
+    names.join(" and ")
 }
 
-pub const HEAD_MODELS: HeadModels = HeadModels {
-    name: "OWLv2 and DINOv2",
-    what: "OWLv2 finds fursuit heads and DINOv2 tells suits apart, only on photos with fursuits.",
-    licence: "Apache-2.0",
-    licence_plain: "free for any use",
-    publisher: "Google and Meta",
-    sources: &["https://huggingface.co/google/owlv2-base-patch16", "https://huggingface.co/facebook/dinov2-base"],
-    bytes: 950_000_000,
-};
+/// The head models still to download: both, unless the status says they
+/// are in place.  The dialog's sizes and its rows come from here, so no
+/// row waits for a download that never comes.
+pub fn missing_models(st: &Status) -> Vec<ModelId> {
+    if st.heads.models_installed { Vec::new() } else { models::FURSUIT_MODELS.to_vec() }
+}
 
 /// The library's fursuit photos, for "for this library" costs: those the
 /// index tags, or before anything is indexed, the study's share (three

@@ -597,6 +597,22 @@ user's choice:
 | AuraFace v1 (fal), recommended | face recognition, 512-d | 261 MB | Apache-2.0 | Hugging Face `fal/AuraFace-v1`, `glintr100.onnx` alone |
 | SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
 | InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
+| OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
+| DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
+
+The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
+asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
+DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
+token) that tells one suit from another.  The head cache lives beside the
+index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
+by the user alone, vectors stored as f16); for grouping and the Fursuits
+tab the vectors are held in memory as f32: **measured 405 MB for the
+~68 000 heads a library of 56 000 shots is expected to hold** (and about
+400 MB more for the few seconds a regroup's copy lives on its worker),
+built only when that work needs it, never at start-up, and let go again
+once fursuit work has been quiet for two minutes (the next request reads
+them back in 0.3 s): the user's decision, 2026-10-03, full size, freed
+after use, not the 768-wide CLS half that measured as well.
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the

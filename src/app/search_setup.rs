@@ -122,6 +122,11 @@ pub fn missing_models(st: &Status, search: bool, face: Option<ModelId>) -> Vec<M
     out
 }
 
+/// Rows for `ids`, waiting until the engine reports on each.
+fn waiting_rows(ids: &[ModelId]) -> Vec<Download> {
+    ids.iter().map(|&id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect()
+}
+
 /// What *Download and index* does next.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Begin {
@@ -204,9 +209,14 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             }
             if fursuits_only {
                 // The library is indexed: the head models (their download
-                // first), then the fursuit photos looked at for heads.
+                // first, only those missing), then the fursuit photos
+                // looked at for heads.
                 let s = &mut app.search;
                 s.dialog = None;
+                let missing = fursuits::missing_models(&s.status);
+                if !missing.is_empty() {
+                    s.downloads = waiting_rows(&missing);
+                }
                 s.link.set_find_heads(true);
                 s.link.find_heads();
                 return app.show_status("Finding fursuit heads in the library. Groups appear on the Fursuits tab as they are found.", 8000);
@@ -233,12 +243,28 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             }
             let face = faces.then_some(model);
             let s = &mut app.search;
-            let ids = models::models_for(face);
+            let mut ids = models::models_for(face);
+            // The *Fursuits* pair asked for means heads on (the engine reads
+            // it from the list); only the missing ones are rows.
+            let heads_missing = if fursuits {
+                ids.extend(models::FURSUIT_MODELS);
+                fursuits::missing_models(&s.status)
+            } else {
+                Vec::new()
+            };
             s.link.set_find_faces(faces);
             if face.is_some() {
                 s.link.set_face_model(model);
             }
-            match begin_first_index(&s.status, face) {
+            let begin = match (begin_first_index(&s.status, face), heads_missing.is_empty()) {
+                (Begin::Index, true) => Begin::Index,
+                (Begin::Index, false) => Begin::Download(waiting_rows(&heads_missing)),
+                (Begin::Download(mut rows), _) => {
+                    rows.extend(waiting_rows(&heads_missing));
+                    Begin::Download(rows)
+                }
+            };
+            match begin {
                 Begin::Index => {
                     s.dialog = None;
                     s.link.start_first_index(&ids);
@@ -425,7 +451,7 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     // fursuit-head models unless they are in place.
     let heads_st = &st.heads;
     let heads = dl.fursuits || dl.fursuits_only;
-    let heads_bytes = if heads && !heads_st.models_installed { fursuits::HEAD_MODELS.bytes } else { 0 };
+    let heads_bytes = if heads { models::bytes_for(&fursuits::missing_models(st)) } else { 0 };
     let total = models::bytes_for(&missing_models(st, !dl.faces_only && !dl.fursuits_only, faces.then_some(dl.face_model))) + heads_bytes;
     let title = match (dl.fursuits_only, dl.faces_only, total > 0) {
         (true, _, true) => "Download the fursuit-head models and find heads?",
@@ -492,7 +518,8 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         };
         let head: Element<'_, Message> = if dl.fursuits_only { kit::heading("Fursuit heads").into() } else { tick(dl.fursuits, "Find fursuit heads", d(DialogMsg::Fursuits)) };
         col = col.push(row![head, kit::caption(note)].spacing(t::S2).align_y(Alignment::Center));
-        col = col.push(group(vec![heads_row(app, heads, heads_st.models_installed)]));
+        col = col.push(group(models::fursuit_models().map(|mi| heads_row(mi, heads, heads_st.models_installed)).collect()));
+        col = col.push(kit::caption(heads_cost(app)));
     }
     let runs = match (st.device.chosen, &st.device.name) {
         (Device::Gpu, Some(name)) => format!("The graphics card ({name}), checked against the processor first"),
@@ -586,11 +613,20 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
             }
         }
         if heads {
-            let mut c = column![text(format!("Fursuit heads: {}", fursuits::HEAD_MODELS.name)).size(t::T_SMALL).color(t::INK)].spacing(1);
-            for src in fursuits::HEAD_MODELS.sources {
-                c = c.push(text(*src).size(t::T_SMALL).color(t::INK3));
+            for mi in models::fursuit_models() {
+                for f in mi.files {
+                    rows.push(
+                        column![
+                            text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                            text(f.url).size(t::T_SMALL).color(t::INK3),
+                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                        ]
+                        .spacing(1)
+                        .padding(Padding::from([6.0, 12.0]))
+                        .into(),
+                    );
+                }
             }
-            rows.push(c.padding(Padding::from([6.0, 12.0])).into());
         }
         col = col.push(group(rows));
     }
@@ -612,33 +648,36 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     iced::widget::scrollable(col.padding(Padding { right: t::S3, ..Padding::ZERO })).style(style::scroll).into()
 }
 
-/// The fursuit-head models' row: their names, size, what they do and what
-/// that costs here, the licence in plain words and the publishers.  Dimmed
-/// while unticked.
-fn heads_row<'a>(app: &App, on: bool, installed: bool) -> Element<'a, Message> {
-    let mi = fursuits::HEAD_MODELS;
-    let st = &app.search.status;
-    let device = st.device.chosen;
-    let photos = fursuits::library_photos(&st.heads, st.library_shots.max(st.indexed_shots));
-    let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
-    let cost = match device {
-        Device::Gpu => format!("{} for this library, then {day} a new event day.", capital(&fursuits::describe_cost(photos, device))),
-        Device::Cpu => format!("{} for this library, {day} an event day.", capital(&fursuits::describe_cost(photos, device))),
-    };
+/// One of the fursuit-head models' rows: its name, size, what it does, the
+/// licence in plain words and the publisher.  Dimmed while unticked.
+fn heads_row<'a>(mi: &models::ModelInfo, on: bool, installed: bool) -> Element<'a, Message> {
     let ink = |c: iced::Color| if on { c } else { alpha(c, 0.45) };
     let top = row![
         text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(ink(t::INK)),
         Space::new().width(Length::Fill),
-        text(if installed { "Downloaded".to_string() } else { size(mi.bytes) }).size(t::T_SMALL).color(ink(t::INK2)),
+        text(if installed { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(ink(t::INK2)),
     ]
     .align_y(Alignment::Center);
     let col = column![
         top,
-        text(format!("{} {cost}", mi.what)).size(t::T_SMALL).color(ink(t::INK2)),
+        text(mi.what).size(t::T_SMALL).color(ink(t::INK2)),
         text(format!("Licence: {}, {}. From {}.", mi.licence, mi.licence_plain, mi.publisher)).size(t::T_SMALL).color(ink(t::INK3)),
     ]
     .spacing(2);
     container(col).padding(Padding::from([7.0, 12.0])).width(Length::Fill).into()
+}
+
+/// What looking for heads costs here, under the head models' rows: the
+/// library's fursuit photos, then an event day.
+fn heads_cost(app: &App) -> String {
+    let st = &app.search.status;
+    let device = st.device.chosen;
+    let photos = fursuits::library_photos(&st.heads, st.library_shots.max(st.indexed_shots));
+    let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
+    match device {
+        Device::Gpu => format!("{} for this library, then {day} a new event day.", capital(&fursuits::describe_cost(photos, device))),
+        Device::Cpu => format!("{} for this library, {day} an event day.", capital(&fursuits::describe_cost(photos, device))),
+    }
 }
 
 fn progress_view(app: &App) -> Element<'_, Message> {

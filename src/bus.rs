@@ -106,6 +106,12 @@ pub enum BgEvent {
         fursuits: Arc<Vec<crate::search::Hit>>,
         animal: Option<String>,
         subjects: Arc<Vec<crate::model::subjects::GroupId>>,
+        /// `@name`s typed (not picked as chips) that named a person and a
+        /// fursuit both: the person was searched; here is the fursuit of
+        /// that name, for the page to offer ("also a fursuit called …").
+        /// Never merged into the hits (the user, 2026-10-03: the kinds'
+        /// photos are never one list).
+        also_fursuits: Arc<Vec<(String, crate::model::subjects::GroupId)>>,
     },
     /// The *Subjects* page's state (every kind; a tab shows one): sent
     /// whenever the groups, names or counts change, throttled while a

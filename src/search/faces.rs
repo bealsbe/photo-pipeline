@@ -594,6 +594,11 @@ pub struct People {
     /// The people's clusters and sureness, from the last regroup and the
     /// faces assigned since.
     pub grouped: Grouped,
+    /// Other kinds' automatic clusters (fursuits, phase 4), by cluster
+    /// id, as their steps last published them: so an operation on such a
+    /// group finds its members and its kind here, and the kinds check
+    /// refuses a mix.  Never people's rows.
+    pub other_clusters: HashMap<u64, (Kind, Vec<FaceRef>)>,
     /// Earlier states of the file with what changed them, newest last.
     undo: Vec<(SubjectsFile, String)>,
     /// The snapshot last built.
@@ -606,7 +611,7 @@ impl People {
     /// Load the user's file (none is empty).
     pub fn load(file_path: Option<PathBuf>) -> People {
         let file = file_path.as_deref().map(SubjectsFile::load).unwrap_or_default();
-        People { file_path, file, store: None, grouped: Grouped::default(), undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
+        People { file_path, file, store: None, grouped: Grouped::default(), other_clusters: HashMap::new(), undo: Vec::new(), snapshot: Arc::new(Subjects::default()), generation: 1 }
     }
 
     /// A regroup's input for the worker, stamped with the next generation.
@@ -682,7 +687,20 @@ impl People {
     fn kind_of(&self, id: &GroupId) -> Option<Kind> {
         match id {
             GroupId::Subject(s) => self.file.get(s).map(|s| s.kind),
-            GroupId::Cluster(_) => self.cluster_members(id).map(|_| Kind::Person),
+            GroupId::Cluster(c) => match self.other_clusters.get(c) {
+                Some((kind, _)) => Some(*kind),
+                None => self.cluster_members(id).map(|_| Kind::Person),
+            },
+        }
+    }
+
+    /// Replace the clusters published for another kind (its step's
+    /// current generation); people's own clusters are never put here.
+    pub fn set_other_clusters(&mut self, kind: Kind, clusters: Vec<(u64, Vec<FaceRef>)>) {
+        debug_assert!(kind != Kind::Person);
+        self.other_clusters.retain(|_, (k, _)| *k != kind);
+        for (id, members) in clusters {
+            self.other_clusters.insert(id, (kind, members));
         }
     }
 
@@ -690,6 +708,9 @@ impl People {
     /// unknown).
     fn cluster_members(&self, id: &GroupId) -> Option<Vec<FaceRef>> {
         let GroupId::Cluster(id) = id else { return None };
+        if let Some((_, members)) = self.other_clusters.get(id) {
+            return Some(members.clone());
+        }
         let store = self.store.as_ref()?;
         let c = self.grouped.cluster(*id)?;
         Some(c.members.iter().filter_map(|&m| store.refs().get(m).copied()).collect())
@@ -702,7 +723,12 @@ impl People {
                 let s = self.file.get(s).ok_or_else(|| Refused::NoSuchSubject(s.clone()))?;
                 Ok((s.kind, s.members.clone()))
             }
-            GroupId::Cluster(_) => self.cluster_members(id).map(|m| (Kind::Person, m)).ok_or(Refused::StaleGroup),
+            // A cluster's kind is whichever step published it (people's
+            // own, or another kind's through `other_clusters`).
+            GroupId::Cluster(_) => match (self.kind_of(id), self.cluster_members(id)) {
+                (Some(kind), Some(m)) => Ok((kind, m)),
+                _ => Err(Refused::StaleGroup),
+            },
         }
     }
 
@@ -1221,6 +1247,30 @@ mod tests {
 
     /// Decision 12 through the people state: merging or moving across
     /// kinds is refused and leaves no undo step.
+    /// Another kind's cluster, published through `other_clusters`, keeps
+    /// its kind through every operation: naming it makes a subject of
+    /// that kind, merging it into a person is refused, and its members
+    /// are found (phase 4 found the opposite on a real run).
+    #[test]
+    fn another_kinds_cluster_keeps_its_kind() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)])]);
+        let cluster = GroupId::Cluster(7);
+        assert_eq!(p.members(&cluster), Ok((Kind::Fursuit, vec![face(1), face(2)])));
+        let person = GroupId::Subject(p.file.create(Kind::Person, Some("Someone".into()), vec![face(3)]));
+        assert_eq!(p.merge(&person, &[cluster.clone()]), Err(Refused::MixedKinds), "a fursuit cluster never joins a person");
+        assert_eq!(p.move_faces(&cluster, vec![face(1)], Some(&person)), Err(Refused::MixedKinds));
+        let id = p.name_group(&cluster, "Suit".into()).unwrap();
+        let s = p.file.get(&id).unwrap();
+        assert_eq!((s.kind, s.name.as_deref(), s.members.len()), (Kind::Fursuit, Some("Suit"), 2));
+        assert_eq!(p.named(Kind::Fursuit, "suit"), [GroupId::Subject(id.clone())]);
+        assert!(p.named(Kind::Person, "suit").is_empty());
+        // A stale or unknown cluster id is refused, not taken for a person.
+        p.set_other_clusters(Kind::Fursuit, Vec::new());
+        assert_eq!(p.name_group(&cluster, "Again".into()), Err(Refused::StaleGroup));
+        assert_eq!(p.undo().as_deref(), Some("Named a group Suit"));
+    }
+
     #[test]
     fn people_fursuits_and_pets_never_merge() {
         let mut p = People::load(None);
