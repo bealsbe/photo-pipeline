@@ -63,6 +63,10 @@ enum Cmd {
     SetHidden(GroupId, bool),
     Forget(SubjectId),
     ForgetAll,
+    /// Sent by the fursuit API block below; the pages call it once they
+    /// switch from their stand-in.
+    #[allow(dead_code)]
+    ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
     MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId> },
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
@@ -375,6 +379,15 @@ impl Engine {
 /// The fursuit API (phase 4, decision 11): what the Fursuits tab,
 /// Preferences and the review call.
 impl Engine {
+    /// Preferences ▸ People ▸ *Forget all people* (or Fursuits ▸ *Forget
+    /// all fursuits*): that kind's subjects, detections, vectors and
+    /// tiles go; the other kinds are not touched.  For fursuits the head
+    /// step's counts start over, so the catch-up is offered again.
+    /// `forget_all` stays for Storage and a rebuild.
+    pub fn forget_kind(&self, kind: Kind) {
+        self.send(Cmd::ForgetKind(kind));
+    }
+
     /// Preferences ▸ *Find fursuit heads*.  Off: no scan starts (what was
     /// found stays until *Forget all*).
     pub fn set_find_heads(&self, on: bool) {
@@ -861,6 +874,22 @@ impl Worker {
                     self.cancel_scan();
                     self.fursuits.forget_all();
                     self.fursuits.reset_grouping();
+                    self.refresh_counts();
+                    self.publish_subjects();
+                }
+                Cmd::ForgetKind(kind) => {
+                    self.people.forget_kind(kind);
+                    match kind {
+                        Kind::Person => self.people.reset_grouping(),
+                        Kind::Fursuit => {
+                            self.cancel_scan();
+                            self.fursuits.forget_all();
+                            self.fursuits.reset_grouping();
+                            self.people.set_other_clusters(Kind::Fursuit, Vec::new());
+                            self.publish_heads();
+                        }
+                        Kind::Pet => {}
+                    }
                     self.refresh_counts();
                     self.publish_subjects();
                 }
@@ -2726,6 +2755,16 @@ mod tests {
         let snap = e.subjects();
         assert!(snap.groups.iter().all(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Cluster(_)) && g.name.is_none()), "{:?}", snap.groups);
         assert_eq!(snap.groups.iter().map(|g| g.photos).sum::<usize>(), 3);
+        // Forgetting people leaves the fursuits; forgetting fursuits
+        // empties the head cache and offers the catch-up again.
+        e.forget_kind(Kind::Person);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(e.subjects().groups.iter().map(|g| g.photos).sum::<usize>(), 3, "people's forget leaves the fursuit groups");
+        assert_eq!(e.status().heads.scanned, 3);
+        e.forget_kind(Kind::Fursuit);
+        wait_for(&e, "the fursuits forgotten", |s| s.heads.scanned == 0 && s.heads.found == 0);
+        assert!(e.subjects().groups.is_empty());
+        assert_eq!(e.status().heads.unscanned(), 3, "the catch-up is on offer again");
         // The card: the scan follows the first index without a question.
         let (bus2, _rx2) = crate::bus::channel();
         let (lib2, d2) = library_of("heads-gpu", &files);
