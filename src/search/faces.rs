@@ -898,6 +898,27 @@ impl People {
         Ok(sid)
     }
 
+    /// *Forget all people* (or fursuits, or pets): that kind's subjects
+    /// go from the user's file, and for people the face cache too; the
+    /// other kinds' names, answers and caches stay untouched.  Beyond
+    /// undo's reach, like [`People::forget_all`].
+    pub fn forget_kind(&mut self, kind: Kind) {
+        self.file.subjects.retain(|s| s.kind != kind);
+        self.undo.clear();
+        if self.file.subjects.is_empty() {
+            if let Some(p) = &self.file_path {
+                let _ = std::fs::remove_file(p);
+            }
+        } else {
+            self.save();
+        }
+        if kind == Kind::Person {
+            if let Some(s) = &mut self.store {
+                s.forget_all();
+            }
+        }
+    }
+
     /// *Forget all*: the user's file and the face cache go.
     pub fn forget_all(&mut self) {
         self.file = SubjectsFile::default();
@@ -1269,6 +1290,33 @@ mod tests {
         p.set_other_clusters(Kind::Fursuit, Vec::new());
         assert_eq!(p.name_group(&cluster, "Again".into()), Err(Refused::StaleGroup));
         assert_eq!(p.undo().as_deref(), Some("Named a group Suit"));
+    }
+
+    /// Forgetting one kind leaves the others: Preferences ▸ People's
+    /// "Forget all" must not take the fursuits' names and answers with it,
+    /// nor the fursuits' the people's.
+    #[test]
+    fn forgetting_one_kind_leaves_the_others() {
+        let d = std::env::temp_dir().join(format!("pp-forget-kind-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("subjects.json");
+        let mut p = People::load(Some(path.clone()));
+        let person = p.file.create(Kind::Person, Some("Someone".into()), vec![face(1)]);
+        let suit = p.file.create(Kind::Fursuit, Some("Suit".into()), vec![face(2)]);
+        p.file.reject(&suit, vec![face(3)]).unwrap();
+        p.save();
+        p.forget_kind(Kind::Person);
+        assert!(p.file.get(&person).is_none(), "the person is gone");
+        let s = p.file.get(&suit).expect("the fursuit stays");
+        assert_eq!((s.name.as_deref(), s.members.len(), s.rejected.len()), (Some("Suit"), 1, 1), "with its members and answers");
+        assert!(path.is_file(), "the file stays while a kind is left");
+        assert_eq!(SubjectsFile::load(&path).subjects.len(), 1);
+        p.forget_kind(Kind::Pet);
+        assert!(p.file.get(&suit).is_some(), "another kind's forget changes nothing here");
+        p.forget_kind(Kind::Fursuit);
+        assert!(p.file.subjects.is_empty() && !path.exists(), "the last kind gone: no file");
+        assert!(p.undo().is_none(), "beyond undo");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
