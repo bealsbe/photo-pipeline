@@ -288,6 +288,11 @@ impl Pen<'_> {
     }
 }
 
+/// Grid units per raster pixel under which a detailed glyph draws its
+/// simpler form: shown at about 18 logical pixels or less (the raster is
+/// twice the display size).
+const SMALL_U: f32 = 1.55;
+
 fn render(glyph: Glyph, size: u32, rgba: [u8; 4]) -> Vec<u8> {
     let mut pm = Pixmap::new(size, size).expect("pixmap");
     let u = size as f32 / 24.0;
@@ -578,6 +583,20 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.circle(12.0, 8.5, 3.5);
             p.path("M5 20c.8-3.8 3.6-6 7-6s6.2 2.2 7 6");
         }
+        Fursuit if p.u < SMALL_U => {
+            // Small (tabs, buttons, chips): the head's outline with one
+            // tuft a side, the eyes and a solid nose.  The inner-ear lines
+            // and the muzzle would run together at this size.
+            p.path("M5.9 10.3C4.5 7.8 3.9 5.2 4 2.9c2.6.5 4.8 1.9 6.3 3.4q1.7-.4 3.4 0c1.5-1.5 3.7-2.9 6.3-3.4.1 2.3-.5 4.9-1.9 7.4.8 1.1 1.2 2.4 1.2 3.8l1.6 1.2-1.7.4c-1.1 2.6-3.4 4.1-6.1 4.1s-5-1.5-6.1-4.1l-1.7-.4 1.6-1.2c0-1.4.4-2.7 1.2-3.8z");
+            p.dot(9.2, 11.9, 1.35);
+            p.dot(14.8, 11.9, 1.35);
+            let mut nose = PathBuilder::new();
+            nose.move_to(10.6 * p.u, 14.5 * p.u);
+            nose.line_to(13.4 * p.u, 14.5 * p.u);
+            nose.line_to(12.0 * p.u, 16.2 * p.u);
+            nose.close();
+            p.fill(nose);
+        }
         Fursuit => {
             // Full ears, cheek ruffs and a muzzle with its nose.
             p.path("M5.9 10.3C4.5 7.8 3.9 5.2 4 2.9c2.6.5 4.8 1.9 6.3 3.4q1.7-.4 3.4 0c1.5-1.5 3.7-2.9 6.3-3.4.1 2.3-.5 4.9-1.9 7.4.8 1.1 1.2 2.4 1.2 3.8l1.9 1.1-2.1.5.8 1.4-1.9-.2c-1.2 2.3-3.4 3.6-6 3.6s-4.8-1.3-6-3.6l-1.9.2.8-1.4-2.1-.5 1.9-1.1c0-1.4.4-2.7 1.2-3.8z");
@@ -799,5 +818,31 @@ mod tests {
         for s in sizes.split_whitespace() {
             assert!(root.join(s).join(format!("{APP_ID}.png")).is_file(), "{s} px icon");
         }
+    }
+
+    /// Where a glyph rendered at `size` raster pixels has ink, sampled on
+    /// the 24 grid (a 3×3 neighbourhood, so a stroke's edge counts).
+    fn ink(g: Glyph, size: u32) -> impl Fn(f32, f32) -> bool {
+        let px = render(g, size, [255, 255, 255, 255]);
+        move |x: f32, y: f32| {
+            let n = size as i64;
+            let (cx, cy) = ((x / 24.0 * size as f32) as i64, (y / 24.0 * size as f32) as i64);
+            (cy - 1..=cy + 1).any(|yy| (cx - 1..=cx + 1).any(|xx| xx >= 0 && yy >= 0 && xx < n && yy < n && px[((yy * n + xx) * 4 + 3) as usize] > 96))
+        }
+    }
+
+    #[test]
+    fn the_fursuit_head_keeps_its_ears_eyes_and_nose_at_every_size() {
+        // Shown at 12 px (the small form) up to 44 px (the full drawing).
+        for size in [24, 30, 36, 48, 88] {
+            let at = ink(Glyph::Fursuit, size);
+            assert!(at(4.0, 3.2) && at(20.0, 3.2), "{size}: both ear tips");
+            assert!(at(9.2, 11.8) && at(14.8, 11.8), "{size}: both eyes");
+            assert!(at(12.0, 15.0), "{size}: the nose");
+            assert!(!at(12.0, 2.5), "{size}: open between the ears, never a round head");
+        }
+        // Small, the inner-ear lines go (they run into the outline there).
+        assert!(!ink(Glyph::Fursuit, 30)(7.9, 7.6), "small: no inner-ear line");
+        assert!(ink(Glyph::Fursuit, 48)(7.9, 7.6), "full size: the inner-ear line");
     }
 }

@@ -7,6 +7,8 @@ pub mod calendar;
 pub mod commands;
 pub mod compare;
 pub mod dialogs;
+pub mod fursuit_art;
+pub mod fursuits;
 pub mod global_menu;
 pub mod hints_ui;
 pub mod kit;
@@ -24,6 +26,7 @@ pub mod preferences;
 pub mod preferences_storage;
 pub mod style;
 pub mod subjects;
+pub mod subjects_fursuits;
 pub mod subjects_person;
 pub mod subjects_review;
 pub mod testing;
@@ -280,6 +283,8 @@ pub enum Message {
     Search(search::Msg),
     /// People, fursuits and pets.
     Subjects(subjects::Msg),
+    /// The fursuit-head step: its offers, the processor's question, stop.
+    Fursuits(subjects_fursuits::Msg),
 }
 
 impl Message {
@@ -318,6 +323,7 @@ impl Message {
             Message::Bulk(_) => "Bulk",
             Message::Search(_) => "Search",
             Message::Subjects(_) => "Subjects",
+            Message::Fursuits(_) => "Fursuits",
         }
     }
 }
@@ -1688,6 +1694,7 @@ impl App {
             Message::Bulk(m) => bulk::update(self, m),
             Message::Search(m) => search::update(self, m),
             Message::Subjects(m) => subjects::update(self, m),
+            Message::Fursuits(m) => subjects_fursuits::update(self, m),
         }
     }
 
@@ -2183,8 +2190,8 @@ impl App {
                 BgEvent::MenuCommand(cmd) => tasks.push(self.update(Message::Cmd(cmd))),
                 BgEvent::Analysis { run, batch } => tasks.push(quality::on_batch(self, run, batch)),
                 BgEvent::SearchStatus(status) => tasks.push(search::on_status(self, status)),
-                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects } => {
-                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects };
+                BgEvent::SearchResults { seq, hits, indexed: _, error, understood, fursuits, animal, subjects, also_fursuits } => {
+                    let reply = search::Reply { hits, error, understood, fursuits, animal, subjects, also_fursuits };
                     // A person's page asks with numbers of its own.
                     if seq >= subjects_person::SEQ_BASE {
                         tasks.push(subjects_person::on_results(self, seq, reply));

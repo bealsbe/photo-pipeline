@@ -91,6 +91,8 @@
 //!                             # Preferences ▸ Search and its Storage rows
 //! prefs closeness 4.5         # set how close matches must be (the slider)
 //! prefs show-search           # open Preferences at its Search section
+//! prefs show-fursuits|show-storage   # ... at Fursuits' last row, Storage's
+//!                             # models row
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
@@ -129,6 +131,19 @@
 //!                             # people-first (none named), faces-catchup
 //!                             # (indexed before faces), faces-off,
 //!                             # faces-running [n]
+//! search fake fursuits        # the stand-in's fursuits: fursuits (two
+//!                             # named), fursuits-first (none named),
+//!                             # heads-catchup (indexed before heads),
+//!                             # heads-off, heads-running [n],
+//!                             # heads-asking [photos] [first|export|resume],
+//!                             # heads-skipped [n], heads-cardcrash
+//! fursuits start|skip|stop|findheads|trycard|prefs|index
+//!                             # the head step's buttons: the processor's
+//!                             # question, ×, the catch-up offer, the card
+//! fursuits dump               # print the head step and the Fursuits tab
+//! search dlg fursuits         # the dialog's Find fursuit heads box
+//! prefs find-heads|find-heads-now|forget-fursuits
+//!                             # Preferences ▸ Fursuits
 //! search dlg faces|face 1     # the dialog's Find people's faces box, the
 //!                             # 2nd face model (registry order)
 //! subjects open               # People, fursuits and pets (Ctrl+4)
@@ -305,6 +320,27 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 return t;
             }
             t
+        }
+        "fursuits" => {
+            use super::subjects_fursuits::{Msg as F, debug_state};
+            let m = |f: F| Message::Fursuits(f);
+            match arg.trim() {
+                "start" => app.update(m(F::Start)),
+                "skip" => app.update(m(F::Skip)),
+                "stop" => app.update(m(F::Stop)),
+                "findheads" => app.update(m(F::FindHeads)),
+                "trycard" => app.update(m(F::TryCard)),
+                "prefs" => app.update(m(F::OpenPrefs)),
+                "index" => app.update(m(F::IndexLibrary)),
+                "dump" => {
+                    eprintln!("[fursuits] {}", debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown fursuits action {other}");
+                    Task::none()
+                }
+            }
         }
         "subjects" => {
             let (t, wait) = subjects_step(app, i, &arg);
@@ -881,6 +917,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "clear-library" => Some(Control::Clear(Cache::Library)),
         "clear-capture" => Some(Control::Clear(Cache::CaptureTimes)),
         "clear-quality" => Some(Control::Clear(Cache::Quality)),
+        "find-heads" => Some(Control::FindHeads),
+        "find-heads-now" => Some(Control::FindHeadsNow),
+        "forget-fursuits" => Some(Control::ForgetFursuits),
         "search-gpu" => Some(Control::SearchDevice(crate::ml::Device::Gpu)),
         "search-cpu" => Some(Control::SearchDevice(crate::ml::Device::Cpu)),
         "checkcard" => Some(Control::CheckCard),
@@ -935,6 +974,8 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
+        "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
+        "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),
         "editcopy" => app.update(Message::FolderPicked(super::FolderTarget::EditCopySetting, Some(rest.into()))),
@@ -1050,6 +1091,7 @@ fn search_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<Tas
         "dlg" => {
             let m = match rest {
                 "faces" => Some(DialogMsg::Faces),
+                "fursuits" => Some(DialogMsg::Fursuits),
                 r if r.starts_with("face ") => r[5..].trim().parse::<usize>().ok().and_then(|k| crate::ml::models::face_models().nth(k)).map(|mi| DialogMsg::FaceModel(mi.id)),
                 "download" => Some(DialogMsg::Download),
                 "cancel" => Some(DialogMsg::Cancel),
@@ -1238,7 +1280,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             Task::none()
         }
         "dump" => {
-            eprintln!("[subjects] {}", subjects::debug_state(app));
+            eprintln!("[subjects] {} {}", subjects::debug_state(app), super::subjects_fursuits::debug_state(app));
             Task::none()
         }
         _ => {

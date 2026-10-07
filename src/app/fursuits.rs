@@ -1,0 +1,755 @@
+//! Fursuits as the pages see them (decision 11): the head step's state and
+//! costs (`crate::search::heads`, re-exported here), the head models' row
+//! for the download dialog, and, behind `PP_SEARCH_FAKE`, a stand-in that
+//! makes fursuits up.
+//!
+//! Groups, naming, the review, merging, splitting and hiding are the
+//! subjects pages' own, on this kind's data; nothing here ever mixes
+//! fursuits with people or pets.
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+
+use chrono::NaiveDate;
+
+pub use crate::search::heads::*;
+
+use super::people::{Face, FaceRef, Group, GroupId, Kind, Shot, SubjectId, shots_of};
+use crate::ml::models::{self, ModelId};
+use crate::model::library_index::LibraryIndex;
+use crate::search::Status;
+use crate::search::index::Key;
+use crate::util;
+
+/// The head step's models (the registry's *Fursuits* pair), named as the
+/// pages say them: "OWLv2 and DINOv2".
+pub fn models_name() -> String {
+    let names: Vec<&str> = models::fursuit_models().map(|m| m.name.split(',').next().unwrap_or(m.name).trim()).collect();
+    names.join(" and ")
+}
+
+/// The head models still to download: both, unless the status says they
+/// are in place.  The dialog's sizes and its rows come from here, so no
+/// row waits for a download that never comes.
+pub fn missing_models(st: &Status) -> Vec<ModelId> {
+    if st.heads.models_installed { Vec::new() } else { models::FURSUIT_MODELS.to_vec() }
+}
+
+/// The library's fursuit photos, for "for this library" costs: those the
+/// index tags, or before anything is indexed, the study's share (three
+/// shots in four).
+pub fn library_photos(h: &HeadsStatus, shots: usize) -> usize {
+    if h.tagged > 0 { h.tagged } else { shots * 3 / 4 }
+}
+
+// ── the stand-in ────────────────────────────────────────────────────────────
+//
+// Made-up fursuits on the library's shots (the same shots and keys as the
+// people's stand-in, so a photo of a person and a fursuit is one photo),
+// drawn as grey cartoon heads (`fursuit_art`).  Heads are only on photos
+// "tagged" as fursuits; suits come in look-alike pairs, so automatic groups
+// mix a little, as the study found; named fursuits get their suggestions a
+// few at a time, and *Find more* (strict) lets the next few through,
+// look-alikes included.
+
+/// Made-up suits (one per look in `fursuit_art::LOOKS`).
+const SUITS: usize = 12;
+/// Fursuit cluster ids start here, clear of the people's.
+pub const ID_BASE: u64 = 1 << 40;
+/// Suggestions a named fursuit gets at first, and each *Find more* adds.
+const FIRST_BATCH: usize = 8;
+const MORE_BATCH: usize = 6;
+
+fn unit(x: &impl Hash) -> f64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    x.hash(&mut h);
+    (h.finish() % 1_000_000) as f64 / 1_000_000.0
+}
+
+fn hash64(x: &impl Hash) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    x.hash(&mut h);
+    h.finish()
+}
+
+/// A few suits in many photos, then a tail.
+fn weight(suit: usize) -> f64 {
+    [22.0, 12.0, 8.0, 5.0, 3.5, 2.6, 2.0, 1.6, 0.9, 0.7, 0.5, 0.4][suit % SUITS]
+}
+
+/// The suit most often mistaken for `suit` (same ears, close greys).
+pub fn lookalike(suit: usize) -> usize {
+    match suit % SUITS {
+        0 => 7,
+        7 => 0,
+        6 => 0,
+        1 => 9,
+        9 => 1,
+        2 => 10,
+        10 => 2,
+        4 => 11,
+        11 => 4,
+        5 => 8,
+        8 => 5,
+        s => s,
+    }
+}
+
+/// The press a shot belongs to, as a seed (a shot of its own if none).
+fn press_seed(s: &Shot) -> u64 {
+    s.burst.map_or_else(|| hash64(&s.key), |b| hash64(&(b, "press")))
+}
+
+/// The index tags this shot as showing fursuits (a press all or none).
+fn tagged(s: &Shot) -> bool {
+    unit(&(press_seed(s), "fursuit")) < 0.62
+}
+
+fn pick_suit(seed: u64, salt: &str) -> usize {
+    let total: f64 = (0..SUITS).map(weight).sum();
+    let mut x = unit(&(seed, salt)) * total;
+    for s in 0..SUITS {
+        x -= weight(s);
+        if x <= 0.0 {
+            return s;
+        }
+    }
+    SUITS - 1
+}
+
+/// The heads on a tagged shot: its press's suit, and sometimes a second
+/// suit beside it.  Boxes as fractions of the photo, a little different
+/// each frame.
+fn heads_of(s: &Shot) -> Vec<(usize, FaceRef)> {
+    let seed = press_seed(s);
+    let jit = |k: &str| (unit(&(s.key, k)) as f32 - 0.5) * 0.02;
+    let main = pick_suit(seed, "suit");
+    let w = 0.16 + 0.08 * unit(&(seed, "w")) as f32;
+    let x = 0.28 + 0.3 * unit(&(seed, "x")) as f32 + jit("x");
+    let mut out = vec![(main, FaceRef::new(s.key, [x, 0.16 + jit("y"), w, w * 1.6]))];
+    if unit(&(seed, "two")) < 0.25 {
+        let other = (main + 1 + (unit(&(seed, "other")) * (SUITS - 1) as f64) as usize) % SUITS;
+        let w2 = w * 0.75;
+        out.push((other, FaceRef::new(s.key, [(x + w + 0.08).min(0.95 - w2), 0.26 + jit("y2"), w2, w2 * 1.6])));
+    }
+    out
+}
+
+/// What became of a head when the stand-in grouped it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placed {
+    Own,
+    /// Held back: a suggestion once the suit is named.
+    Held,
+    /// Grouped with its look-alike by mistake.
+    Wrong(usize),
+}
+
+fn placed(face: &FaceRef, suit: usize) -> Placed {
+    let u = unit(&(face, "placed"));
+    if suit <= 3 && u < 0.3 {
+        Placed::Held
+    } else if u > 0.9 && lookalike(suit) != suit {
+        Placed::Wrong(lookalike(suit))
+    } else {
+        Placed::Own
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FakeGroup {
+    id: GroupId,
+    name: Option<String>,
+    hidden: bool,
+    members: Vec<FaceRef>,
+    confirmed: HashSet<FaceRef>,
+    rejected: HashSet<FaceRef>,
+    /// The suit most of it shows.
+    suit: usize,
+    /// *Find more* rounds asked so far.
+    rounds: usize,
+}
+
+/// The stand-in's fursuits: groups of heads made up from the library,
+/// changed by the pages' calls (the same calls as the people's).
+#[derive(Debug, Clone, Default)]
+pub struct FakeFursuits {
+    shots: Vec<Shot>,
+    by_key: HashMap<Key, usize>,
+    /// The tagged shots, newest first, as indexes into `shots`.
+    tagged: Vec<usize>,
+    groups: Vec<FakeGroup>,
+    next_id: u64,
+    generation: u64,
+    /// Tagged shots looked at for heads so far, newest first.
+    pub scanned: usize,
+    undo: Vec<(Vec<FakeGroup>, String)>,
+    /// Name the two largest suits once heads are found (a library already
+    /// worked on, for screenshots).
+    pub name_first: bool,
+}
+
+const NAMES: [&str; 2] = ["Fursuit 1", "Fursuit 2"];
+
+impl FakeFursuits {
+    pub fn new(name_first: bool) -> FakeFursuits {
+        FakeFursuits { name_first, ..FakeFursuits::default() }
+    }
+
+    pub fn on_library(&mut self, index: &LibraryIndex) {
+        self.set_shots(shots_of(index));
+    }
+
+    fn set_shots(&mut self, shots: Vec<Shot>) {
+        self.shots = shots;
+        self.by_key = self.shots.iter().enumerate().map(|(i, s)| (s.key, i)).collect();
+        self.tagged = self.shots.iter().enumerate().filter(|(_, s)| tagged(s)).map(|(i, _)| i).collect();
+        self.scanned = self.scanned.min(self.tagged.len());
+    }
+
+    /// Tagged shots among the newest `indexed` shots of the library.
+    pub fn tagged_in(&self, indexed: usize) -> usize {
+        self.tagged.iter().take_while(|&&i| i < indexed).count()
+    }
+
+    /// Heads were looked for in the newest `n` tagged shots: group afresh,
+    /// keeping the user's names and answers.
+    pub fn scan(&mut self, n: usize) {
+        self.scanned = n.min(self.tagged.len());
+        self.regroup();
+    }
+
+    pub fn forget_all(&mut self) {
+        self.groups.clear();
+        self.undo.clear();
+        self.scanned = 0;
+        self.generation += 1;
+    }
+
+    fn heads_scanned(&self) -> impl Iterator<Item = (usize, FaceRef)> + '_ {
+        self.tagged[..self.scanned].iter().flat_map(|&i| heads_of(&self.shots[i]))
+    }
+
+    fn regroup(&mut self) {
+        let mut members: Vec<Vec<FaceRef>> = vec![Vec::new(); SUITS];
+        for (suit, f) in self.heads_scanned() {
+            match placed(&f, suit) {
+                Placed::Own => members[suit].push(f),
+                Placed::Wrong(q) => members[q].push(f),
+                Placed::Held => {}
+            }
+        }
+        let old = std::mem::take(&mut self.groups);
+        // A head already in a group (merged, moved, answered) stays there.
+        let claimed: HashSet<FaceRef> = old.iter().flat_map(|g| g.members.iter().copied()).collect();
+        for (suit, heads) in members.into_iter().enumerate() {
+            let heads: Vec<FaceRef> = heads.into_iter().filter(|f| !claimed.contains(f)).collect();
+            if let Some(mut g) = old.iter().find(|g| g.suit == suit && !is_made(&g.id)).cloned() {
+                for f in heads {
+                    if !g.rejected.contains(&f) {
+                        g.members.push(f);
+                    }
+                }
+                self.groups.push(g);
+                continue;
+            }
+            if heads.is_empty() {
+                continue;
+            }
+            let named = self.name_first && suit < NAMES.len();
+            let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 1000 * (self.generation + 1)) };
+            let confirmed = if named { heads.iter().copied().collect() } else { HashSet::new() };
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, rounds: 0 });
+        }
+        // Groups the user made by moving heads out stay.
+        for g in old {
+            if is_made(&g.id) && !self.groups.iter().any(|x| x.id == g.id) {
+                self.groups.push(g);
+            }
+        }
+        self.generation += 1;
+    }
+
+    fn fresh_subject(&mut self) -> GroupId {
+        self.next_id += 1;
+        GroupId::Subject(SubjectId(format!("fursuit{:06}", self.next_id)))
+    }
+
+    /// Is this group one of the fursuits'?
+    pub fn owns(&self, id: &GroupId) -> bool {
+        self.groups.iter().any(|g| &g.id == id)
+    }
+
+    fn face_of(&self, f: FaceRef, confirmed: bool) -> Option<Face> {
+        let s = &self.shots[*self.by_key.get(&f.key)?];
+        let clarity = (0.3 + 0.7 * unit(&(f, "clear"))) as f32;
+        Some(Face { face: f, jpg: s.jpg.clone(), raw: s.raw.clone(), day: s.day, capture: s.capture, burst: s.burst, clarity, confirmed })
+    }
+
+    fn group(&self, id: &GroupId) -> Option<&FakeGroup> {
+        self.groups.iter().find(|g| &g.id == id)
+    }
+
+    fn group_mut(&mut self, id: &GroupId) -> Option<&mut FakeGroup> {
+        self.groups.iter_mut().find(|g| &g.id == id)
+    }
+
+    /// Every fursuit group, as the Fursuits tab lists them.
+    pub fn groups(&self) -> Vec<Group> {
+        let mut out = Vec::new();
+        for g in &self.groups {
+            let faces: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
+            let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
+            let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
+            let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
+            let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
+            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), days: days.len(), cover, suggestions });
+        }
+        out
+    }
+
+    /// Heads found so far.
+    pub fn found(&self) -> usize {
+        self.heads_scanned().count()
+    }
+
+    pub fn named(&self) -> usize {
+        self.groups.iter().filter(|g| g.name.is_some()).count()
+    }
+
+    /// A group's heads, clearest first.
+    pub fn faces(&self, id: &GroupId) -> Vec<Face> {
+        let Some(g) = self.group(id) else { return Vec::new() };
+        let mut v: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
+        v.sort_by(|a, b| b.clarity.total_cmp(&a.clarity).then(a.capture.cmp(&b.capture)));
+        v
+    }
+
+    /// The shot keys of a group's photos.
+    pub fn members(&self, id: &GroupId) -> HashSet<Key> {
+        self.group(id).map(|g| g.members.iter().map(|f| f.key).collect()).unwrap_or_default()
+    }
+
+    /// The heads that may show `g`'s suit, one entry per press, strictest
+    /// first: its own held-back heads, then (from the first *Find more*)
+    /// look-alikes; never a member or one answered No; only as many as the
+    /// rounds asked let through.
+    fn suggestions_of(&self, g: &FakeGroup) -> Vec<Vec<Face>> {
+        let have: HashSet<FaceRef> = g.members.iter().copied().collect();
+        let mut by_press: BTreeMap<(u64, u64), Vec<Face>> = BTreeMap::new();
+        for &i in &self.tagged[..self.scanned] {
+            let s = &self.shots[i];
+            for (suit, f) in heads_of(s) {
+                if have.contains(&f) || g.rejected.contains(&f) {
+                    continue;
+                }
+                let own = suit == g.suit && placed(&f, suit) == Placed::Held;
+                let alike = g.rounds > 0 && suit == lookalike(g.suit) && suit != g.suit && unit(&(f, g.suit, "alike")) < 0.12;
+                if !(own || alike) {
+                    continue;
+                }
+                let press = s.burst.unwrap_or_else(|| hash64(&s.key));
+                // Look-alikes rank after the suit's own.
+                let rank = (unit(&(press, g.suit, "rank")) * 1e6) as u64 + if alike { 1_000_000 } else { 0 };
+                if let Some(face) = self.face_of(f, false) {
+                    by_press.entry((rank, press)).or_default().push(face);
+                }
+            }
+        }
+        let limit = FIRST_BATCH + MORE_BATCH * g.rounds;
+        by_press
+            .into_values()
+            .map(|mut v| {
+                v.sort_by(|a, b| b.clarity.total_cmp(&a.clarity));
+                v
+            })
+            .take(limit)
+            .collect()
+    }
+
+    /// What the review offers: a named fursuit's suggestions, or an
+    /// unnamed group's own heads to check, one entry per press.
+    pub fn suggestions(&self, id: &GroupId) -> Vec<Vec<Face>> {
+        let Some(g) = self.group(id) else { return Vec::new() };
+        if g.name.is_some() {
+            return self.suggestions_of(g);
+        }
+        let mut by_press: BTreeMap<u64, Vec<Face>> = BTreeMap::new();
+        for f in self.faces(id) {
+            by_press.entry(f.burst.unwrap_or_else(|| hash64(&f.face.key))).or_default().push(f);
+        }
+        let mut v: Vec<Vec<Face>> = by_press.into_values().collect();
+        v.sort_by(|a, b| a[0].clarity.total_cmp(&b[0].clarity));
+        v
+    }
+
+    /// *Find more*, strict: let the next few through.  How many new
+    /// suggestions it found (0: nothing more is close enough).
+    pub fn find_more(&mut self, id: &GroupId) -> usize {
+        let Some(before) = self.group(id).map(|g| self.suggestions_of(g).len()) else { return 0 };
+        if let Some(g) = self.group_mut(id) {
+            g.rounds += 1;
+        }
+        let after = self.group(id).map_or(0, |g| self.suggestions_of(g).len());
+        if after == before {
+            // Nothing new: the round isn't spent.
+            if let Some(g) = self.group_mut(id) {
+                g.rounds -= 1;
+            }
+        }
+        after.saturating_sub(before)
+    }
+
+    fn remember(&mut self, what: impl Into<String>) {
+        self.undo.push((self.groups.clone(), what.into()));
+        if self.undo.len() > 50 {
+            self.undo.remove(0);
+        }
+        self.generation += 1;
+    }
+
+    /// Edits that can be taken back.
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
+    pub fn undo(&mut self) -> Option<String> {
+        let (groups, what) = self.undo.pop()?;
+        self.groups = groups;
+        self.generation += 1;
+        Some(what)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    fn label(&self, id: &GroupId) -> String {
+        self.group(id).and_then(|g| g.name.clone()).unwrap_or_else(|| "an unnamed group".into())
+    }
+
+    pub fn name_group(&mut self, id: &GroupId, name: &str) -> Result<GroupId, String> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            return Err("A name can't be empty.".into());
+        }
+        if self.groups.iter().any(|g| &g.id != id && g.name.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&name))) {
+            return Err(format!("There's already a fursuit called {name}."));
+        }
+        let Some(was) = self.group(id).map(|g| g.name.clone()) else { return Err("That group changed: look again.".into()) };
+        self.remember(match was {
+            Some(w) => format!("Renamed {w} to {name}"),
+            None => format!("Named a group {name}"),
+        });
+        let new_id = match id {
+            GroupId::Subject(_) => id.clone(),
+            GroupId::Cluster(_) => self.fresh_subject(),
+        };
+        let g = self.group_mut(id).expect("checked");
+        g.id = new_id.clone();
+        g.name = Some(name);
+        let all: Vec<FaceRef> = g.members.clone();
+        g.confirmed.extend(all);
+        Ok(new_id)
+    }
+
+    /// Merge `others` into `into`: fursuits only.
+    pub fn merge(&mut self, into: &GroupId, others: &[GroupId], kinds: impl Fn(&GroupId) -> Option<Kind>) -> Result<(), String> {
+        if kinds(into) != Some(Kind::Fursuit) || others.iter().any(|o| kinds(o) != Some(Kind::Fursuit)) {
+            return Err("Only groups of one kind can be merged.".into());
+        }
+        if self.group(into).is_none() {
+            return Err("That group changed: look again.".into());
+        }
+        let n = others.iter().filter(|o| *o != into).count();
+        let label = self.label(into);
+        self.remember(format!("Merged {} into {label}", util::plural(n as u64 + 1, "group")));
+        let mut moved: Vec<FakeGroup> = Vec::new();
+        self.groups.retain(|g| {
+            if &g.id != into && others.contains(&g.id) {
+                moved.push(g.clone());
+                false
+            } else {
+                true
+            }
+        });
+        let g = self.group_mut(into).expect("checked");
+        for m in moved {
+            for f in m.members {
+                if !g.members.contains(&f) {
+                    g.members.push(f);
+                }
+            }
+            g.confirmed.extend(m.confirmed);
+            g.rejected.extend(m.rejected);
+            if g.name.is_none() {
+                g.name = m.name;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn set_hidden(&mut self, id: &GroupId, hidden: bool) {
+        if self.group(id).is_none() {
+            return;
+        }
+        let label = self.label(id);
+        self.remember(if hidden { format!("Hid {label}") } else { format!("Showed {label} again") });
+        if let Some(g) = self.group_mut(id) {
+            g.hidden = hidden;
+        }
+    }
+
+    pub fn forget(&mut self, id: &GroupId) {
+        let label = self.label(id);
+        self.remember(format!("Forgot {label}"));
+        let generation = self.generation;
+        if let Some(g) = self.group_mut(id) {
+            g.name = None;
+            g.confirmed.clear();
+            g.rejected.clear();
+            g.hidden = false;
+            g.rounds = 0;
+            g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 1000 * (generation + 1));
+        }
+    }
+
+    /// Move heads out of `from`: into `to` (a fursuit), or a new group.
+    pub fn move_faces(&mut self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) -> Result<(), String> {
+        if self.group(from).is_none() || to.is_some_and(|t| self.group(t).is_none()) {
+            return Err("That group changed: look again.".into());
+        }
+        let ids: HashSet<FaceRef> = faces.iter().copied().collect();
+        let what = match to {
+            Some(t) => format!("Moved {} to {}", util::plural(ids.len() as u64, "head"), self.label(t)),
+            None => format!("Moved {} to a new group", util::plural(ids.len() as u64, "head")),
+        };
+        self.remember(what);
+        let suit = self.group(from).map_or(0, |g| g.suit);
+        if let Some(g) = self.group_mut(from) {
+            g.members.retain(|f| !ids.contains(f));
+            g.confirmed.retain(|k| !ids.contains(k));
+        }
+        match to {
+            Some(t) => {
+                let g = self.group_mut(t).expect("checked");
+                for f in faces {
+                    if !g.members.contains(f) {
+                        g.members.push(*f);
+                    }
+                    g.rejected.remove(f);
+                    g.confirmed.insert(*f);
+                }
+            }
+            None => {
+                self.next_id += 1;
+                let id = GroupId::Cluster(made_id(self.next_id));
+                let s = faces.first().and_then(|f| self.look_of(f)).unwrap_or(suit);
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, rounds: 0 });
+            }
+        }
+        Ok(())
+    }
+
+    /// Yes (add the heads), No (not this fursuit: out, never suggested
+    /// again) or None (take the answer back).
+    pub fn answer(&mut self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>) {
+        if self.group(id).is_none() {
+            return;
+        }
+        let label = self.label(id);
+        let n = faces.len() as u64;
+        self.remember(match yes {
+            Some(true) => format!("Added {} to {label}", util::plural(n, "photo")),
+            Some(false) => format!("Marked {} as not {label}", util::plural(n, "photo")),
+            None => format!("Took back an answer for {label}"),
+        });
+        let Some(g) = self.group_mut(id) else { return };
+        for f in faces {
+            match yes {
+                Some(true) => {
+                    if !g.members.contains(f) {
+                        g.members.push(*f);
+                    }
+                    g.confirmed.insert(*f);
+                    g.rejected.remove(f);
+                }
+                Some(false) => {
+                    g.members.retain(|x| x != f);
+                    g.confirmed.remove(f);
+                    g.rejected.insert(*f);
+                }
+                None => {
+                    if !g.rejected.remove(f) {
+                        g.members.retain(|x| x != f);
+                        g.confirmed.remove(f);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The suit a detection shows, if it is one of the stand-in's heads
+    /// (for its grey drawing); `None` for anything else (a face).
+    pub fn look_of(&self, face: &FaceRef) -> Option<usize> {
+        let s = &self.shots[*self.by_key.get(&face.key)?];
+        if !tagged(s) {
+            return None;
+        }
+        heads_of(s).into_iter().find(|(_, f)| f == face).map(|(suit, _)| suit)
+    }
+}
+
+/// Clusters the user made by moving heads out: their own id range.
+fn made_id(n: u64) -> u64 {
+    ID_BASE + 1_000_000_000 + n
+}
+
+fn is_made(id: &GroupId) -> bool {
+    matches!(id, GroupId::Cluster(c) if *c >= made_id(0))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Made-up shots: `days` days of `n` frames, presses of three, newest
+    /// day first (as `shots_of` gives them).
+    fn shots(days: u32, n: u32) -> Vec<Shot> {
+        let mut out = Vec::new();
+        for d in (0..days).rev() {
+            let day = NaiveDate::from_ymd_opt(2024, 6, d + 1).unwrap();
+            for i in 0..n {
+                let mut k = [0u8; 16];
+                k[..4].copy_from_slice(&d.to_le_bytes());
+                k[4..8].copy_from_slice(&i.to_le_bytes());
+                let capture = day.and_hms_opt(10, i / 3 % 60, (i % 3) * 2).unwrap();
+                let jpg = Some(std::path::PathBuf::from(format!("/lib/{day}/{i:04}.JPG")));
+                out.push(Shot { key: Key(k), jpg, raw: None, day, capture, burst: Some((d * 1000 + i / 3) as u64) });
+            }
+        }
+        out
+    }
+
+    fn fursuits(named: bool) -> FakeFursuits {
+        let mut f = FakeFursuits::new(named);
+        f.set_shots(shots(6, 150));
+        let n = f.tagged.len();
+        f.scan(n);
+        f
+    }
+
+    fn named_one(f: &FakeFursuits) -> GroupId {
+        f.groups().into_iter().find(|g| g.name.as_deref() == Some("Fursuit 1")).unwrap().id
+    }
+
+    /// The head models are listed for download only while missing, and the
+    /// pages name them from the registry.
+    #[test]
+    fn head_models_are_rows_only_while_missing() {
+        let mut st = Status::default();
+        assert_eq!(missing_models(&st), models::FURSUIT_MODELS.to_vec());
+        assert!(models::bytes_for(&missing_models(&st)) > 900_000_000, "the pair is about a gigabyte");
+        st.heads.models_installed = true;
+        assert!(missing_models(&st).is_empty(), "in place: no row waits for a download that never comes");
+        assert_eq!(models_name(), "OWLv2 and DINOv2");
+    }
+
+    #[test]
+    fn heads_are_only_on_fursuit_photos_and_group_by_suit() {
+        let f = fursuits(false);
+        assert!(f.tagged.len() > 300 && f.tagged.len() < 750, "about 60 % tagged: {}", f.tagged.len());
+        let groups = f.groups();
+        assert!(groups.len() >= 8, "{}", groups.len());
+        assert!(groups.iter().all(|g| g.kind == Kind::Fursuit && g.name.is_none()), "fursuits only, nothing named for the user");
+        for g in &groups {
+            for key in f.members(&g.id) {
+                assert!(tagged(&f.shots[f.by_key[&key]]), "a head on an untagged photo");
+            }
+            assert!(f.faces(&g.id).iter().any(|x| x.face == g.cover.face), "the cover is one of its own heads");
+        }
+        // Ids sit clear of the people's.
+        assert!(groups.iter().all(|g| matches!(g.id, GroupId::Cluster(c) if c >= ID_BASE)));
+        // Some groups hold a look-alike's head: automatic groups mix.
+        let mixed = f.groups.iter().filter(|g| g.members.iter().any(|h| f.look_of(h) != Some(g.suit))).count();
+        assert!(mixed >= 1, "some automatic groups are mixed");
+        // The frames of a press show the press's suit.
+        let s = &f.shots[f.tagged[0]];
+        let same: Vec<usize> = f.tagged.iter().map(|&i| &f.shots[i]).filter(|x| x.burst == s.burst).map(|x| heads_of(x)[0].0).collect();
+        assert!(same.windows(2).all(|w| w[0] == w[1]));
+    }
+
+    #[test]
+    fn find_more_is_strict_a_few_at_a_time() {
+        let mut f = fursuits(true);
+        let one = named_one(&f);
+        let first = f.suggestions(&one);
+        assert!(!first.is_empty() && first.len() <= FIRST_BATCH, "{}", first.len());
+        // One entry per press: one answer covers a burst.
+        for e in &first {
+            assert!(e.iter().all(|x| x.burst == e[0].burst));
+        }
+        assert!(first.iter().flatten().all(|x| f.look_of(&x.face) == Some(0)), "strict: no look-alikes at first");
+        let more = f.find_more(&one);
+        assert!(more > 0 && more <= MORE_BATCH, "{more}");
+        let second = f.suggestions(&one);
+        assert_eq!(second.len(), first.len() + more);
+        let mut last = second.len();
+        for _ in 0..40 {
+            if f.find_more(&one) == 0 {
+                break;
+            }
+            let now = f.suggestions(&one).len();
+            assert!(now > last);
+            last = now;
+        }
+        assert_eq!(f.find_more(&one), 0, "eventually nothing more is close enough");
+    }
+
+    #[test]
+    fn answers_cover_a_press_and_no_is_never_offered_again() {
+        let mut f = fursuits(true);
+        let one = named_one(&f);
+        let list = f.suggestions(&one);
+        let entry: Vec<FaceRef> = list[0].iter().map(|x| x.face).collect();
+        let before = f.faces(&one).len();
+        f.answer(&one, &entry, Some(true));
+        assert_eq!(f.faces(&one).len(), before + entry.len(), "Yes covers every frame of the press");
+        assert!(!f.suggestions(&one).iter().any(|e| e[0].face == entry[0]));
+        let what = f.undo().unwrap_or_default();
+        assert!(what.starts_with("Added ") && what.ends_with(" to Fursuit 1"), "{what}");
+        assert_eq!(f.faces(&one).len(), before, "undone");
+        f.answer(&one, &entry, Some(false));
+        assert!(!f.suggestions(&one).iter().any(|e| e[0].face == entry[0]), "No: not offered again");
+        f.answer(&one, &entry, None);
+        assert!(f.suggestions(&one).iter().any(|e| e[0].face == entry[0]), "taken back: offered again");
+    }
+
+    #[test]
+    fn merging_and_moving_never_cross_kinds() {
+        let mut f = fursuits(false);
+        let g = f.groups();
+        let (a, b) = (g[0].id.clone(), g[1].id.clone());
+        let person = GroupId::Cluster(7);
+        let kinds = |id: &GroupId| if *id == person { Some(Kind::Person) } else { g.iter().find(|x| &x.id == id).map(|x| x.kind) };
+        assert!(f.merge(&a, std::slice::from_ref(&person), kinds).is_err(), "a fursuit and a person are never merged");
+        assert!(f.merge(&person, std::slice::from_ref(&a), kinds).is_err());
+        f.merge(&a, std::slice::from_ref(&b), kinds).unwrap();
+        assert!(!f.owns(&b) && f.owns(&a));
+        assert!(f.move_faces(&a, &[], Some(&person)).is_err(), "moved only to a fursuit");
+        let two: Vec<FaceRef> = f.faces(&a).iter().take(2).map(|x| x.face).collect();
+        let n = f.groups().len();
+        f.move_faces(&a, &two, None).unwrap();
+        assert_eq!(f.groups().len(), n + 1);
+        // A group made by moving heads out survives a regroup.
+        let tagged = f.tagged.len();
+        f.scan(tagged);
+        assert_eq!(f.groups().len(), n + 1);
+        // Naming: one name per fursuit, any case.
+        let c = f.groups()[0].id.clone();
+        let named = f.name_group(&c, "Patches").unwrap();
+        assert!(f.faces(&named).iter().all(|x| x.confirmed));
+        let d = f.groups().iter().find(|x| x.name.is_none()).unwrap().id.clone();
+        assert!(f.name_group(&d, "patches").is_err());
+    }
+}

@@ -95,13 +95,13 @@ pub fn short(id: &GroupId) -> String {
 
 /// A shot of the library, as the stand-in sees it.
 #[derive(Debug, Clone)]
-struct Shot {
-    key: Key,
-    jpg: Option<PathBuf>,
-    raw: Option<PathBuf>,
-    day: NaiveDate,
-    capture: NaiveDateTime,
-    burst: Option<u64>,
+pub(super) struct Shot {
+    pub(super) key: Key,
+    pub(super) jpg: Option<PathBuf>,
+    pub(super) raw: Option<PathBuf>,
+    pub(super) day: NaiveDate,
+    pub(super) capture: NaiveDateTime,
+    pub(super) burst: Option<u64>,
 }
 
 /// A number in 0..1 from a hash of `x`.
@@ -119,7 +119,7 @@ fn hash64(x: &impl Hash) -> u64 {
 
 /// The library's shots, newest day first, with made-up keys and the
 /// presses found as the stand-in's search finds them.
-fn shots_of(index: &LibraryIndex) -> Vec<Shot> {
+pub(super) fn shots_of(index: &LibraryIndex) -> Vec<Shot> {
     let mut out = Vec::new();
     let mut press = 0u64;
     for (date, day) in index.days.iter().rev() {

@@ -29,6 +29,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
+use super::heads::HeadsResult;
 use super::models::ModelId;
 use super::worker::{self, Reply, Request};
 use super::{CardFailure, Device, SelfCheck};
@@ -192,6 +193,15 @@ pub trait Embedder: Send + Sync {
     fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<ImageResult>, HelperError>;
     /// Encode query texts (always on the processor, whatever the device).
     fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError>;
+    /// Find fursuit heads in a batch of photos (phase 4): image work on
+    /// the chosen device, under the same card rule as [`embed_images`].
+    /// A helper started without the head models answers with an error.
+    ///
+    /// [`embed_images`]: Embedder::embed_images
+    fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<HeadsResult>, HelperError> {
+        let _ = files;
+        Err(HelperError::Broken("this helper has no head step".into()))
+    }
     /// Stop the helper (the app is quitting, or the device changed).
     fn shutdown(&self) {}
 }
@@ -215,15 +225,22 @@ pub struct Spec {
     pub text_only: bool,
     /// Load the face detector and this recognition model too.
     pub face_model: Option<ModelId>,
+    /// Load the fursuit head models too (OWLv2 and DINOv2; phase 4).
+    pub heads: bool,
 }
 
 impl Spec {
     pub fn images(device: Device, face_model: Option<ModelId>) -> Spec {
-        Spec { device, text_only: false, face_model }
+        Spec { device, text_only: false, face_model, heads: false }
+    }
+
+    /// The same helper with the head models loaded (or not).
+    pub fn with_heads(self, heads: bool) -> Spec {
+        Spec { heads: heads && !self.text_only, ..self }
     }
 
     pub fn text_only() -> Spec {
-        Spec { device: Device::Cpu, text_only: true, face_model: None }
+        Spec { device: Device::Cpu, text_only: true, face_model: None, heads: false }
     }
 }
 
@@ -275,6 +292,9 @@ impl Process {
             let name = serde_json::to_value(m).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
             cmd.arg("--face-model").arg(name);
         }
+        if spec.heads && !spec.text_only {
+            cmd.arg("--heads");
+        }
         if let Some(models) = std::env::var_os("PP_MODEL_DIR") {
             cmd.arg("--models").arg(models);
         }
@@ -318,7 +338,7 @@ impl Process {
                             continue;
                         }
                         match &reply {
-                            Reply::Images { id, .. } | Reply::Texts { id, .. } | Reply::Error { id, .. } => {
+                            Reply::Images { id, .. } | Reply::Texts { id, .. } | Reply::Heads { id, .. } | Reply::Error { id, .. } => {
                                 if let Some(tx) = pending.lock().remove(id) {
                                     let _ = tx.send(reply);
                                 }
@@ -355,7 +375,7 @@ impl Process {
 
     fn send(&mut self, req: &Request) -> Result<Receiver<Reply>, HelperError> {
         let id = match req {
-            Request::EmbedImages { id, .. } | Request::EncodeText { id, .. } => *id,
+            Request::EmbedImages { id, .. } | Request::EncodeText { id, .. } | Request::FindHeads { id, .. } => *id,
             Request::Quit => 0,
         };
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -407,13 +427,13 @@ impl Client {
     /// when `face_model` is given) and wait for it to load the models
     /// and, on the card, pass the self-check.  `PP_ML_FAKE_CARD` makes
     /// the card fail for tests ([`super::fake_card_failure`]).
-    pub fn start(device: Device, face_model: Option<ModelId>) -> Result<Client, StartError> {
-        if device == Device::Gpu {
+    pub fn start(spec: Spec) -> Result<Client, StartError> {
+        if spec.device == Device::Gpu {
             if let Some(f) = super::fake_card_failure() {
                 return Err(StartError::Card(f));
             }
         }
-        Client::spawn(Spec::images(device, face_model))
+        Client::spawn(Spec { text_only: false, ..spec })
     }
 
     /// A helper for queries only: the text tower on the processor, no
@@ -446,7 +466,7 @@ impl Client {
     /// The factory the app uses.
     pub fn factory() -> EmbedderFactory {
         Box::new(|spec| {
-            let c = if spec.text_only { Client::start_text_only() } else { Client::start(spec.device, spec.face_model) };
+            let c = if spec.text_only { Client::start_text_only() } else { Client::start(spec) };
             c.map(|c| Arc::new(c) as Arc<dyn Embedder>)
         })
     }
@@ -454,7 +474,7 @@ impl Client {
     /// Make sure a helper is running for `req`'s kind of work, applying
     /// the restart rule, and send it.  Returns the reply channel.
     fn dispatch(&self, req: Request) -> Result<Receiver<Reply>, HelperError> {
-        let images = matches!(req, Request::EmbedImages { .. });
+        let images = matches!(req, Request::EmbedImages { .. } | Request::FindHeads { .. });
         let mut inner = self.inner.lock();
         if images {
             if let Some(f) = &inner.card_failed {
@@ -592,6 +612,19 @@ impl Embedder for Client {
         }
     }
 
+    fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<HeadsResult>, HelperError> {
+        if !self.spec.heads {
+            return Err(HelperError::Broken("this helper was started without the head models".into()));
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let rx = self.dispatch(Request::FindHeads { id, files: files.to_vec() })?;
+        match self.wait(rx)? {
+            Reply::Heads { results, .. } => Ok(results),
+            Reply::Error { message, .. } => Err(HelperError::Broken(message)),
+            other => Err(HelperError::Broken(format!("unexpected reply {other:?}"))),
+        }
+    }
+
     fn shutdown(&self) {
         if let Some(mut p) = self.inner.lock().proc.take() {
             p.stop();
@@ -606,11 +639,19 @@ pub mod tests {
     #[test]
     fn a_fake_card_failure_stops_the_card_helper_before_it_starts() {
         temp_env("PP_ML_FAKE_CARD", "self-check", || {
-            assert!(matches!(Client::start(Device::Gpu, None), Err(StartError::Card(CardFailure::SelfCheckFailed { .. }))));
+            assert!(matches!(Client::start(Spec::images(Device::Gpu, None)), Err(StartError::Card(CardFailure::SelfCheckFailed { .. }))));
         });
         temp_env("PP_ML_FAKE_CARD", "no-card", || {
-            assert_eq!(Client::start(Device::Gpu, Some(ModelId::AuraFace)).err(), Some(StartError::Card(CardFailure::NoCard)));
+            assert_eq!(Client::start(Spec::images(Device::Gpu, Some(ModelId::AuraFace))).err(), Some(StartError::Card(CardFailure::NoCard)));
         });
+    }
+
+    #[test]
+    fn a_spec_carries_the_head_models_only_for_image_work() {
+        let s = Spec::images(Device::Gpu, Some(ModelId::AuraFace)).with_heads(true);
+        assert!(s.heads && !s.text_only && s.face_model == Some(ModelId::AuraFace));
+        assert!(!Spec::text_only().with_heads(true).heads, "queries only: no head models");
+        assert!(!Spec::images(Device::Cpu, None).heads, "off unless asked");
     }
 
     #[test]

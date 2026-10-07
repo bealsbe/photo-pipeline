@@ -100,6 +100,11 @@ pub struct Settings {
     /// (decision 10); changing it recomputes the face vectors and keeps
     /// names, members and rejections.
     pub face_model: crate::ml::models::ModelId,
+    // Fursuits (phase 4, decision 11).
+    /// *Find fursuit heads* (on by default): heads are looked for in the
+    /// photos the index tags as fursuits, after the search step.  With the
+    /// processor chosen every scan asks first, whatever this says.
+    pub find_heads: bool,
     /// *Smallest group to show*: clusters with fewer photos fold under
     /// *Smaller groups* (3, 5 or 10; §10 says 5).
     pub people_min_photos: usize,
@@ -160,6 +165,7 @@ impl Default for Settings {
             subjects_tab: 0,
             find_faces: true,
             face_model: crate::ml::models::FACE_MODEL_DEFAULT,
+            find_heads: true,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
     }
@@ -455,6 +461,17 @@ mod tests {
 
     /// Decision 9 and 10: faces on by default, AuraFace pre-selected,
     /// groups of five; odd values fall back.
+    /// Fursuit heads are looked for by default (decision 11), and a file
+    /// from before fursuits keeps that.
+    #[test]
+    fn fursuit_heads_are_found_by_default() {
+        assert!(Settings::default().find_heads);
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).unwrap();
+        assert!(old.find_heads);
+        let off = serde_json::to_string(&Settings { find_heads: false, ..Settings::default() }).unwrap();
+        assert!(!serde_json::from_str::<Settings>(&off).unwrap().find_heads);
+    }
+
     #[test]
     fn people_settings_default_to_faces_on_with_auraface() {
         let s = Settings::default();

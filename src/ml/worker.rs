@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 
 use super::client::{Embedding, FaceAsk, FaceFound, FileError, ImageResult, Want};
 use super::face::{self, ALIGNED, CANVAS_LEN, DET_SIZE, Norm};
+use super::heads;
 use super::models::{self, ModelId};
 use super::prep::{self, FacePrep, INPUT_SIZE, Prepared};
 use super::{CardFailure, Device, SelfCheck};
@@ -75,6 +76,9 @@ pub enum Request {
     EmbedImages { id: u64, files: Vec<(PathBuf, FileType)>, want: Want },
     /// Encode query texts on the processor.
     EncodeText { id: u64, texts: Vec<String> },
+    /// Find fursuit heads in these photos (phase 4): one result per path,
+    /// in order.  Needs a helper started with `--heads`.
+    FindHeads { id: u64, files: Vec<(PathBuf, FileType)> },
     /// Exit now.
     Quit,
 }
@@ -85,13 +89,15 @@ pub enum Request {
 pub enum Reply {
     /// Models loaded; on the card, the self-check passed.  `face_model` is
     /// the recognition model loaded, if any, with its vector width.
-    Ready { device: Device, name: Option<String>, self_check: SelfCheck, dim: usize, face_model: Option<ModelId>, face_dim: usize },
+    Ready { device: Device, name: Option<String>, self_check: SelfCheck, dim: usize, face_model: Option<ModelId>, face_dim: usize, heads: bool },
     /// The card was asked for and can't be used; the helper exits.
     CardFailed { failure: CardFailure },
     /// The models couldn't be loaded (missing, damaged); the helper exits.
     Failed { message: String },
     Images { id: u64, results: Vec<ImageResult> },
     Texts { id: u64, vectors: Vec<Vec<f32>> },
+    /// The heads found (phase 4), one entry per path asked.
+    Heads { id: u64, results: Vec<heads::HeadsResult> },
     /// A request that couldn't be served (asked a text-only helper for
     /// images, or a model error), with the request's id.
     Error { id: u64, message: String },
@@ -110,6 +116,7 @@ pub fn main(args: &[String]) -> i32 {
         _ => Device::Gpu,
     };
     let text_only = args.iter().any(|a| a == "--text-only");
+    let heads = args.iter().any(|a| a == "--heads") && !text_only;
     let face_model = arg("--face-model").and_then(|s| serde_json::from_value::<ModelId>(serde_json::Value::String(s)).ok()).filter(|m| m.is_face_model());
     let root = arg("--models-root").map(PathBuf::from).or_else(models::models_dir);
     let dir = arg("--models").map(PathBuf::from).or_else(|| root.as_ref().map(|r| r.join(ModelId::Siglip2.dir_name())));
@@ -125,7 +132,7 @@ pub fn main(args: &[String]) -> i32 {
         send(&mut out, &Reply::CardFailed { failure: f });
         return 2;
     }
-    let loaded = Models::load(&dir, &root, device, text_only, face_model);
+    let loaded = Models::load(&dir, &root, device, text_only, face_model, heads);
     let models = match loaded {
         Ok(m) => m,
         Err(Load::Card(f)) => {
@@ -146,6 +153,7 @@ pub fn main(args: &[String]) -> i32 {
             dim: models.dim,
             face_model: models.face.as_ref().map(|f| f.id),
             face_dim: models.face.as_ref().map_or(0, |f| f.dim),
+            heads: models.heads.is_some(),
         },
     );
     serve(models, std::io::BufReader::new(std::io::stdin()), out, Duration::from_secs(IDLE_MINUTES * 60))
@@ -199,6 +207,9 @@ pub struct Models {
     /// YuNet, with its declared shape made symbolic, when faces are on.
     detector: Option<Session>,
     face: Option<FaceModel>,
+    /// OWLv2 and DINOv2 for fursuit heads (phase 4), when asked for.
+    /// Their own sessions and vectors: nothing shared with faces.
+    heads: Option<heads::HeadModels>,
 }
 
 /// Image `i`'s block of a detector output flattened over the batch: `c`
@@ -221,7 +232,7 @@ impl Models {
     /// and run the self-check when the card is used.  With `face_model`,
     /// the detector and the recognition model from `root` too, checked
     /// the same way.
-    pub fn load(dir: &Path, root: &Path, device: Device, text_only: bool, face_model: Option<ModelId>) -> Result<Models, Load> {
+    pub fn load(dir: &Path, root: &Path, device: Device, text_only: bool, face_model: Option<ModelId>, heads: bool) -> Result<Models, Load> {
         let info = models::info(ModelId::Siglip2);
         let path = |i: usize| dir.join(info.files[i].file);
         let tokenizer = tokenizers::Tokenizer::from_file(path(2)).map_err(|e| Load::Other(format!("tokenizer: {e}")))?;
@@ -230,7 +241,7 @@ impl Models {
             ValueType::Tensor { shape, .. } if shape.len() == 2 => Some(shape[1].max(0) as usize),
             _ => None,
         });
-        let mut out = Models { device, name: None, self_check: SelfCheck::NotRun, dim: dim.unwrap_or(0), vision: None, text, tokenizer, detector: None, face: None };
+        let mut out = Models { device, name: None, self_check: SelfCheck::NotRun, dim: dim.unwrap_or(0), vision: None, text, tokenizer, detector: None, face: None, heads: None };
         if text_only {
             return Ok(out);
         }
@@ -258,6 +269,15 @@ impl Models {
         out.vision = Some(vision);
         if let Some(id) = face_model {
             out.load_faces(root, id)?;
+        }
+        if heads {
+            // The head step's pair, on the same device, checked against
+            // the processor on the card like the rest.
+            let hm = heads::HeadModels::load(&root.join(ModelId::Owlv2.dir_name()), &root.join(ModelId::Dinov2.dir_name()), device)?;
+            if let SelfCheck::Passed { cosine, max_diff } = hm.self_check {
+                eprintln!("ml-worker: heads self-check cosine {cosine:.6}, largest difference {max_diff:.2e}");
+            }
+            out.heads = Some(hm);
         }
         Ok(out)
     }
@@ -465,11 +485,11 @@ pub fn tokenize(tok: &tokenizers::Tokenizer, text: &str) -> Result<Vec<i64>, Str
     Ok(ids)
 }
 
-fn cpu_threads() -> usize {
+pub(super) fn cpu_threads() -> usize {
     std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8)
 }
 
-fn cpu_session(path: &Path, threads: usize) -> ort::Result<Session> {
+pub(super) fn cpu_session(path: &Path, threads: usize) -> ort::Result<Session> {
     Session::builder()?.with_optimization_level(GraphOptimizationLevel::Level3)?.with_intra_threads(threads)?.commit_from_file(path)
 }
 
@@ -485,7 +505,7 @@ fn gpu_builder() -> ort::Result<ort::session::builder::SessionBuilder> {
     Ok(Session::builder()?.with_execution_providers([ep.build().error_on_failure()])?.with_optimization_level(GraphOptimizationLevel::Level3)?)
 }
 
-fn gpu_session(path: &Path) -> ort::Result<Session> {
+pub(super) fn gpu_session(path: &Path) -> ort::Result<Session> {
     gpu_builder()?.commit_from_file(path)
 }
 
@@ -494,7 +514,7 @@ fn gpu_session_from(bytes: &[u8]) -> ort::Result<Session> {
 }
 
 /// An error creating or running the card's session, as a card failure.
-fn card_failure(e: &ort::Error) -> CardFailure {
+pub(super) fn card_failure(e: &ort::Error) -> CardFailure {
     let text = e.to_string();
     eprintln!("ml-worker: graphics card: {text}");
     let lower = text.to_lowercase();
@@ -731,6 +751,23 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
                     eprintln!("ml-worker: {} texts in {:.1} ms", texts.len(), started.elapsed().as_secs_f64() * 1000.0);
                 }
             }
+            Request::FindHeads { id, files } => {
+                let Some(hm) = models.heads.as_mut() else {
+                    send(&mut out, &Reply::Error { id, message: "this helper has no head models loaded".into() });
+                    continue;
+                };
+                let started = Instant::now();
+                let per = match models.device {
+                    Device::Gpu => heads::CHUNK_GPU,
+                    Device::Cpu => heads::CHUNK_CPU,
+                };
+                let results = heads::serve(hm, &pool, &files, per);
+                if std::env::var_os("PP_PROFILE").is_some() {
+                    let found: usize = results.iter().filter_map(|r| r.result.as_ref().ok()).map(|p| p.heads.len()).sum();
+                    eprintln!("ml-worker: {} photos ({found} heads) in {:.0} ms", results.len(), started.elapsed().as_secs_f64() * 1000.0);
+                }
+                send(&mut out, &Reply::Heads { id, results });
+            }
             Request::EmbedImages { id, files, want } => {
                 if models.vision.is_none() {
                     send(&mut out, &Reply::Error { id, message: "this helper runs the text tower only".into() });
@@ -888,7 +925,7 @@ mod tests {
         let line = serde_json::to_string(&req).unwrap();
         assert!(!line.contains('\n'));
         assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), req);
-        let rep = Reply::Ready { device: Device::Gpu, name: Some("Test GPU".into()), self_check: SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 }, dim: 768, face_model: Some(ModelId::AuraFace), face_dim: 512 };
+        let rep = Reply::Ready { device: Device::Gpu, name: Some("Test GPU".into()), self_check: SelfCheck::Passed { cosine: 1.0, max_diff: 0.0 }, dim: 768, face_model: Some(ModelId::AuraFace), face_dim: 512, heads: true };
         let line = serde_json::to_string(&rep).unwrap();
         assert!(line.starts_with(r#"{"reply":"ready""#));
         assert_eq!(serde_json::from_str::<Reply>(&line).unwrap(), rep);
@@ -902,10 +939,16 @@ mod tests {
             Reply::Error { id: 3, message: "m".into() },
             Reply::Idle,
             Reply::Texts { id: 1, vectors: vec![vec![0.5, 0.5]] },
+            Reply::Heads { id: 2, results: vec![heads::HeadsResult { path: PathBuf::from("/x/a.JPG"), result: Err(FileError::other("x")) }] },
         ] {
             let line = serde_json::to_string(&rep).unwrap_or_else(|e| panic!("{rep:?}: {e}"));
             assert_eq!(serde_json::from_str::<Reply>(&line).unwrap(), rep);
         }
+        // A heads request is its own kind of work, apart from faces.
+        let req = Request::FindHeads { id: 9, files: vec![(PathBuf::from("/x/a.JPG"), FileType::Jpg)] };
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(line.starts_with(r#"{"req":"find_heads""#) && !line.contains("faces"));
+        assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), req);
         // A known-faces request names the files and their landmarks.
         let known = FaceAsk::Known { files: vec![super::super::client::KnownFaces { path: PathBuf::from("/x/a.JPG"), faces: vec![super::super::client::FaceSpot { bbox: [0.1, 0.1, 0.2, 0.2], landmarks: [[0.15, 0.15]; 5], score: 0.95 }] }] };
         let req = Request::EmbedImages { id: 8, files: vec![(PathBuf::from("/x/a.JPG"), FileType::Jpg)], want: Want { search: false, faces: known } };

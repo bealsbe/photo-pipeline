@@ -23,6 +23,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use super::faces::{FaceStore, People};
+use super::heads::{self, Decision as HeadDecision, Fursuits, HeadStore, Why as HeadWhy};
 use super::index::{Index, Key, PathEntry, Record};
 use super::parse::{self, Parsed};
 use super::tags::{Tags, VocabVectors};
@@ -61,14 +62,24 @@ enum Cmd {
     Merge { into: GroupId, others: Vec<GroupId> },
     SetHidden(GroupId, bool),
     Forget(SubjectId),
-    ForgetAll,
+    /// Sent by the fursuit API block below; the pages call it once they
+    /// switch from their stand-in.
+    #[allow(dead_code)]
+    ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
     MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId> },
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
     Suggestions { seq: u64, group: GroupId },
     Undo,
-    /// A regroup finished on its worker.
+    /// A regroup finished on its worker (either kind; `kind` says).
     Regrouped(Box<super::step::Regrouped>),
+    // Fursuits (phase 4, decision 11).  Sent by the fursuit API, which
+    // the pages call once they switch from their stand-in.
+    SetFindHeads(bool),
+    FindHeads,
+    AnswerHeads(bool),
+    StopHeads,
+    FindMore { seq: u64, group: GroupId },
     Shutdown,
 }
 
@@ -83,6 +94,8 @@ pub struct Storage {
     /// The faces found, their vectors and tiles (the *People* row; the
     /// user's names live elsewhere and aren't counted).
     pub faces_bytes: u64,
+    /// The head cache's files (the Storage row's *Fursuits*).
+    pub heads_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -99,6 +112,8 @@ struct Shared {
     subjects: Mutex<Arc<Subjects>>,
     /// The face tiles' index, for `Engine::crop` on any thread.
     tiles: Mutex<Option<Arc<Mutex<super::faces::TileIndex>>>>,
+    /// The head tiles, likewise (phase 4).
+    head_tiles: Mutex<Option<Arc<Mutex<heads::HeadTiles>>>>,
 }
 
 /// What the engine is built on; tests swap the pieces that touch the
@@ -145,17 +160,18 @@ pub fn no_downloads() -> Downloader {
 
 impl Engine {
     /// Start the engine with the real helper.  `device`, `index_exports`,
-    /// `find_faces` and `face_model` are the saved preferences.
-    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId) -> Engine {
-        Engine::with_config(bus, device, index_exports, find_faces, face_model, Config::real())
+    /// `find_faces`, `face_model` and `find_heads` are the saved
+    /// preferences.
+    pub fn new(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId, find_heads: bool) -> Engine {
+        Engine::with_config(bus, device, index_exports, find_faces, face_model, find_heads, Config::real())
     }
 
     /// Start the engine on a configuration (tests).
-    pub fn with_config(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId, config: Config) -> Engine {
+    pub fn with_config(bus: Bus, device: Device, index_exports: bool, find_faces: bool, face_model: ModelId, find_heads: bool, config: Config) -> Engine {
         let (tx, rx) = crossbeam_channel::unbounded();
         let faces = FacesStatus { on: find_faces, model: Some(face_model), ..FacesStatus::default() };
         let status = Status { index_exports, device: crate::ml::DeviceStatus { chosen: device, ..Default::default() }, faces, ..Status::default() };
-        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())), tiles: Mutex::new(None) });
+        let shared = Arc::new(Shared { status: Mutex::new(status), things: Mutex::new(Arc::new(Vec::new())), subjects: Mutex::new(Arc::new(Subjects::default())), tiles: Mutex::new(None), head_tiles: Mutex::new(None) });
         let s = shared.clone();
         let me = tx.clone();
         let Config { factory, installed, index_dir, subjects_path, downloader } = config;
@@ -196,6 +212,13 @@ impl Engine {
                     subjects_sent: None,
                     regroup_running: false,
                     regroup_wanted: false,
+                    find_heads,
+                    fursuits: Fursuits::new(find_heads),
+                    scan: None,
+                    head_scan_pending: None,
+                    embedder_has_heads: false,
+                    heads_regroup_running: false,
+                    heads_regroup_wanted: false,
                 }
                 .run()
             })
@@ -291,11 +314,6 @@ impl Engine {
         self.send(Cmd::Forget(id));
     }
 
-    /// Preferences ▸ Storage ▸ *Forget all*: every face found, every
-    /// vector and tile, and the subjects file (§10).
-    pub fn forget_all(&self) {
-        self.send(Cmd::ForgetAll);
-    }
 
     /// A group's faces, clearest first: `BgEvent::SubjectFaces { seq, .. }`.
     pub fn faces(&self, seq: u64, group: GroupId) {
@@ -330,16 +348,72 @@ impl Engine {
         self.send(Cmd::Undo);
     }
 
-    /// A face's pixels for a tile or the review, `px`×`px` (or fitted,
-    /// for [`Framing::Photo`]), as `(width, height, RGBA)`.  **Blocks**:
-    /// reads the cached tile, else the photo's preview; call it on a
-    /// worker, never the UI thread.
+    /// A face's or head's pixels for a tile or the review, `px`×`px`
+    /// (or fitted, for [`Framing::Photo`]), as `(width, height, RGBA)`.
+    /// **Blocks**: reads the cached tile (a head's, else a face's), else
+    /// the photo's preview; call it on a worker, never the UI thread.
     pub fn crop(&self, face: &Face, px: u32, framing: Framing) -> Option<(u32, u32, Vec<u8>)> {
+        if framing == Framing::Face {
+            let head_tiles = self.shared.head_tiles.lock().clone();
+            if let Some(t) = head_tiles {
+                if let Some(px) = heads::tile_pixels(&t.lock(), &face.face, px) {
+                    return Some(px);
+                }
+            }
+        }
         let tiles = self.shared.tiles.lock().clone();
         match tiles {
             Some(t) => super::faces::crop(Some(&t.lock()), face, px, framing),
             None => super::faces::crop(None, face, px, framing),
         }
+    }
+
+}
+
+/// The fursuit API (phase 4, decision 11): what the Fursuits tab,
+/// Preferences and the review call.
+impl Engine {
+    /// Preferences ▸ People ▸ *Forget all people* (or Fursuits ▸ *Forget
+    /// all fursuits*): that kind's subjects, detections, vectors and
+    /// tiles go; the other kinds are not touched.  For fursuits the head
+    /// step's counts start over, so the catch-up is offered again.
+    /// `forget_all` stays for Storage and a rebuild.
+    pub fn forget_kind(&self, kind: Kind) {
+        self.send(Cmd::ForgetKind(kind));
+    }
+
+    /// Preferences ▸ *Find fursuit heads*.  Off: no scan starts (what was
+    /// found stays until *Forget all*).
+    pub fn set_find_heads(&self, on: bool) {
+        self.send(Cmd::SetFindHeads(on));
+    }
+
+    /// *Find fursuit heads in the N photos*: the catch-up over indexed
+    /// fursuit photos not looked at (and ones skipped earlier), asked
+    /// from the tab or Preferences after the cost was shown.  Downloads
+    /// the two models first if need be.  On either device it starts,
+    /// since the asking happened on the tab.
+    pub fn find_heads(&self) {
+        self.send(Cmd::FindHeads);
+    }
+
+    /// The answer to `Step::Asking` (the processor): start the scan, or
+    /// skip it (its photos are remembered and offered again from the
+    /// tab).
+    pub fn answer_heads(&self, start: bool) {
+        self.send(Cmd::AnswerHeads(start));
+    }
+
+    /// Stop a running head scan (its progress is kept).
+    pub fn stop_heads(&self) {
+        self.send(Cmd::StopHeads);
+    }
+
+    /// *Find more*, strict: `BgEvent::Suggestions { seq, .. }` with the
+    /// next few heads (or faces) under the strict cut-off, one entry per
+    /// burst; an empty list means nothing more is close enough.
+    pub fn find_more(&self, seq: u64, group: GroupId) {
+        self.send(Cmd::FindMore { seq, group });
     }
 }
 
@@ -418,7 +492,8 @@ pub fn storage(library_root: Option<&Path>) -> Storage {
         out.index_bytes = dir_bytes(&dir);
         out.index_shots = super::index::count_rows(&dir);
         out.faces_bytes = FaceStore::bytes_in(&dir);
-        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes);
+        out.heads_bytes = HeadStore::bytes_in(&dir);
+        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes);
     }
     if let Some(dir) = models::models_dir() {
         out.models_bytes = dir_bytes(&dir);
@@ -518,11 +593,33 @@ struct Worker {
     /// A regroup is on its worker; another was asked for meanwhile.
     regroup_running: bool,
     regroup_wanted: bool,
+    /// Preferences ▸ *Find fursuit heads* (phase 4).
+    find_heads: bool,
+    /// The fursuit step: its cache, its grouping, what waits for the user.
+    fursuits: Fursuits,
+    /// A head scan runs in place of a pass (never both at once).
+    scan: Option<HeadScan>,
+    /// A head scan waiting for its models to download: why, and whether
+    /// the tab asked for it.
+    head_scan_pending: Option<(HeadWhy, bool)>,
+    /// The running helper was started with the head models.
+    embedder_has_heads: bool,
+    heads_regroup_running: bool,
+    heads_regroup_wanted: bool,
+}
+
+/// A running head scan.
+struct HeadScan {
+    handle: heads::ScanHandle,
+    batches: Receiver<heads::HeadBatch>,
 }
 
 const TEXT_CACHE: usize = 64;
 /// While a pass runs, *Things* is sent at most this often.
 const THINGS_EVERY: Duration = Duration::from_secs(2);
+/// How often the idle engine looks whether built memory can go (the
+/// fursuit vectors after [`Fursuits::VECTORS_IDLE`]).
+const IDLE_TICK: Duration = Duration::from_secs(15);
 
 impl Worker {
     fn run(mut self) {
@@ -538,11 +635,28 @@ impl Worker {
                         }
                         None
                     }
+                    default(IDLE_TICK) => { self.idle_tick(); None }
+                }
+            } else if let Some(sc) = &self.scan {
+                crossbeam_channel::select! {
+                    recv(self.rx) -> c => match c { Ok(c) => Some(c), Err(_) => break },
+                    recv(sc.batches) -> b => {
+                        match b {
+                            Ok(batch) => { self.on_head_batch(batch); }
+                            Err(_) => { self.scan = None; self.fursuits.stop(); self.publish_heads(); }
+                        }
+                        None
+                    }
+                    default(IDLE_TICK) => { self.idle_tick(); None }
                 }
             } else {
-                match self.rx.recv() {
+                match self.rx.recv_timeout(IDLE_TICK) {
                     Ok(c) => Some(c),
-                    Err(_) => break,
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                        self.idle_tick();
+                        None
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
                 }
             };
             let Some(cmd) = cmd else { continue };
@@ -575,6 +689,14 @@ impl Worker {
                             self.start_face_pass(change);
                         }
                     }
+                    if ok.iter().any(|m| m.is_fursuit_model()) {
+                        self.drop_embedder();
+                    }
+                    if let Some((why, asked)) = self.head_scan_pending.take() {
+                        if self.heads_ready() {
+                            self.offer_head_scan(why, asked);
+                        }
+                    }
                 }
                 Cmd::StopIndexing => {
                     if let Some(p) = &self.pass {
@@ -595,14 +717,19 @@ impl Worker {
                         s.stopped = None;
                         s.device.self_check = SelfCheck::NotRun;
                     });
+                    self.fursuits.card_back();
+                    self.publish_heads();
                     self.resume_pass();
                 }
                 Cmd::SetDevice(d) => {
                     if d != self.device {
                         let was_running = self.pass.is_some();
                         self.cancel_pass();
+                        self.cancel_scan();
                         self.drop_embedder();
                         self.device = d;
+                        self.fursuits.card_back();
+                        self.publish_heads();
                         let stopped_by_card = matches!(self.shared.status.lock().stopped, Some(Stopped::Card(_)));
                         self.update(|s| {
                             s.device = crate::ml::DeviceStatus { chosen: d, ..Default::default() };
@@ -633,6 +760,9 @@ impl Worker {
                         store.forget_all();
                     }
                     self.people.reset_grouping();
+                    self.cancel_scan();
+                    self.fursuits.forget_all();
+                    self.fursuits.reset_grouping();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -657,6 +787,9 @@ impl Worker {
                         store.forget_all();
                     }
                     self.people.reset_grouping();
+                    self.cancel_scan();
+                    self.fursuits.forget_all();
+                    self.fursuits.reset_grouping();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -679,6 +812,9 @@ impl Worker {
                 Cmd::Busy(n) => {
                     if let Some(p) = &self.pass {
                         p.handle.set_busy(n);
+                    }
+                    if let Some(sc) = &self.scan {
+                        sc.handle.set_busy(n);
                     }
                 }
                 Cmd::SetFindFaces(on) => {
@@ -726,9 +862,19 @@ impl Worker {
                     let r = self.people.forget(&id);
                     self.after_edit(r);
                 }
-                Cmd::ForgetAll => {
-                    self.people.forget_all();
-                    self.people.reset_grouping();
+                Cmd::ForgetKind(kind) => {
+                    self.people.forget_kind(kind);
+                    match kind {
+                        Kind::Person => self.people.reset_grouping(),
+                        Kind::Fursuit => {
+                            self.cancel_scan();
+                            self.fursuits.forget_all();
+                            self.fursuits.reset_grouping();
+                            self.people.set_other_clusters(Kind::Fursuit, Vec::new());
+                            self.publish_heads();
+                        }
+                        Kind::Pet => {}
+                    }
                     self.refresh_counts();
                     self.publish_subjects();
                 }
@@ -745,33 +891,60 @@ impl Worker {
                     let r = self.people.answer(&group, faces, yes);
                     self.after_edit(r.map(|_| ()));
                 }
-                Cmd::Suggestions { seq, group } => {
-                    self.ensure_resolver();
-                    let list = match self.people.suggestions(&group, &|f| self.resolve_face(f), false) {
-                        Ok(l) => l,
-                        Err(e) => {
-                            eprintln!("subjects: suggestions refused: {e}");
-                            Vec::new()
-                        }
-                    };
-                    let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
+                Cmd::Suggestions { seq, group } => self.send_suggestions(seq, group, false),
+                Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
+                Cmd::SetFindHeads(on) => {
+                    self.find_heads = on;
+                    self.fursuits.status.on = on;
+                    if !on {
+                        self.cancel_scan();
+                    }
+                    self.publish_heads();
                 }
+                Cmd::FindHeads => {
+                    if self.heads_ready() {
+                        self.offer_head_scan(HeadWhy::CatchUp, true);
+                    } else {
+                        self.head_scan_pending = Some((HeadWhy::CatchUp, true));
+                        self.download_missing(&models::FURSUIT_MODELS);
+                    }
+                }
+                Cmd::AnswerHeads(start) => {
+                    if let Some((jobs, _)) = self.fursuits.answer(start) {
+                        self.run_head_scan(jobs);
+                    }
+                    self.publish_heads();
+                }
+                Cmd::StopHeads => self.cancel_scan(),
                 Cmd::Undo => {
                     if let Some(what) = self.people.undo() {
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
                         self.publish_subjects();
                         self.start_regroup();
+                        self.start_heads_regroup();
                     }
                 }
-                Cmd::Regrouped(r) => {
-                    self.regroup_running = false;
-                    if self.people.apply_regroup(*r) {
-                        self.publish_subjects();
+                Cmd::Regrouped(r) => match r.kind {
+                    Kind::Fursuit => {
+                        self.heads_regroup_running = false;
+                        if self.fursuits.apply_regroup(*r, &self.people.file) {
+                            self.people.set_other_clusters(Kind::Fursuit, self.fursuits.clusters());
+                            self.publish_subjects();
+                        }
+                        if std::mem::take(&mut self.heads_regroup_wanted) {
+                            self.start_heads_regroup();
+                        }
                     }
-                    if std::mem::take(&mut self.regroup_wanted) {
-                        self.start_regroup();
+                    _ => {
+                        self.regroup_running = false;
+                        if self.people.apply_regroup(*r) {
+                            self.publish_subjects();
+                        }
+                        if std::mem::take(&mut self.regroup_wanted) {
+                            self.start_regroup();
+                        }
                     }
-                }
+                },
                 Cmd::Shutdown => break,
             }
         }
@@ -807,9 +980,12 @@ impl Worker {
     fn refresh_installed(&mut self) {
         let search = self.models_ready();
         let faces = self.missing(&models::face_set(self.face_model)).is_empty();
+        let heads = self.heads_ready();
+        self.fursuits.status.models_installed = heads;
         self.update(|s| {
             s.models_installed = search;
             s.faces.installed = faces;
+            s.heads.models_installed = heads;
         });
     }
 
@@ -819,10 +995,156 @@ impl Worker {
         match result {
             Err(e) => eprintln!("subjects: refused: {e}"),
             // Members and rejections moved: the clusters and the
-            // suggestion counts follow, on the worker.
-            Ok(()) => self.start_regroup(),
+            // suggestion counts follow, on the worker (each kind its own).
+            Ok(()) => {
+                self.start_regroup();
+                self.start_heads_regroup();
+            }
         }
         self.publish_subjects();
+    }
+
+    /// The fursuit grouping again on a worker thread (`Cmd::Regrouped`
+    /// with `Kind::Fursuit` brings the result); the head vectors are
+    /// built in memory for it if they weren't.
+    fn start_heads_regroup(&mut self) {
+        if self.heads_regroup_running {
+            self.heads_regroup_wanted = true;
+            return;
+        }
+        let Some(job) = self.fursuits.regroup_job(&self.people.file) else { return };
+        self.heads_regroup_running = true;
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("fursuits-regroup".into())
+            .spawn(move || {
+                let _t = crate::profile::span("subjects", "fursuits regroup");
+                let r = super::step::regroup(&job);
+                let _ = me.send(Cmd::Regrouped(Box::new(r)));
+            })
+            .expect("spawn fursuits-regroup");
+    }
+
+    /// Suggestions (or *Find more* with `strict`) for a group, from its
+    /// own kind's step only: a fursuit group is answered from heads, any
+    /// other from faces; never both.
+    fn send_suggestions(&mut self, seq: u64, group: GroupId, strict: bool) {
+        self.ensure_resolver();
+        let r = if self.fursuits.is_fursuit_group(&self.people.file, &group) {
+            // The head vectors in memory first (the fursuit work asks).
+            self.fursuits.step();
+            self.fursuits.suggestions(&self.people.file, &group, &|f| self.resolve_face(f), strict)
+        } else {
+            self.people.suggestions(&group, &|f| self.resolve_face(f), strict)
+        };
+        let list = match r {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("subjects: suggestions refused: {e}");
+                Vec::new()
+            }
+        };
+        let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
+    }
+
+    /// Nothing asked for a while: built memory that fursuit work no
+    /// longer needs is let go (the user's choice: freed after use).
+    fn idle_tick(&mut self) {
+        if self.fursuits.release_if_idle(Instant::now()) && std::env::var_os("PP_PROFILE").is_some() {
+            eprintln!("subjects: fursuit vectors released after {:?} idle", Fursuits::VECTORS_IDLE);
+        }
+    }
+
+    /// The two head models are in place.
+    fn heads_ready(&self) -> bool {
+        self.missing(&models::FURSUIT_MODELS).is_empty()
+    }
+
+    /// Put the fursuit step's status in the snapshot and send it.
+    fn publish_heads(&mut self) {
+        self.fursuits.status.on = self.find_heads;
+        self.fursuits.status.models_installed = self.heads_ready();
+        self.fursuits.status.named = self.people.file.named_count(Kind::Fursuit);
+        self.fursuits.refresh();
+        let heads = self.fursuits.status.clone();
+        self.update(|s| s.heads = heads);
+    }
+
+    /// Photos want a head scan (the first index or new exports ended, or
+    /// the tab asked): decision 11's rule decides whether it starts now
+    /// or waits for the user.  Never while a pass or a scan runs.
+    fn offer_head_scan(&mut self, why: HeadWhy, asked: bool) {
+        if !self.find_heads || self.pass.is_some() || self.scan.is_some() || !self.heads_ready() {
+            return;
+        }
+        let jobs = {
+            let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return };
+            self.fursuits.plan(lib, ix, &self.tags, asked)
+        };
+        let started = jobs.clone();
+        if self.fursuits.consider(jobs, why, self.device, asked) == HeadDecision::Start {
+            self.run_head_scan(started);
+        }
+        self.publish_heads();
+    }
+
+    /// Start the scan over `jobs` on its thread, with a helper that has
+    /// the head models (started again if the running one hasn't).
+    fn run_head_scan(&mut self, jobs: Vec<heads::HeadJob>) {
+        if jobs.is_empty() || self.scan.is_some() {
+            self.fursuits.stop();
+            return;
+        }
+        let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
+        if !self.embedder_has_heads {
+            self.drop_embedder();
+        }
+        let Some(embedder) = self.image_embedder() else {
+            self.fursuits.stop();
+            return;
+        };
+        let (tx, rx) = crossbeam_channel::unbounded::<heads::HeadBatch>();
+        let handle = heads::start(root, jobs, embedder, move |b| drop(tx.send(b)));
+        self.scan = Some(HeadScan { handle, batches: rx });
+    }
+
+    /// A batch from the head scan: the cache grows, the new heads join
+    /// the clusters; at the end a full regroup, and new exports that
+    /// arrived meanwhile are looked at (the scan took the pass's place).
+    fn on_head_batch(&mut self, batch: heads::HeadBatch) {
+        if batch.restarted {
+            self.update(|s| s.helper_restarts += 1);
+        }
+        let over = self.fursuits.absorb(&batch);
+        self.fursuits.assign_new(&self.people.file);
+        if over {
+            self.scan = None;
+            if let Some(fin) = &batch.finished {
+                if let Some(Stopped::Card(f)) = &fin.stopped {
+                    self.drop_embedder();
+                    self.card_failed(f.clone());
+                }
+            }
+            self.publish_heads();
+            self.people.set_other_clusters(Kind::Fursuit, self.fursuits.clusters());
+            self.publish_subjects();
+            self.start_heads_regroup();
+            self.maybe_index_new();
+        } else {
+            self.publish_heads();
+            self.publish_subjects_throttled(false);
+        }
+    }
+
+    fn cancel_scan(&mut self) {
+        if let Some(sc) = self.scan.take() {
+            sc.handle.cancel();
+            while let Ok(b) = sc.batches.try_recv() {
+                self.fursuits.absorb(&b);
+            }
+        }
+        self.fursuits.stop();
+        self.publish_heads();
     }
 
     /// Group the faces again on a worker thread (`Cmd::Regrouped` brings
@@ -859,11 +1181,18 @@ impl Worker {
     fn publish_subjects(&mut self) {
         self.subjects_sent = Some(Instant::now());
         self.ensure_resolver();
-        let snapshot = self.people.build_snapshot(&|f| self.resolve_face(f));
+        let mut snapshot = (*self.people.build_snapshot(&|f| self.resolve_face(f))).clone();
+        self.fursuits.extend_snapshot(&mut snapshot, &|f| self.resolve_face(f));
+        let snapshot = Arc::new(snapshot);
         self.people.set_snapshot(snapshot.clone());
         let named = self.people.file.named_count(Kind::Person);
+        let suits = self.people.file.named_count(Kind::Fursuit);
         *self.shared.subjects.lock() = snapshot.clone();
-        self.update(|s| s.faces.named = named);
+        self.fursuits.status.named = suits;
+        self.update(|s| {
+            s.faces.named = named;
+            s.heads.named = suits;
+        });
         let _ = self.bus.unbounded_send(BgEvent::Subjects(snapshot));
     }
 
@@ -874,8 +1203,13 @@ impl Worker {
         let shot = r.shots.get(&f.key)?;
         let rec = self.index.as_ref().and_then(|ix| ix.vectors.by_key.get(&f.key).map(|&i| &ix.vectors.records[i]));
         let capture = rec.and_then(|rec| rec.capture.map(|c| c + chrono::Duration::milliseconds(rec.meta.subsec_ms.unwrap_or(0) as i64))).unwrap_or(shot.mtime);
-        let confirmed = self.people.file.member_of(Kind::Person, f).is_some();
-        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity: self.people.clarity(f), confirmed })
+        let is_head = self.fursuits.store.as_ref().is_some_and(|s| s.detection(f).is_some());
+        let (confirmed, clarity) = if is_head {
+            (self.people.file.member_of(Kind::Fursuit, f).is_some(), self.fursuits.clarity_with_sureness(f))
+        } else {
+            (self.people.file.member_of(Kind::Person, f).is_some(), self.people.clarity(f))
+        };
+        Some(Face { face: *f, jpg: shot.jpg.clone(), raw: shot.raw.clone(), day: shot.day, capture, burst: shot.burst, clarity, confirmed })
     }
 
     fn publish(&self) {
@@ -924,13 +1258,23 @@ impl Worker {
             let store = dir.as_ref().map(|dir| FaceStore::load(dir, self.face_model));
             *self.shared.tiles.lock() = store.as_ref().map(FaceStore::tiles);
             self.people.store = store;
+            // The head cache too (its vectors stay on disk until asked for).
+            self.cancel_scan();
+            match dir.as_ref() {
+                Some(dir) => self.fursuits.open(dir),
+                None => self.fursuits.close(),
+            }
+            *self.shared.head_tiles.lock() = self.fursuits.store.as_ref().map(HeadStore::tiles);
             self.resolver = None;
         }
         let live: HashSet<PathBuf> = lib.days.values().flat_map(|d| d.files.iter().map(|f| pass::rel_path(&lib.root, &f.path))).collect();
         if let Some(ix) = &mut self.index {
             ix.retain_paths(&live);
+            let keys: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
             if let Some(store) = &mut self.people.store {
-                let keys: HashSet<Key> = ix.paths.entries.values().map(|e| e.key).collect();
+                store.retain(&keys);
+            }
+            if let Some(store) = &mut self.fursuits.store {
                 store.retain(&keys);
             }
         }
@@ -939,6 +1283,7 @@ impl Worker {
         self.refresh_counts();
         if root_changed {
             self.people.reset_grouping();
+            self.fursuits.reset_grouping();
             self.start_regroup();
         }
         self.publish_subjects();
@@ -946,6 +1291,8 @@ impl Worker {
             self.vocab_tried = false;
         }
         self.refresh_tags();
+        self.fursuits.count_tagged(&self.tags);
+        self.publish_heads();
         self.maybe_index_new();
     }
 
@@ -1025,6 +1372,7 @@ impl Worker {
         let (indexed, asked) = self.index.as_ref().map_or((0, false), |ix| (ix.len(), ix.paths.first_index_asked));
         let shots = self.library.as_ref().map_or(0, |l| l.total_shots);
         let (looked_at, found, unrecognised) = self.people.store.as_ref().map_or((0, 0, 0), |s| (s.looked_at(), s.found(), s.unrecognised()));
+        let (scanned, heads_found) = self.fursuits.store.as_ref().map_or((0, 0), |s| (s.looked_at(), s.found()));
         self.update(|s| {
             s.library_shots = shots;
             s.indexed_shots = indexed;
@@ -1032,6 +1380,8 @@ impl Worker {
             s.faces.looked_at = looked_at;
             s.faces.found = found;
             s.faces.unrecognised = unrecognised;
+            s.heads.scanned = scanned;
+            s.heads.found = heads_found;
         });
     }
 
@@ -1074,7 +1424,7 @@ impl Worker {
     /// change.  Only ever started by a command, never by a pass's end, so
     /// it can't start itself over.
     fn start_face_pass(&mut self, change: bool) {
-        if self.pass.is_some() || !self.faces_ready() {
+        if self.pass.is_some() || self.scan.is_some() || !self.faces_ready() {
             return;
         }
         let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
@@ -1147,6 +1497,10 @@ impl Worker {
         // rows means faces on with that model; none means faces unticked.
         let face_model = models::face_model_in(&wanted);
         self.find_faces = face_model.is_some();
+        // The dialog's *Fursuits* pair ticked means heads on (decision 11;
+        // on the processor the scan still asks when it would start).
+        self.find_heads = models::fursuits_in(&wanted);
+        self.fursuits.status.on = self.find_heads;
         if let Some(m) = face_model {
             self.face_model = m;
         }
@@ -1206,8 +1560,10 @@ impl Worker {
         if let Some(e) = &self.embedder {
             return Some(e.clone());
         }
-        match (self.factory)(Spec::images(self.device, self.find_faces.then_some(self.face_model))) {
+        let with_heads = self.find_heads && self.heads_ready();
+        match (self.factory)(Spec::images(self.device, self.find_faces.then_some(self.face_model)).with_heads(with_heads)) {
             Ok(e) => {
+                self.embedder_has_heads = with_heads;
                 let (name, check) = e.device_report();
                 self.update(|s| {
                     s.device.name = name;
@@ -1228,6 +1584,8 @@ impl Worker {
     }
 
     fn card_failed(&mut self, f: CardFailure) {
+        self.fursuits.card_failed(f.clone());
+        self.publish_heads();
         let waiting = self.check().map_or(0, |p| p.jobs.len());
         self.update(|s| {
             if let CardFailure::SelfCheckFailed { cosine, max_diff } = &f {
@@ -1240,7 +1598,7 @@ impl Worker {
     }
 
     fn start_pass(&mut self, kind: PassKind) {
-        if self.pass.is_some() {
+        if self.pass.is_some() || self.scan.is_some() {
             return;
         }
         let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
@@ -1315,7 +1673,19 @@ impl Worker {
             // couldn't embed is in `tried`, so its end never starts
             // another pass over the same files.
             if complete {
+                self.fursuits.count_tagged(&self.tags);
                 self.maybe_index_new();
+                // The head step comes after search (and faces): once the
+                // first index or a new-exports pass ran to its end, the
+                // fursuit photos it indexed are considered (decision 11:
+                // the card starts, the processor asks).  A pass that
+                // started just above has the slot, and the step waits for
+                // that pass's end in turn.
+                match kind {
+                    PassKind::FirstIndex => self.offer_head_scan(HeadWhy::FirstIndex, false),
+                    PassKind::NewExports => self.offer_head_scan(HeadWhy::NewExports, false),
+                    PassKind::Rebuild | PassKind::Faces => {}
+                }
             }
         } else {
             self.update(|s| {
@@ -1445,8 +1815,20 @@ impl Worker {
         for g in subjects {
             narrow(self.people.photos_of(g).unwrap_or_default());
         }
+        // A typed name is one kind's: the person when a person has it,
+        // else the fursuit; a fursuit of the same name as a person is
+        // reported beside the results, never searched with them (a picked
+        // chip carries its own GroupId and so its kind).
+        let mut also_fursuits: Vec<(String, GroupId)> = Vec::new();
         for name in &parsed.names {
-            let named = self.people.named(Kind::Person, name);
+            let people = self.people.named(Kind::Person, name);
+            let suits = self.people.named(Kind::Fursuit, name);
+            let named = if people.is_empty() {
+                suits
+            } else {
+                also_fursuits.extend(suits.into_iter().map(|g| (name.clone(), g)));
+                people
+            };
             let mut keys = HashSet::new();
             for g in &named {
                 keys.extend(self.people.photos_of(g).unwrap_or_default());
@@ -1456,6 +1838,7 @@ impl Worker {
         }
         groups.dedup();
         let groups = Arc::new(groups);
+        let also_fursuits = Arc::new(also_fursuits);
         let bus = self.bus.clone();
         let answer = |hits: Vec<Hit>, fursuits: Vec<Hit>, error: Option<String>| {
             let _ = bus.unbounded_send(BgEvent::SearchResults {
@@ -1467,6 +1850,7 @@ impl Worker {
                 fursuits: Arc::new(fursuits),
                 animal: animal.clone(),
                 subjects: groups.clone(),
+                also_fursuits: also_fursuits.clone(),
             });
         };
         // Subjects with no words and no dates: their photos, clearest
@@ -1689,7 +2073,7 @@ mod tests {
     fn the_status_starts_from_the_saved_preferences_and_a_query_answers() {
         let (bus, _rx) = crate::bus::channel();
         let config = Config { factory: Box::new(|_| Err(StartError::Other("no".into()))), installed: Box::new(|_| false), index_dir: None, subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Cpu, false, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Cpu, false, true, ModelId::AuraFace, false, config);
         let s = e.status();
         assert_eq!(s.device.chosen, Device::Cpu);
         assert!(!s.index_exports && s.not_indexed());
@@ -1770,6 +2154,12 @@ mod tests {
 
         /// The answer to query `seq`.
         fn results(&mut self, seq: u64) -> Answer {
+            self.results_with_also(seq).0
+        }
+
+        /// The answer, with the fursuits of a typed name that a person
+        /// has too ("also a fursuit called …").
+        fn results_with_also(&mut self, seq: u64) -> (Answer, Vec<(String, GroupId)>) {
             let stream = &mut self.stream;
             self.rt.block_on(async {
                 use iced::futures::StreamExt;
@@ -1777,9 +2167,9 @@ mod tests {
                 while Instant::now() < deadline {
                     let Some(batch) = stream.next().await else { break };
                     for ev in batch {
-                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal, subjects: _ } = ev {
+                        if let BgEvent::SearchResults { seq: s, hits, indexed, error, understood, fursuits, animal, subjects: _, also_fursuits } = ev {
                             if s == seq {
-                                return ((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal);
+                                return (((*hits).clone(), indexed, error, (*understood).clone(), (*fursuits).clone(), animal), (*also_fursuits).clone());
                             }
                         }
                     }
@@ -1839,7 +2229,7 @@ mod tests {
         let (lib, d) = library("device-rule", 6);
         let (factory, asked) = logging_factory(true);
         let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 6);
         e.start_first_index(&[ModelId::Siglip2]);
@@ -1875,7 +2265,7 @@ mod tests {
         let (lib, d) = library("round-trip", 12);
         let (factory, asked) = logging_factory(false);
         let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 12);
         // Nothing is indexed on its own before the first index is asked for.
@@ -1922,7 +2312,7 @@ mod tests {
         // Clear removes it all.
         let (bus2, _rx2) = crate::bus::channel();
         let (factory, _) = logging_factory(false);
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         e2.clear_index();
@@ -1981,7 +2371,7 @@ mod tests {
             let (factory, _) = logging_factory(false);
             let (installed, downloader, _have, asked) = faces_arrive_later(succeed);
             let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
-            let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+            let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
             e.on_library(lib.clone());
             wait_for(&e, "the library", |s| s.library_shots == 5);
             assert!(e.status().models_installed && !e.status().faces.installed);
@@ -2004,7 +2394,7 @@ mod tests {
         let (factory, _) = logging_factory(false);
         let (installed, downloader, _have, asked) = faces_arrive_later(true);
         let config = Config { factory, installed, index_dir: Some(d.join("index")), subjects_path: None, downloader };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 4);
         // Search alone first (faces unticked in the dialog).
@@ -2032,7 +2422,7 @@ mod tests {
         // Faces on and the models in place: the first index looks at
         // every photo.
         let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 6);
         e.start_first_index(&models::models_for(Some(ModelId::AuraFace)));
@@ -2076,7 +2466,7 @@ mod tests {
         f.fail_paths_containing = Some("0003".into());
         let fake = Arc::new(f);
         let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 5);
@@ -2129,7 +2519,7 @@ mod tests {
         f.fail_errno = Some(libc::EIO);
         let fake = Arc::new(f);
         let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 3);
@@ -2158,7 +2548,7 @@ mod tests {
         f.delay = Duration::from_millis(100);
         let fake = Arc::new(f);
         let config = Config { factory: one_fake(fake.clone()), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         let mut ev = Events::new(&rx);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 320);
@@ -2254,6 +2644,23 @@ mod tests {
                 })
                 .collect())
         }
+        /// One head per photo whose name says fursuit, with the photo's
+        /// own axis vector (so photos named alike are one suit).
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            Ok(files
+                .iter()
+                .map(|(p, _)| {
+                    let stem = crate::util::stem(p);
+                    let key = Key::of(1, p.as_os_str().as_encoded_bytes());
+                    let heads = if stem.contains("fursuit") {
+                        vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score: 0.5, size: 300, sharpness: 0.2, vector: Axes::unit(&Axes::parts_of(&stem)), tile: Vec::new() }]
+                    } else {
+                        Vec::new()
+                    };
+                    crate::ml::heads::HeadsResult { path: p.clone(), result: Ok(crate::ml::heads::PhotoHeads { key, heads }) }
+                })
+                .collect())
+        }
         fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
             Ok(texts
                 .iter()
@@ -2290,6 +2697,123 @@ mod tests {
         (Arc::new(ix), d)
     }
 
+    /// Decision 11 through the engine.  On the processor: the first
+    /// index's end puts the fursuit photos to the user (`Step::Asking`),
+    /// nothing scans on its own, a skip is remembered, and the tab's
+    /// catch-up starts and finds the heads; the snapshot then holds
+    /// fursuit groups of kind Fursuit and no people.  On the card the
+    /// scan starts unasked at the first index's end.
+    #[test]
+    fn the_head_step_asks_on_the_processor_and_starts_on_the_card() {
+        let files = [
+            ("2025/Mar-2025/12-Mar-2025", "0001-fursuit-90.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0002-fursuit-80.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0003-dog-60.JPG"),
+            ("2025/Mar-2025/13-Mar-2025", "0004-fursuit-70.JPG"),
+        ];
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let (bus, _rx) = crate::bus::channel();
+        let (lib, d) = library_of("heads-cpu", &files);
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Cpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        wait_for(&e, "the library", |s| s.library_shots == 4);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+        wait_for(&e, "the question", |s| matches!(s.heads.step, heads::Step::Asking(_)));
+        let s = e.status();
+        assert_eq!(s.heads.step, heads::Step::Asking(heads::Offer { photos: 3, why: HeadWhy::FirstIndex }), "the three fursuit photos, not the dog");
+        assert_eq!((s.heads.on, s.heads.models_installed, s.heads.tagged, s.heads.scanned), (true, true, 3, 0));
+        e.answer_heads(false);
+        wait_for(&e, "the skip", |s| s.heads.step == heads::Step::Idle);
+        assert_eq!(e.status().heads.skipped, 3);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!((e.status().heads.step, e.status().heads.scanned), (heads::Step::Idle, 0), "nothing starts by itself");
+        e.find_heads();
+        wait_for(&e, "the catch-up", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
+        assert_eq!((e.status().heads.found, e.status().heads.skipped), (3, 0));
+        let started = Instant::now();
+        while e.subjects().groups.iter().all(|g| g.kind != Kind::Fursuit) {
+            assert!(started.elapsed() < Duration::from_secs(5), "fursuit groups never appeared: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let snap = e.subjects();
+        assert!(snap.groups.iter().all(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Cluster(_)) && g.name.is_none()), "{:?}", snap.groups);
+        assert_eq!(snap.groups.iter().map(|g| g.photos).sum::<usize>(), 3);
+        // Forgetting people leaves the fursuits; forgetting fursuits
+        // empties the head cache and offers the catch-up again.
+        e.forget_kind(Kind::Person);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(e.subjects().groups.iter().map(|g| g.photos).sum::<usize>(), 3, "people's forget leaves the fursuit groups");
+        assert_eq!(e.status().heads.scanned, 3);
+        e.forget_kind(Kind::Fursuit);
+        wait_for(&e, "the fursuits forgotten", |s| s.heads.scanned == 0 && s.heads.found == 0);
+        assert!(e.subjects().groups.is_empty());
+        assert_eq!(e.status().heads.unscanned(), 3, "the catch-up is on offer again");
+        // The card: the scan follows the first index without a question.
+        let (bus2, _rx2) = crate::bus::channel();
+        let (lib2, d2) = library_of("heads-gpu", &files);
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d2.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e2.on_library(lib2);
+        wait_for(&e2, "the library", |s| s.library_shots == 4);
+        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        wait_for(&e2, "the scan after the first index", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
+        assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// A name shared by a person and a fursuit (the user, 2026-10-03: "the
+    /// one you picked").  Typed, `@Alex` is the person; the fursuit of
+    /// that name comes beside the results for the page to offer, and its
+    /// photos are never in the list.  A picked chip is its own GroupId:
+    /// the fursuit's chip searches the fursuit alone.
+    #[test]
+    fn a_name_shared_across_kinds_never_unions_results() {
+        let files = [
+            ("2025/Mar-2025/12-Mar-2025", "0001-fursuit-90.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0002-fursuit-80.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0003-dog-60.JPG"),
+        ];
+        let (bus, rx) = crate::bus::channel();
+        let (lib, d) = library_of("shared-name", &files);
+        let key_of = |day: &str, file: &str| Key::of(1, lib.root.join(day).join("JPG").join(file).as_os_str().as_encoded_bytes());
+        let person_ref = FaceRef::new(key_of(files[2].0, files[2].1), [0.1, 0.1, 0.2, 0.2]);
+        let suit_ref = FaceRef::new(key_of(files[0].0, files[0].1), [0.3, 0.2, 0.3, 0.4]);
+        let mut file = crate::model::subjects::SubjectsFile::default();
+        file.create(Kind::Person, Some("Alex".into()), vec![person_ref]);
+        let suit = file.create(Kind::Fursuit, Some("Alex".into()), vec![suit_ref]);
+        let path = d.join("subjects.json");
+        file.save(&path).unwrap();
+        let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+        let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(path), downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        wait_for(&e, "the library", |s| s.library_shots == 3);
+        e.start_first_index(&[ModelId::Siglip2]);
+        wait_for(&e, "the first index", |s| s.indexed_shots == 3 && s.pass.is_none());
+        let mut ev = Events::new(&rx);
+        let names = |hits: &[Hit]| hits.iter().map(|h| crate::util::stem(h.jpg.as_deref().or(h.raw.as_deref()).unwrap())[..4].to_string()).collect::<Vec<_>>();
+        // Typed: the person, and the fursuit beside.
+        e.query(1, "@Alex", super::super::CLOSENESS_DEFAULT, &[]);
+        let ((hits, _, error, understood, ..), also) = ev.results_with_also(1);
+        assert!(error.is_none() && understood.names == ["Alex"]);
+        assert_eq!(names(&hits), ["0003"], "the person's photo only");
+        assert_eq!(also, [("Alex".to_string(), GroupId::Subject(suit.clone()))], "the fursuit is offered, not searched");
+        // Picked: the fursuit's chip is the fursuit alone, nothing beside.
+        e.query(2, "", super::super::CLOSENESS_DEFAULT, &[GroupId::Subject(suit.clone())]);
+        let ((hits, ..), also) = ev.results_with_also(2);
+        assert_eq!(names(&hits), ["0001"], "the suit's photo only");
+        assert!(also.is_empty());
+        // Both chips picked: an AND of their photos, which share none.
+        e.query(3, "", super::super::CLOSENESS_DEFAULT, &[GroupId::Subject(suit.clone()), GroupId::Subject(file.subjects[0].id.clone())]);
+        let ((hits, ..), _) = ev.results_with_also(3);
+        assert!(hits.is_empty(), "never a union: {hits:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The query syntax, the boost and the kinds rule, end to end: a real
     /// animal's query never carries a fursuit in its list (the fursuits
     /// come apart), Things holds objects and scenes only, `-word` and
@@ -2324,7 +2848,7 @@ mod tests {
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
         let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
-        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, config);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
         e.on_library(lib.clone());
         wait_for(&e, "the library", |s| s.library_shots == 14);
         e.start_first_index(&[ModelId::Siglip2]);
@@ -2463,7 +2987,7 @@ mod tests {
             log2.lock().push((device, text_only));
             Ok(Arc::new(Axes) as Arc<dyn Embedder>)
         });
-        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
+        let e2 = Engine::with_config(bus2, Device::Gpu, true, true, ModelId::AuraFace, false, Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() });
         e2.on_library(lib.clone());
         wait_for(&e2, "the saved index", |s| s.indexed_shots == 14);
         let things = Events::new(&rx2).things(&e2);

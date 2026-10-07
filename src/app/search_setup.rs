@@ -21,6 +21,7 @@ use iced::keyboard::{Key, key::Named};
 use iced::widget::{Space, button, column, container, mouse_area, opaque, progress_bar, row, space, stack, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
+use super::fursuits;
 use super::kit::{self, tip};
 use super::search::{Dialog, DialogMsg, Download, Msg, Stage, search_models};
 use super::style;
@@ -121,6 +122,11 @@ pub fn missing_models(st: &Status, search: bool, face: Option<ModelId>) -> Vec<M
     out
 }
 
+/// Rows for `ids`, waiting until the engine reports on each.
+fn waiting_rows(ids: &[ModelId]) -> Vec<Download> {
+    ids.iter().map(|&id| Download { model: id, done: 0, total: models::info(id).bytes(), state: DownloadState::Waiting }).collect()
+}
+
 /// What *Download and index* does next.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Begin {
@@ -188,7 +194,35 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             }
             Task::none()
         }
+        DialogMsg::Fursuits => {
+            if let Some(d) = s.dialog.as_mut().filter(|d| !d.fursuits_only) {
+                d.fursuits = !d.fursuits;
+            }
+            Task::none()
+        }
         DialogMsg::Download | DialogMsg::Retry => {
+            let heads = s.dialog.as_ref().map(|d| (d.fursuits, d.fursuits_only));
+            let (fursuits, fursuits_only) = heads.unwrap_or((app.settings.find_heads, false));
+            if app.settings.find_heads != (fursuits || fursuits_only) {
+                app.settings.find_heads = fursuits || fursuits_only;
+                app.settings.save_in_background();
+            }
+            if fursuits_only {
+                // The library is indexed: the head models (their download
+                // first, only those missing), then the fursuit photos
+                // looked at for heads.
+                let s = &mut app.search;
+                s.dialog = None;
+                let missing = fursuits::missing_models(&s.status);
+                if !missing.is_empty() {
+                    s.downloads = waiting_rows(&missing);
+                }
+                s.link.set_find_heads(true);
+                s.link.find_heads();
+                return app.show_status("Finding fursuit heads in the library. Groups appear on the Fursuits tab as they are found.", 8000);
+            }
+            app.search.link.set_find_heads(fursuits);
+            let s = &mut app.search;
             let ask = s.dialog.as_ref().map(|d| (d.faces_only, d.faces, d.face_model));
             let (faces_only, faces, model) = ask.unwrap_or(fallback);
             // The face model picked is the one Preferences shows from now.
@@ -209,12 +243,28 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             }
             let face = faces.then_some(model);
             let s = &mut app.search;
-            let ids = models::models_for(face);
+            let mut ids = models::models_for(face);
+            // The *Fursuits* pair asked for means heads on (the engine reads
+            // it from the list); only the missing ones are rows.
+            let heads_missing = if fursuits {
+                ids.extend(models::FURSUIT_MODELS);
+                fursuits::missing_models(&s.status)
+            } else {
+                Vec::new()
+            };
             s.link.set_find_faces(faces);
             if face.is_some() {
                 s.link.set_face_model(model);
             }
-            match begin_first_index(&s.status, face) {
+            let begin = match (begin_first_index(&s.status, face), heads_missing.is_empty()) {
+                (Begin::Index, true) => Begin::Index,
+                (Begin::Index, false) => Begin::Download(waiting_rows(&heads_missing)),
+                (Begin::Download(mut rows), _) => {
+                    rows.extend(waiting_rows(&heads_missing));
+                    Begin::Download(rows)
+                }
+            };
+            match begin {
                 Begin::Index => {
                     s.dialog = None;
                     s.link.start_first_index(&ids);
@@ -395,24 +445,32 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     let faces_st = &st.faces;
     let c = costs(app);
     let ready = st.models_installed;
-    let faces = dl.faces || dl.faces_only;
+    let faces = (dl.faces || dl.faces_only) && !dl.fursuits_only;
     let model = models::info(dl.face_model);
-    // What *Download* fetches: the same list its rows will show.
-    let total = models::bytes_for(&missing_models(st, !dl.faces_only, faces.then_some(dl.face_model)));
-    let title = match (dl.faces_only, total > 0) {
-        (true, true) => "Download a face model and find faces?",
-        (true, false) => "Find faces in the library?",
-        (false, true) => "Download the models and index the library?",
-        (false, false) => "Index the library?",
+    // What *Download* fetches: the same list its rows will show, and the
+    // fursuit-head models unless they are in place.
+    let heads_st = &st.heads;
+    let heads = dl.fursuits || dl.fursuits_only;
+    let heads_bytes = if heads { models::bytes_for(&fursuits::missing_models(st)) } else { 0 };
+    let total = models::bytes_for(&missing_models(st, !dl.faces_only && !dl.fursuits_only, faces.then_some(dl.face_model))) + heads_bytes;
+    let title = match (dl.fursuits_only, dl.faces_only, total > 0) {
+        (true, _, true) => "Download the fursuit-head models and find heads?",
+        (true, _, false) => "Find fursuit heads in the library?",
+        (false, true, true) => "Download a face model and find faces?",
+        (false, true, false) => "Find faces in the library?",
+        (false, false, true) => "Download the models and index the library?",
+        (false, false, false) => "Index the library?",
     };
-    let lede = if dl.faces_only {
+    let lede = if dl.fursuits_only {
+        "Fursuit heads are found on this computer, with models downloaded once from their publishers. Nothing about your photos is sent anywhere."
+    } else if dl.faces_only {
         "Faces are found on this computer, with a model downloaded once from its publisher. Nothing about your photos is sent anywhere."
     } else {
-        "Search and face finding run on this computer, with models downloaded once from their publishers. Nothing about your photos is sent anywhere."
+        "Search, faces and fursuit heads are found on this computer, with models downloaded once from their publishers. Nothing about your photos is sent anywhere."
     };
     let mut col = column![dialogs::header(title, None), kit::secondary(lede)].spacing(t::S2 + 2.0);
     // Search's rows, under their role.
-    if !dl.faces_only {
+    if !dl.faces_only && !dl.fursuits_only {
         let mut role = "";
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
         for mi in models::search_models() {
@@ -430,24 +488,39 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         }
     }
     // Faces: on unless unticked, with the model picked.
-    let head: Element<'_, Message> = if dl.faces_only { kit::heading("Faces").into() } else { tick(dl.faces, "Find people's faces", d(DialogMsg::Faces)) };
-    col = col.push(row![head, kit::caption("Groups faces alike so you can name people. Pick the model:")].spacing(t::S2).align_y(Alignment::Center));
-    let rows: Vec<Element<'_, Message>> = models::face_models()
-        .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, face_ready(st, mi.id), dl.faces_only))
-        .collect();
-    let mut list = column![].spacing(2).padding(2);
-    for r in rows {
-        list = list.push(r);
-    }
-    col = col.push(container(list).width(Length::Fill).style(style::group()));
     let finder = models::info(models::FACE_DETECTOR);
-    col = col.push(kit::caption(format!(
-        "{} ({}, {}, from {}) finds the faces for whichever model you pick, so changing the model later keeps the faces and their names. Nothing is named for you.",
-        finder.name,
-        size(finder.bytes()),
-        finder.licence,
-        finder.publisher
-    )));
+    if !dl.fursuits_only {
+        let head: Element<'_, Message> = if dl.faces_only { kit::heading("Faces").into() } else { tick(dl.faces, "Find people's faces", d(DialogMsg::Faces)) };
+        col = col.push(row![head, kit::caption("Groups faces alike so you can name people. Pick the model:")].spacing(t::S2).align_y(Alignment::Center));
+        let rows: Vec<Element<'_, Message>> = models::face_models()
+            .map(|mi| face_row(app, mi, mi.id == dl.face_model, faces, face_ready(st, mi.id), dl.faces_only))
+            .collect();
+        let mut list = column![].spacing(2).padding(2);
+        for r in rows {
+            list = list.push(r);
+        }
+        col = col.push(container(list).width(Length::Fill).style(style::group()));
+        col = col.push(kit::caption(format!(
+            "{} ({}, {}, from {}) finds the faces for whichever model you pick, so changing the model later keeps the faces and their names. Nothing is named for you.",
+            finder.name,
+            size(finder.bytes()),
+            finder.licence,
+            finder.publisher
+        )));
+    }
+    // Fursuit heads: on unless unticked (unticked to start with on the
+    // processor), one row for the two models they need.
+    if !dl.faces_only {
+        let note = match (dl.fursuits_only, st.device.chosen) {
+            (true, _) => "Only on the photos the index says show fursuits.",
+            (false, Device::Gpu) => "Scanned during indexing, after search and faces, on the photos with fursuits.",
+            (false, Device::Cpu) => "Long on the processor, so each scan asks first, with its cost.",
+        };
+        let head: Element<'_, Message> = if dl.fursuits_only { kit::heading("Fursuit heads").into() } else { tick(dl.fursuits, "Find fursuit heads", d(DialogMsg::Fursuits)) };
+        col = col.push(row![head, kit::caption(note)].spacing(t::S2).align_y(Alignment::Center));
+        col = col.push(group(models::fursuit_models().map(|mi| heads_row(mi, heads, heads_st.models_installed)).collect()));
+        col = col.push(kit::caption(heads_cost(app)));
+    }
     let runs = match (st.device.chosen, &st.device.name) {
         (Device::Gpu, Some(name)) => format!("The graphics card ({name}), checked against the processor first"),
         (Device::Gpu, None) => "The graphics card, checked against the processor first".to_string(),
@@ -459,9 +532,23 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     if total > 0 {
         facts.push(fact("Downloads", format!("{} in all, once", size(total)), None));
     }
-    facts.push(fact("Reads", capital(&c.read), None));
+    let head_photos = fursuits::photos_to_look_at(heads_st, shots);
+    let read = if dl.fursuits_only {
+        let on_share = app.library.as_deref().and_then(|l| super::network::share_of(app, l)).is_some();
+        format!(
+            "The previews of the {} photos with fursuits again: {} from the library{}",
+            crate::util::thousands(head_photos as u64),
+            estimate::describe_bytes(fursuits::head_bytes_read(head_photos)),
+            if on_share { " on the share" } else { "" }
+        )
+    } else {
+        capital(&c.read)
+    };
+    facts.push(fact("Reads", read, None));
     facts.push(fact("Runs on", runs, Some("Preferences ▸ Search chooses the graphics card or the processor.")));
-    let takes = if dl.faces_only {
+    let takes = if dl.fursuits_only {
+        format!("{}. Groups appear on the Fursuits tab as they are found.", capital(&fursuits::describe_cost(head_photos, device)))
+    } else if dl.faces_only {
         let todo = st.indexed_shots.saturating_sub(faces_st.looked_at);
         format!("{} {} {}. Groups appear on the People tab as they are found.", capital(&estimate::describe_seconds(estimate::face_catch_up_seconds(todo, device, dl.face_model))), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
     } else if faces {
@@ -469,6 +556,12 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         format!("{} for search and faces {} {}. Search works on the newest days within a minute.", capital(&estimate::describe_seconds(secs)), if device == Device::Gpu { "with" } else { "on" }, device.phrase())
     } else {
         format!("{}. Search works on the newest days within a minute.", c.takes)
+    };
+    // Then the heads, after search (and faces); on the processor, asked.
+    let takes = match (dl.fursuits && !dl.fursuits_only, device) {
+        (true, Device::Gpu) => format!("{takes} Then {} for fursuit heads.", estimate::describe_seconds(fursuits::head_seconds(head_photos, device))),
+        (true, Device::Cpu) => format!("{takes} Fursuit heads then take {}, and that asks first.", fursuits::describe_cost(head_photos, device)),
+        _ => takes,
     };
     facts.push(fact("Takes", takes, None));
     col = col.push(group(facts));
@@ -487,7 +580,7 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     );
     if dl.sums {
         let mut rows: Vec<Element<'_, Message>> = Vec::new();
-        if !dl.faces_only {
+        if !dl.faces_only && !dl.fursuits_only {
             for mi in models::search_models() {
                 for f in mi.files {
                     rows.push(
@@ -519,20 +612,72 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
                 }
             }
         }
+        if heads {
+            for mi in models::fursuit_models() {
+                for f in mi.files {
+                    rows.push(
+                        column![
+                            text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                            text(f.url).size(t::T_SMALL).color(t::INK3),
+                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                        ]
+                        .spacing(1)
+                        .padding(Padding::from([6.0, 12.0]))
+                        .into(),
+                    );
+                }
+            }
+        }
         col = col.push(group(rows));
     }
-    let go = match (dl.faces_only, total > 0) {
-        (true, true) => format!("Download {} and find faces", size(total)),
-        (true, false) => "Find faces".to_string(),
-        (false, true) => format!("Download {} and index", size(total)),
-        (false, false) => "Index the library".to_string(),
+    let go = match (dl.fursuits_only, dl.faces_only, total > 0) {
+        (true, _, true) => format!("Download {} and find heads", size(total)),
+        (true, _, false) => "Find fursuit heads".to_string(),
+        (false, true, true) => format!("Download {} and find faces", size(total)),
+        (false, true, false) => "Find faces".to_string(),
+        (false, false, true) => format!("Download {} and index", size(total)),
+        (false, false, false) => "Index the library".to_string(),
     };
     col = col.push(Space::new().height(t::S1));
     col = col.push(dialogs::footer(
         vec![],
         vec![kit::btn("Cancel", style::secondary(), Some(d(DialogMsg::Cancel))).into(), kit::btn(go, style::primary(), Some(d(DialogMsg::Download))).into()],
     ));
-    iced::widget::scrollable(col).style(style::scroll).into()
+    // A gutter, so the scroll bar never covers the rows (the fursuit row
+    // makes the dialog scroll at ordinary window heights).
+    iced::widget::scrollable(col.padding(Padding { right: t::S3, ..Padding::ZERO })).style(style::scroll).into()
+}
+
+/// One of the fursuit-head models' rows: its name, size, what it does, the
+/// licence in plain words and the publisher.  Dimmed while unticked.
+fn heads_row<'a>(mi: &models::ModelInfo, on: bool, installed: bool) -> Element<'a, Message> {
+    let ink = |c: iced::Color| if on { c } else { alpha(c, 0.45) };
+    let top = row![
+        text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(ink(t::INK)),
+        Space::new().width(Length::Fill),
+        text(if installed { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(ink(t::INK2)),
+    ]
+    .align_y(Alignment::Center);
+    let col = column![
+        top,
+        text(mi.what).size(t::T_SMALL).color(ink(t::INK2)),
+        text(format!("Licence: {}, {}. From {}.", mi.licence, mi.licence_plain, mi.publisher)).size(t::T_SMALL).color(ink(t::INK3)),
+    ]
+    .spacing(2);
+    container(col).padding(Padding::from([7.0, 12.0])).width(Length::Fill).into()
+}
+
+/// What looking for heads costs here, under the head models' rows: the
+/// library's fursuit photos, then an event day.
+fn heads_cost(app: &App) -> String {
+    let st = &app.search.status;
+    let device = st.device.chosen;
+    let photos = fursuits::library_photos(&st.heads, st.library_shots.max(st.indexed_shots));
+    let day = estimate::describe_seconds(fursuits::head_seconds(fursuits::EVENT_DAY_PHOTOS, device));
+    match device {
+        Device::Gpu => format!("{} for this library, then {day} a new event day.", capital(&fursuits::describe_cost(photos, device))),
+        Device::Cpu => format!("{} for this library, {day} an event day.", capital(&fursuits::describe_cost(photos, device))),
+    }
 }
 
 fn progress_view(app: &App) -> Element<'_, Message> {

@@ -457,7 +457,8 @@ pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) 
 }
 
 pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec<Face>>>) -> Task<Message> {
-    review::on_suggestions(app, seq, group, list)
+    let more = person::on_more(app, seq, &group, &list);
+    Task::batch([more, review::on_suggestions(app, seq, group, list)])
 }
 
 /// The search status changed: say when a faces pass of its own ended.
@@ -847,7 +848,8 @@ fn header(app: &App) -> Element<'_, Message> {
                 format!("{} named, {} to name", a.named.len(), util::plural(a.to_name.len() as u64, "group"))
             }
         }
-        _ => "Coming later".to_string(),
+        Kind::Fursuit => super::subjects_fursuits::caption(app),
+        Kind::Pet => "Coming later".to_string(),
     };
     let mut title = column![text(kind.title()).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(1);
     if !caption.is_empty() {
@@ -929,6 +931,7 @@ fn overview(app: &App) -> Element<'_, Message> {
         col = col.push(pick_strip(app));
     }
     let body: Element<'_, Message> = match s.tab {
+        Kind::Fursuit => super::subjects_fursuits::body(app),
         kind => match state(app, kind) {
             State::Later => coming_later(kind),
             State::NoLibrary => message(Glyph::Library, "Choose your library folder", "People are found in the library, the folder Export files photos into by date.".into(), Some(("Choose library folder…", Message::PickFolder(super::FolderTarget::Library))), None),
@@ -968,7 +971,7 @@ fn coming_later<'a>(kind: Kind) -> Element<'a, Message> {
 }
 
 /// The quiet "comes later" body of the Fursuits and Pets tabs.
-fn later<'a>(glyph: Glyph, title: &'a str, body: &'a str) -> Element<'a, Message> {
+pub(super) fn later<'a>(glyph: Glyph, title: &'a str, body: &'a str) -> Element<'a, Message> {
     let col = column![
         Space::new().height(Length::FillPortion(2)),
         icons::view(glyph, 30.0, t::PHOTO_INK3),
@@ -984,7 +987,7 @@ fn later<'a>(glyph: Glyph, title: &'a str, body: &'a str) -> Element<'a, Message
 }
 
 /// A page that explains itself on the chrome's ground, as search's do.
-fn message<'a>(glyph: Glyph, title: &'a str, body: String, primary: Option<(&'a str, Message)>, secondary: Option<(&'a str, Message)>) -> Element<'a, Message> {
+pub(super) fn message<'a>(glyph: Glyph, title: &'a str, body: String, primary: Option<(&'a str, Message)>, secondary: Option<(&'a str, Message)>) -> Element<'a, Message> {
     let mut col = column![].spacing(t::S2).align_x(Alignment::Center).max_width(480);
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(glyph, 44.0, t::INK4));
@@ -1007,7 +1010,7 @@ fn message<'a>(glyph: Glyph, title: &'a str, body: String, primary: Option<(&'a 
 }
 
 /// One fact of an invitation: what, and a quieter line under it.
-fn fact<'a>(k: &'a str, v: String, sub: Option<String>) -> Element<'a, Message> {
+pub(super) fn fact<'a>(k: &'a str, v: String, sub: Option<String>) -> Element<'a, Message> {
     let mut words = column![text(v).size(t::T_BODY).color(t::INK)].spacing(2).width(Length::Fill);
     if let Some(sub) = sub {
         words = words.push(text(sub).size(t::T_SMALL).color(t::INK3));
@@ -1080,12 +1083,19 @@ fn looking(app: &App) -> Element<'_, Message> {
     } else {
         later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")
     };
-    let col = column![progress_strip(app).unwrap_or_else(|| Space::new().into()), body];
+    let col = column![progress_strip(app, Kind::Person).unwrap_or_else(|| Space::new().into()), body];
     container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
-/// While faces are being looked for: how far, on the photos' grey.
-fn progress_strip(app: &App) -> Option<Element<'_, Message>> {
+/// While a kind's step runs (faces looked for, fursuit heads scanned):
+/// how far, on the photos' grey; for fursuits also what the step waits
+/// for.  Never another kind's.
+fn progress_strip(app: &App, kind: Kind) -> Option<Element<'_, Message>> {
+    match kind {
+        Kind::Person => {}
+        Kind::Fursuit => return super::subjects_fursuits::status_card(app),
+        Kind::Pet => return None,
+    }
     let st = &app.search.status;
     let f = &st.faces;
     if st.stopped.is_some() {
@@ -1146,7 +1156,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let hint = if g.hidden {
         "Show it on the tab again".to_string()
     } else if g.name.is_none() {
-        "Open to name this person (F2)".to_string()
+        format!("Open to name this {} (F2)", g.kind.one())
     } else {
         format!("{}: {}", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
     };
@@ -1185,11 +1195,11 @@ fn disclose<'a>(label: &'a str, n: usize, open: bool, msg: Message) -> Element<'
         .into()
 }
 
-fn groups(app: &App) -> Element<'_, Message> {
+pub(super) fn groups(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
     let mut col = column![].padding(Padding { top: t::S1, bottom: t::S5, left: 0.0, right: 0.0 });
-    if let Some(p) = progress_strip(app) {
+    if let Some(p) = progress_strip(app, s.tab) {
         col = col.push(p);
     }
     if !a.named.is_empty() {
@@ -1290,7 +1300,7 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
         super::dialogs::header(format!("Merge {} groups into one {one}?", mg.groups.len()), None),
         kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. Which name should it keep?")),
         container(list).width(Length::Fill).style(style::group()),
-        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from Faces on the {one}'s page.")),
+        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
         Space::new().height(t::S1),
         super::dialogs::footer(vec![], vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::MergeCancel))).into(), kit::btn(go, style::primary(), Some(m(Msg::MergeGo))).into()]),
     ]
@@ -1343,7 +1353,11 @@ pub fn debug_state(app: &App) -> String {
         app.view,
         s.page(),
         s.tab,
-        state(app, s.tab),
+        // The Fursuits tab's states are its own.
+        match s.tab {
+            Kind::Fursuit => format!("{:?}", super::subjects_fursuits::state(app)),
+            kind => format!("{:?}", state(app, kind)),
+        },
         names(&a.named),
         names(&a.to_name).into_iter().take(8).collect::<Vec<_>>(),
         a.small.len(),

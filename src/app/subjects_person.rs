@@ -93,6 +93,9 @@ pub struct Person {
     follow: Option<String>,
     /// A group just merged into: the page follows there.
     merged_into: Option<GroupId>,
+    /// *Find more* asked (strict, fursuits): its request, and how many
+    /// suggestions waited before, to say what it found.
+    pub more: Option<(u64, usize)>,
 }
 
 impl Person {
@@ -114,6 +117,7 @@ impl Person {
             name_hi: 0,
             follow: None,
             merged_into: None,
+            more: None,
         }
     }
 }
@@ -145,6 +149,8 @@ pub enum Msg {
     MergeInto(GroupId),
     Forget,
     Review,
+    /// *Find more* (fursuits: strict, a few at a time).
+    FindMore,
 }
 
 // ── naming ──────────────────────────────────────────────────────────────────
@@ -503,7 +509,32 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let group = p.group.clone();
             super::subjects_review::start(app, &group)
         }
+        Msg::FindMore => {
+            let seq = app.subjects.next_seq();
+            let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
+            let group = p.group.clone();
+            let before = app.subjects.all.group(&group).map_or(0, |g| g.suggestions);
+            if let Some(p) = app.subjects.person.as_mut() {
+                p.more = Some((seq, before));
+            }
+            app.search.link.find_more(seq, &group);
+            app.show_status("Looking again, from everything confirmed so far.", 4000)
+        }
     }
+}
+
+/// What *Find more* found (the suggestions it answers with).
+pub fn on_more(app: &mut App, seq: u64, group: &GroupId, list: &[Vec<Face>]) -> Task<Message> {
+    let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
+    let Some((_, before)) = p.more.filter(|(s, _)| *s == seq && &p.group == group) else { return Task::none() };
+    p.more = None;
+    let name = subj::label(&app.subjects, group);
+    let text = match list.len().saturating_sub(before) {
+        0 => format!("Nothing more looks close enough to {name} yet. New exports bring new suggestions."),
+        1 => format!("Found 1 more photo that may show {name}. Review it with Y."),
+        n => format!("Found {n} more photos that may show {name}. Review them with Y."),
+    };
+    app.show_status(text, 6000)
 }
 
 fn toggle_burst(app: &mut App, id: RecordId) -> Task<Message> {
@@ -834,6 +865,10 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         kit::segment(p.kind.crops(), p.show == Show::Faces, None, pm(Msg::Show(Show::Faces))),
     ]);
     r = r.push(seg);
+    // Fursuits are matched strictly: more come a few at a time, asked for.
+    if g.name.is_some() && p.kind == Kind::Fursuit {
+        r = r.push(tip(kit::btn("Find more", style::secondary(), Some(pm(Msg::FindMore))), "Look again from every photo confirmed. Strict, so a few at a time, each to check with Y or N", true));
+    }
     if g.name.is_some() {
         let review: Element<'a, Message> = if g.suggestions > 0 {
             let label = row![text(format!("Review {}", util::plural(g.suggestions as u64, "suggestion"))).size(t::T_BODY).font(paint::MEDIUM), keycap("Y")].spacing(8).align_y(Alignment::Center);

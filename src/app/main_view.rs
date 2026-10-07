@@ -58,6 +58,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if let Some(b) = search_setup::banner(app) {
         col = col.push(b);
     }
+    if let Some(b) = super::subjects_fursuits::ask_strip(app) {
+        col = col.push(b);
+    }
     if !app.view.is_library() {
         col = col.push(filter_bar(app));
     }
@@ -799,6 +802,9 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     }
     let mut r = row![message, Space::new().width(Length::Fill)].align_y(Alignment::Center).padding(Padding::from([0.0, BAR_PAD]));
     if let Some(slot) = hints_ui::status_slot(app) {
+        r = r.push(slot);
+    }
+    if let Some(slot) = super::subjects_fursuits::status_slot(app) {
         r = r.push(slot);
     }
     if let Some(slot) = search_setup::status_slot(app) {

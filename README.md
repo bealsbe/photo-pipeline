@@ -380,14 +380,18 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   them, in the order they were taken rather than best first ("312 photos
   from Jun 2026"), accidental frames left out.  `-word` on its own
   searches nothing, and the page says why.
-- **`@name`: someone you named.**  Typing `@` lists the people you have
-  named, with their faces and how many photos; Enter or Tab takes one, and
-  it becomes a chip in the field (× or Backspace in an empty field removes
-  it; up to three).  A chip alone shows that person's photos, clearest
-  first; words beside it rank their photos best first (*@Name beach*).  A
-  name no one has ("No one is named "…"") finds nothing, and the page says
-  so.  Recent searches keep the chips as `@"Name"`.  Fursuits and pets
-  come later.
+- **`@name`: someone you named.**  Typing `@` lists the people and the
+  fursuits you have named, each kind under its own heading (*People*,
+  *Fursuits*), never mixed, with their crops and how many photos; Enter or
+  Tab takes one, and it becomes a chip in the field (× or Backspace in an
+  empty field removes it; up to three).  A chip alone shows that person's
+  or fursuit's photos, clearest first; words beside it rank their photos
+  best first (*@Name beach*).  A name no one has ("No one is named "…"")
+  finds nothing, and the page says so.  A name typed out that a person and
+  a fursuit share searches the person; the strip over the results says
+  there is also a fursuit of that name, with *Search for the fursuit
+  instead* (a chip picked from the list searches just what was picked).
+  Recent searches keep the chips as `@"Name"`.  Pets come later.
 - **What was understood.**  A quiet strip over the results says what was
   applied besides the words ("Only Jun 2024", "Every photo from Jun
   2026", "Leaving out crowd"), so you can see why they look as they do.
@@ -395,7 +399,7 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   knows the library holds (*cameras 96*, *fireworks 24*, *food 21*), most
   photos first; a click searches one.  The list holds objects and scenes
   only: people, fursuits and pets never appear in it, or in the list
-  under the field; people have a page of their own (below), and fursuits
+  under the field; people and fursuits have pages of their own (below),
   and pets come later.  Photos that
   plainly show the thing you searched for come first, then the rest by
   similarity.  The start page also shows your recent searches and a few
@@ -456,10 +460,11 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 
 **People, fursuits and pets** (Ctrl+4, on the side rail under Search, or in
 the View menu) is where the faces found while indexing are grouped, so you
-can name the people you want to find.  Its header has *People | Fursuits |
-Pets*; only People works in this phase, and the other two tabs say they
-come later.  A tab shows one kind only, so a merge, a move or a suggestion
-never crosses kinds.  Nothing is ever named for you.
+can name the people you want to find, and where fursuit heads are grouped
+the same way (*Fursuits*, below).  Its header has *People | Fursuits |
+Pets*; the Pets tab says pets come later.  A tab shows one kind only, so a
+merge, a move or a suggestion never crosses kinds.  Nothing is ever named
+for you.
 
 - **The People tab** shows the people you named, then *Groups to name*,
   largest first: each a round face crop with its name (or "Unnamed") and
@@ -512,6 +517,52 @@ never crosses kinds.  Nothing is ever named for you.
   faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
   deletes every face found and every name, behind a plain confirmation.
   Your photos are never changed, and nothing is written into the library.
+
+### Fursuits
+
+The *Fursuits* tab works like *People*, on fursuit heads instead of faces
+(decision 11): heads are looked for on the photos the index tags as
+fursuits, as a step of indexing after search and faces; you name a fursuit
+from one group and confirm its suggestions with Y and N.  Fursuits are
+never shown, merged, suggested or completed together with people or pets.
+
+- **The tab** lists named fursuits, then *Groups to name*, largest first,
+  as rounded-square head crops (people are round), with *Smaller groups*,
+  *Hidden*, picking, merging and hiding as on People.  A fursuit's page,
+  its *Heads* (to split a group), naming and "Same fursuit?" (the review,
+  Y and N in the keep and prune colours, one answer per burst, Ctrl+Z to
+  take an answer back) are the same pages as a person's.
+- **Find more**, on a fursuit's band and at the end of its review, looks
+  again from every head you confirmed with a strict cut-off, so it brings
+  a few at a time; when nothing more is close enough it says so.
+- **The head step.**  On the graphics card it runs on its own: after the
+  first index (the download dialog's *Find fursuit heads*, ticked unless
+  the processor is chosen) and on each export's new fursuit photos, with
+  its progress on the tab and in the status bar (× stops it; what was
+  found is kept).
+- **On the processor it asks first, every time.**  A head scan there is
+  long (hours for a library, over an hour an event day), so whenever one
+  would start (after the first index, after an export, when carrying on)
+  a strip under the folder bar, in any view, and a card on the tab ask
+  *Find fursuit heads in the 412 new photos with fursuits?* with what it
+  costs: *Find fursuit heads* or *Skip this time*.  Skipped photos wait on
+  the tab, which offers them again with their cost.
+- **A library indexed before** fursuit heads were looked for gets an
+  offer on the tab: what it looks at, what it reads, how long it takes on
+  the device chosen and what it downloads (the *Fursuits* pair, if not in
+  place); nothing runs until asked.
+- **A failing card** stops the step and says so (the banner, and the tab
+  once the banner is put away) with *Try the card again* and
+  *Preferences*; nothing moves to the processor.
+- **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
+  the device chosen, the photos not looked at yet with *Find their
+  heads…*, and *Forget all…*, which forgets the heads found and the
+  fursuit names given and leaves people alone (Preferences ▸ People's
+  *Forget all…* likewise leaves fursuits alone).  Preferences ▸ Storage
+  shows the heads' size.
+- **Look:** the tab's glyph is a furry head (full ears, cheek ruffs, a
+  muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
+  cartoon heads, never a photo.
 
 ### How it works
 
@@ -597,6 +648,22 @@ user's choice:
 | AuraFace v1 (fal), recommended | face recognition, 512-d | 261 MB | Apache-2.0 | Hugging Face `fal/AuraFace-v1`, `glintr100.onnx` alone |
 | SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
 | InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
+| OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
+| DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
+
+The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
+asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
+DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
+token) that tells one suit from another.  The head cache lives beside the
+index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
+by the user alone, vectors stored as f16); for grouping and the Fursuits
+tab the vectors are held in memory as f32: **measured 405 MB for the
+~68 000 heads a library of 56 000 shots is expected to hold** (and about
+400 MB more for the few seconds a regroup's copy lives on its worker),
+built only when that work needs it, never at start-up, and let go again
+once fursuit work has been quiet for two minutes (the next request reads
+them back in 0.3 s): the user's decision, 2026-10-03, full size, freed
+after use, not the 768-wide CLS half that measured as well.
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the
@@ -659,8 +726,9 @@ the engine does underneath (`src/search/faces.rs`, `src/search/step.rs`,
   can read (`faces.bin`, `facevecs-<model>.bin`, `tiles.bin` beside the
   search index, mode 0600); nothing is written into photos, sidecars or
   exports.  *Clear* (the search index) drops the unnamed detections;
-  Preferences ▸ Storage ▸ *Forget all* drops everything, the names
-  included.
+  Preferences ▸ People ▸ *Forget all…* drops every face found and every
+  person's name, and leaves fursuits alone (Preferences ▸ Fursuits has
+  its own).
 - **Measured** (this machine): on 1 010 of the study's previews YuNet at
   1 024 px finds 140 faces in 119 photos (the study found 145 at full
   size); with faces on, the card takes about 15 ms a photo whichever
@@ -821,7 +889,13 @@ These are deliberate:
   request (`search fake …`).  It downloads, reads and writes nothing.
   `search complete`, `search things` and `search fursuits show|hide`
   drive and print the completions, the start page's Things and the
-  fursuits' list.
+  fursuits' list.  The stand-in also makes up people and fursuits on the
+  library's shots (`search fake people`, `search fake fursuits`, and the
+  head step's states: `heads-catchup`, `heads-off`, `heads-running [n]`,
+  `heads-asking [photos] [first|export|resume]`, `heads-skipped [n]`,
+  `heads-cardcrash`), drawn as grey silhouettes and grey cartoon heads;
+  `fursuits start|skip|stop|findheads|trycard|prefs|dump` press the head
+  step's buttons.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

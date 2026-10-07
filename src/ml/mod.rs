@@ -22,6 +22,7 @@ pub mod client;
 pub mod download;
 pub mod face;
 pub mod gpu;
+pub mod heads;
 pub mod models;
 pub mod onnx_patch;
 pub mod prep;
