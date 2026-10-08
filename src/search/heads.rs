@@ -1492,11 +1492,24 @@ mod store_tests {
         let rows = store.rows();
         let tiles = store.tiles();
         eprintln!("{} heads in {} photos", store.found(), store.looked_at());
+        // The groups that ship now, to say what the other variants' big
+        // groups are made of (how many of the tight groups each spans).
+        let tight = subjects::cluster_with(&rows, &order, store.cutoffs().group, store.linkage());
+        let mut tight_of: HashMap<usize, usize> = HashMap::new();
+        for (g, c) in tight.iter().enumerate().filter(|(_, c)| c.members.len() >= 3) {
+            for &m in &c.members {
+                tight_of.insert(m, g);
+            }
+        }
         for (name, cut, linkage) in linkages() {
             let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
             let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
             let big = sizes.iter().filter(|&&n| n >= 3).count();
-            eprintln!("{name}: {} groups, {big} of 3+ heads; sizes {:?}", clusters.len(), &sizes[..sizes.len().min(12)]);
+            let spans: Vec<String> = clusters.iter().take(4).map(|c| {
+                let groups: HashSet<usize> = c.members.iter().filter_map(|m| tight_of.get(m).copied()).collect();
+                format!("{} heads span {} tight 3+ groups", c.members.len(), groups.len())
+            }).collect();
+            eprintln!("{name}: {} groups, {big} of 3+ heads; sizes {:?}; {}", clusters.len(), &sizes[..sizes.len().min(12)], spans.join(", "));
             let slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
             for (gi, c) in clusters.iter().take(6).enumerate() {
                 if c.members.len() < 3 {
