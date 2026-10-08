@@ -698,10 +698,20 @@ fn fursuits_library() {
     let index_s = t.elapsed().as_secs_f64();
     eprintln!("indexed {} shots in {index_s:.1} s on {:?}; heads: on={} installed={} tagged={} step={:?}; resident {:.0} MB", status.indexed_shots, status.device.name, status.heads.on, status.heads.models_installed, status.heads.tagged, status.heads.step, rss_mb());
     // The step: the card scans at once; the processor asks (decision 11).
+    // An index that was already complete ends no pass, so nothing offers
+    // the step: then the tab's catch-up (find_heads) is what resumes a
+    // scan, over the photos the cache hasn't seen.
+    let asked_at = Instant::now();
+    let mut caught_up = false;
     let s = loop {
         let s = engine.status();
-        if !matches!(s.heads.step, Step::Idle) || s.heads.tagged == 0 {
+        if !matches!(s.heads.step, Step::Idle) || s.heads.tagged == 0 || (caught_up && s.heads.unscanned() == 0) {
             break s;
+        }
+        if !caught_up && asked_at.elapsed() > Duration::from_secs(3) && s.heads.unscanned() > 0 {
+            eprintln!("no pass ended: asking for the catch-up over {} unscanned of {} tagged (scanned {})", s.heads.unscanned(), s.heads.tagged, s.heads.scanned);
+            engine.find_heads();
+            caught_up = true;
         }
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(50));

@@ -1681,6 +1681,53 @@ mod store_tests {
         }
     }
 
+    /// Dump a head cache for the relabelling page's builder: per photo
+    /// its key, library-relative path, capture time and day, and each
+    /// head's box, score, size, sharpness and vector row; the f32 rows as
+    /// a raw file.  `PP_EVAL_OUT/index` holds the cache and the index,
+    /// `PP_EVAL_LIBRARY` the library root, `PP_DUMP_OUT` where to write.
+    /// Paths are relative to the library root; nothing else about the
+    /// user's photos is written.
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT, PP_EVAL_LIBRARY) and PP_DUMP_OUT"]
+    fn fursuit_relabel_dump() {
+        let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY"));
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let out = PathBuf::from(std::env::var("PP_DUMP_OUT").expect("PP_DUMP_OUT"));
+        fs::create_dir_all(&out).unwrap();
+        let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+        let mut store = HeadStore::load(&dir);
+        let (vrefs, vdim, vdata) = {
+            let v = store.vectors();
+            (v.refs.clone(), v.dim, v.data.clone())
+        };
+        let row_of: HashMap<FaceRef, usize> = vrefs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let mut photos = Vec::new();
+        for (rel, e) in &index.paths.entries {
+            let dets = store.heads_of(&e.key);
+            if dets.is_empty() {
+                continue;
+            }
+            let rec = index.vectors.by_key.get(&e.key).map(|&i| &index.vectors.records[i]);
+            let capture_ms = rec.and_then(|r| r.capture.map(|c| c.and_utc().timestamp_millis() + r.meta.subsec_ms.unwrap_or(0) as i64));
+            let day = rec.and_then(|r| r.capture.map(|c| c.date().to_string())).or_else(|| rel.components().nth(2).map(|c| c.as_os_str().to_string_lossy().to_string()));
+            let heads: Vec<serde_json::Value> = dets
+                .iter()
+                .map(|d| {
+                    let r = d.head_ref(e.key);
+                    serde_json::json!({ "bbox": d.bbox, "thousandths": r.thousandths(), "score": d.score, "size_px": d.size_px, "sharpness": d.sharpness, "clarity": d.clarity(), "row": row_of.get(&r) })
+                })
+                .collect();
+            photos.push(serde_json::json!({ "key": format!("{:032x}", u128::from_be_bytes(e.key.0)), "rel": rel.to_string_lossy(), "capture_ms": capture_ms, "day": day, "heads": heads }));
+        }
+        let rows: Vec<serde_json::Value> = vrefs.iter().map(|r| serde_json::json!({ "key": format!("{:032x}", u128::from_be_bytes(r.key.0)), "thousandths": r.thousandths() })).collect();
+        let dump = serde_json::json!({ "root": root.to_string_lossy(), "dim": vdim, "photos": photos, "rows": rows });
+        fs::write(out.join("heads.json"), serde_json::to_vec(&dump).unwrap()).unwrap();
+        let bytes: Vec<u8> = vdata.iter().flat_map(|x| x.to_le_bytes()).collect();
+        fs::write(out.join("vectors.f32"), bytes).unwrap();
+        eprintln!("dumped {} photos with heads, {} rows × {}", photos.len(), vrefs.len(), vdim);
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
