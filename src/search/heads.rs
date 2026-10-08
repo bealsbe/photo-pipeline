@@ -753,6 +753,19 @@ impl KindStep for HeadStore {
     fn cutoffs(&self) -> Cutoffs {
         subjects::cutoff_for(VECTOR_MODEL)
     }
+
+    /// Tight groups, no joining step (the user's choice, 2026-10-08,
+    /// from the relabel): a head joins a group only when it lies within
+    /// the cut of the group's members on average, and groups are never
+    /// merged by their centroids.  People's nearest-centroid-with-merge
+    /// chained this library's heads into one group of 4 265 (39 % of
+    /// them); average linkage at 0.17 kept 95 of 359 labelled same pairs
+    /// together with 7 of 432 different pairs, a judged group in eight
+    /// mixed, and regroups the library's heads in under two seconds.
+    /// *Find more* (0.14) and the review (0.17) join a suit across time.
+    fn linkage(&self) -> subjects::Linkage {
+        subjects::Linkage::Average
+    }
 }
 
 // ---- the scan ---------------------------------------------------------
@@ -1427,7 +1440,8 @@ mod store_tests {
     fn linkages() -> Vec<(&'static str, f32, subjects::Linkage)> {
         use subjects::Linkage as L;
         vec![
-            ("ships: centroid+merge 0.14", 0.14, L::PEOPLE),
+            ("ships now: average at the group cut", subjects::cutoff_for(VECTOR_MODEL).group, L::Average),
+            ("shipped before: centroid+merge 0.14", 0.14, L::PEOPLE),
             ("centroid, no merge 0.14", 0.14, L::Centroid { merge: false, seed_cap: None }),
             ("centroid+merge 0.12", 0.12, L::PEOPLE),
             ("centroid+merge 0.10", 0.10, L::PEOPLE),
@@ -1464,7 +1478,17 @@ mod store_tests {
         fs::create_dir_all(&out).unwrap();
         let mut store = HeadStore::load(&dir);
         store.vectors();
-        let order = ordered(&store);
+        let mut order = ordered(&store);
+        // PP_SHEETS_DAY=<day folder name>: only that day's heads, found
+        // through the index's path map.
+        if let Ok(day) = std::env::var("PP_SHEETS_DAY") {
+            let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY with PP_SHEETS_DAY"));
+            let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+            let keys: HashSet<Key> = index.paths.entries.iter().filter(|(rel, _)| rel.to_string_lossy().contains(&day)).map(|(_, e)| e.key).collect();
+            let refs = store.refs();
+            order.retain(|&i| keys.contains(&refs[i].key));
+            eprintln!("{} heads on {day}", order.len());
+        }
         let rows = store.rows();
         let tiles = store.tiles();
         eprintln!("{} heads in {} photos", store.found(), store.looked_at());
@@ -1874,6 +1898,35 @@ mod store_tests {
         }
     }
 
+    /// The cost of a regroup under each candidate linkage at the
+    /// cohort's size (`PP_EVAL_OUT`'s head cache, 10 826 heads): wall
+    /// time of `step::regroup`'s path on one thread of work, and the
+    /// resident size before and after, for the gates (about 2 s, under
+    /// about 200 MB extra).
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT)"]
+    fn fursuit_regroup_cost() {
+        fn rss_mb() -> f64 {
+            let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
+            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+        }
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let order = ordered(&store);
+        let rows = store.rows();
+        let base = rss_mb();
+        eprintln!("{} heads; resident {base:.0} MB with the vectors built", store.refs().len());
+        for (name, cut, linkage) in linkages() {
+            let before = rss_mb();
+            let t = Instant::now();
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let secs = t.elapsed().as_secs_f64();
+            let after = rss_mb();
+            eprintln!("{name}: {secs:.2} s, resident {before:.0} → {after:.0} MB (+{:.0}), {} groups, largest {}", after - before, clusters.len(), clusters.first().map_or(0, |c| c.members.len()));
+        }
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
@@ -1978,6 +2031,50 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// The fursuit grouping has no joining step.  Two bunches of heads
+    /// whose seeds lie apart (0.34) are pulled together by their later
+    /// members until their centroids lie within the cut: people's
+    /// grouping then merges them into one group whose ends are far
+    /// apart; average linkage keeps them as two, since a head joins only
+    /// what it is near on average and nothing merges groups afterwards.
+    /// The pass's incremental assign under the same linkage refuses the
+    /// far head too.
+    #[test]
+    fn two_bunches_pulled_together_stay_two_fursuit_groups() {
+        use crate::model::subjects::Linkage;
+        // Unit vectors in the plane at these angles (cosine distance
+        // 1 − cos of the angle between): P at 0, 0, 0.3; Q at 0.85, 0.55, 0.55.
+        let angles = [0.0f32, 0.0, 0.85, 0.55, 0.55, 0.3];
+        let mut data = Vec::new();
+        for a in angles {
+            data.extend_from_slice(&[a.cos(), a.sin()]);
+        }
+        let rows = subjects::Rows::F32 { dim: 2, data: &data };
+        let order: Vec<usize> = (0..angles.len()).collect();
+        let d = |i: usize, j: usize| 1.0 - rows.dot(i, &rows.row_vec(j));
+        assert!(d(0, 2) > 0.3, "the seeds are far apart: {}", d(0, 2));
+        let people = subjects::cluster_with(&rows, &order, 0.17, Linkage::PEOPLE);
+        assert_eq!(people.len(), 1, "people's merge pass joins the two bunches once their centroids drift within the cut: {people:?}");
+        let suits = subjects::cluster_with(&rows, &order, 0.17, Linkage::Average);
+        assert_eq!(suits.len(), 2, "average linkage keeps them apart: {suits:?}");
+        for c in &suits {
+            for &a in &c.members {
+                for &b in &c.members {
+                    assert!(d(a, b) < 0.2, "no fursuit group holds heads far apart");
+                }
+            }
+        }
+        // The pass's incremental assign under the same linkage: the far
+        // seed starts its own group rather than drifting into P.
+        let mut live = subjects::cluster_with(&rows, &order[..2], 0.17, Linkage::Average);
+        subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average);
+        assert_eq!(live.len(), 2, "{live:?}");
+        let store = HeadStore::load(&scratch("linkage"));
+        assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
+        assert_eq!(store.cutoffs(), subjects::cutoff_for(ModelId::Dinov2));
+        assert_eq!((store.cutoffs().group, store.cutoffs().suggest, store.cutoffs().strict), (0.17, 0.17, 0.14));
+    }
+
     /// Kinds never mix in the fursuit grouping: the step is Kind::Fursuit,
     /// a person named over the same refs counts for nothing here, a
     /// fursuit subject does; suggestions for a person's id are empty; and
@@ -2002,7 +2099,7 @@ mod store_tests {
         let job = f.regroup_job(&file).unwrap();
         assert_eq!((job.kind, job.dim, job.refs.len()), (Kind::Fursuit, 2, 4));
         assert_eq!(job.cutoffs, subjects::cutoff_for(ModelId::Dinov2));
-        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.14, 0.17, 0.14), "the measured cut-offs");
+        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.17, 0.17, 0.14), "the measured cut-offs: groups and the review at 0.17, Find more strict at 0.14");
         let r = step::regroup(&job);
         assert!(!r.suggestion_counts.contains_key(&person), "a person is not counted among fursuits");
         assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 4, "the person's refs are not confirmed here");
@@ -2017,6 +2114,21 @@ mod store_tests {
         f.step();
         let s = f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap();
         assert_eq!(s.iter().flatten().map(|x| x.face).collect::<Vec<_>>(), [refs[3]], "the strict cut finds the identical head");
+        // Suggestions come nearest first: a subject with one member and
+        // three candidates at 0.02, 0.10 and 0.15 lists them in that order.
+        {
+            let store = f.store.as_mut().unwrap();
+            // Around (−1, 0): far from every head above, so only these four count.
+            let v = |t: f32| [(std::f32::consts::PI + t).cos(), (std::f32::consts::PI + t).sin()];
+            for (n, t) in [(10u8, 0.0f32), (11, (1.0f32 - 0.15).acos()), (12, (1.0f32 - 0.02).acos()), (13, (1.0f32 - 0.10).acos())] {
+                store.add(key(n), &[head(0.2, 300, &v(t))]).unwrap();
+            }
+        }
+        let r10 = f.store.as_ref().unwrap().heads_of(&key(10))[0].head_ref(key(10));
+        let near = file.create(Kind::Fursuit, Some("Near".into()), vec![r10]);
+        f.step();
+        let order: Vec<Key> = f.suggestions(&file, &GroupId::Subject(near), &resolve, false).unwrap().iter().flatten().map(|x| x.face.key).collect();
+        assert_eq!(order, [key(12), key(13), key(11)], "nearest first, at 0.02, 0.10, 0.15");
         assert!(f.suggestions(&file, &GroupId::Subject(person.clone()), &resolve, false).unwrap().is_empty(), "a person's suggestions are not answered from heads");
         assert_eq!(f.suggestions(&file, &GroupId::Cluster(999), &resolve, false), Err(Refused::StaleGroup));
         assert!(f.clarity_with_sureness(&refs[0]) > 0.0);

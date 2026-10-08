@@ -578,15 +578,18 @@ pub struct Cutoffs {
 /// The cut-offs per model.  Faces: the study's (AuraFace 0.6, SFace
 /// 0.5; InsightFace as Immich's 0.5), to be moved by phase 0's
 /// comparison; *Find more* at three quarters of it.  Fursuit heads
-/// (DINOv2, phase 4): **measured on the user's 258 pairwise answers**
-/// over two event days (plan, "As built — phase 4"): under 0.14 a pair
-/// was the same suit 23 times in 26 asked, under 0.17 47 in 78, and
-/// between 0.17 and 0.20 only 12 in 65; so groups and *Find more* at
-/// 0.14, suggestions for the Y/N review at 0.17, nothing beyond.
+/// (DINOv2, phase 4): measured on the user's labels, first 258 pairs
+/// over two days, then 791 pairs across the library in four tiers of
+/// time gap (plan, "As built — phase 4").  Under 0.14 a pair is the same
+/// suit 82–97 % of the time in every tier, so *Find more* is strict at
+/// 0.14; the review's suggestions go to 0.17 (62–83 % right); the
+/// automatic groups use average linkage at that 0.17 with no joining
+/// step (`Linkage::Average`), since nearest-centroid groups with the
+/// merge pass chained the library's heads into one group.
 pub fn cutoff_for(model: crate::ml::models::ModelId) -> Cutoffs {
     use crate::ml::models::ModelId;
     let c = match model {
-        ModelId::Dinov2 => return Cutoffs { group: 0.14, suggest: 0.17, strict: 0.14 },
+        ModelId::Dinov2 => return Cutoffs { group: 0.17, suggest: 0.17, strict: 0.14 },
         ModelId::AuraFace => 0.6,
         ModelId::SFace => 0.5,
         _ => 0.5,
@@ -689,16 +692,6 @@ fn unit(mut v: Vec<f32>) -> Vec<f32> {
     v
 }
 
-/// The nearest prototype to `v`: (index, cosine distance).
-pub fn nearest(prototypes: &[Vec<f32>], v: &[f32]) -> Option<(usize, f32)> {
-    use rayon::prelude::*;
-    if prototypes.len() < 256 {
-        prototypes.iter().enumerate().map(|(i, p)| (i, 1.0 - dot(p, v))).min_by(|a, b| a.1.total_cmp(&b.1))
-    } else {
-        prototypes.par_iter().enumerate().map(|(i, p)| (i, 1.0 - dot(p, v))).min_by(|a, b| a.1.total_cmp(&b.1))
-    }
-}
-
 /// How a kind's rows are grouped into the automatic groups.  People use
 /// [`Linkage::Centroid`] with the merge pass, as the first grouping did;
 /// a kind whose heads vary more under the lights (fursuits, phase 4)
@@ -766,12 +759,20 @@ pub fn cluster_with(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Link
     clusters
 }
 
-/// The cluster `v` joins under `linkage`, if any.
+/// The cluster `v` joins under `linkage`, if any.  One pass over the
+/// centroids (no copies); the member-based linkages then look only at
+/// the clusters whose centroid lies within twice the cut.
 fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: Linkage) -> Option<usize> {
-    let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
+    use rayon::prelude::*;
+    let centroid_distance = |c: &Cluster| 1.0 - dot(&c.centroid, v);
     match linkage {
         Linkage::Centroid { seed_cap, .. } => {
-            let (k, d) = nearest(&centroids, v)?;
+            let nearest = if clusters.len() < 256 {
+                clusters.iter().enumerate().map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
+            } else {
+                clusters.par_iter().enumerate().map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
+            };
+            let (k, d) = nearest?;
             if d > cutoff {
                 return None;
             }
@@ -784,12 +785,19 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
             }
         }
         Linkage::Average | Linkage::Complete => {
-            // Shortlist by centroid, decide by the members.
+            // For unit vectors the mean distance to the members is
+            // 1 − v·(sum/n) ≥ 1 − v·centroid (the centroid is the unit
+            // sum, and ‖sum‖/n ≤ 1), and the largest distance is at least
+            // the mean: so a cluster whose centroid lies beyond the cut
+            // can't qualify, and the shortlist is exact.
+            let near: Vec<usize> = if clusters.len() < 256 {
+                clusters.iter().enumerate().filter(|(_, c)| centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
+            } else {
+                clusters.par_iter().enumerate().filter(|(_, c)| centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
+            };
             let mut best: Option<(usize, f32)> = None;
-            for (k, c) in clusters.iter().enumerate() {
-                if 1.0 - dot(&c.centroid, v) > 2.0 * cutoff {
-                    continue;
-                }
+            for k in near {
+                let c = &clusters[k];
                 let ds = c.members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - rows.dot(m, v));
                 let score = match linkage {
                     Linkage::Average => {
@@ -1097,6 +1105,37 @@ mod tests {
             data.extend(v);
         }
         (data, dim)
+    }
+
+    /// People's grouping is unchanged by the per-kind linkage: on fixed
+    /// toy rows, nearest centroid with the merge pass gives exactly these
+    /// members, in this order, as it did before the linkage existed (the
+    /// face between the first two bunches joins the first, whose centroid
+    /// it meets first; the bunches' centroids stay too far apart to
+    /// merge).  The pin is the members themselves, not a property.
+    #[test]
+    fn peoples_grouping_is_pinned() {
+        let dim = 3;
+        let mut data = Vec::new();
+        let unit = |v: [f32; 3]| {
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            [v[0] / n, v[1] / n, v[2] / n]
+        };
+        for v in [[1.0, 0.0, 0.0], [0.98, 0.1, 0.0], [0.0, 1.0, 0.0], [0.1, 0.98, 0.0], [0.0, 0.0, 1.0], [0.0, 0.1, 0.98], [0.7, 0.7, 0.0]] {
+            data.extend_from_slice(&unit(v));
+        }
+        let rows = Rows::F32 { dim, data: &data };
+        let order: Vec<usize> = (0..7).collect();
+        let people = cluster_with(&rows, &order, 0.5, Linkage::PEOPLE);
+        let members: Vec<Vec<usize>> = people.iter().map(|c| c.members.clone()).collect();
+        assert_eq!(members, vec![vec![0, 1, 6], vec![2, 3], vec![4, 5]]);
+        let centroid: Vec<f32> = people[0].centroid.iter().map(|x| (x * 1000.0).round() / 1000.0).collect();
+        assert_eq!(centroid, vec![0.958, 0.287, 0.0]);
+        // The same rows under the fursuits' linkage: the in-between face
+        // still goes with the first bunch, whose members it is nearest on
+        // average; no merge pass runs.
+        let suits = cluster_with(&rows, &order, 0.5, Linkage::Average);
+        assert_eq!(suits.iter().map(|c| c.members.clone()).collect::<Vec<_>>(), members);
     }
 
     #[test]
