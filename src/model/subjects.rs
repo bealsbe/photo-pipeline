@@ -699,11 +699,45 @@ pub fn nearest(prototypes: &[Vec<f32>], v: &[f32]) -> Option<(usize, f32)> {
     }
 }
 
-/// Group rows: each row, in `order` (clearest first), joins the nearest
-/// cluster within `cutoff` or starts one; then clusters whose centroids
-/// lie within `cutoff` of each other are merged, until none do.  Rows
-/// outside `order` (confirmed to a subject) take no part.  Pure.
-pub fn cluster(rows: &Rows<'_>, order: &[usize], cutoff: f32) -> Vec<Cluster> {
+/// How a kind's rows are grouped into the automatic groups.  People use
+/// [`Linkage::Centroid`] with the merge pass, as the first grouping did;
+/// a kind whose heads vary more under the lights (fursuits, phase 4)
+/// chooses what its labels support.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Linkage {
+    /// A row joins the nearest cluster whose centroid lies within the
+    /// cut; with `merge`, clusters whose centroids lie within the cut are
+    /// merged afterwards, until none do.  `seed_cap`: a row also has to
+    /// lie within this of the cluster's first (clearest) member, which
+    /// stops a centroid drifting away from what it started as.
+    Centroid { merge: bool, seed_cap: Option<f32> },
+    /// A row joins the cluster (among those whose centroid is within
+    /// twice the cut) whose members lie on average within the cut of it,
+    /// the closest such; no merge pass.
+    #[allow(dead_code)] // Phase 4 tune: a kind picks it once its labels say so.
+    Average,
+    /// As [`Linkage::Average`], but every member must lie within the cut.
+    #[allow(dead_code)] // Phase 4 tune: as above.
+    Complete,
+}
+
+impl Linkage {
+    /// The first grouping, people's: nearest centroid with the merge pass.
+    pub const PEOPLE: Linkage = Linkage::Centroid { merge: true, seed_cap: None };
+}
+
+impl Default for Linkage {
+    fn default() -> Linkage {
+        Linkage::PEOPLE
+    }
+}
+
+/// Group rows: each row, in `order` (clearest first), joins a cluster as
+/// `linkage` says or starts one (under [`Linkage::PEOPLE`]: the nearest
+/// centroid within `cutoff`, then clusters whose centroids lie within
+/// `cutoff` of each other are merged, until none do).  Rows outside
+/// `order` (confirmed to a subject) take no part.  Pure.
+pub fn cluster_with(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Linkage) -> Vec<Cluster> {
     let mut clusters: Vec<Cluster> = Vec::new();
     let mut sums: Vec<Vec<f32>> = Vec::new();
     for &i in order {
@@ -711,24 +745,66 @@ pub fn cluster(rows: &Rows<'_>, order: &[usize], cutoff: f32) -> Vec<Cluster> {
             continue;
         }
         let v = rows.row_vec(i);
-        let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
-        match nearest(&centroids, &v) {
-            Some((k, d)) if d <= cutoff => {
+        match join(&clusters, rows, &v, cutoff, linkage) {
+            Some(k) => {
                 clusters[k].members.push(i);
                 for (s, x) in sums[k].iter_mut().zip(&v) {
                     *s += x;
                 }
                 clusters[k].centroid = unit(sums[k].clone());
             }
-            _ => {
+            None => {
                 clusters.push(Cluster { members: vec![i], centroid: v.clone() });
                 sums.push(v);
             }
         }
     }
-    merge_close(&mut clusters, rows, cutoff);
+    if let Linkage::Centroid { merge: true, .. } = linkage {
+        merge_close(&mut clusters, rows, cutoff);
+    }
     clusters.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then_with(|| a.members.first().cmp(&b.members.first())));
     clusters
+}
+
+/// The cluster `v` joins under `linkage`, if any.
+fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: Linkage) -> Option<usize> {
+    let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
+    match linkage {
+        Linkage::Centroid { seed_cap, .. } => {
+            let (k, d) = nearest(&centroids, v)?;
+            if d > cutoff {
+                return None;
+            }
+            match seed_cap {
+                Some(cap) => {
+                    let seed = *clusters[k].members.first()?;
+                    (1.0 - rows.dot(seed, v) <= cap).then_some(k)
+                }
+                None => Some(k),
+            }
+        }
+        Linkage::Average | Linkage::Complete => {
+            // Shortlist by centroid, decide by the members.
+            let mut best: Option<(usize, f32)> = None;
+            for (k, c) in clusters.iter().enumerate() {
+                if 1.0 - dot(&c.centroid, v) > 2.0 * cutoff {
+                    continue;
+                }
+                let ds = c.members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - rows.dot(m, v));
+                let score = match linkage {
+                    Linkage::Average => {
+                        let (n, sum) = ds.fold((0usize, 0f32), |(n, s), d| (n + 1, s + d));
+                        if n == 0 { continue } else { sum / n as f32 }
+                    }
+                    _ => ds.fold(f32::MIN, f32::max),
+                };
+                if score <= cutoff && best.is_none_or(|(_, b)| score < b) {
+                    best = Some((k, score));
+                }
+            }
+            best.map(|(k, _)| k)
+        }
+    }
 }
 
 /// Merge clusters whose centroids lie within `cutoff`, repeatedly.
@@ -787,17 +863,16 @@ fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
 }
 
 /// Add rows to existing clusters as they arrive (the pass): each joins
-/// the nearest cluster within `cutoff` or starts one.  The full
-/// [`cluster`] runs later to tidy up.
-pub fn assign(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutoff: f32) {
+/// a cluster as `linkage` says or starts one.  The full [`cluster_with`]
+/// runs later to tidy up.
+pub fn assign_with(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutoff: f32, linkage: Linkage) {
     for &i in new {
         if i >= rows.len() {
             continue;
         }
         let v = rows.row_vec(i);
-        let centroids: Vec<Vec<f32>> = clusters.iter().map(|c| c.centroid.clone()).collect();
-        match nearest(&centroids, &v) {
-            Some((k, d)) if d <= cutoff => {
+        match join(clusters, rows, &v, cutoff, linkage) {
+            Some(k) => {
                 let c = &mut clusters[k];
                 let n = c.members.len() as f32;
                 let mut sum: Vec<f32> = c.centroid.iter().map(|x| x * n).collect();
@@ -1037,7 +1112,7 @@ mod tests {
         assert!(rows16.row_vec(5).iter().zip(&rows.row_vec(5)).all(|(a, b)| (a - b).abs() < 1e-3));
         assert_eq!(rows16.to_f32().len(), data.len());
         let order: Vec<usize> = (0..rows.len()).collect();
-        let clusters = cluster(&rows, &order, 0.5);
+        let clusters = cluster_with(&rows, &order, 0.5, Linkage::PEOPLE);
         let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
         assert_eq!(sizes, [8, 8, 8, 1, 1, 1], "{sizes:?}");
         for c in &clusters[..3] {
@@ -1047,11 +1122,11 @@ mod tests {
         }
         // Rows left out of the order (confirmed to a subject) take no part.
         let partial: Vec<usize> = (8..27).collect();
-        let without = cluster(&rows, &partial, 0.5);
+        let without = cluster_with(&rows, &partial, 0.5, Linkage::PEOPLE);
         assert!(without.iter().all(|c| c.members.iter().all(|&m| m >= 8)));
         // Incremental assignment puts a new face of person 0 with its group.
-        let mut live = cluster(&rows, &partial, 0.5);
-        assign(&mut live, &rows, &[0, 1, 2], 0.5);
+        let mut live = cluster_with(&rows, &partial, 0.5, Linkage::PEOPLE);
+        assign_with(&mut live, &rows, &[0, 1, 2], 0.5, Linkage::PEOPLE);
         let with0: Vec<&Cluster> = live.iter().filter(|c| c.members.contains(&0)).collect();
         assert_eq!(with0.len(), 1);
         assert!(with0[0].members.contains(&1) && with0[0].members.contains(&2) && with0[0].members.len() == 3, "{:?}", with0[0].members);
@@ -1082,11 +1157,11 @@ mod tests {
     /// by the full clustering's merge pass.
     fn assign_is_merged_by_full_cluster(rows: &Rows<'_>) -> bool {
         let (a, b): (Vec<usize>, Vec<usize>) = (0..8).partition(|i| i % 2 == 0);
-        let mut c = cluster(rows, &a, 0.5);
+        let mut c = cluster_with(rows, &a, 0.5, Linkage::PEOPLE);
         let before = c.len();
-        c.extend(cluster(rows, &b, 0.5));
+        c.extend(cluster_with(rows, &b, 0.5, Linkage::PEOPLE));
         let order: Vec<usize> = (0..8).collect();
-        let merged = cluster(rows, &order, 0.5);
+        let merged = cluster_with(rows, &order, 0.5, Linkage::PEOPLE);
         before == 1 && merged.len() == 1 && merged[0].members.len() == 8
     }
 }
