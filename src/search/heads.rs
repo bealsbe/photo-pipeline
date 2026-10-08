@@ -753,6 +753,19 @@ impl KindStep for HeadStore {
     fn cutoffs(&self) -> Cutoffs {
         subjects::cutoff_for(VECTOR_MODEL)
     }
+
+    /// Tight groups, no joining step (the user's choice, 2026-10-08,
+    /// from the relabel): a head joins a group only when it lies within
+    /// the cut of the group's members on average, and groups are never
+    /// merged by their centroids.  People's nearest-centroid-with-merge
+    /// chained this library's heads into one group of 4 265 (39 % of
+    /// them); average linkage at 0.17 kept 95 of 359 labelled same pairs
+    /// together with 7 of 432 different pairs, a judged group in eight
+    /// mixed, and regroups the library's heads in under two seconds.
+    /// *Find more* (0.14) and the review (0.17) join a suit across time.
+    fn linkage(&self) -> subjects::Linkage {
+        subjects::Linkage::Average
+    }
 }
 
 // ---- the scan ---------------------------------------------------------
@@ -1422,6 +1435,511 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+
+    /// The grouping variants the tune compares, by name.
+    fn linkages() -> Vec<(&'static str, f32, subjects::Linkage)> {
+        use subjects::Linkage as L;
+        vec![
+            ("ships now: average at the group cut", subjects::cutoff_for(VECTOR_MODEL).group, L::Average),
+            ("shipped before: centroid+merge 0.14", 0.14, L::PEOPLE),
+            ("centroid, no merge 0.14", 0.14, L::Centroid { merge: false, seed_cap: None }),
+            ("centroid+merge 0.12", 0.12, L::PEOPLE),
+            ("centroid+merge 0.10", 0.10, L::PEOPLE),
+            ("centroid, seed cap 0.14/0.14", 0.14, L::Centroid { merge: false, seed_cap: Some(0.14) }),
+            ("centroid, seed cap 0.14/0.17", 0.14, L::Centroid { merge: false, seed_cap: Some(0.17) }),
+            ("average 0.14", 0.14, L::Average),
+            ("average 0.17", 0.17, L::Average),
+            ("complete 0.14", 0.14, L::Complete),
+            ("complete 0.17", 0.17, L::Complete),
+            ("complete 0.20", 0.20, L::Complete),
+        ]
+    }
+
+    /// Rows of a head store in the regroup's order (clearest first), as
+    /// the engine would group them.
+    fn ordered(store: &HeadStore) -> Vec<usize> {
+        let refs = store.refs();
+        let mut order: Vec<usize> = (0..refs.len()).collect();
+        order.sort_by(|&a, &b| store.clarity(&refs[b]).total_cmp(&store.clarity(&refs[a])).then(a.cmp(&b)));
+        order
+    }
+
+    /// Contact sheets of the biggest groups under each linkage, from a
+    /// head cache an eval run left (`PP_EVAL_OUT/index`), for looking at
+    /// by eye: `PP_SHEETS_OUT/<variant>-<n>.jpg`, one row of tiles per
+    /// group, 12 tiles at most.  Prints the group sizes.  Nothing is
+    /// published; the sheets stay in scratch.
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT) and PP_SHEETS_OUT"]
+    fn fursuit_group_sheets() {
+        use crate::imaging::decode;
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let out = PathBuf::from(std::env::var("PP_SHEETS_OUT").expect("PP_SHEETS_OUT"));
+        fs::create_dir_all(&out).unwrap();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let mut order = ordered(&store);
+        // PP_SHEETS_DAY=<day folder name>: only that day's heads, found
+        // through the index's path map.
+        if let Ok(day) = std::env::var("PP_SHEETS_DAY") {
+            let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY with PP_SHEETS_DAY"));
+            let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+            let keys: HashSet<Key> = index.paths.entries.iter().filter(|(rel, _)| rel.to_string_lossy().contains(&day)).map(|(_, e)| e.key).collect();
+            let refs = store.refs();
+            order.retain(|&i| keys.contains(&refs[i].key));
+            eprintln!("{} heads on {day}", order.len());
+        }
+        let rows = store.rows();
+        let tiles = store.tiles();
+        eprintln!("{} heads in {} photos", store.found(), store.looked_at());
+        // The groups that ship now, to say what the other variants' big
+        // groups are made of (how many of the tight groups each spans).
+        let tight = subjects::cluster_with(&rows, &order, store.cutoffs().group, store.linkage());
+        let mut tight_of: HashMap<usize, usize> = HashMap::new();
+        for (g, c) in tight.iter().enumerate().filter(|(_, c)| c.members.len() >= 3) {
+            for &m in &c.members {
+                tight_of.insert(m, g);
+            }
+        }
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+            let big = sizes.iter().filter(|&&n| n >= 3).count();
+            let spans: Vec<String> = clusters.iter().take(4).map(|c| {
+                let groups: HashSet<usize> = c.members.iter().filter_map(|m| tight_of.get(m).copied()).collect();
+                format!("{} heads span {} tight 3+ groups", c.members.len(), groups.len())
+            }).collect();
+            eprintln!("{name}: {} groups, {big} of 3+ heads; sizes {:?}; {}", clusters.len(), &sizes[..sizes.len().min(12)], spans.join(", "));
+            let slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+            for (gi, c) in clusters.iter().take(6).enumerate() {
+                if c.members.len() < 3 {
+                    break;
+                }
+                let mut sheet = vec![0u8; 12 * 128 * 128 * 3];
+                let mut n = 0;
+                for &m in c.members.iter().take(12) {
+                    let Some(jpeg) = tiles.lock().read(&store.refs()[m]) else { continue };
+                    let Ok(px) = decode::decode_jpeg_full_scaled(&jpeg, 1) else { continue };
+                    let px = decode::resize_to(&px, 128, 128);
+                    let rgb = decode::to_rgb(&px);
+                    for y in 0..128 {
+                        let src = &rgb[y * 128 * 3..(y + 1) * 128 * 3];
+                        let dst = (y * 12 * 128 + n * 128) * 3;
+                        sheet[dst..dst + 128 * 3].copy_from_slice(src);
+                    }
+                    n += 1;
+                }
+                let mut bytes = Vec::new();
+                jpeg_encoder::Encoder::new(&mut bytes, 85).encode(&sheet, (12 * 128) as u16, 128, jpeg_encoder::ColorType::Rgb).unwrap();
+                fs::write(out.join(format!("{slug}-{gi}-{}heads.jpg", c.members.len())), bytes).unwrap();
+            }
+        }
+    }
+
+    /// Score the grouping variants against the user's pairwise labels
+    /// (v3 `labels.json`: tracks, crop boxes, same/different answers),
+    /// over the app's own heads of the same photos (a head cache from an
+    /// eval run over the two labelled days, `PP_EVAL_OUT`; the library
+    /// root `PP_EVAL_LIBRARY`; the labels copy `PP_LABELS`).  A label
+    /// track is matched to the app's heads of its photo by box overlap
+    /// (IoU ≥ 0.5).  Per variant: groups holding two known-different
+    /// tracks (mixed), known-same pairs split across groups, known-
+    /// different pairs merged into one group; same-day and cross-day
+    /// apart; and the group sizes.  Prints only counts.
+    #[test]
+    #[ignore = "needs the labels copy (PP_LABELS), a head cache (PP_EVAL_OUT) and the library (PP_EVAL_LIBRARY)"]
+    fn fursuit_grouping_vs_labels() {
+        use std::collections::BTreeMap;
+        let labels: serde_json::Value = serde_json::from_slice(&fs::read(std::env::var("PP_LABELS").expect("PP_LABELS")).unwrap()).unwrap();
+        assert_eq!(labels["version"], 3, "a v3 pairwise labels file");
+        let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY"));
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+        // File name (the camera's) → key, through the index's path map.
+        let key_by_name: HashMap<String, Key> = index.paths.entries.iter().filter_map(|(rel, e)| Some((rel.file_name()?.to_string_lossy().to_string(), e.key))).collect();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let refs = store.refs().to_vec();
+        let row_of: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        // Label crops → app rows.
+        let crops = labels["crop_files"].as_array().unwrap();
+        let mut row_of_crop: HashMap<u64, usize> = HashMap::new();
+        let (mut matched, mut unmatched_photo, mut unmatched_box) = (0, 0, 0);
+        for c in crops {
+            let name = c["name"].as_str().unwrap();
+            let Some(key) = key_by_name.get(name) else { unmatched_photo += 1; continue };
+            let b: Vec<f32> = c["box"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let lb = [b[0], b[1], b[2] - b[0], b[3] - b[1]];
+            let best = store.heads_of(key).iter().map(|d| (crate::ml::heads::iou(lb, d.bbox), d.head_ref(*key))).max_by(|a, b| a.0.total_cmp(&b.0));
+            match best {
+                Some((iou, r)) if iou >= 0.5 => {
+                    if let Some(&row) = row_of.get(&r) {
+                        row_of_crop.insert(c["i"].as_u64().unwrap(), row);
+                        matched += 1;
+                    }
+                }
+                _ => unmatched_box += 1,
+            }
+        }
+        eprintln!("label crops: {matched} matched to the app's heads, {unmatched_box} without a matching box, {unmatched_photo} whose photo is not indexed");
+        // Tracks → rows; a track is one head through one press.
+        let tracks = labels["tracks"].as_array().unwrap();
+        let mut rows_of_track: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut set_of_track: HashMap<u64, String> = HashMap::new();
+        for t in tracks {
+            let id = t["t"].as_u64().unwrap();
+            set_of_track.insert(id, t["set"].as_str().unwrap().to_string());
+            let rs: Vec<usize> = t["crops"].as_array().unwrap().iter().filter_map(|i| row_of_crop.get(&i.as_u64().unwrap()).copied()).collect();
+            if !rs.is_empty() {
+                rows_of_track.insert(id, rs);
+            }
+        }
+        // Known pairs: asked, plus implied (same is transitive; different
+        // carries across same-groups).
+        let bad: HashSet<u64> = labels["bad"].as_object().map(|m| m.keys().filter_map(|k| k.parse().ok()).collect()).unwrap_or_default();
+        let mut parent: HashMap<u64, u64> = HashMap::new();
+        fn find(p: &mut HashMap<u64, u64>, x: u64) -> u64 {
+            let mut r = x;
+            while let Some(&q) = p.get(&r) {
+                if q == r {
+                    break;
+                }
+                r = q;
+            }
+            r
+        }
+        let answers: Vec<(u64, u64, bool, bool)> = labels["answers"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|a| {
+                let (x, y) = (a["a"].as_u64()?, a["b"].as_u64()?);
+                if bad.contains(&x) || bad.contains(&y) {
+                    return None;
+                }
+                match a["r"].as_str()? {
+                    "same" => Some((x, y, true, a["cross"].as_bool().unwrap_or(false))),
+                    "diff" => Some((x, y, false, a["cross"].as_bool().unwrap_or(false))),
+                    _ => None,
+                }
+            })
+            .collect();
+        for &(x, y, same, _) in &answers {
+            if same {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                if rx != ry {
+                    parent.insert(rx.max(ry), rx.min(ry));
+                }
+            }
+        }
+        let mut diff: HashSet<(u64, u64)> = HashSet::new();
+        for &(x, y, same, _) in &answers {
+            if !same {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                diff.insert((rx.min(ry), rx.max(ry)));
+            }
+        }
+        let labelled: Vec<u64> = {
+            let mut v: Vec<u64> = answers.iter().flat_map(|&(x, y, _, _)| [x, y]).filter(|t| rows_of_track.contains_key(t)).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let mut known: Vec<(u64, u64, bool, bool)> = Vec::new();
+        for (i, &x) in labelled.iter().enumerate() {
+            for &y in &labelled[i + 1..] {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                let same = rx == ry;
+                if !same && !diff.contains(&(rx.min(ry), rx.max(ry))) {
+                    continue;
+                }
+                let cross = set_of_track[&x] != set_of_track[&y];
+                known.push((x, y, same, cross));
+            }
+        }
+        let n_same = known.iter().filter(|k| k.2).count();
+        let n_cross = known.iter().filter(|k| k.3).count();
+        eprintln!("{} labelled tracks with app heads; {} known pairs ({n_same} same, {} different; {n_cross} cross-day) from {} answers", labelled.len(), known.len(), known.len() - n_same, answers.len());
+        let order = ordered(&store);
+        let rows = store.rows();
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let mut group_of_row: HashMap<usize, usize> = HashMap::new();
+            for (g, c) in clusters.iter().enumerate() {
+                for &m in &c.members {
+                    group_of_row.insert(m, g);
+                }
+            }
+            // A track's group: the group most of its rows are in.
+            let group_of_track: HashMap<u64, usize> = rows_of_track
+                .iter()
+                .filter_map(|(t, rs)| {
+                    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+                    for r in rs {
+                        if let Some(&g) = group_of_row.get(r) {
+                            *counts.entry(g).or_default() += 1;
+                        }
+                    }
+                    counts.into_iter().max_by_key(|&(_, n)| n).map(|(g, _)| (*t, g))
+                })
+                .collect();
+            let (mut split, mut merged, mut split_cross, mut merged_cross, mut same_seen, mut diff_seen) = (0, 0, 0, 0, 0, 0);
+            let mut mixed_groups: HashSet<usize> = HashSet::new();
+            let mut judged_groups: HashSet<usize> = HashSet::new();
+            for &(x, y, same, cross) in &known {
+                let (Some(&gx), Some(&gy)) = (group_of_track.get(&x), group_of_track.get(&y)) else { continue };
+                if same {
+                    same_seen += 1;
+                    if gx != gy {
+                        split += 1;
+                        split_cross += cross as usize;
+                    } else {
+                        judged_groups.insert(gx);
+                    }
+                } else {
+                    diff_seen += 1;
+                    if gx == gy {
+                        merged += 1;
+                        merged_cross += cross as usize;
+                        mixed_groups.insert(gx);
+                    }
+                }
+            }
+            judged_groups.extend(mixed_groups.iter().copied());
+            let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+            eprintln!(
+                "{name}: {} groups ({} of 3+ heads); judged groups {}, mixed {}; same pairs split {split}/{same_seen} (cross-day {split_cross}); different pairs merged {merged}/{diff_seen} (cross-day {merged_cross}); sizes {:?}",
+                clusters.len(),
+                sizes.iter().filter(|&&n| n >= 3).count(),
+                judged_groups.len(),
+                mixed_groups.len(),
+                &sizes[..sizes.len().min(10)]
+            );
+        }
+    }
+
+    /// Dump a head cache for the relabelling page's builder: per photo
+    /// its key, library-relative path, capture time and day, and each
+    /// head's box, score, size, sharpness and vector row; the f32 rows as
+    /// a raw file.  `PP_EVAL_OUT/index` holds the cache and the index,
+    /// `PP_EVAL_LIBRARY` the library root, `PP_DUMP_OUT` where to write.
+    /// Paths are relative to the library root; nothing else about the
+    /// user's photos is written.
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT, PP_EVAL_LIBRARY) and PP_DUMP_OUT"]
+    fn fursuit_relabel_dump() {
+        let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY"));
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let out = PathBuf::from(std::env::var("PP_DUMP_OUT").expect("PP_DUMP_OUT"));
+        fs::create_dir_all(&out).unwrap();
+        let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+        let mut store = HeadStore::load(&dir);
+        let (vrefs, vdim, vdata) = {
+            let v = store.vectors();
+            (v.refs.clone(), v.dim, v.data.clone())
+        };
+        let row_of: HashMap<FaceRef, usize> = vrefs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let mut photos = Vec::new();
+        for (rel, e) in &index.paths.entries {
+            let dets = store.heads_of(&e.key);
+            if dets.is_empty() {
+                continue;
+            }
+            let rec = index.vectors.by_key.get(&e.key).map(|&i| &index.vectors.records[i]);
+            let capture_ms = rec.and_then(|r| r.capture.map(|c| c.and_utc().timestamp_millis() + r.meta.subsec_ms.unwrap_or(0) as i64));
+            let day = rec.and_then(|r| r.capture.map(|c| c.date().to_string())).or_else(|| rel.components().nth(2).map(|c| c.as_os_str().to_string_lossy().to_string()));
+            let heads: Vec<serde_json::Value> = dets
+                .iter()
+                .map(|d| {
+                    let r = d.head_ref(e.key);
+                    serde_json::json!({ "bbox": d.bbox, "thousandths": r.thousandths(), "score": d.score, "size_px": d.size_px, "sharpness": d.sharpness, "clarity": d.clarity(), "row": row_of.get(&r) })
+                })
+                .collect();
+            photos.push(serde_json::json!({ "key": format!("{:032x}", u128::from_be_bytes(e.key.0)), "rel": rel.to_string_lossy(), "capture_ms": capture_ms, "day": day, "heads": heads }));
+        }
+        let rows: Vec<serde_json::Value> = vrefs.iter().map(|r| serde_json::json!({ "key": format!("{:032x}", u128::from_be_bytes(r.key.0)), "thousandths": r.thousandths() })).collect();
+        let dump = serde_json::json!({ "root": root.to_string_lossy(), "dim": vdim, "photos": photos, "rows": rows });
+        fs::write(out.join("heads.json"), serde_json::to_vec(&dump).unwrap()).unwrap();
+        let bytes: Vec<u8> = vdata.iter().flat_map(|x| x.to_le_bytes()).collect();
+        fs::write(out.join("vectors.f32"), bytes).unwrap();
+        eprintln!("dumped {} photos with heads, {} rows × {}", photos.len(), vrefs.len(), vdim);
+    }
+
+    /// Score the grouping variants against the relabelling page's
+    /// answers (v4: each answer carries both heads by content key and
+    /// box), over the app's own heads (`PP_EVAL_OUT/index`): per tier,
+    /// the distance curve, and for each variant recall (same pairs in
+    /// one group), merged different pairs, and the share of 3+ groups
+    /// holding a labelled different pair; Find more's strict cut and the
+    /// suggestion band as the pair's own distance.  `PP_HOLDOUT=even|odd`
+    /// scores only the answers whose first head's day index is even or
+    /// odd (a hold-out by day).  Prints counts only.
+    #[test]
+    #[ignore = "needs the labels copy (PP_LABELS) and a head cache (PP_EVAL_OUT)"]
+    fn fursuit_relabel_score() {
+        let labels: serde_json::Value = serde_json::from_slice(&fs::read(std::env::var("PP_LABELS").expect("PP_LABELS")).unwrap()).unwrap();
+        assert_eq!(labels["version"], 4, "a v4 relabel file");
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let holdout = std::env::var("PP_HOLDOUT").ok();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let refs = store.refs().to_vec();
+        let row_of: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let key_of = |hex: &str| -> Key {
+            let mut k = [0u8; 16];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+            }
+            Key(k)
+        };
+        // The page rounds boxes to four decimals, the store's refs to
+        // thousandths: join by key and the best-overlapping head of that
+        // photo (IoU >= 0.6), which is the same head.
+        let exact = std::cell::Cell::new(0usize);
+        let head_row = |h: &serde_json::Value| -> Option<usize> {
+            let b: Vec<f32> = h["bbox"].as_array()?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let key = key_of(h["key"].as_str()?);
+            let r = FaceRef::new(key, [b[0], b[1], b[2], b[3]]);
+            if let Some(&row) = row_of.get(&r) {
+                exact.set(exact.get() + 1);
+                return Some(row);
+            }
+            let best = store.heads_of(&key).iter().map(|d| (crate::ml::heads::iou([b[0], b[1], b[2], b[3]], d.bbox), d.head_ref(key))).max_by(|x, y| x.0.total_cmp(&y.0))?;
+            if best.0 < 0.6 {
+                return None;
+            }
+            row_of.get(&best.1).copied()
+        };
+        // Days, for the hold-out.
+        let mut days: Vec<String> = labels["answers"].as_object().unwrap().values().map(|a| a["heads"]["a"]["day"].as_str().unwrap().to_string()).collect();
+        days.sort();
+        days.dedup();
+        let day_index: HashMap<String, usize> = days.iter().enumerate().map(|(i, d)| (d.clone(), i)).collect();
+        // Answers → (row a, row b, same, tier, d, held)
+        let mut pairs: Vec<(usize, usize, bool, u64, f32)> = Vec::new();
+        let (mut unmapped, mut skipped, mut held_out) = (0, 0, 0);
+        for a in labels["answers"].as_object().unwrap().values() {
+            let r = a["r"].as_str().unwrap();
+            if r == "skip" {
+                skipped += 1;
+                continue;
+            }
+            let di = day_index[a["heads"]["a"]["day"].as_str().unwrap()];
+            if let Some(h) = &holdout {
+                let keep = if h == "even" { di % 2 == 0 } else { di % 2 == 1 };
+                if !keep {
+                    held_out += 1;
+                    continue;
+                }
+            }
+            match (head_row(&a["heads"]["a"]), head_row(&a["heads"]["b"])) {
+                (Some(x), Some(y)) => pairs.push((x, y, r == "same", a["tier"].as_u64().unwrap(), a["d"].as_f64().unwrap() as f32)),
+                _ => unmapped += 1,
+            }
+        }
+        eprintln!("{} answers mapped to the app's heads ({} heads by exact ref, the rest by key and overlap), {unmapped} unmapped, {skipped} skipped, {held_out} held out ({:?}); {} days", pairs.len(), exact.get(), holdout, days.len());
+        let rows = store.rows();
+        let dist = |x: usize, y: usize| 1.0 - rows.dot(x, &rows.row_vec(y));
+        let tiers = [1u64, 2, 3, 4];
+        // The distance curve per tier (the pair's own head-to-head distance).
+        let bands = [(0.0f32, 0.10f32), (0.10, 0.14), (0.14, 0.17), (0.17, 0.20), (0.20, 0.24), (0.24, 0.30), (0.30, 1.0)];
+        eprintln!("\nP(same | distance) per tier, asked pairs, the two heads' own distance:");
+        for t in tiers {
+            let mut line = format!("  tier {t}:");
+            for (lo, hi) in bands {
+                let inb: Vec<&(usize, usize, bool, u64, f32)> = pairs.iter().filter(|p| p.3 == t && { let d = dist(p.0, p.1); d >= lo && d < hi }).collect();
+                let same = inb.iter().filter(|p| p.2).count();
+                line += &format!(" [{lo:.2}-{hi:.2}) {same}/{};", inb.len());
+            }
+            eprintln!("{line}");
+        }
+        // Find more (strict 0.14) and the suggestion band (0.17): what a pair's own distance gathers.
+        eprintln!("\nFind more (d < 0.14) and suggestions (d < 0.17) per tier: same pairs reached / all same (recall), and the share same among the pairs under the cut (precision):");
+        for t in tiers {
+            let tp: Vec<&(usize, usize, bool, u64, f32)> = pairs.iter().filter(|p| p.3 == t).collect();
+            let same_all = tp.iter().filter(|p| p.2).count();
+            let mut line = format!("  tier {t}:");
+            for cut in [0.14f32, 0.17, 0.20] {
+                let under: Vec<&&(usize, usize, bool, u64, f32)> = tp.iter().filter(|p| dist(p.0, p.1) < cut).collect();
+                let same_under = under.iter().filter(|p| p.2).count();
+                line += &format!(" <{cut:.2}: recall {same_under}/{same_all}, precision {same_under}/{};", under.len());
+            }
+            eprintln!("{line}");
+        }
+        // The grouping variants.
+        let order = ordered(&store);
+        eprintln!("\nGrouping variants: per tier recall = same pairs in one group / same pairs; merged = different pairs in one group / different pairs; then 3+ groups holding a labelled different pair / 3+ groups holding any labelled pair:");
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let mut group_of: HashMap<usize, usize> = HashMap::new();
+            for (g, c) in clusters.iter().enumerate() {
+                for &m in &c.members {
+                    group_of.insert(m, g);
+                }
+            }
+            let big: HashSet<usize> = clusters.iter().enumerate().filter(|(_, c)| c.members.len() >= 3).map(|(g, _)| g).collect();
+            let mut judged: HashSet<usize> = HashSet::new();
+            let mut mixed: HashSet<usize> = HashSet::new();
+            let mut line = format!("{name}: {} groups, {} of 3+ heads, largest {:?} |", clusters.len(), big.len(), clusters.iter().take(3).map(|c| c.members.len()).collect::<Vec<_>>());
+            let (mut rs, mut rn, mut ms, mut mn) = (0, 0, 0, 0);
+            for t in tiers {
+                let (mut same_in, mut same_n, mut diff_in, mut diff_n) = (0, 0, 0, 0);
+                for p in pairs.iter().filter(|p| p.3 == t) {
+                    let (ga, gb) = (group_of.get(&p.0), group_of.get(&p.1));
+                    let together = ga.is_some() && ga == gb;
+                    if let (Some(&g), true) = (ga, together) {
+                        if big.contains(&g) {
+                            judged.insert(g);
+                            if !p.2 {
+                                mixed.insert(g);
+                            }
+                        }
+                    }
+                    if p.2 {
+                        same_n += 1;
+                        if together { same_in += 1; }
+                    } else {
+                        diff_n += 1;
+                        if together { diff_in += 1; }
+                    }
+                }
+                rs += same_in; rn += same_n; ms += diff_in; mn += diff_n;
+                line += &format!(" t{t} recall {same_in}/{same_n} merged {diff_in}/{diff_n};");
+            }
+            line += &format!(" all recall {rs}/{rn} merged {ms}/{mn}; mixed 3+ groups {}/{}", mixed.len(), judged.len());
+            eprintln!("{line}");
+        }
+    }
+
+    /// The cost of a regroup under each candidate linkage at the
+    /// cohort's size (`PP_EVAL_OUT`'s head cache, 10 826 heads): wall
+    /// time of `step::regroup`'s path on one thread of work, and the
+    /// resident size before and after, for the gates (about 2 s, under
+    /// about 200 MB extra).
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT)"]
+    fn fursuit_regroup_cost() {
+        fn rss_mb() -> f64 {
+            let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
+            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+        }
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let order = ordered(&store);
+        let rows = store.rows();
+        let base = rss_mb();
+        eprintln!("{} heads; resident {base:.0} MB with the vectors built", store.refs().len());
+        for (name, cut, linkage) in linkages() {
+            let before = rss_mb();
+            let t = Instant::now();
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let secs = t.elapsed().as_secs_f64();
+            let after = rss_mb();
+            eprintln!("{name}: {secs:.2} s, resident {before:.0} → {after:.0} MB (+{:.0}), {} groups, largest {}", after - before, clusters.len(), clusters.first().map_or(0, |c| c.members.len()));
+        }
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
@@ -1526,6 +2044,50 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// The fursuit grouping has no joining step.  Two bunches of heads
+    /// whose seeds lie apart (0.34) are pulled together by their later
+    /// members until their centroids lie within the cut: people's
+    /// grouping then merges them into one group whose ends are far
+    /// apart; average linkage keeps them as two, since a head joins only
+    /// what it is near on average and nothing merges groups afterwards.
+    /// The pass's incremental assign under the same linkage refuses the
+    /// far head too.
+    #[test]
+    fn two_bunches_pulled_together_stay_two_fursuit_groups() {
+        use crate::model::subjects::Linkage;
+        // Unit vectors in the plane at these angles (cosine distance
+        // 1 − cos of the angle between): P at 0, 0, 0.3; Q at 0.85, 0.55, 0.55.
+        let angles = [0.0f32, 0.0, 0.85, 0.55, 0.55, 0.3];
+        let mut data = Vec::new();
+        for a in angles {
+            data.extend_from_slice(&[a.cos(), a.sin()]);
+        }
+        let rows = subjects::Rows::F32 { dim: 2, data: &data };
+        let order: Vec<usize> = (0..angles.len()).collect();
+        let d = |i: usize, j: usize| 1.0 - rows.dot(i, &rows.row_vec(j));
+        assert!(d(0, 2) > 0.3, "the seeds are far apart: {}", d(0, 2));
+        let people = subjects::cluster_with(&rows, &order, 0.17, Linkage::PEOPLE);
+        assert_eq!(people.len(), 1, "people's merge pass joins the two bunches once their centroids drift within the cut: {people:?}");
+        let suits = subjects::cluster_with(&rows, &order, 0.17, Linkage::Average);
+        assert_eq!(suits.len(), 2, "average linkage keeps them apart: {suits:?}");
+        for c in &suits {
+            for &a in &c.members {
+                for &b in &c.members {
+                    assert!(d(a, b) < 0.2, "no fursuit group holds heads far apart");
+                }
+            }
+        }
+        // The pass's incremental assign under the same linkage: the far
+        // seed starts its own group rather than drifting into P.
+        let mut live = subjects::cluster_with(&rows, &order[..2], 0.17, Linkage::Average);
+        subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average);
+        assert_eq!(live.len(), 2, "{live:?}");
+        let store = HeadStore::load(&scratch("linkage"));
+        assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
+        assert_eq!(store.cutoffs(), subjects::cutoff_for(ModelId::Dinov2));
+        assert_eq!((store.cutoffs().group, store.cutoffs().suggest, store.cutoffs().strict), (0.17, 0.17, 0.14));
+    }
+
     /// Kinds never mix in the fursuit grouping: the step is Kind::Fursuit,
     /// a person named over the same refs counts for nothing here, a
     /// fursuit subject does; suggestions for a person's id are empty; and
@@ -1550,7 +2112,7 @@ mod store_tests {
         let job = f.regroup_job(&file).unwrap();
         assert_eq!((job.kind, job.dim, job.refs.len()), (Kind::Fursuit, 2, 4));
         assert_eq!(job.cutoffs, subjects::cutoff_for(ModelId::Dinov2));
-        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.14, 0.17, 0.14), "the measured cut-offs");
+        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.17, 0.17, 0.14), "the measured cut-offs: groups and the review at 0.17, Find more strict at 0.14");
         let r = step::regroup(&job);
         assert!(!r.suggestion_counts.contains_key(&person), "a person is not counted among fursuits");
         assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 4, "the person's refs are not confirmed here");
@@ -1565,6 +2127,21 @@ mod store_tests {
         f.step();
         let s = f.suggestions(&file, &GroupId::Subject(suit.clone()), &resolve, true).unwrap();
         assert_eq!(s.iter().flatten().map(|x| x.face).collect::<Vec<_>>(), [refs[3]], "the strict cut finds the identical head");
+        // Suggestions come nearest first: a subject with one member and
+        // three candidates at 0.02, 0.10 and 0.15 lists them in that order.
+        {
+            let store = f.store.as_mut().unwrap();
+            // Around (−1, 0): far from every head above, so only these four count.
+            let v = |t: f32| [(std::f32::consts::PI + t).cos(), (std::f32::consts::PI + t).sin()];
+            for (n, t) in [(10u8, 0.0f32), (11, (1.0f32 - 0.15).acos()), (12, (1.0f32 - 0.02).acos()), (13, (1.0f32 - 0.10).acos())] {
+                store.add(key(n), &[head(0.2, 300, &v(t))]).unwrap();
+            }
+        }
+        let r10 = f.store.as_ref().unwrap().heads_of(&key(10))[0].head_ref(key(10));
+        let near = file.create(Kind::Fursuit, Some("Near".into()), vec![r10]);
+        f.step();
+        let order: Vec<Key> = f.suggestions(&file, &GroupId::Subject(near), &resolve, false).unwrap().iter().flatten().map(|x| x.face.key).collect();
+        assert_eq!(order, [key(12), key(13), key(11)], "nearest first, at 0.02, 0.10, 0.15");
         assert!(f.suggestions(&file, &GroupId::Subject(person.clone()), &resolve, false).unwrap().is_empty(), "a person's suggestions are not answered from heads");
         assert_eq!(f.suggestions(&file, &GroupId::Cluster(999), &resolve, false), Err(Refused::StaleGroup));
         assert!(f.clarity_with_sureness(&refs[0]) > 0.0);

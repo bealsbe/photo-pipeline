@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Rows, SubjectsFile};
+use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Linkage, Rows, SubjectsFile};
 
 /// What a kind's step gives the grouping.
 pub trait KindStep: Send {
@@ -30,6 +30,11 @@ pub trait KindStep: Send {
     /// The model's cut-offs (cosine distances) for one person, suit or
     /// pet: for the automatic groups, for suggestions, for *Find more*.
     fn cutoffs(&self) -> Cutoffs;
+    /// How the automatic groups are formed; people's grouping unless the
+    /// kind's labels say otherwise.
+    fn linkage(&self) -> Linkage {
+        Linkage::PEOPLE
+    }
 }
 
 /// What a regroup works on: a copy of the step's data, so the worker
@@ -42,6 +47,7 @@ pub struct RegroupJob {
     pub data: Vec<f32>,
     pub clarity: Vec<f32>,
     pub cutoffs: Cutoffs,
+    pub linkage: Linkage,
     pub file: SubjectsFile,
 }
 
@@ -119,7 +125,7 @@ impl Grouped {
         let confirmed = file.confirmed(step.kind());
         let new: Vec<usize> = (self.rows..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i])).collect();
         let rows = step.rows();
-        subjects::assign(&mut self.clusters, &rows, &new, step.cutoffs().group);
+        subjects::assign_with(&mut self.clusters, &rows, &new, step.cutoffs().group, step.linkage());
         self.sureness.resize(refs.len(), 1.0);
         self.rows = refs.len();
         self.refresh_ids(refs, &|r| step.clarity(r));
@@ -144,6 +150,7 @@ pub fn job(step: &dyn KindStep, file: &SubjectsFile, generation: u64) -> Regroup
         data: rows.to_f32(),
         clarity: step.refs().iter().map(|r| step.clarity(r)).collect(),
         cutoffs: step.cutoffs(),
+        linkage: step.linkage(),
         file: file.clone(),
     }
 }
@@ -157,7 +164,7 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
     let confirmed = j.file.confirmed(j.kind);
     let mut order: Vec<usize> = (0..n).filter(|&i| !confirmed.contains_key(&j.refs[i])).collect();
     order.sort_by(|&a, &b| j.clarity[b].total_cmp(&j.clarity[a]).then(a.cmp(&b)));
-    let clusters = subjects::cluster(&rows, &order, j.cutoffs.group);
+    let clusters = subjects::cluster_with(&rows, &order, j.cutoffs.group, j.linkage);
     let mut sureness = vec![1.0f32; n];
     for c in &clusters {
         for &m in &c.members {

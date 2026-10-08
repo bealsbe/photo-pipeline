@@ -2300,6 +2300,75 @@ its vectors are 1 536 wide where faces are 512; its files, requests and
 replies are its own; the store ignores face files in the same folder
 (tested).
 
+### The relabel across the library (2026-10-07) and the grouping chosen
+
+The first labels were two event days.  The user wanted every photo of a
+suit gathered, "from minutes apart to years apart", so a second label
+set was taken over the whole library: a read-only symlink library of
+all 74 archive days with JPGs (days over 600 JPGs thinned evenly to
+~600; 14 517 photos), indexed and scanned for heads by the app's own
+step on the card (9 251 fursuit-tagged photos, 10 826 heads in 7 033
+photos, 7 909 head tracks in 5 088 presses over 37 days), and a
+pairwise page like the first with four tiers by the time between the
+two heads: the same hour (never the same press, a minute apart at
+least), the same day, the same week, further apart.  Pairs were drawn
+from each track's nearest neighbours within the tier's time window,
+mostly close calls with easy ends, spread over tracks and days.  Every
+answer carries both heads by content key, box, time and press, so it
+stands on its own.  **791 answers**: same/different 110/86, 84/115,
+102/97, 63/134 by tier; 12 heads left out.
+
+P(same | distance), asked pairs, the two heads' own distance:
+
+| tier | < 0.10 | 0.10–0.14 | 0.14–0.17 | 0.17–0.20 | 0.20–0.24 | 0.24–0.30 |
+|---|---|---|---|---|---|---|
+| same hour | 10/10 | 27/29 | 32/44 | 23/44 | 12/39 | 4/22 |
+| same day | 10/10 | 26/30 | 27/42 | 12/40 | 6/48 | 2/21 |
+| same week | 9/9 | 29/30 | 34/49 | 22/44 | 5/38 | 1/19 |
+| further apart | 9/10 | 23/28 | 19/44 | 8/52 | 4/36 | 0/20 |
+
+Under 0.14 a pair is the same suit 82–97 % of the time in every tier;
+beyond it the further tiers fall off sooner (0.14–0.17: 73 % the same
+hour, 43 % further apart).  *Find more* at 0.14 reaches 37/110, 36/84,
+38/102 and 32/63 of the labelled same pairs per tier at 37/39, 36/40,
+38/39 and 32/38 right; the review at 0.17 reaches 69/110, 63/84,
+72/102 and 51/63 at 69/83, 63/82, 72/88 and 51/82 right.  (The pairs
+were sampled as close calls, so these recalls are of hard pairs.)
+
+**The grouping that shipped, measured against these labels**, over all
+10 826 heads: nearest centroid with the merge pass at 0.14 chained the
+library into **one group of 4 265 heads (39 % of them)**; it held 327 of
+359 labelled same pairs but also 273 of 432 different pairs.  The
+merge pass was the cause (at 0.12 the group was 2 635 heads, at 0.10
+still 695).  Without it, over the same labels (recall = same pairs in
+one group; merged = different pairs in one group; mixed = 3+ groups
+holding a labelled different pair / 3+ groups holding any labelled
+pair): nearest centroid 0.14 gathered 152/359 with 32/432 merged, mixed
+8/45; **average linkage 0.17: 95/359 (35/110, 23/84, 21/102, 16/63 by
+tier), merged 7/432 (0/86, 4/115, 1/97, 2/134), mixed 6/49**; the
+centroid with a seed cap 0.14/0.17: 98/359, 7/432, 6/39; complete
+linkage 0.17: 47/359, 3/432.  The even and odd halves of the days give
+the same ranking.  Regroup cost at 10 826 heads on one worker: the
+merge pass 17.6 s and 70 MB; average linkage 1.84 s and no extra memory
+once a cluster is shortlisted by an exact bound (for unit vectors the
+mean distance to a cluster's members is at least the distance to its
+centroid).
+
+**The user's choice (2026-10-08): tight groups and *Find more*.**
+Fursuit heads group by average linkage at 0.17 with no joining step
+(`KindStep::linkage` → `Linkage::Average`; `cutoff_for(Dinov2)` is
+group 0.17, suggest 0.17, strict 0.14); the incremental assign during a
+pass uses the same rule, so it admits nothing a regroup would refuse;
+*Find more* (0.14) and the review (0.17), nearest first, join a suit
+across days and years.  People's grouping is untouched
+(`Linkage::PEOPLE`, pinned member by member on toy rows).  On the night
+convention day of the pass (455 heads): before, the largest group held
+101 heads spanning 12 of the tight groups (and the 32-head one spanned
+3); after, the largest are 31, 24 and 13 heads, each one suit on its
+contact sheet.  No automatic grouping on these vectors gathers the
+far-apart matches without mixing; that is what the review and *Find
+more* are for.
+
 ## As built — phase 4 (UI): fursuits
 
 The Fursuits tab and the head step as the user sees them (§7a.4–7a.8,

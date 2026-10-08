@@ -651,6 +651,18 @@ user's choice:
 | OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
 | DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
 
+Fursuit groups are **tight by design**: a head joins a group only when it
+is close to the group's members on average (average linkage at 0.17 on
+DINOv2's cosine distance), and groups are never merged afterwards; so a
+group is one suit at one event, and *Find more* (strict, 0.14) and the
+"Same fursuit?" review (0.17), nearest first, are how a suit is gathered
+across days and years.  Both numbers come from the user's 791 pairwise
+answers over the library (`docs/library-search-plan.md`, phase 4 as
+built): under 0.14 two heads are the same suit 82–97 % of the time
+whatever the time between them; the nearest-centroid grouping people use
+chained the library's fursuit heads into one group and is not used for
+this kind.
+
 The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
 asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
 DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch

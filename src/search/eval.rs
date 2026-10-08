@@ -698,10 +698,23 @@ fn fursuits_library() {
     let index_s = t.elapsed().as_secs_f64();
     eprintln!("indexed {} shots in {index_s:.1} s on {:?}; heads: on={} installed={} tagged={} step={:?}; resident {:.0} MB", status.indexed_shots, status.device.name, status.heads.on, status.heads.models_installed, status.heads.tagged, status.heads.step, rss_mb());
     // The step: the card scans at once; the processor asks (decision 11).
+    // An index that was already complete ends no pass, so nothing offers
+    // the step: then the tab's catch-up (find_heads) is what resumes a
+    // scan, over the photos the cache hasn't seen.
+    // The tag count follows the index's tags, synced after the library's
+    // counts are published: give it a moment before reading it as none.
+    let asked_at = Instant::now();
+    let mut caught_up = false;
     let s = loop {
         let s = engine.status();
-        if !matches!(s.heads.step, Step::Idle) || s.heads.tagged == 0 {
+        let settled = asked_at.elapsed() > Duration::from_secs(30);
+        if !matches!(s.heads.step, Step::Idle) || (s.heads.tagged == 0 && settled) || (caught_up && s.heads.unscanned() == 0) {
             break s;
+        }
+        if !caught_up && s.heads.tagged > 0 && asked_at.elapsed() > Duration::from_secs(3) && s.heads.unscanned() > 0 {
+            eprintln!("no pass ended: asking for the catch-up over {} unscanned of {} tagged (scanned {})", s.heads.unscanned(), s.heads.tagged, s.heads.scanned);
+            engine.find_heads();
+            caught_up = true;
         }
         assert!(Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(50));
@@ -744,6 +757,10 @@ fn fursuits_library() {
             latest
         })
     };
+    // The full regroup after the scan replaces the clusters the pass
+    // assigned (new ids): let it settle before reading the groups, else
+    // a name goes to a stale id and is refused.
+    std::thread::sleep(Duration::from_secs(3));
     let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| g.kind == Kind::Fursuit) || status.heads.found == 0);
     let clusters: Vec<&crate::model::subjects::Group> = snap.groups.iter().filter(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Cluster(_))).collect();
     let sizes: Vec<usize> = clusters.iter().map(|g| g.photos).collect();
@@ -802,6 +819,19 @@ fn fursuits_library() {
     });
     eprintln!("@name: {} photos in {:.0} ms; resident {:.0} MB", hits.len(), t.elapsed().as_secs_f64() * 1000.0, rss_mb());
     assert_eq!(hits.len(), named.photos);
+    // Forgetting the fursuits empties the head cache too; a run whose
+    // cache is the point (a cohort for labelling) keeps it with
+    // PP_EVAL_KEEP=1 and forgets the name alone.
+    if env("PP_EVAL_KEEP").is_some() {
+        engine.forget(match &named.id {
+            GroupId::Subject(id) => id.clone(),
+            GroupId::Cluster(_) => unreachable!("named"),
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        engine.shutdown();
+        eprintln!("done, cache kept; resident {:.0} MB", rss_mb());
+        return;
+    }
     // Every kind forgotten: the file goes when no subject remains.
     engine.forget_kind(crate::model::subjects::Kind::Person);
     engine.forget_kind(crate::model::subjects::Kind::Fursuit);
