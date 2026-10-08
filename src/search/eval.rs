@@ -744,6 +744,10 @@ fn fursuits_library() {
             latest
         })
     };
+    // The full regroup after the scan replaces the clusters the pass
+    // assigned (new ids): let it settle before reading the groups, else
+    // a name goes to a stale id and is refused.
+    std::thread::sleep(Duration::from_secs(3));
     let snap = wait_subjects(&mut stream, &|s| s.groups.iter().any(|g| g.kind == Kind::Fursuit) || status.heads.found == 0);
     let clusters: Vec<&crate::model::subjects::Group> = snap.groups.iter().filter(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Cluster(_))).collect();
     let sizes: Vec<usize> = clusters.iter().map(|g| g.photos).collect();

@@ -1422,6 +1422,265 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+
+    /// The grouping variants the tune compares, by name.
+    fn linkages() -> Vec<(&'static str, f32, subjects::Linkage)> {
+        use subjects::Linkage as L;
+        vec![
+            ("ships: centroid+merge 0.14", 0.14, L::PEOPLE),
+            ("centroid, no merge 0.14", 0.14, L::Centroid { merge: false, seed_cap: None }),
+            ("centroid+merge 0.12", 0.12, L::PEOPLE),
+            ("centroid+merge 0.10", 0.10, L::PEOPLE),
+            ("centroid, seed cap 0.14/0.14", 0.14, L::Centroid { merge: false, seed_cap: Some(0.14) }),
+            ("centroid, seed cap 0.14/0.17", 0.14, L::Centroid { merge: false, seed_cap: Some(0.17) }),
+            ("average 0.14", 0.14, L::Average),
+            ("average 0.17", 0.17, L::Average),
+            ("complete 0.14", 0.14, L::Complete),
+            ("complete 0.17", 0.17, L::Complete),
+            ("complete 0.20", 0.20, L::Complete),
+        ]
+    }
+
+    /// Rows of a head store in the regroup's order (clearest first), as
+    /// the engine would group them.
+    fn ordered(store: &HeadStore) -> Vec<usize> {
+        let refs = store.refs();
+        let mut order: Vec<usize> = (0..refs.len()).collect();
+        order.sort_by(|&a, &b| store.clarity(&refs[b]).total_cmp(&store.clarity(&refs[a])).then(a.cmp(&b)));
+        order
+    }
+
+    /// Contact sheets of the biggest groups under each linkage, from a
+    /// head cache an eval run left (`PP_EVAL_OUT/index`), for looking at
+    /// by eye: `PP_SHEETS_OUT/<variant>-<n>.jpg`, one row of tiles per
+    /// group, 12 tiles at most.  Prints the group sizes.  Nothing is
+    /// published; the sheets stay in scratch.
+    #[test]
+    #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT) and PP_SHEETS_OUT"]
+    fn fursuit_group_sheets() {
+        use crate::imaging::decode;
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let out = PathBuf::from(std::env::var("PP_SHEETS_OUT").expect("PP_SHEETS_OUT"));
+        fs::create_dir_all(&out).unwrap();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let order = ordered(&store);
+        let rows = store.rows();
+        let tiles = store.tiles();
+        eprintln!("{} heads in {} photos", store.found(), store.looked_at());
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+            let big = sizes.iter().filter(|&&n| n >= 3).count();
+            eprintln!("{name}: {} groups, {big} of 3+ heads; sizes {:?}", clusters.len(), &sizes[..sizes.len().min(12)]);
+            let slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+            for (gi, c) in clusters.iter().take(6).enumerate() {
+                if c.members.len() < 3 {
+                    break;
+                }
+                let mut sheet = vec![0u8; 12 * 128 * 128 * 3];
+                let mut n = 0;
+                for &m in c.members.iter().take(12) {
+                    let Some(jpeg) = tiles.lock().read(&store.refs()[m]) else { continue };
+                    let Ok(px) = decode::decode_jpeg_full_scaled(&jpeg, 1) else { continue };
+                    let px = decode::resize_to(&px, 128, 128);
+                    let rgb = decode::to_rgb(&px);
+                    for y in 0..128 {
+                        let src = &rgb[y * 128 * 3..(y + 1) * 128 * 3];
+                        let dst = (y * 12 * 128 + n * 128) * 3;
+                        sheet[dst..dst + 128 * 3].copy_from_slice(src);
+                    }
+                    n += 1;
+                }
+                let mut bytes = Vec::new();
+                jpeg_encoder::Encoder::new(&mut bytes, 85).encode(&sheet, (12 * 128) as u16, 128, jpeg_encoder::ColorType::Rgb).unwrap();
+                fs::write(out.join(format!("{slug}-{gi}-{}heads.jpg", c.members.len())), bytes).unwrap();
+            }
+        }
+    }
+
+    /// Score the grouping variants against the user's pairwise labels
+    /// (v3 `labels.json`: tracks, crop boxes, same/different answers),
+    /// over the app's own heads of the same photos (a head cache from an
+    /// eval run over the two labelled days, `PP_EVAL_OUT`; the library
+    /// root `PP_EVAL_LIBRARY`; the labels copy `PP_LABELS`).  A label
+    /// track is matched to the app's heads of its photo by box overlap
+    /// (IoU ≥ 0.5).  Per variant: groups holding two known-different
+    /// tracks (mixed), known-same pairs split across groups, known-
+    /// different pairs merged into one group; same-day and cross-day
+    /// apart; and the group sizes.  Prints only counts.
+    #[test]
+    #[ignore = "needs the labels copy (PP_LABELS), a head cache (PP_EVAL_OUT) and the library (PP_EVAL_LIBRARY)"]
+    fn fursuit_grouping_vs_labels() {
+        use std::collections::BTreeMap;
+        let labels: serde_json::Value = serde_json::from_slice(&fs::read(std::env::var("PP_LABELS").expect("PP_LABELS")).unwrap()).unwrap();
+        assert_eq!(labels["version"], 3, "a v3 pairwise labels file");
+        let root = PathBuf::from(std::env::var("PP_EVAL_LIBRARY").expect("PP_EVAL_LIBRARY"));
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
+        // File name (the camera's) → key, through the index's path map.
+        let key_by_name: HashMap<String, Key> = index.paths.entries.iter().filter_map(|(rel, e)| Some((rel.file_name()?.to_string_lossy().to_string(), e.key))).collect();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let refs = store.refs().to_vec();
+        let row_of: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        // Label crops → app rows.
+        let crops = labels["crop_files"].as_array().unwrap();
+        let mut row_of_crop: HashMap<u64, usize> = HashMap::new();
+        let (mut matched, mut unmatched_photo, mut unmatched_box) = (0, 0, 0);
+        for c in crops {
+            let name = c["name"].as_str().unwrap();
+            let Some(key) = key_by_name.get(name) else { unmatched_photo += 1; continue };
+            let b: Vec<f32> = c["box"].as_array().unwrap().iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let lb = [b[0], b[1], b[2] - b[0], b[3] - b[1]];
+            let best = store.heads_of(key).iter().map(|d| (crate::ml::heads::iou(lb, d.bbox), d.head_ref(*key))).max_by(|a, b| a.0.total_cmp(&b.0));
+            match best {
+                Some((iou, r)) if iou >= 0.5 => {
+                    if let Some(&row) = row_of.get(&r) {
+                        row_of_crop.insert(c["i"].as_u64().unwrap(), row);
+                        matched += 1;
+                    }
+                }
+                _ => unmatched_box += 1,
+            }
+        }
+        eprintln!("label crops: {matched} matched to the app's heads, {unmatched_box} without a matching box, {unmatched_photo} whose photo is not indexed");
+        // Tracks → rows; a track is one head through one press.
+        let tracks = labels["tracks"].as_array().unwrap();
+        let mut rows_of_track: HashMap<u64, Vec<usize>> = HashMap::new();
+        let mut set_of_track: HashMap<u64, String> = HashMap::new();
+        for t in tracks {
+            let id = t["t"].as_u64().unwrap();
+            set_of_track.insert(id, t["set"].as_str().unwrap().to_string());
+            let rs: Vec<usize> = t["crops"].as_array().unwrap().iter().filter_map(|i| row_of_crop.get(&i.as_u64().unwrap()).copied()).collect();
+            if !rs.is_empty() {
+                rows_of_track.insert(id, rs);
+            }
+        }
+        // Known pairs: asked, plus implied (same is transitive; different
+        // carries across same-groups).
+        let bad: HashSet<u64> = labels["bad"].as_object().map(|m| m.keys().filter_map(|k| k.parse().ok()).collect()).unwrap_or_default();
+        let mut parent: HashMap<u64, u64> = HashMap::new();
+        fn find(p: &mut HashMap<u64, u64>, x: u64) -> u64 {
+            let mut r = x;
+            while let Some(&q) = p.get(&r) {
+                if q == r {
+                    break;
+                }
+                r = q;
+            }
+            r
+        }
+        let answers: Vec<(u64, u64, bool, bool)> = labels["answers"]
+            .as_object()
+            .unwrap()
+            .values()
+            .filter_map(|a| {
+                let (x, y) = (a["a"].as_u64()?, a["b"].as_u64()?);
+                if bad.contains(&x) || bad.contains(&y) {
+                    return None;
+                }
+                match a["r"].as_str()? {
+                    "same" => Some((x, y, true, a["cross"].as_bool().unwrap_or(false))),
+                    "diff" => Some((x, y, false, a["cross"].as_bool().unwrap_or(false))),
+                    _ => None,
+                }
+            })
+            .collect();
+        for &(x, y, same, _) in &answers {
+            if same {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                if rx != ry {
+                    parent.insert(rx.max(ry), rx.min(ry));
+                }
+            }
+        }
+        let mut diff: HashSet<(u64, u64)> = HashSet::new();
+        for &(x, y, same, _) in &answers {
+            if !same {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                diff.insert((rx.min(ry), rx.max(ry)));
+            }
+        }
+        let labelled: Vec<u64> = {
+            let mut v: Vec<u64> = answers.iter().flat_map(|&(x, y, _, _)| [x, y]).filter(|t| rows_of_track.contains_key(t)).collect();
+            v.sort();
+            v.dedup();
+            v
+        };
+        let mut known: Vec<(u64, u64, bool, bool)> = Vec::new();
+        for (i, &x) in labelled.iter().enumerate() {
+            for &y in &labelled[i + 1..] {
+                let (rx, ry) = (find(&mut parent, x), find(&mut parent, y));
+                let same = rx == ry;
+                if !same && !diff.contains(&(rx.min(ry), rx.max(ry))) {
+                    continue;
+                }
+                let cross = set_of_track[&x] != set_of_track[&y];
+                known.push((x, y, same, cross));
+            }
+        }
+        let n_same = known.iter().filter(|k| k.2).count();
+        let n_cross = known.iter().filter(|k| k.3).count();
+        eprintln!("{} labelled tracks with app heads; {} known pairs ({n_same} same, {} different; {n_cross} cross-day) from {} answers", labelled.len(), known.len(), known.len() - n_same, answers.len());
+        let order = ordered(&store);
+        let rows = store.rows();
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let mut group_of_row: HashMap<usize, usize> = HashMap::new();
+            for (g, c) in clusters.iter().enumerate() {
+                for &m in &c.members {
+                    group_of_row.insert(m, g);
+                }
+            }
+            // A track's group: the group most of its rows are in.
+            let group_of_track: HashMap<u64, usize> = rows_of_track
+                .iter()
+                .filter_map(|(t, rs)| {
+                    let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
+                    for r in rs {
+                        if let Some(&g) = group_of_row.get(r) {
+                            *counts.entry(g).or_default() += 1;
+                        }
+                    }
+                    counts.into_iter().max_by_key(|&(_, n)| n).map(|(g, _)| (*t, g))
+                })
+                .collect();
+            let (mut split, mut merged, mut split_cross, mut merged_cross, mut same_seen, mut diff_seen) = (0, 0, 0, 0, 0, 0);
+            let mut mixed_groups: HashSet<usize> = HashSet::new();
+            let mut judged_groups: HashSet<usize> = HashSet::new();
+            for &(x, y, same, cross) in &known {
+                let (Some(&gx), Some(&gy)) = (group_of_track.get(&x), group_of_track.get(&y)) else { continue };
+                if same {
+                    same_seen += 1;
+                    if gx != gy {
+                        split += 1;
+                        split_cross += cross as usize;
+                    } else {
+                        judged_groups.insert(gx);
+                    }
+                } else {
+                    diff_seen += 1;
+                    if gx == gy {
+                        merged += 1;
+                        merged_cross += cross as usize;
+                        mixed_groups.insert(gx);
+                    }
+                }
+            }
+            judged_groups.extend(mixed_groups.iter().copied());
+            let sizes: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+            eprintln!(
+                "{name}: {} groups ({} of 3+ heads); judged groups {}, mixed {}; same pairs split {split}/{same_seen} (cross-day {split_cross}); different pairs merged {merged}/{diff_seen} (cross-day {merged_cross}); sizes {:?}",
+                clusters.len(),
+                sizes.iter().filter(|&&n| n >= 3).count(),
+                judged_groups.len(),
+                mixed_groups.len(),
+                &sizes[..sizes.len().min(10)]
+            );
+        }
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
