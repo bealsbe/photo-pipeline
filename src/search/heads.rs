@@ -1728,6 +1728,152 @@ mod store_tests {
         eprintln!("dumped {} photos with heads, {} rows × {}", photos.len(), vrefs.len(), vdim);
     }
 
+    /// Score the grouping variants against the relabelling page's
+    /// answers (v4: each answer carries both heads by content key and
+    /// box), over the app's own heads (`PP_EVAL_OUT/index`): per tier,
+    /// the distance curve, and for each variant recall (same pairs in
+    /// one group), merged different pairs, and the share of 3+ groups
+    /// holding a labelled different pair; Find more's strict cut and the
+    /// suggestion band as the pair's own distance.  `PP_HOLDOUT=even|odd`
+    /// scores only the answers whose first head's day index is even or
+    /// odd (a hold-out by day).  Prints counts only.
+    #[test]
+    #[ignore = "needs the labels copy (PP_LABELS) and a head cache (PP_EVAL_OUT)"]
+    fn fursuit_relabel_score() {
+        let labels: serde_json::Value = serde_json::from_slice(&fs::read(std::env::var("PP_LABELS").expect("PP_LABELS")).unwrap()).unwrap();
+        assert_eq!(labels["version"], 4, "a v4 relabel file");
+        let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
+        let holdout = std::env::var("PP_HOLDOUT").ok();
+        let mut store = HeadStore::load(&dir);
+        store.vectors();
+        let refs = store.refs().to_vec();
+        let row_of: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let key_of = |hex: &str| -> Key {
+            let mut k = [0u8; 16];
+            for (i, b) in k.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap();
+            }
+            Key(k)
+        };
+        // The page rounds boxes to four decimals, the store's refs to
+        // thousandths: join by key and the best-overlapping head of that
+        // photo (IoU >= 0.6), which is the same head.
+        let exact = std::cell::Cell::new(0usize);
+        let head_row = |h: &serde_json::Value| -> Option<usize> {
+            let b: Vec<f32> = h["bbox"].as_array()?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+            let key = key_of(h["key"].as_str()?);
+            let r = FaceRef::new(key, [b[0], b[1], b[2], b[3]]);
+            if let Some(&row) = row_of.get(&r) {
+                exact.set(exact.get() + 1);
+                return Some(row);
+            }
+            let best = store.heads_of(&key).iter().map(|d| (crate::ml::heads::iou([b[0], b[1], b[2], b[3]], d.bbox), d.head_ref(key))).max_by(|x, y| x.0.total_cmp(&y.0))?;
+            if best.0 < 0.6 {
+                return None;
+            }
+            row_of.get(&best.1).copied()
+        };
+        // Days, for the hold-out.
+        let mut days: Vec<String> = labels["answers"].as_object().unwrap().values().map(|a| a["heads"]["a"]["day"].as_str().unwrap().to_string()).collect();
+        days.sort();
+        days.dedup();
+        let day_index: HashMap<String, usize> = days.iter().enumerate().map(|(i, d)| (d.clone(), i)).collect();
+        // Answers → (row a, row b, same, tier, d, held)
+        let mut pairs: Vec<(usize, usize, bool, u64, f32)> = Vec::new();
+        let (mut unmapped, mut skipped, mut held_out) = (0, 0, 0);
+        for a in labels["answers"].as_object().unwrap().values() {
+            let r = a["r"].as_str().unwrap();
+            if r == "skip" {
+                skipped += 1;
+                continue;
+            }
+            let di = day_index[a["heads"]["a"]["day"].as_str().unwrap()];
+            if let Some(h) = &holdout {
+                let keep = if h == "even" { di % 2 == 0 } else { di % 2 == 1 };
+                if !keep {
+                    held_out += 1;
+                    continue;
+                }
+            }
+            match (head_row(&a["heads"]["a"]), head_row(&a["heads"]["b"])) {
+                (Some(x), Some(y)) => pairs.push((x, y, r == "same", a["tier"].as_u64().unwrap(), a["d"].as_f64().unwrap() as f32)),
+                _ => unmapped += 1,
+            }
+        }
+        eprintln!("{} answers mapped to the app's heads ({} heads by exact ref, the rest by key and overlap), {unmapped} unmapped, {skipped} skipped, {held_out} held out ({:?}); {} days", pairs.len(), exact.get(), holdout, days.len());
+        let rows = store.rows();
+        let dist = |x: usize, y: usize| 1.0 - rows.dot(x, &rows.row_vec(y));
+        let tiers = [1u64, 2, 3, 4];
+        // The distance curve per tier (the pair's own head-to-head distance).
+        let bands = [(0.0f32, 0.10f32), (0.10, 0.14), (0.14, 0.17), (0.17, 0.20), (0.20, 0.24), (0.24, 0.30), (0.30, 1.0)];
+        eprintln!("\nP(same | distance) per tier, asked pairs, the two heads' own distance:");
+        for t in tiers {
+            let mut line = format!("  tier {t}:");
+            for (lo, hi) in bands {
+                let inb: Vec<&(usize, usize, bool, u64, f32)> = pairs.iter().filter(|p| p.3 == t && { let d = dist(p.0, p.1); d >= lo && d < hi }).collect();
+                let same = inb.iter().filter(|p| p.2).count();
+                line += &format!(" [{lo:.2}-{hi:.2}) {same}/{};", inb.len());
+            }
+            eprintln!("{line}");
+        }
+        // Find more (strict 0.14) and the suggestion band (0.17): what a pair's own distance gathers.
+        eprintln!("\nFind more (d < 0.14) and suggestions (d < 0.17) per tier: same pairs reached / all same (recall), and the share same among the pairs under the cut (precision):");
+        for t in tiers {
+            let tp: Vec<&(usize, usize, bool, u64, f32)> = pairs.iter().filter(|p| p.3 == t).collect();
+            let same_all = tp.iter().filter(|p| p.2).count();
+            let mut line = format!("  tier {t}:");
+            for cut in [0.14f32, 0.17, 0.20] {
+                let under: Vec<&&(usize, usize, bool, u64, f32)> = tp.iter().filter(|p| dist(p.0, p.1) < cut).collect();
+                let same_under = under.iter().filter(|p| p.2).count();
+                line += &format!(" <{cut:.2}: recall {same_under}/{same_all}, precision {same_under}/{};", under.len());
+            }
+            eprintln!("{line}");
+        }
+        // The grouping variants.
+        let order = ordered(&store);
+        eprintln!("\nGrouping variants: per tier recall = same pairs in one group / same pairs; merged = different pairs in one group / different pairs; then 3+ groups holding a labelled different pair / 3+ groups holding any labelled pair:");
+        for (name, cut, linkage) in linkages() {
+            let clusters = subjects::cluster_with(&rows, &order, cut, linkage);
+            let mut group_of: HashMap<usize, usize> = HashMap::new();
+            for (g, c) in clusters.iter().enumerate() {
+                for &m in &c.members {
+                    group_of.insert(m, g);
+                }
+            }
+            let big: HashSet<usize> = clusters.iter().enumerate().filter(|(_, c)| c.members.len() >= 3).map(|(g, _)| g).collect();
+            let mut judged: HashSet<usize> = HashSet::new();
+            let mut mixed: HashSet<usize> = HashSet::new();
+            let mut line = format!("{name}: {} groups, {} of 3+ heads, largest {:?} |", clusters.len(), big.len(), clusters.iter().take(3).map(|c| c.members.len()).collect::<Vec<_>>());
+            let (mut rs, mut rn, mut ms, mut mn) = (0, 0, 0, 0);
+            for t in tiers {
+                let (mut same_in, mut same_n, mut diff_in, mut diff_n) = (0, 0, 0, 0);
+                for p in pairs.iter().filter(|p| p.3 == t) {
+                    let (ga, gb) = (group_of.get(&p.0), group_of.get(&p.1));
+                    let together = ga.is_some() && ga == gb;
+                    if let (Some(&g), true) = (ga, together) {
+                        if big.contains(&g) {
+                            judged.insert(g);
+                            if !p.2 {
+                                mixed.insert(g);
+                            }
+                        }
+                    }
+                    if p.2 {
+                        same_n += 1;
+                        if together { same_in += 1; }
+                    } else {
+                        diff_n += 1;
+                        if together { diff_in += 1; }
+                    }
+                }
+                rs += same_in; rn += same_n; ms += diff_in; mn += diff_n;
+                line += &format!(" t{t} recall {same_in}/{same_n} merged {diff_in}/{diff_n};");
+            }
+            line += &format!(" all recall {rs}/{rn} merged {ms}/{mn}; mixed 3+ groups {}/{}", mixed.len(), judged.len());
+            eprintln!("{line}");
+        }
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
