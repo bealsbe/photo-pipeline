@@ -704,13 +704,11 @@ pub enum Linkage {
     /// lie within this of the cluster's first (clearest) member, which
     /// stops a centroid drifting away from what it started as.
     Centroid { merge: bool, seed_cap: Option<f32> },
-    /// A row joins the cluster (among those whose centroid is within
-    /// twice the cut) whose members lie on average within the cut of it,
-    /// the closest such; no merge pass.
-    #[allow(dead_code)] // Phase 4 tune: a kind picks it once its labels say so.
+    /// A row joins the cluster whose members lie on average within the
+    /// cut of it, the closest such; no merge pass.  Fursuits' grouping.
     Average,
     /// As [`Linkage::Average`], but every member must lie within the cut.
-    #[allow(dead_code)] // Phase 4 tune: as above.
+    #[allow(dead_code)] // Scored in the phase 4 tune (`heads.rs` tests); no kind uses it.
     Complete,
 }
 
@@ -761,7 +759,7 @@ pub fn cluster_with(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Link
 
 /// The cluster `v` joins under `linkage`, if any.  One pass over the
 /// centroids (no copies); the member-based linkages then look only at
-/// the clusters whose centroid lies within twice the cut.
+/// the clusters whose centroid lies within the cut (an exact bound).
 fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: Linkage) -> Option<usize> {
     use rayon::prelude::*;
     let centroid_distance = |c: &Cluster| 1.0 - dot(&c.centroid, v);
