@@ -570,7 +570,7 @@ impl Link {
     /// by the search model get its vectors (asked for, never automatic).
     pub fn catch_up_head_vectors(&self) {
         match self {
-            Link::Engine(_) => {}
+            Link::Engine(e) => e.catch_up_head_vectors(),
             Link::Fake(f) => f.change(|s| {
                 let total = s.status.heads.vectors_missing;
                 if total > 0 && !s.status.heads.scanning() {

@@ -126,6 +126,14 @@ pub fn caption(app: &App) -> String {
     let s = &app.subjects;
     let a = subj::arrange(&s.all, Kind::Fursuit, app.settings.people_min_photos());
     let looking = app.search.status.heads.scanning();
+    // Updating the heads found before v2 is not looking for new ones.
+    if let Step::Scanning { why: Why::Vectors, .. } = app.search.status.heads.step {
+        return match (a.named.len(), a.to_name.len()) {
+            (0, 0) => "Fursuit heads are being updated".to_string(),
+            (0, _) => "Fursuit heads are still being updated. Name the fursuits you want to find.".to_string(),
+            (n, k) => format!("{n} named, {} to name", util::plural(k as u64, "group")),
+        };
+    }
     match (a.named.len(), a.to_name.len()) {
         (0, 0) if looking => "Fursuit heads are being found".to_string(),
         (0, 0) => String::new(),
@@ -542,8 +550,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             app.show_status(format!("Skipped. {} wait on the Fursuits tab, to look at later.", super::search_setup::capital(&photos_phrase(o))), 6000)
         }
         Msg::Stop => {
+            let updating = matches!(app.search.status.heads.step, Step::Scanning { why: Why::Vectors, .. });
             app.search.link.stop_heads();
-            app.show_status("Stopped looking for fursuit heads. What was found is kept.", 5000)
+            app.show_status(if updating { "Stopped updating fursuit heads. Those updated are kept." } else { "Stopped looking for fursuit heads. What was found is kept." }, 5000)
         }
         Msg::TryCard => {
             app.search.link.try_card_again();
