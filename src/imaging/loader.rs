@@ -273,9 +273,15 @@ impl Loader {
         }
     }
 
+    /// How far either side of the photo on screen to preload, trimmed to
+    /// the budget.
+    pub fn preload_radius(&self) -> usize {
+        PRELOAD_RADIUS.min(self.affordable_radius())
+    }
+
     /// Preload up to ±radius around `center`, trimmed to the budget.
     pub fn preload_range(&mut self, items: &[(PathBuf, FileType)], center: usize) {
-        let radius = PRELOAD_RADIUS.min(self.affordable_radius());
+        let radius = self.preload_radius();
         let lo = center.saturating_sub(radius);
         let hi = (center + radius).min(items.len().saturating_sub(1));
         for i in lo..=hi {

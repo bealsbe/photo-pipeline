@@ -77,6 +77,9 @@ pub struct Viewer {
     pub(super) burst_of: Vec<Option<BurstId>>,
     /// The burst sheet: on screen or not, the burst open, frames picked.
     pub(super) sheet: SheetUi,
+    /// The move under way is a burst skip (Shift+← →), this way: its
+    /// preload looks ahead instead of back over the frames skipped.
+    pub(super) skipping: Option<i32>,
 }
 
 /// The status while a photo decodes.
@@ -236,6 +239,7 @@ pub fn open_as(app: &mut App, source: Source, items: Vec<RecordId>, index: usize
         win,
         burst_of,
         sheet: SheetUi::default(),
+        skipping: None,
     });
     if let Some(v) = app.viewer.as_mut() {
         viewer_burst::arrive(v, index, land, None, pref);
@@ -316,6 +320,8 @@ fn preload_adjacent(app: &mut App) {
         .map(|&id| c.get(id).map(|r| (r.path.clone(), r.file_type)).unwrap_or((PathBuf::new(), FileType::Jpg)))
         .collect();
     let index = v.index;
+    // After a burst skip, what comes next rather than what was skipped.
+    let ahead = v.skipping.map(|dir| viewer_burst::skip_preload(&v.burst_of, index, dir, app.loader.preload_radius()));
     app.loader.clear_queue();
     // Keep the current image's load if it is still in flight.
     if let Some((p, t)) = items.get(index) {
@@ -323,7 +329,16 @@ fn preload_adjacent(app: &mut App) {
             app.loader.request(p, *t);
         }
     }
-    app.loader.preload_range(&items, index);
+    match ahead {
+        Some(want) => {
+            for i in want {
+                if let Some((p, t)) = items.get(i) {
+                    app.loader.preload(p, *t);
+                }
+            }
+        }
+        None => app.loader.preload_range(&items, index),
+    }
 }
 
 pub(super) fn navigate(app: &mut App, to: usize, dir: i32) -> Task<Message> {
@@ -785,6 +800,12 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
         return Task::none();
     }
     if !v.crop_mode {
+        // Shift+← → (Shift+A D): skip whole bursts, on a frame or the sheet.
+        match super::commands::Cmd::from_key(&key, mods) {
+            Some(super::commands::Cmd::PrevBurst) => return viewer_burst::skip(app, -1),
+            Some(super::commands::Cmd::NextBurst) => return viewer_burst::skip(app, 1),
+            _ => {}
+        }
         if let Some(t) = viewer_burst::on_key(app, &key, c) {
             return t;
         }
@@ -940,24 +961,25 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     let on_sheet = viewer_burst::on_sheet(v);
 
     // ── top bar ─────────────────────────────────────────────────────────
+    // In a burst the chevrons' tooltips also name the keys that skip it.
+    const SKIP_BACK: &str = "This burst's first frame, or the burst before  (Shift+←)";
     let (prev, next) = match run.as_ref().filter(|_| on_sheet) {
         // On the sheet the chevrons leave the burst.
         Some(r) => (
-            kit::tip(kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), (r.start > 0).then_some(Message::Viewer(Msg::Leave(-1)))), "Before this burst  (PgUp)", true),
-            kit::tip(kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), (r.end < n).then_some(Message::Viewer(Msg::Leave(1)))), "After this burst  (PgDn)", true),
-        ),
-        None => (
             kit::tip(
-                kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), if nav_ok && v.index > 0 { vmsg(Msg::Prev) } else { None }),
-                "Previous  (←)",
+                kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), (r.start > 0).then_some(Message::Viewer(Msg::Leave(-1)))),
+                format!("Before this burst  (PgUp)\n{SKIP_BACK}"),
                 true,
             ),
-            kit::tip(
-                kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), if nav_ok && v.index + 1 < n { vmsg(Msg::Next) } else { None }),
-                "Next  (→)",
-                true,
-            ),
+            kit::tip(kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), (r.end < n).then_some(Message::Viewer(Msg::Leave(1)))), "After this burst  (PgDn or Shift+→)", true),
         ),
+        None => {
+            let (back, on) = if run.is_some() { (format!("Previous  (←)\n{SKIP_BACK}"), "Next  (→)\nNext burst  (Shift+→)") } else { ("Previous  (←)".to_string(), "Next  (→)") };
+            (
+                kit::tip(kit::icon_btn(Glyph::ChevronLeft, t::INK, style::ghost(), if nav_ok && v.index > 0 { vmsg(Msg::Prev) } else { None }), back, true),
+                kit::tip(kit::icon_btn(Glyph::ChevronRight, t::INK, style::ghost(), if nav_ok && v.index + 1 < n { vmsg(Msg::Next) } else { None }), on, true),
+            )
+        }
     };
     let name = display.map(|r| r.filename()).unwrap_or_default();
     let mut top = row![prev, next, Space::new().width(t::S2)].spacing(t::S2).align_y(Alignment::Center);

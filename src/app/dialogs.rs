@@ -1754,6 +1754,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         "Viewer",
         &[
             ("←  →  or  A  D", "Previous and next photo"),
+            ("Shift+←  →  or  Shift+A  D", "Skip a burst: back to its first frame, or on to the next one"),
             ("Home  /  End", "First and last photo"),
             ("P  or  Delete", "Mark to prune"),
             ("M", "Mark for export"),
@@ -1782,6 +1783,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Esc  or  −  or  B", "From a frame, back out to all of them"),
             ("←  →  on a frame", "The burst's previous and next frame"),
             ("PgUp  /  PgDn", "Before or after the burst"),
+            ("Shift+←  /  Shift+→", "This burst's first frame or the burst before; the next burst"),
             ("P  /  M  /  U", "Mark the outlined frame"),
             ("Ctrl+click  or  Space", "Pick frames to compare"),
             ("C", "Compare the picked frames, or the outlined one and its neighbours"),

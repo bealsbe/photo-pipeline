@@ -1436,7 +1436,9 @@ impl App {
                 return t;
             }
         }
-        if let Some(cmd) = Cmd::from_key(&key, mods) {
+        // The viewer's own commands (Shift+arrows) leave their keys to the
+        // page here: the grid's Shift+arrows extend its selection.
+        if let Some(cmd) = Cmd::from_key(&key, mods).filter(|c| !c.viewer_only()) {
             let enabled = !self.view.is_library() || !matches!(cmd, Cmd::SelectMode) || self.view == View::Subjects;
             if enabled {
                 return self.update(Message::Cmd(cmd));
@@ -1835,6 +1837,8 @@ impl App {
             // whichever view is showing.
             Cmd::StackBursts => self.toggle_all_bursts(),
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
+            Cmd::PrevBurst => viewer_burst::skip(self, -1),
+            Cmd::NextBurst => viewer_burst::skip(self, 1),
             Cmd::Preferences => preferences::open(self),
             Cmd::Analyse => hints_ui::analyse(self),
             Cmd::KeepThisPruneRest => bulk::open(self, bulk::Action::KeepThis),
