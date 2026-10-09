@@ -2533,7 +2533,6 @@ close calls in *Find more* and the "Same fursuit?" review.
 - **The fursuit download** is now the head finder alone; the copy names it from the registry (`fursuits::models_name`).
 
 - **One ask, sixty close calls** (the backend's `judging::MAX_CLOSE_CALLS`). A finished run with more beyond says "N more can be checked" with *Check the next N*, which is the review's *Find more*. With the judge on, a new ask keeps the review's list and adds what is new at the end (`Review::append`), so answers and place stay.
-- **Too few heads to group.** Until the whitening exists (`whiten::MIN_HEADS` heads with vectors), the tab says "Fursuits are grouped once 512 heads are found" and how many so far (`State::TooFew`), and a scan's card says when groups will appear.
 
 ### Checked on the real engine
 

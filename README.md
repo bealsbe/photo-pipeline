@@ -579,10 +579,7 @@ never shown, merged, suggested or completed together with people or pets.
   say how many photos, what is read and how long it takes, with *Update
   the fursuit heads*; it reads those previews again at the heads already
   found, so names and answers keep pointing at them.  Nothing runs until
-  asked; × in the status bar stops it.  Fursuits are grouped once 512
-  heads have the search model's vectors (telling suits apart is learnt
-  from the library's own heads); until then the tab says how many so
-  far.
+  asked; × in the status bar stops it.
 - **A failing card** stops the step and says so (the banner, and the tab
   once the banner is put away) with *Try the card again* and
   *Preferences*; nothing moves to the processor.

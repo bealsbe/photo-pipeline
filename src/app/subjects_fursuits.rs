@@ -28,7 +28,6 @@ use super::subjects::{self as subj};
 use super::{App, Message, View};
 use crate::ml::Device;
 use crate::search::estimate;
-use crate::search::whiten::MIN_HEADS;
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::theme::{self as t, alpha};
@@ -80,9 +79,6 @@ pub enum State {
     Looking,
     /// The card failed, nothing grouped yet.
     Failed,
-    /// Heads found, but too few to tell apart yet (a whitening needs
-    /// `whiten::MIN_HEADS` heads with vectors): nothing is grouped.
-    TooFew,
     /// Every fursuit photo looked at, no head found.
     NoHeads,
     Groups,
@@ -121,9 +117,6 @@ pub fn state(app: &App) -> State {
     }
     if h.catch_up_wanted() {
         return State::CatchUp;
-    }
-    if h.found > 0 && !h.whitened {
-        return State::TooFew;
     }
     State::NoHeads
 }
@@ -234,16 +227,6 @@ pub fn body(app: &App) -> Element<'_, Message> {
             col = col.push(subj::later(Glyph::Fursuit, title, note));
             container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
         }
-        State::TooFew => subj::message(
-            Glyph::Fursuit,
-            TOO_FEW_TITLE.as_str(),
-            format!(
-                "{} so far. Telling one fursuit from another is learnt from the library's own heads, so it needs that many first. New exports add more. Nothing is named for you.",
-                super::search_setup::capital(&util::plural(h.vectors as u64, "fursuit head"))
-            ),
-            None,
-            None,
-        ),
         State::NoHeads => subj::message(
             Glyph::Fursuit,
             "No fursuit heads found yet",
@@ -398,19 +381,6 @@ fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
         .into()
 }
 
-/// The title while too few heads are found to group them.
-static TOO_FEW_TITLE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("Fursuits are grouped once {} heads are found", util::thousands(MIN_HEADS as u64)));
-
-/// When groups appear: as heads are found, or once there are enough to
-/// tell apart (`MIN_HEADS` with vectors).
-fn groups_note(h: &HeadsStatus) -> String {
-    if h.whitened {
-        "Groups appear as they are found, newest days first.".to_string()
-    } else {
-        format!("Groups appear once {} heads are found: {} so far.", util::thousands(MIN_HEADS as u64), util::thousands(h.vectors as u64))
-    }
-}
-
 /// Over the groups (or alone): a scan's progress, the processor's question,
 /// a failed card, or photos still to look at.
 pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
@@ -435,7 +405,7 @@ pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
                 Glyph::Fursuit,
                 t::PHOTO_INK2,
                 format!("Finding fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
-                format!("{} left {}. {}", super::search_setup::capital(&left), on_device(device), groups_note(h)),
+                format!("{} left {}. Groups appear as they are found, newest days first.", super::search_setup::capital(&left), on_device(device)),
                 bar(frac, 120.0, t::PHOTO_RAISED),
             ))
         }
