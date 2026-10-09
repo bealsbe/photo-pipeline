@@ -1250,8 +1250,15 @@ impl Fake {
                     st.fursuits.judge_on = s.judge.installed();
                     st.judge_run = None;
                     st.refresh_people();
+                    st.sent_people = None;
                 }
                 "judge-wait" => st.card_held = true,
+                "judge-nosure" => {
+                    st.fursuits.no_sure = true;
+                    st.refresh_people();
+                    // The counts changed with no edit: send them again.
+                    st.sent_people = None;
+                }
                 "judge-free" => st.card_held = false,
                 "judge-cardcrash" => {
                     st.judge_run = None;

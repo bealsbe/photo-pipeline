@@ -702,7 +702,11 @@ fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         fact("Runs on", card, Some("Never the processor. If it doesn't fit on the card, or the card fails, checking stops and says why.")),
         fact(
             "Takes",
-            format!("{} a close call, only while Find more or a review has some.", capital(&secs)),
+            format!(
+                "{} a close call ({} for 100), only while Find more or a review has some.",
+                capital(&secs),
+                crate::search::estimate::describe_seconds(100.0 * super::fursuits::JUDGE_SECONDS_PER_CALL)
+            ),
             Some("It waits while indexing or the fursuit-head step is using the card, and lets the card go after two quiet minutes."),
         ),
         fact("Keeps", format!("{} in the models folder. Preferences ▸ Storage deletes it.", size(mi.kept_bytes())), None),

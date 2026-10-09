@@ -278,7 +278,12 @@ pub fn review_line<'a>(app: &'a App, group: &GroupId, seq: u64, left_out_shown: 
     match live {
         Some((tone, title, detail)) => {
             let failed = matches!(j.state, JudgeState::Failed(_) | JudgeState::Broken(_));
-            r = r.push(icons::view(if failed { Glyph::GraphicsCard } else { Glyph::CloseCall }, 16.0, tone));
+            let glyph = match j.state {
+                JudgeState::Failed(_) => Glyph::GraphicsCard,
+                JudgeState::Broken(_) => Glyph::Warning,
+                _ => Glyph::CloseCall,
+            };
+            r = r.push(icons::view(glyph, 16.0, tone));
             let title = text(title).size(t::T_SMALL).font(paint::MEDIUM).color(if failed { t::WARN } else { t::PHOTO_INK });
             let detail = text(detail).size(t::T_SMALL).color(t::PHOTO_INK3);
             // A failure takes two lines: what stopped, then why and what is
@@ -464,7 +469,7 @@ mod tests {
     fn the_choice_says_its_speed_size_and_where_it_runs() {
         assert_eq!(choice_words(JudgeChoice::Off), None, "Off costs nothing to say");
         let w = choice_words(JudgeChoice::Gemma4).unwrap();
-        assert!(w.starts_with("About 1 second a close call"), "{w}");
+        assert!(w.starts_with("About 2 seconds a close call"), "{w}");
         assert!(w.contains("About 18 GB"), "{w}");
         assert!(w.contains("graphics card only"), "{w}");
         assert!(!w.contains("processor"), "never offers the processor: {w}");

@@ -72,9 +72,10 @@ pub fn call_seconds_words(secs: f64) -> String {
 /// Seconds to put the judge on the card the first time (the research's
 /// 29 s).  PROVISIONAL: the backend's `estimate::JUDGE_LOAD_SECONDS`.
 pub const JUDGE_LOAD_SECONDS: f64 = 29.0;
-/// Seconds a close call takes (the plan's "about 1 s").  PROVISIONAL: the
-/// backend's `estimate::JUDGE_SECONDS_PER_PAIR`.
-pub const JUDGE_SECONDS_PER_CALL: f64 = 1.0;
+/// Seconds a close call takes: the research measured 2.3 s a pair, both
+/// orders at 560 image tokens.  PROVISIONAL: the backend's own
+/// measurement, `estimate::JUDGE_SECONDS_PER_PAIR`.
+pub const JUDGE_SECONDS_PER_CALL: f64 = 2.3;
 
 // ── the stand-in ────────────────────────────────────────────────────────────
 //
@@ -225,6 +226,8 @@ pub struct FakeFursuits {
     pub name_first: bool,
     /// A close-call judge is chosen and in place.
     pub judge_on: bool,
+    /// Nothing is sure: every candidate is a close call (`judge-nosure`).
+    pub no_sure: bool,
 }
 
 const NAMES: [&str; 2] = ["Fursuit 1", "Fursuit 2"];
@@ -424,7 +427,7 @@ impl FakeFursuits {
 
     /// The sure suggestions and the close calls (the judge's band).
     fn split(&self, g: &FakeGroup, all: Vec<(bool, Vec<Face>)>) -> (Vec<Vec<Face>>, Vec<Vec<Face>>) {
-        let limit = FIRST_BATCH + MORE_BATCH * g.rounds;
+        let limit = if self.no_sure { 0 } else { FIRST_BATCH + MORE_BATCH * g.rounds };
         let (mut sure, mut band) = (Vec::new(), Vec::new());
         for (own, v) in all {
             if own && sure.len() < limit {

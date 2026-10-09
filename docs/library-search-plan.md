@@ -2496,3 +2496,46 @@ heads-catchup|heads-off|heads-running [n]|heads-asking [photos]
   models* still said "the search model" (it holds the face and head
   models too, and Delete removes them all); the stand-in's skipped scan
   left nothing to offer.
+
+## As built — fursuit matching v2 (UI): the close-call judge
+
+The user-facing side of v2 (decided 2026-10-08): whitened search-model
+head vectors in place of DINOv2, and Gemma 4 as an optional judge of the
+close calls in *Find more* and the "Same fursuit?" review.
+
+### Where it lives
+
+- `src/app/fursuit_judge.rs`: the judge as the pages show it.
+  - `Run`, one request's verdicts, kept in `Subjects::judge`.
+  - `on_judged` takes `BgEvent::Judged`.
+  - The review's line over the strip, the strip's hollow tail tile, the status bar's slot, the band's left-out count, and their messages (`Message::Judge`).
+- The review (`subjects_review.rs`): the judge's offers join the END of the list (`Review::take`, deduped by each entry's first head), so nothing on screen moves and answers keep their places.
+  - What the judge left out joins too, marked, when *Show them* is pressed.
+  - An empty first list stays open while a judge is on (`waiting_page`), and the end page says when close calls are still coming.
+- Preferences ▸ Fursuits:
+  - *Close-call judge*, a radio list built from `JudgeChoice::ALL` and the registry's `choice: "judge"` rows, so another judge is a new variant and a row, not a new control.
+  - A line under the list says where the chosen judge stands: not downloaded (with *Download…*), downloading, the processor chosen, on the card now, or stopped.
+  - *Heads to update* with *Update them*.
+  - Storage ▸ *Close-call judge*, a row of its own with *Open* and *Delete…*.
+- The download dialog: `Dialog::judge(choice)` shows the judge's row and what it costs, runs on and keeps. Its progress, failure and status-bar words name the judge.
+- The Fursuits tab: `State::Vectors` (a page when no head has the new vectors yet), a card over the groups otherwise, and `Why::Vectors` progress with ×.
+- Glyph `CloseCall`: two rounded-square heads on a beam.
+
+### As designed, with these differences
+
+- **Choosing a judge not downloaded** opens the dialog in the main window (Preferences closes, as *Find their heads…* does). The choice is made when *Download* is pressed. If the download stops or fails, the choice stays, and Preferences offers *Download…* again.
+- **Off is never an empty state.** With the judge off, the review and Find more are exactly as before: no line, no tile, no hint to turn it on.
+- **Speed in words** comes from the measured time a close call takes (2.3 s a pair, both orders): "About 2 seconds a close call", and in the dialog "(about 4 minutes for 100)".
+- **A failing card** is said in the review's line as two lines in the warning tone, with *Try the card again* and *Preferences*, and in the status bar. The run it stopped is told as "Checked 6 of 81 close calls before the judge stopped". The processor is never offered (`failure_words`, tested).
+- **The fursuit download** is now the head finder alone; the copy names it from the registry (`fursuits::models_name`).
+
+### The stand-in
+
+`FakeFursuits` judges a named fursuit's close calls:
+- its own suit's held-back heads beyond the sure batch;
+- look-alikes, mixed in nearest first;
+- verdicts as the suit, with a few mistakes.
+
+The fake engine runs them a tick at a time. It waits while a pass, the head step or `judge-wait` holds the card, and it takes a few ticks to load. It sends `Judged` deltas as the engine does.
+
+`search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|judge-cardcrash|judge-broken|heads-vectors [n|all]` set its states.

@@ -536,6 +536,23 @@ never shown, merged, suggested or completed together with people or pets.
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
+- **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*,
+  off by default).  With a judge chosen, *Find more* and the "Same
+  fursuit?" review offer the clear matches at once, and the judge looks
+  at the close calls, two heads side by side, nearest first.  A calm line
+  over the review's strip says how far it has got ("Checking 23 close
+  calls…", with ×), or that the close calls wait for the graphics card
+  while indexing or the head step uses it.  Those it thinks are the same
+  fursuit join the end of the list as they come (a hollow tile at the end
+  of the strip counts those still to check); those it thinks are
+  different are left out and counted ("14 checked and left out"), and
+  *Show them* adds them to the end of the list, marked, to answer
+  yourself.  The status bar shows the same line in any view.  It only
+  suggests: every photo still takes your Y or N, and nothing is named,
+  merged or marked for you.  Fursuits only, never people.  A failing card
+  stops it and says so as an error, with *Try the card again* and
+  *Preferences*; it never moves to the processor, and what is already on
+  the list is kept.
 - **The head step.**  On the graphics card it runs on its own: after the
   first index (the download dialog's *Find fursuit heads*, ticked unless
   the processor is chosen) and on each export's new fursuit photos, with
@@ -550,17 +567,31 @@ never shown, merged, suggested or completed together with people or pets.
   the tab, which offers them again with their cost.
 - **A library indexed before** fursuit heads were looked for gets an
   offer on the tab: what it looks at, what it reads, how long it takes on
-  the device chosen and what it downloads (the *Fursuits* pair, if not in
-  place); nothing runs until asked.
+  the device chosen and what it downloads (the head finder, OWLv2, if
+  not in place); nothing runs until asked.
+- **Heads to update.**  Heads found before fursuits were told apart by
+  the search model need its vectors once: the tab (a page when none has
+  them yet, a card over the groups otherwise) and Preferences ▸ Fursuits
+  say how many photos, what is read and how long it takes, with *Update
+  the fursuit heads*; it reads those previews again at the heads already
+  found, so names and answers keep pointing at them.  Nothing runs until
+  asked; × in the status bar stops it.
 - **A failing card** stops the step and says so (the banner, and the tab
   once the banner is put away) with *Try the card again* and
   *Preferences*; nothing moves to the processor.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
-  heads…*, and *Forget all…*, which forgets the heads found and the
-  fursuit names given and leaves people alone (Preferences ▸ People's
-  *Forget all…* likewise leaves fursuits alone).  Preferences ▸ Storage
-  shows the heads' size.
+  heads…*, heads to update with *Update them*, *Close-call judge* (a
+  choice list: *Off*, the default, or *Gemma 4*, about 18 GB and about
+  2 seconds a close call, on the graphics card only; choosing one not
+  downloaded opens the download dialog with its row, and a line under
+  the list says where it stands), and *Forget all…*, which forgets the
+  heads found and the fursuit names given and leaves people alone
+  (Preferences ▸ People's *Forget all…* likewise leaves fursuits alone).
+  Preferences ▸ Storage shows the heads' size (with the close calls the
+  judge checked) and the judge's model on a row of its own, with
+  *Delete…* (the judge turns off; choosing it again downloads it again,
+  after asking).
 - **Look:** the tab's glyph is a furry head (full ears, cheek ruffs, a
   muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
   cartoon heads, never a photo.
@@ -906,9 +937,14 @@ These are deliberate:
   library's shots (`search fake people`, `search fake fursuits`, and the
   head step's states: `heads-catchup`, `heads-off`, `heads-running [n]`,
   `heads-asking [photos] [first|export|resume]`, `heads-skipped [n]`,
-  `heads-cardcrash`), drawn as grey silhouettes and grey cartoon heads;
-  `fursuits start|skip|stop|findheads|trycard|prefs|dump` press the head
-  step's buttons.
+  `heads-cardcrash`, `heads-vectors [n|all]`), drawn as grey silhouettes
+  and grey cartoon heads; `fursuits start|skip|stop|findheads|updateheads|
+  trycard|prefs|dump` press the head step's buttons.  Its close-call judge
+  (`search fake judge-on|judge-off|judge-notinstalled|judge-wait|
+  judge-free|judge-cardcrash|judge-broken`) judges a named fursuit's close
+  calls a few a second, offering its own suit's heads and leaving
+  look-alikes out (with a few mistakes); `judge stop|showleftout|trycard|
+  prefs|dump` drive its line.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

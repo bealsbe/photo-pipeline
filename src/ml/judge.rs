@@ -42,7 +42,7 @@ impl JudgeChoice {
     pub fn description(self) -> &'static str {
         match self {
             JudgeChoice::Off => "",
-            JudgeChoice::Gemma4 => "about 18 GB, about 1 s per close call",
+            JudgeChoice::Gemma4 => "about 18 GB, about 2 s per close call",
         }
     }
 }
