@@ -245,8 +245,15 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
 pub fn failure_words(f: &crate::ml::CardFailure) -> (String, String) {
     (
         f.title().replacen("Indexing stopped", "Checking close calls stopped", 1),
-        format!("{} The suggestions here are kept. Nothing is moved to the processor.", f.detail().trim()),
+        format!("{} The suggestions here are kept. Nothing is moved to the processor.", sentence(&f.detail())),
     )
+}
+
+/// `s` as a sentence: capitalised, ending in a full stop (a helper's own
+/// words may lack either).
+fn sentence(s: &str) -> String {
+    let s = super::search_setup::capital(s.trim());
+    if s.is_empty() || s.ends_with(['.', '!', '?']) { s } else { format!("{s}.") }
 }
 
 /// A judge's choice in Preferences, in plain words: its speed, where it
@@ -520,6 +527,8 @@ mod tests {
             assert!(detail.contains("kept"), "what it found stays: {detail}");
             assert!(!detail.contains("choose it") && !detail.contains("instead"), "no offer of the processor: {detail}");
         }
+        let (_, detail) = failure_words(&CardFailure::Failed("the model doesn't fit on the card".into()));
+        assert!(detail.starts_with("The model doesn't fit on the card. The suggestions"), "{detail}");
         assert_eq!(left_out_words(14), "14 checked and left out");
         assert_eq!(left_out_words(1_200), "1,200 checked and left out");
     }
