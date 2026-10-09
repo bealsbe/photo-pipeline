@@ -7,6 +7,7 @@ pub mod calendar;
 pub mod commands;
 pub mod compare;
 pub mod dialogs;
+pub mod download_speed;
 pub mod fursuit_art;
 pub mod fursuit_judge;
 pub mod fursuits;
@@ -669,6 +670,10 @@ impl App {
         ];
         if self.calendar.animating() || self.scan_dirty || self.script_scroll.is_some() {
             subs.push(window::frames().map(|_| Message::Tick));
+        }
+        // A download's speed, and a stall (when no progress comes at all).
+        if self.search.downloads.iter().any(|d| d.state == crate::ml::download::DownloadState::Downloading) {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Search(search::Msg::Clock)));
         }
         Subscription::batch(subs)
     }
@@ -2213,7 +2218,7 @@ impl App {
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
-                BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
+                BgEvent::ModelDownload { model, done, fetched, total, state } => tasks.push(search::on_download(self, model, done, fetched, total, state)),
             }
         }
         // The search pass steps back while thumbnails are wanted.

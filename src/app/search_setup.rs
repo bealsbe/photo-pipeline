@@ -22,6 +22,7 @@ use iced::widget::{Space, button, column, container, mouse_area, opaque, progres
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::fursuits;
+use super::download_speed as speed;
 use super::kit::{self, tip};
 use super::search::{Dialog, DialogMsg, Download, Msg, Stage, search_models};
 use super::style;
@@ -834,6 +835,7 @@ fn progress_view(app: &App) -> Element<'_, Message> {
         (false, false) => ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar."),
         (false, true) => ("Downloading the models", "Indexing starts as soon as the models are in place. You can close this: the downloads carry on, with their progress in the status bar."),
     };
+    let reading = s.speed_now();
     let rows = s
         .downloads
         .iter()
@@ -845,12 +847,13 @@ fn progress_view(app: &App) -> Element<'_, Message> {
                 DownloadState::Checking => text("Checking…").size(t::T_SMALL).color(t::INK2).into(),
                 DownloadState::Waiting => text("Waiting").size(t::T_SMALL).color(t::INK3).into(),
                 DownloadState::Cancelled => text("Stopped").size(t::T_SMALL).color(t::INK3).into(),
+                DownloadState::Downloading => text(speed::with_speed(progress_bytes(x.done, x.total), reading)).size(t::T_SMALL).color(t::INK2).into(),
                 _ => text(progress_bytes(x.done, x.total)).size(t::T_SMALL).color(t::INK2).into(),
             };
             row![
                 text(format!("{role}: {name}")).size(t::T_BODY).color(t::INK).width(190),
                 bar(frac, None),
-                container(state).width(120).align_x(iced::alignment::Horizontal::Right),
+                container(state).width(170).align_x(iced::alignment::Horizontal::Right),
             ]
             .spacing(t::S3)
             .align_y(Alignment::Center)
@@ -866,7 +869,23 @@ fn progress_view(app: &App) -> Element<'_, Message> {
             kit::btn("Close", style::secondary(), Some(d(DialogMsg::Close))).into(),
         ]
     };
-    column![dialogs::header(title, None), kit::secondary(body), group(rows), Space::new().height(t::S1), dialogs::footer(vec![], buttons)].spacing(t::S3).into()
+    // How long is left (or that it is starting, or waits for the network),
+    // left of the buttons.
+    let left: Vec<Element<'_, Message>> = reading.map(|r| speed_note(r, remaining(&s.downloads), true)).into_iter().collect();
+    column![dialogs::header(title, None), kit::secondary(body), group(rows), Space::new().height(t::S1), dialogs::footer(left, buttons)].spacing(t::S3).into()
+}
+
+/// Bytes still to come down, over every row.
+pub fn remaining(rows: &[Download]) -> u64 {
+    rows.iter().map(|x| x.total.saturating_sub(x.done)).sum()
+}
+
+/// The time left, "starting…" or "waiting for the network", in the
+/// progress's quiet small type (the dialog's starts with a capital).
+fn speed_note<'a>(r: speed::Reading, remaining: u64, sentence: bool) -> Element<'a, Message> {
+    let words = speed::note(r, remaining);
+    let tone = if r == speed::Reading::Stalled { t::INK2 } else { t::INK3 };
+    text(if sentence { capital(&words) } else { words }).size(t::T_SMALL).color(tone).into()
 }
 
 /// A thin progress bar.  `width` None fills the row.
@@ -907,7 +926,8 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     let slot: Element<'_, Message> = if s.downloading() {
         let (done, total) = s.downloads.iter().fold((0u64, 0u64), |(a, b), x| (a + x.done, b + x.total));
         let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-        let content = row![
+        let reading = s.speed_now();
+        let mut content = row![
             words(if judge_downloads(&s.downloads) {
                 "Downloading the close-call judge".into()
             } else if s.downloads.len() > 1 {
@@ -915,11 +935,14 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
             } else {
                 "Downloading the search model".into()
             }),
-            text(progress_bytes(done, total)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
+            text(speed::with_speed(progress_bytes(done, total), reading)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
             bar(frac, Some(56.0)),
         ]
         .spacing(t::S2)
         .align_y(Alignment::Center);
+        if let Some(r) = reading {
+            content = content.push(speed_note(r, remaining(&s.downloads), false));
+        }
         let b = button(content).padding(Padding::from([0.0, 6.0])).style(style::ghost().style()).on_press(d(DialogMsg::Show));
         row![tip(b, "Show the download", false), stop("Stop the download. Nothing is indexed until it's done.")].spacing(t::S1).align_y(Alignment::Center).into()
     } else if let Some(why) = &st.stopped {

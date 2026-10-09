@@ -162,6 +162,8 @@ pub struct Search {
     /// The engine's status, as last reported.
     pub status: Status,
     pub downloads: Vec<Download>,
+    /// How fast the downloads under way come down.
+    pub speed: super::download_speed::Speed,
 
     /// What is in the field: the words, and before them the chips of the
     /// people searched within (one kind or another, each a group).
@@ -245,6 +247,9 @@ pub enum Msg {
     TryAgain,
     OpenPrefs,
     HideBanner,
+    /// Once a second while a download runs: its speed, or that it waits
+    /// for the network (no events come while it does).
+    Clock,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +280,7 @@ impl Search {
             link,
             status,
             downloads: Vec::new(),
+            speed: Default::default(),
             query: String::new(),
             chips: Vec::new(),
             ran_chips: Vec::new(),
@@ -314,6 +320,12 @@ impl Search {
     /// A model download is under way.
     pub fn downloading(&self) -> bool {
         self.downloads.iter().any(|d| !d.state.is_final())
+    }
+
+    /// The speed, while a model's bytes are coming down (not while one
+    /// waits or is checked).  A clock read, no I/O.
+    pub fn speed_now(&self) -> Option<super::download_speed::Reading> {
+        self.downloads.iter().any(|d| d.state == DownloadState::Downloading).then(|| self.speed.reading(Instant::now()))
     }
 
     /// Photos found (frames inside stacks too), the fursuits left out not
@@ -660,10 +672,14 @@ pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     Task::batch(tasks)
 }
 
-pub fn on_download(app: &mut App, model: ModelId, done: u64, total: u64, state: DownloadState) -> Task<Message> {
+pub fn on_download(app: &mut App, model: ModelId, done: u64, fetched: u64, total: u64, state: DownloadState) -> Task<Message> {
     let s = &mut app.search;
     let failed = super::search_setup::failed(&state);
+    s.speed.observe(model, fetched, state == DownloadState::Downloading, Instant::now());
     super::search_setup::record_download(&mut s.downloads, Download { model, done, total, state });
+    if !s.downloading() {
+        s.speed.finish();
+    }
     // A failure shows in the dialog, reopened if it was closed.
     if failed {
         s.dialog = Some(Dialog::new(Stage::Progress, &app.settings));
@@ -840,6 +856,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             app.search.banner_hidden = true;
             Task::none()
         }
+        // Nothing to do: the views read the clock.
+        Msg::Clock => Task::none(),
     }
 }
 
@@ -1646,11 +1664,20 @@ fn preparing(app: &App) -> Element<'_, Message> {
     let s = &app.search;
     let (line, action): (String, Element<'_, Message>) = if s.downloading() {
         let (done, total) = s.downloads.iter().fold((0, 0), |(a, b), d| (a + d.done, b + d.total));
+        // "4.2 of 9.9 GB at 38 MB/s, about 3 minutes left"
+        let mut so_far = super::search_setup::progress_bytes(done, total);
+        match s.speed_now() {
+            Some(r @ super::download_speed::Reading::Rate { now, .. }) => {
+                so_far = format!("{so_far} at {}, {}", super::download_speed::rate_words(now), super::download_speed::note(r, super::search_setup::remaining(&s.downloads)))
+            }
+            Some(r @ super::download_speed::Reading::Stalled) => so_far = format!("{so_far}, {}", super::download_speed::note(r, 0)),
+            _ => {}
+        }
         (
             if s.downloads.len() > 1 {
-                format!("Downloading the models: {}. Indexing starts as soon as they're in place.", super::search_setup::progress_bytes(done, total))
+                format!("Downloading the models: {so_far}. Indexing starts as soon as they're in place.")
             } else {
-                format!("Downloading the search model: {}. Indexing starts as soon as it's in place.", super::search_setup::progress_bytes(done, total))
+                format!("Downloading the search model: {so_far}. Indexing starts as soon as it's in place.")
             },
             kit::btn("Show the download", style::secondary(), Some(m(Msg::Dialog(DialogMsg::Show)))).into(),
         )
@@ -1737,7 +1764,7 @@ pub fn debug_state(app: &App) -> String {
         format!("words={:?} exclude={:?} dates={:?} names={:?}", u.words, u.exclude, u.dates.map(|d| d.label()), u.names)
     });
     format!(
-        "view={:?} page={:?} query={:?} ran={:?} pending={:?} error={:?} photos={} tiles={} sections={:?} fursuits={} fursuits_shown={} animal={:?} understood={:?} stacks={} {:?} open_bursts={} selection={:?} anchor={:?} completions={} hi={:?} recent={:?} from={:?}/{:?} coverage={:?} status=[models={} indexed={}/{} asked={} pass={:?} device={:?} stopped={:?} waiting={} restarts={} exports={}] downloads={:?} dialog={:?} banner_hidden={} steps={} closeness={:.2} scroll={} fake={}",
+        "view={:?} page={:?} query={:?} ran={:?} pending={:?} error={:?} photos={} tiles={} sections={:?} fursuits={} fursuits_shown={} animal={:?} understood={:?} stacks={} {:?} open_bursts={} selection={:?} anchor={:?} completions={} hi={:?} recent={:?} from={:?}/{:?} coverage={:?} status=[models={} indexed={}/{} asked={} pass={:?} device={:?} stopped={:?} waiting={} restarts={} exports={}] downloads={:?} speed={:?} dialog={:?} banner_hidden={} steps={} closeness={:.2} scroll={} fake={}",
         app.view,
         page(app),
         s.query,
@@ -1773,6 +1800,7 @@ pub fn debug_state(app: &App) -> String {
         st.helper_restarts,
         st.index_exports,
         s.downloads.iter().map(|d| format!("{:?}:{}/{}:{:?}", d.model, d.done, d.total, d.state)).collect::<Vec<_>>(),
+        s.speed_now(),
         s.dialog.as_ref().map(|d| (d.stage, d.sums)),
         s.banner_hidden,
         s.steps,

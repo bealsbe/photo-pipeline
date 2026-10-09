@@ -1735,6 +1735,9 @@ fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
         Some(mi) => {
             let coming = app.search.downloads.iter().find(|d| d.model == mi.id && !d.state.is_final());
             let right = match coming {
+                Some(d) if d.state == crate::ml::download::DownloadState::Downloading => {
+                    super::download_speed::with_speed(super::search_setup::progress_bytes(d.done, d.total), app.search.speed_now())
+                }
                 Some(d) => super::search_setup::progress_bytes(d.done, d.total),
                 None if j.downloaded.contains(&c) => "Downloaded".to_string(),
                 None => format!("{} to download", super::search_setup::size(mi.bytes())),
@@ -1784,7 +1787,16 @@ fn judge_note(app: &App) -> Option<Element<'_, Message>> {
         .align_y(Alignment::Center)
         .into(),
         crate::ml::judge::JudgeState::Broken(why) => line(Glyph::Warning, t::WARN, format!("The close-call judge couldn't run. {why}")).into(),
-        _ if judge_downloading(app) => line(Glyph::Info, t::INK2, format!("{} is downloading; close calls are checked once it's in place.", c.label())).into(),
+        _ if judge_downloading(app) => {
+            // "…, about 3 minutes left" or "…, waiting for the network".
+            let how = match app.search.speed_now() {
+                Some(r @ (super::download_speed::Reading::Rate { .. } | super::download_speed::Reading::Stalled)) => {
+                    format!(", {}", super::download_speed::note(r, super::search_setup::remaining(&app.search.downloads)))
+                }
+                _ => String::new(),
+            };
+            line(Glyph::Info, t::INK2, format!("{} is downloading{how}; close calls are checked once it's in place.", c.label())).into()
+        }
         _ if !j.downloaded.contains(&c) => row![
             line(Glyph::Info, t::INK2, format!("{} isn't downloaded, so close calls are matched by look alone for now.", c.label())),
             focusable(p, Control::JudgeDownload, kit::btn("Download…", style::secondary(), Some(m(Msg::Press(Control::JudgeDownload))))),
