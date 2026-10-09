@@ -77,6 +77,14 @@ enum Cmd {
     AnswerHeads(bool),
     StopHeads,
     FindMore { seq: u64, group: GroupId },
+    // Fursuit matching v2.
+    #[allow(dead_code)] // Sent by `catch_up_head_vectors`, which the pages call.
+    CatchUpHeadVectors,
+    /// Tests: whiten with fewer heads than a library needs.
+    #[cfg(test)]
+    MinFit(usize),
+    /// A whitening fit finished on its worker (`None`: too few heads).
+    Whitened(Option<Box<super::whiten::Whitening>>),
     Shutdown,
 }
 
@@ -91,8 +99,13 @@ pub struct Storage {
     /// The faces found, their vectors and tiles (the *People* row; the
     /// user's names live elsewhere and aren't counted).
     pub faces_bytes: u64,
-    /// The head cache's files (the Storage row's *Fursuits*).
+    /// The head cache's files (the Storage row's *Fursuits*), vector
+    /// files of models no longer run included.
     pub heads_bytes: u64,
+    /// The close-call judges' model files (not in `models_bytes`), and
+    /// the verdicts kept beside the index (not in `index_bytes`; v2).
+    pub judge_bytes: u64,
+    pub judged_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -216,6 +229,7 @@ impl Engine {
                     embedder_has_heads: false,
                     heads_regroup_running: false,
                     heads_regroup_wanted: false,
+                    fitting: false,
                 }
                 .run()
             })
@@ -412,6 +426,22 @@ impl Engine {
     pub fn find_more(&self, seq: u64, group: GroupId) {
         self.send(Cmd::FindMore { seq, group });
     }
+
+    /// *Update N photos' heads* (v2): the heads found before fursuit
+    /// matching v2 get the search model's vectors, their photos read
+    /// again on the chosen device (`HeadsStatus::vectors_missing`, the
+    /// cost from `estimate::head_vector_seconds`).  Only ever started by
+    /// this command, never on its own.
+    #[allow(dead_code)] // Called by the pages (fursuit matching v2's UI branch).
+    pub fn catch_up_head_vectors(&self) {
+        self.send(Cmd::CatchUpHeadVectors);
+    }
+
+    /// Tests: whiten with as few as `n` heads.
+    #[cfg(test)]
+    pub fn set_min_fit(&self, n: usize) {
+        self.send(Cmd::MinFit(n));
+    }
 }
 
 impl Engine {
@@ -484,16 +514,26 @@ impl Engine {
 /// Sizes of the index and the models folders.  Walks them: call on a
 /// worker (the Preferences storage survey).
 pub fn storage(library_root: Option<&Path>) -> Storage {
+    storage_in(library_root.and_then(super::index::dir_for).as_deref(), models::models_dir().as_deref())
+}
+
+/// [`storage`] for an index folder and a models folder.  Every model
+/// folder counts, ones no longer used too (phase 4's DINOv2 stays
+/// counted until *Delete* removes it); the judges' folders are counted
+/// apart.
+pub fn storage_in(index_dir: Option<&Path>, models_dir: Option<&Path>) -> Storage {
     let mut out = Storage::default();
-    if let Some(dir) = library_root.and_then(super::index::dir_for) {
-        out.index_bytes = dir_bytes(&dir);
-        out.index_shots = super::index::count_rows(&dir);
-        out.faces_bytes = FaceStore::bytes_in(&dir);
-        out.heads_bytes = HeadStore::bytes_in(&dir);
-        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes);
+    if let Some(dir) = index_dir {
+        out.index_bytes = dir_bytes(dir);
+        out.index_shots = super::index::count_rows(dir);
+        out.faces_bytes = FaceStore::bytes_in(dir);
+        out.heads_bytes = HeadStore::bytes_in(dir);
+        out.judged_bytes = std::fs::read_dir(dir).map(|rd| rd.flatten().filter(|e| e.file_name().to_string_lossy().starts_with("judged-")).filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0);
+        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes + out.judged_bytes);
     }
-    if let Some(dir) = models::models_dir() {
-        out.models_bytes = dir_bytes(&dir);
+    if let Some(dir) = models_dir {
+        out.judge_bytes = models::judge_models().map(|m| dir_bytes(&dir.join(m.id.dir_name()))).sum();
+        out.models_bytes = dir_bytes(dir).saturating_sub(out.judge_bytes);
     }
     out
 }
@@ -603,6 +643,8 @@ struct Worker {
     embedder_has_heads: bool,
     heads_regroup_running: bool,
     heads_regroup_wanted: bool,
+    /// A whitening fit is on its worker (v2).
+    fitting: bool,
 }
 
 /// A running head scan.
@@ -801,7 +843,7 @@ impl Worker {
                     self.cancel_pass();
                     self.drop_embedder();
                     if let Some(dir) = models::models_dir() {
-                        let _ = std::fs::remove_dir_all(dir);
+                        models::delete_all_but_judges(&dir);
                     }
                     self.update(|s| s.models_installed = false);
                 }
@@ -913,6 +955,19 @@ impl Worker {
                     self.publish_heads();
                 }
                 Cmd::StopHeads => self.cancel_scan(),
+                Cmd::CatchUpHeadVectors => self.catch_up_head_vectors(),
+                #[cfg(test)]
+                Cmd::MinFit(n) => self.fursuits.min_fit = n,
+                Cmd::Whitened(w) => {
+                    self.fitting = false;
+                    if self.fursuits.apply_fit(w.map(|b| *b)) {
+                        self.people.set_other_clusters(Kind::Fursuit, Vec::new());
+                        self.publish_subjects();
+                        self.start_heads_regroup();
+                    }
+                    // Heads that arrived meanwhile may call for another.
+                    self.maybe_fit(false);
+                }
                 Cmd::Undo => {
                     if let Some(what) = self.people.undo() {
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
@@ -1093,7 +1148,10 @@ impl Worker {
             return;
         }
         let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
-        if !self.embedder_has_heads {
+        // Finding heads needs a helper with the detector; the catch-up
+        // (known boxes) any image helper.
+        let finding = jobs.iter().all(|j| j.boxes.is_empty());
+        if finding && !self.embedder_has_heads {
             self.drop_embedder();
         }
         let Some(embedder) = self.image_embedder() else {
@@ -1114,6 +1172,7 @@ impl Worker {
         }
         let over = self.fursuits.absorb(&batch);
         self.fursuits.assign_new(&self.people.file);
+        self.maybe_fit(over);
         if over {
             self.scan = None;
             if let Some(fin) = &batch.finished {
@@ -1131,6 +1190,46 @@ impl Worker {
             self.publish_heads();
             self.publish_subjects_throttled(false);
         }
+    }
+
+    /// Fit the whitening again on a worker when it is due (v2:
+    /// `Fursuits::fit_wanted`); `Cmd::Whitened` brings it back.  One at a
+    /// time.
+    fn maybe_fit(&mut self, at_end: bool) {
+        if self.fitting || !self.fursuits.fit_wanted(at_end) {
+            return;
+        }
+        let Some(dir) = self.fursuits.store.as_ref().map(|s| s.dir().to_path_buf()) else { return };
+        let min = self.fursuits.min_fit;
+        self.fitting = true;
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("fursuits-whiten".into())
+            .spawn(move || {
+                let t = Instant::now();
+                let w = HeadStore::fit_whitening(&dir, min);
+                if let Some(w) = &w {
+                    eprintln!("heads: whitening fitted on {} heads in {:.2} s", w.fitted_on, t.elapsed().as_secs_f64());
+                }
+                let _ = me.send(Cmd::Whitened(w.map(Box::new)));
+            })
+            .expect("spawn fursuits-whiten");
+    }
+
+    /// The v2 catch-up, asked for: the heads without vectors get them,
+    /// on the chosen device, as a head scan (never beside a pass).
+    fn catch_up_head_vectors(&mut self) {
+        if self.pass.is_some() || self.scan.is_some() || !self.models_ready() {
+            return;
+        }
+        let jobs = {
+            let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return };
+            self.fursuits.vector_jobs(lib, ix)
+        };
+        if self.fursuits.start_catch_up(&jobs) {
+            self.run_head_scan(jobs);
+        }
+        self.publish_heads();
     }
 
     fn cancel_scan(&mut self) {
@@ -1263,6 +1362,8 @@ impl Worker {
             }
             *self.shared.head_tiles.lock() = self.fursuits.store.as_ref().map(HeadStore::tiles);
             self.resolver = None;
+            // Vectors without a whitening (an interrupted catch-up): fit.
+            self.maybe_fit(false);
         }
         let live: HashSet<PathBuf> = lib.days.values().flat_map(|d| d.files.iter().map(|f| pass::rel_path(&lib.root, &f.path))).collect();
         if let Some(ix) = &mut self.index {
@@ -2694,6 +2795,31 @@ mod tests {
         (Arc::new(ix), d)
     }
 
+    /// Storage counts every model folder, phase 4's DINOv2 too until
+    /// *Delete* removes it, and the judges' apart; the head cache counts
+    /// its old vector file; Delete keeps the judge's folder (its own row).
+    #[test]
+    fn storage_counts_an_old_dinov2_layout_and_delete_removes_it() {
+        let d = std::env::temp_dir().join(format!("pp-storage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (models_dir, index_dir) = (d.join("models"), d.join("index"));
+        for (folder, bytes) in [("dinov2-base", 1000usize), ("siglip2-b16-256", 300), ("gemma4-26b-a4b-it-ud-q4km", 5000)] {
+            std::fs::create_dir_all(models_dir.join(folder)).unwrap();
+            std::fs::write(models_dir.join(folder).join("f"), vec![0u8; bytes]).unwrap();
+        }
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("headvecs-dinov2-base.bin"), vec![0u8; 700]).unwrap();
+        std::fs::write(index_dir.join("judged-gemma4-26b-a4b-it-ud-q4km.bin"), vec![0u8; 50]).unwrap();
+        let s = storage_in(Some(&index_dir), Some(&models_dir));
+        assert_eq!((s.models_bytes, s.judge_bytes), (1300, 5000), "DINOv2's folder still counts; the judge's apart");
+        assert_eq!((s.heads_bytes, s.judged_bytes), (700, 50));
+        models::delete_all_but_judges(&models_dir);
+        let s = storage_in(Some(&index_dir), Some(&models_dir));
+        assert_eq!((s.models_bytes, s.judge_bytes), (0, 5000), "Delete removed DINOv2's folder; the judge has its own row");
+        assert!(!models_dir.join("dinov2-base").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Decision 11 through the engine.  On the processor: the first
     /// index's end puts the fursuit photos to the user (`Step::Asking`),
     /// nothing scans on its own, a skip is remembered, and the tab's
@@ -2713,9 +2839,11 @@ mod tests {
         let (lib, d) = library_of("heads-cpu", &files);
         let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Cpu, true, false, ModelId::AuraFace, true, config);
+        // Three heads are enough to whiten here (the library needs 512).
+        e.set_min_fit(2);
         e.on_library(lib);
         wait_for(&e, "the library", |s| s.library_shots == 4);
-        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
         wait_for(&e, "the question", |s| matches!(s.heads.step, heads::Step::Asking(_)));
         let s = e.status();
@@ -2755,7 +2883,7 @@ mod tests {
         let e2 = Engine::with_config(bus2, Device::Gpu, true, false, ModelId::AuraFace, true, config);
         e2.on_library(lib2);
         wait_for(&e2, "the library", |s| s.library_shots == 4);
-        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e2, "the scan after the first index", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
         assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
         let _ = std::fs::remove_dir_all(&d);

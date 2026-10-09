@@ -137,7 +137,7 @@ fn photos_phrase(o: Offer) -> String {
     match o.why {
         Why::NewExports => format!("the {n} new {photos} with fursuits"),
         Why::Resume => format!("the {n} {photos} with fursuits still to look at"),
-        Why::FirstIndex | Why::CatchUp => format!("the {n} {photos} with fursuits"),
+        Why::FirstIndex | Why::CatchUp | Why::Vectors => format!("the {n} {photos} with fursuits"),
     }
 }
 
@@ -151,7 +151,7 @@ pub fn ask_words(o: Offer) -> (String, String) {
     let before = match o.why {
         Why::FirstIndex => "The library is indexed for search. ",
         Why::NewExports => "Search already has them. ",
-        Why::CatchUp | Why::Resume => "",
+        Why::CatchUp | Why::Resume | Why::Vectors => "",
     };
     (
         title,

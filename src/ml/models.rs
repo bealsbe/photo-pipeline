@@ -23,7 +23,7 @@
 //! are re-downloadable, so a cache, shown and cleared in Preferences ▸
 //! Storage.  Nothing here is ever written into the library.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -49,9 +49,10 @@ pub enum ModelId {
     /// "a fursuit head" (phase 4, decision 11).  The image tower, the text
     /// tower and the box head in one graph, with its CLIP tokenizer.
     Owlv2,
-    /// DINOv2 base: tells one fursuit from another from a head crop
-    /// (phase 4).  Its vectors are kept apart from every other kind's.
-    Dinov2,
+    /// Gemma 4 26B-A4B-it (Unsloth's UD-Q4_K_M GGUF with its vision
+    /// projector): the fursuit close-call judge (v2), run by the judge
+    /// helper on the card alone.
+    Gemma4,
 }
 
 impl ModelId {
@@ -64,7 +65,7 @@ impl ModelId {
             ModelId::InsightFace => "insightface-buffalo-l",
             ModelId::SFace => "sface-2021dec",
             ModelId::Owlv2 => "owlv2-b16-ensemble",
-            ModelId::Dinov2 => "dinov2-base",
+            ModelId::Gemma4 => "gemma4-26b-a4b-it-ud-q4km",
         }
     }
 
@@ -73,15 +74,24 @@ impl ModelId {
         matches!(self, ModelId::AuraFace | ModelId::InsightFace | ModelId::SFace)
     }
 
-    /// One of the fursuit head step's models (phase 4).
+    /// One of the fursuit head step's models (phase 4): the detector.
+    /// The head vectors come from the search model (v2), which is always
+    /// in place.
     pub fn is_fursuit_model(self) -> bool {
-        matches!(self, ModelId::Owlv2 | ModelId::Dinov2)
+        matches!(self, ModelId::Owlv2)
+    }
+
+    /// One of the close-call judge choices (v2).
+    pub fn is_judge_model(self) -> bool {
+        matches!(self, ModelId::Gemma4)
     }
 }
 
-/// The fursuit head step's models (phase 4): the detector and the
-/// embedding, both or neither.
-pub const FURSUIT_MODELS: [ModelId; 2] = [ModelId::Owlv2, ModelId::Dinov2];
+/// The fursuit head step's models (phase 4, v2): OWLv2 finds the heads;
+/// their vectors come from the search model, so nothing else is needed.
+/// DINOv2 (phase 4's head vectors) is no longer listed: a folder left from
+/// then is counted and removed with the rest by Preferences ▸ Storage.
+pub const FURSUIT_MODELS: [ModelId; 1] = [ModelId::Owlv2];
 
 /// The face detector every face model uses.
 pub const FACE_DETECTOR: ModelId = ModelId::Yunet;
@@ -244,7 +254,7 @@ pub const SFACE_FILES: &[ModelFile] = &[ModelFile {
 }];
 
 const OWLV2_BASE: &str = "https://huggingface.co/Xenova/owlv2-base-patch16-ensemble/resolve/main/";
-const DINOV2_BASE: &str = "https://huggingface.co/onnx-community/dinov2-base/resolve/main/";
+const GEMMA4_BASE: &str = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/";
 
 /// OWLv2 B/16 ensemble as the transformers.js export Hugging Face's staff
 /// maintain of Google's `owlv2-base-patch16-ensemble` (Apache-2.0): the
@@ -267,20 +277,31 @@ pub const OWLV2_FILES: &[ModelFile] = &[
     },
 ];
 
-/// DINOv2 base as the transformers.js export of Meta's `dinov2-base`
-/// (Apache-2.0), fp32: its CLS and mean patch token equal the study's
-/// (cosine 1.000 on the study's crops).  Pinned 2026-10-02.
-pub const DINOV2_FILES: &[ModelFile] = &[ModelFile {
-    file: "model.onnx",
-    url: "https://huggingface.co/onnx-community/dinov2-base/resolve/main/onnx/model.onnx",
-    sha256: "320d1012a6fc65b101fc85ca30ee7a47b2e4f6a2e8bd78fb9d7036def0e30cb0",
-    bytes: 346_627_111,
-    archive: None,
-}];
+/// Gemma 4 26B-A4B-it as Unsloth's dynamic Q4_K_M GGUF with its fp16
+/// vision projector (Apache-2.0): the research's pick for the fursuit
+/// close-call judge (recall at 95 % precision 106/110, 81/84, 102/102,
+/// 63/63 per time tier on 791 labelled pairs).  Pinned 2026-10-08 by the
+/// digests the research measured on its own download.
+pub const GEMMA4_FILES: &[ModelFile] = &[
+    ModelFile {
+        file: "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        sha256: "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f",
+        bytes: 16_947_541_728,
+        archive: None,
+    },
+    ModelFile {
+        file: "mmproj-F16.gguf",
+        url: "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
+        sha256: "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+        bytes: 1_193_058_784,
+        archive: None,
+    },
+];
 
 /// Every model, in the dialog's order: search, the face detector, the
-/// face choices (the recommended one first), then the fursuit head step's
-/// two.
+/// face choices (the recommended one first), the fursuit head detector,
+/// then the close-call judge choices (v2).
 pub const ALL: &[ModelInfo] = &[
     ModelInfo {
         id: ModelId::Siglip2,
@@ -379,18 +400,18 @@ pub const ALL: &[ModelInfo] = &[
         restricted: false,
     },
     ModelInfo {
-        id: ModelId::Dinov2,
-        role: "Fursuits",
-        name: "DINOv2, base size",
-        what: "Tells one fursuit from another, from its head.",
+        id: ModelId::Gemma4,
+        role: "Close-call judge",
+        name: "Gemma 4, 26B-A4B",
+        what: "Looks at two fursuit heads side by side and says whether they are the same fursuit.",
         licence: "Apache-2.0",
         licence_plain: "free for any use",
-        publisher: "Meta",
-        source_url: DINOV2_BASE,
+        publisher: "Google, quantised by Unsloth",
+        source_url: GEMMA4_BASE,
         required: false,
-        files: DINOV2_FILES,
+        files: GEMMA4_FILES,
         preprocess_version: 1,
-        choice: None,
+        choice: Some("judge"),
         recommended: false,
         restricted: false,
     },
@@ -432,15 +453,37 @@ pub fn face_model_in(ids: &[ModelId]) -> Option<ModelId> {
     ids.iter().copied().find(|id| id.is_face_model())
 }
 
-/// The fursuit head step's rows (the dialog's *Fursuits* pair, phase 4).
+/// The fursuit head step's rows (the dialog's *Fursuits* row, phase 4).
 pub fn fursuit_models() -> impl Iterator<Item = &'static ModelInfo> {
     ALL.iter().filter(|m| m.id.is_fursuit_model())
 }
 
-/// The dialog asked for fursuit heads: both of the step's models are among
-/// `ids`.
+/// The dialog asked for fursuit heads: the step's models are among `ids`.
 pub fn fursuits_in(ids: &[ModelId]) -> bool {
     FURSUIT_MODELS.iter().all(|m| ids.contains(m))
+}
+
+/// The close-call judge choices (v2; Preferences ▸ Fursuits ▸ *Close-call
+/// judge*), in the list's order.
+pub fn judge_models() -> impl Iterator<Item = &'static ModelInfo> {
+    ALL.iter().filter(|m| m.choice == Some("judge"))
+}
+
+/// Preferences ▸ Storage ▸ Downloaded models ▸ Delete: every model
+/// folder in `dir` goes (folders of models no longer used too, such as
+/// phase 4's `dinov2-base`), except the close-call judges', which have a
+/// row of their own.
+pub fn delete_all_but_judges(dir: &Path) {
+    let keep: Vec<&str> = judge_models().map(|m| m.id.dir_name()).collect();
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name();
+        if keep.iter().any(|k| name.to_str() == Some(*k)) {
+            continue;
+        }
+        let p = e.path();
+        let _ = if p.is_dir() { std::fs::remove_dir_all(&p) } else { std::fs::remove_file(&p) };
+    }
 }
 
 /// `~/.cache/photo_pipeline/models/`
@@ -531,23 +574,44 @@ mod tests {
         assert_eq!(info(ModelId::AuraFace).bytes() / 1_000_000, 260);
     }
 
-    /// Decision 11 and 13: the fursuit head step's two models are a pair of
-    /// their own rows, Apache-2.0, from maintained ONNX exports, pinned.
+    /// Decision 11 and 13, as v2 left it: the fursuit head step is one row
+    /// (OWLv2, Apache-2.0, a maintained ONNX export, pinned); the head
+    /// vectors come from the search model, so DINOv2 is gone from the
+    /// registry.
     #[test]
-    fn the_fursuit_models_are_a_pinned_apache_pair() {
+    fn the_fursuit_step_is_the_pinned_detector_alone() {
         let rows: Vec<&ModelInfo> = fursuit_models().collect();
         assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), FURSUIT_MODELS);
         assert!(rows.iter().all(|m| m.role == "Fursuits" && m.licence == "Apache-2.0" && !m.required && !m.restricted && m.choice.is_none()));
-        assert!(rows.iter().all(|m| !m.id.is_face_model()), "never a face model");
+        assert!(rows.iter().all(|m| !m.id.is_face_model() && !m.id.is_judge_model()), "never a face model or the judge");
         assert!(ALL.iter().filter(|m| !m.id.is_fursuit_model()).all(|m| m.role != "Fursuits"));
+        assert!(ALL.iter().all(|m| !m.id.dir_name().contains("dinov2")), "DINOv2 is not downloaded any more");
         assert_eq!(info(ModelId::Owlv2).bytes() / 1_000_000, 616, "the graph and its tokenizer");
-        assert_eq!(info(ModelId::Dinov2).bytes() / 1_000_000, 346);
-        assert_eq!(bytes_for(&FURSUIT_MODELS) / 1_000_000, 963);
-        assert!(fursuits_in(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]));
-        assert!(!fursuits_in(&[ModelId::Siglip2, ModelId::Owlv2]), "half the pair is no step");
+        assert_eq!(bytes_for(&FURSUIT_MODELS) / 1_000_000, 616);
+        assert!(fursuits_in(&[ModelId::Siglip2, ModelId::Owlv2]));
+        assert!(!fursuits_in(&[ModelId::Siglip2]), "no detector is no step");
         assert_eq!(serde_json::to_string(&ModelId::Owlv2).unwrap(), "\"owlv2\"");
-        assert_eq!(serde_json::to_string(&ModelId::Dinov2).unwrap(), "\"dinov2\"");
         assert_eq!(models_for(None), [ModelId::Siglip2], "search alone, as before");
+    }
+
+    /// The close-call judge (v2): a choice list of its own, Apache-2.0,
+    /// pinned by the digests the research measured, never required, and
+    /// never a fursuit step or face model.
+    #[test]
+    fn the_judge_is_a_pinned_choice_of_its_own() {
+        let rows: Vec<&ModelInfo> = judge_models().collect();
+        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), [ModelId::Gemma4]);
+        let g = info(ModelId::Gemma4);
+        assert!(g.role == "Close-call judge" && g.licence == "Apache-2.0" && !g.required && !g.restricted && g.choice == Some("judge"));
+        assert!(g.id.is_judge_model() && !g.id.is_fursuit_model() && !g.id.is_face_model());
+        assert_eq!(g.files.len(), 2, "the weights and the vision projector");
+        assert_eq!(g.bytes() / 1_000_000_000, 18, "about 18 GB");
+        assert_eq!(g.files[0].bytes / 1_000_000, 16_947);
+        assert_eq!(g.files[1].bytes / 1_000_000, 1_193);
+        assert!(g.files.iter().all(|f| f.url.starts_with(GEMMA4_BASE) && f.file.ends_with(".gguf")));
+        assert_eq!(g.weights_sha256(), "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f");
+        assert_eq!(serde_json::to_string(&ModelId::Gemma4).unwrap(), "\"gemma4\"");
+        assert!(!FURSUIT_MODELS.contains(&ModelId::Gemma4) && !fursuits_in(&[ModelId::Gemma4]));
     }
 
     #[test]

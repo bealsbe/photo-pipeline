@@ -1,19 +1,24 @@
-//! Fursuit heads (phase 4, decision 11): OWLv2 finds them in a photo by
-//! the words "a fursuit head", DINOv2 turns each head's crop into a vector
-//! that tells one suit from another.  This module is the helper's side:
-//! the two sessions, the preprocessing, the box decoding and the crops.
-//! What is kept and how suits are grouped is `crate::search::heads`.
+//! Fursuit heads (phase 4, decision 11; vectors as v2 left them): OWLv2
+//! finds them in a photo by the words "a fursuit head", and the search
+//! model's image tower (SigLIP2) turns each head's crop into a vector that
+//! tells one suit from another once whitened (`crate::search::whiten`).
+//! This module is the helper's side: the detector session, the
+//! preprocessing, the box decoding and the crops.  What is kept and how
+//! suits are grouped is `crate::search::heads`.
 //!
-//! **Measured against the study** (`docs/library-search-plan.md` §3.4,
-//! §3.5), on its previews: the ONNX graphs give the same heads with scores
-//! within 0.02 of the PyTorch run, and DINOv2 vectors with cosine 1.000 to
-//! the study's, provided the crop is resized to 256 and centre-cut to 224
-//! as the model's own preprocessing does (a plain resize to 224 drifts to
-//! 0.90–0.98).  The numbers in §3 therefore carry over.
+//! **Measured against the study** (`docs/library-search-plan.md` §3.4): on
+//! its previews the ONNX graph gives the same heads with scores within
+//! 0.02 of the PyTorch run.  **The head vector** (v2, "As built — v2") is
+//! the installed SigLIP2 B/16 tower on the same crop the research
+//! harness used (the box widened 12 % each side, square, black beyond the
+//! edge), through the search step's own input (squashed to 256, mean and
+//! std 0.5): whitened over the library's heads it beat DINOv2 on every
+//! time tier of the user's 791 labelled pairs (AUC 0.92–0.97).  DINOv2 is
+//! not run any more.
 //!
 //! **Kinds never mix.**  A [`Head`] is a fursuit head and nothing else:
-//! it never passes through the face pipeline, and its vector is of its
-//! own model and dimension ([`DIM`]).
+//! it never passes through the face pipeline, and its vector is kept in
+//! its own store of its own width ([`DIM`]), apart from the search index.
 
 use std::path::{Path, PathBuf};
 
@@ -33,10 +38,6 @@ use crate::search::index::{KEY_HEAD_BYTES, Key};
 
 /// OWLv2's input edge: the preview is fitted into this square.
 pub const OWL_INPUT: u32 = 960;
-/// DINOv2's input: the crop resized to [`DINO_RESIZE`] and centre-cut to
-/// [`DINO_INPUT`], as its preprocessing does.
-pub const DINO_RESIZE: u32 = 256;
-pub const DINO_INPUT: u32 = 224;
 /// The words OWLv2 is asked for.
 pub const PROMPT: &str = "a fursuit head";
 /// OWLv2's text context (CLIP's, padded).
@@ -54,21 +55,18 @@ pub const CROP_MARGIN: f32 = 0.12;
 /// Decode the preview so its long edge is at least this (OWLv2 sees 960 px;
 /// a 1616-px MPF preview is decoded whole).
 pub const PREVIEW_EDGE: u32 = 960;
-/// The head vector: DINOv2's CLS token and the mean of its patch tokens.
-pub const DIM: usize = 1536;
+/// The head vector: the search model's pooled image vector (SigLIP2 B/16,
+/// 768 wide), unit length, before whitening.
+pub const DIM: usize = 768;
 /// Photos per OWLv2 call: one, on either device.  Measured on the card
 /// (WebGPU): 168 ms a photo one at a time against 852 ms each in fours.
 pub const CHUNK_GPU: usize = 1;
 pub const CHUNK_CPU: usize = 1;
-/// Crops per DINOv2 call, exact batches on either device.  Padding the
-/// card's batches to one shape was tried and cost more than it saved
-/// (477 ms a photo against 368 on the study's previews).
-const DINO_CHUNK: usize = 32;
+/// Crops per image-tower call.
+pub const EMBED_CHUNK: usize = 32;
 
 const CLIP_MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 const CLIP_STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
-const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 /// OWLv2 pads the square with mid-grey (0.5 before normalising).
 const PAD_GREY: f32 = 0.5;
 const PAD_TOKEN: i64 = 0;
@@ -84,10 +82,26 @@ pub struct Head {
     pub size: u32,
     /// How sharp the crop is (mean edge strength, 0..1): part of clarity.
     pub sharpness: f32,
-    /// DINOv2's unit vector, [`DIM`] long.
+    /// The search model's unit vector of the crop, [`DIM`] long (empty if
+    /// the crop couldn't be embedded).
     pub vector: Vec<f32>,
-    /// A `worker::TILE_PX` square JPEG around the head, for the page.
+    /// A `worker::TILE_PX` square JPEG around the head, for the page
+    /// (empty when only the vector was asked for: [`KnownHeads`]).
     pub tile: Vec<u8>,
+}
+
+/// A photo whose heads are already known (their boxes), for the vectors
+/// alone: the catch-up of libraries scanned before v2's vectors, which
+/// must keep every head's identity (its key and box) as the user's names
+/// point at it.  `key` is checked against the file as read: a photo that
+/// changed is reported, not embedded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KnownHeads {
+    pub path: PathBuf,
+    pub file_type: FileType,
+    pub key: Key,
+    /// `[x, y, width, height]` as fractions of the oriented preview.
+    pub boxes: Vec<[f32; 4]>,
 }
 
 /// A photo's heads, with the key the helper read for it.
@@ -112,50 +126,40 @@ pub struct Det {
     pub score: f32,
 }
 
-/// The two sessions.
+/// Something that embeds head crops: the search model's image tower in
+/// the helper (`worker::Models::embed_crops`), a double in tests.  Unit
+/// vectors, one per crop, [`DIM`] long.
+pub type Embed<'a> = dyn FnMut(&[Pixels]) -> ort::Result<Vec<Vec<f32>>> + 'a;
+
+/// The detector session.
 pub struct HeadModels {
     pub self_check: SelfCheck,
     owl: Session,
-    dino: Session,
     ids: Vec<i64>,
     mask: Vec<i64>,
 }
 
 impl HeadModels {
-    /// Load OWLv2 and DINOv2 from their model folders on `device`.  On the
-    /// card, each session's answers are checked against the processor's
-    /// on a fixed input (the same tolerance as search's self-check); a
-    /// failure is a [`CardFailure`].
-    pub fn load(owl_dir: &Path, dino_dir: &Path, device: Device) -> Result<HeadModels, Load> {
+    /// Load OWLv2 from its model folder on `device`.  On the card its
+    /// answers are checked against the processor's on a fixed input (the
+    /// same tolerance as search's self-check); a failure is a
+    /// [`CardFailure`].  The head vectors come from the search model's
+    /// tower, loaded and checked by the helper already.
+    pub fn load(owl_dir: &Path, device: Device) -> Result<HeadModels, Load> {
         let owl_info = models::info(ModelId::Owlv2);
-        let dino_info = models::info(ModelId::Dinov2);
         let owl_path = owl_dir.join(owl_info.files[0].file);
-        let dino_path = dino_dir.join(dino_info.files[0].file);
         let tokenizer = tokenizers::Tokenizer::from_file(owl_dir.join(owl_info.files[1].file)).map_err(|e| Load::Other(format!("OWLv2 tokenizer: {e}")))?;
         let (ids, mask) = prompt_tokens(&tokenizer).map_err(Load::Other)?;
         let threads = cpu_threads();
         let mut out = match device {
-            Device::Cpu => HeadModels {
-                self_check: SelfCheck::NotRun,
-                owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?,
-                dino: cpu_session(&dino_path, threads).map_err(|e| Load::Other(format!("DINOv2: {e}")))?,
-                ids,
-                mask,
-            },
+            Device::Cpu => HeadModels { self_check: SelfCheck::NotRun, owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?, ids, mask },
             Device::Gpu => {
                 let owl = gpu_session(&owl_path).map_err(|e| Load::Card(card_failure(&e)))?;
-                let dino = gpu_session(&dino_path).map_err(|e| Load::Card(card_failure(&e)))?;
-                HeadModels { self_check: SelfCheck::NotRun, owl, dino, ids, mask }
+                HeadModels { self_check: SelfCheck::NotRun, owl, ids, mask }
             }
         };
         if device == Device::Gpu {
-            let mut cpu = HeadModels {
-                self_check: SelfCheck::NotRun,
-                owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?,
-                dino: cpu_session(&dino_path, threads).map_err(|e| Load::Other(format!("DINOv2: {e}")))?,
-                ids: out.ids.clone(),
-                mask: out.mask.clone(),
-            };
+            let mut cpu = HeadModels { self_check: SelfCheck::NotRun, owl: cpu_session(&owl_path, threads).map_err(|e| Load::Other(format!("OWLv2: {e}")))?, ids: out.ids.clone(), mask: out.mask.clone() };
             let (cosine, max_diff) = out.self_check_against(&mut cpu).map_err(|e| Load::Card(card_failure(&e)))?;
             eprintln!("ml-worker: heads self-check cosine {cosine:.6}, largest difference {max_diff:.2e}");
             if !super::self_check_passes(cosine, max_diff) {
@@ -166,22 +170,15 @@ impl HeadModels {
         Ok(out)
     }
 
-    /// Fixed inputs through both: the smallest cosine and the largest
-    /// difference over OWLv2's score vector and DINOv2's embedding.
+    /// A fixed input through both: the cosine and the largest difference
+    /// over OWLv2's score vector.
     fn self_check_against(&mut self, other: &mut HeadModels) -> ort::Result<(f32, f32)> {
         let n = (OWL_INPUT * OWL_INPUT) as usize;
         let data: Vec<u8> = (0..3 * n).map(|i| ((i * 7 + (i / n) * 13) % 251) as u8).collect();
         let px = Pixels::new(OWL_INPUT, OWL_INPUT, 3, data);
         let a = self.scores(&[&px])?;
         let b = other.scores(&[&px])?;
-        let (mut cos, mut diff) = compare(&a[0], &b[0]);
-        let crop = decode::crop(&px, 100, 100, 300, 300);
-        let va = self.embed(&[crop.clone()])?;
-        let vb = other.embed(&[crop])?;
-        let (c2, d2) = compare(&va[0], &vb[0]);
-        cos = cos.min(c2);
-        diff = diff.max(d2);
-        Ok((cos, diff))
+        Ok(compare(&a[0], &b[0]))
     }
 
     /// OWLv2 over previews: per photo, the sigmoid score of every anchor
@@ -241,36 +238,9 @@ impl HeadModels {
             .collect())
     }
 
-    /// DINOv2 over crops: unit vectors, CLS and mean patch token.
-    pub fn embed(&mut self, crops: &[Pixels]) -> ort::Result<Vec<Vec<f32>>> {
-        let mut out = Vec::with_capacity(crops.len());
-        let per = (3 * DINO_INPUT * DINO_INPUT) as usize;
-        for chunk in crops.chunks(DINO_CHUNK) {
-            let n = chunk.len();
-            let mut data = Vec::with_capacity(n * per);
-            for c in chunk {
-                data.extend(dino_input(c));
-            }
-            let name = self.dino.inputs()[0].name().to_string();
-            let outputs = self.dino.run(ort::inputs![name.as_str() => Tensor::from_array((vec![n as i64, 3, DINO_INPUT as i64, DINO_INPUT as i64], data))?])?;
-            let (shape, hidden) = extract(&outputs, "last_hidden_state")?;
-            if shape.len() != 3 || shape[0] as usize != n || shape[1] < 2 {
-                return Err(ort::Error::new(format!("unexpected DINOv2 output shape {shape:?}")));
-            }
-            let (tokens, width) = (shape[1] as usize, shape[2] as usize);
-            if 2 * width != DIM {
-                return Err(ort::Error::new(format!("DINOv2 gives {width}-wide tokens; the head vector is {DIM} long")));
-            }
-            for row in hidden.chunks_exact(tokens * width) {
-                out.push(pool_tokens(row, tokens, width));
-            }
-        }
-        Ok(out)
-    }
-
     /// Everything for a batch of previews: the heads with their crops'
-    /// vectors, per photo.
-    pub fn find(&mut self, imgs: &[&Pixels]) -> ort::Result<Vec<Vec<Head>>> {
+    /// vectors (through `embed`, the search model's tower), per photo.
+    pub fn find(&mut self, imgs: &[&Pixels], embed: &mut Embed<'_>) -> ort::Result<Vec<Vec<Head>>> {
         let dets = self.detect(imgs)?;
         let mut crops = Vec::new();
         for (px, ds) in imgs.iter().zip(&dets) {
@@ -278,7 +248,10 @@ impl HeadModels {
                 crops.push(crop_square(px, d.bbox, CROP_MARGIN));
             }
         }
-        let vectors = self.embed(&crops)?;
+        let vectors = if crops.is_empty() { Vec::new() } else { embed(&crops)? };
+        if vectors.len() != crops.len() {
+            return Err(ort::Error::new(format!("{} crops embedded as {} vectors", crops.len(), vectors.len())));
+        }
         let mut vi = vectors.into_iter();
         let mut ci = crops.iter();
         Ok(imgs
@@ -459,36 +432,25 @@ pub fn crop_square(px: &Pixels, bbox: [f32; 4], margin: f32) -> Pixels {
     Pixels::new(side, side, px.channels, out)
 }
 
-/// DINOv2's input: the crop resized to [`DINO_RESIZE`] square, its centre
-/// [`DINO_INPUT`] cut out, ImageNet normalisation, CHW.
-pub fn dino_input(crop: &Pixels) -> Vec<f32> {
-    let big = decode::resize_to(crop, DINO_RESIZE, DINO_RESIZE);
-    let off = (DINO_RESIZE - DINO_INPUT) / 2;
-    let cut = decode::crop(&big, off, off, DINO_INPUT, DINO_INPUT);
-    let n = (DINO_INPUT * DINO_INPUT) as usize;
-    let mut out = vec![0f32; 3 * n];
-    for y in 0..DINO_INPUT {
-        for x in 0..DINO_INPUT {
-            let p = rgb_at(&cut, x, y);
-            let i = (y * DINO_INPUT + x) as usize;
-            for ch in 0..3 {
-                out[ch * n + i] = (p[ch] - IMAGENET_MEAN[ch]) / IMAGENET_STD[ch];
-            }
-        }
+/// The vectors of heads already known in a preview (`boxes` as the
+/// detector left them): the same crop as [`HeadModels::find`] makes, through
+/// `embed`.  Score and tile are left empty: the store keeps the detection
+/// it has and takes the vector alone.
+pub fn embed_known(px: &Pixels, boxes: &[[f32; 4]], embed: &mut Embed<'_>) -> ort::Result<Vec<Head>> {
+    let crops: Vec<Pixels> = boxes.iter().map(|&b| crop_square(px, b, CROP_MARGIN)).collect();
+    let vectors = if crops.is_empty() { Vec::new() } else { embed(&crops)? };
+    if vectors.len() != crops.len() {
+        return Err(ort::Error::new(format!("{} crops embedded as {} vectors", crops.len(), vectors.len())));
     }
-    out
-}
-
-/// CLS token followed by the mean of the patch tokens, as a unit vector.
-pub fn pool_tokens(row: &[f32], tokens: usize, width: usize) -> Vec<f32> {
-    let mut v = Vec::with_capacity(2 * width);
-    v.extend_from_slice(&row[..width]);
-    let patches = (tokens - 1).max(1) as f32;
-    for d in 0..width {
-        let sum: f32 = (1..tokens).map(|t| row[t * width + d]).sum();
-        v.push(sum / patches);
-    }
-    normalised(&v)
+    Ok(boxes
+        .iter()
+        .zip(&crops)
+        .zip(vectors)
+        .map(|((&bbox, crop), vector)| {
+            let size = (bbox[2] * px.width as f32).max(bbox[3] * px.height as f32).round() as u32;
+            Head { bbox, score: 0.0, size, sharpness: sharpness(crop), vector, tile: Vec::new() }
+        })
+        .collect())
 }
 
 /// How sharp a crop is: the mean absolute Laplacian of its luma at 64 px,
@@ -565,8 +527,9 @@ fn decode_oriented(jpeg: &[u8], orientation: u8) -> Result<Pixels, FileError> {
 
 /// The helper's heads loop over one request: previews are read and
 /// decoded on `pool`'s threads ahead of inference; photos go through the
-/// models `chunk` at a time; one result per path, in order.
-pub fn serve(models: &mut HeadModels, pool: &rayon::ThreadPool, files: &[(PathBuf, FileType)], chunk: usize) -> Vec<HeadsResult> {
+/// detector `chunk` at a time and their crops through `embed`; one result
+/// per path, in order.
+pub fn serve(models: &mut HeadModels, embed: &mut Embed<'_>, pool: &rayon::ThreadPool, files: &[(PathBuf, FileType)], chunk: usize) -> Vec<HeadsResult> {
     use std::sync::mpsc;
     let mut results: Vec<Option<HeadsResult>> = vec![None; files.len()];
     let (ptx, prx) = mpsc::sync_channel::<(usize, Result<(Key, Pixels), FileError>)>(chunk.max(1) * 2);
@@ -578,12 +541,12 @@ pub fn serve(models: &mut HeadModels, pool: &rayon::ThreadPool, files: &[(PathBu
         });
     });
     let mut ready: Vec<(usize, Key, Pixels)> = Vec::with_capacity(chunk);
-    let flush = |ready: &mut Vec<(usize, Key, Pixels)>, results: &mut Vec<Option<HeadsResult>>, models: &mut HeadModels| {
+    let mut flush = |ready: &mut Vec<(usize, Key, Pixels)>, results: &mut Vec<Option<HeadsResult>>, models: &mut HeadModels| {
         if ready.is_empty() {
             return;
         }
         let imgs: Vec<&Pixels> = ready.iter().map(|(_, _, p)| p).collect();
-        match models.find(&imgs) {
+        match models.find(&imgs, embed) {
             Ok(found) => {
                 for ((i, key, _), heads) in ready.drain(..).zip(found) {
                     results[i] = Some(HeadsResult { path: files[i].0.clone(), result: Ok(PhotoHeads { key, heads }) });
@@ -610,6 +573,37 @@ pub fn serve(models: &mut HeadModels, pool: &rayon::ThreadPool, files: &[(PathBu
         .into_iter()
         .zip(files)
         .map(|(r, (p, _))| r.unwrap_or_else(|| HeadsResult { path: p.clone(), result: Err(FileError::other("not prepared")) }))
+        .collect()
+}
+
+/// The helper's loop for heads already known ([`KnownHeads`]): previews
+/// are read on `pool`'s threads; a photo whose key is not the one asked
+/// for (the file changed) is reported, not embedded; the known boxes are
+/// cropped and embedded through `embed`.  One result per entry, in order.
+pub fn serve_known(embed: &mut Embed<'_>, pool: &rayon::ThreadPool, files: &[KnownHeads]) -> Vec<HeadsResult> {
+    use std::sync::mpsc;
+    let mut results: Vec<Option<HeadsResult>> = vec![None; files.len()];
+    let (ptx, prx) = mpsc::sync_channel::<(usize, Result<(Key, Pixels), FileError>)>(2 * EMBED_CHUNK);
+    let jobs: Vec<KnownHeads> = files.to_vec();
+    pool.spawn(move || {
+        use rayon::prelude::*;
+        jobs.par_iter().enumerate().for_each(|(i, j)| {
+            let _ = ptx.send((i, read_preview(&j.path, j.file_type)));
+        });
+    });
+    for (i, r) in prx {
+        let job = &files[i];
+        let result = match r {
+            Err(e) => Err(e),
+            Ok((key, _)) if key != job.key => Err(FileError::other("the photo changed since its heads were found")),
+            Ok((key, px)) => embed_known(&px, &job.boxes, embed).map(|heads| PhotoHeads { key, heads }).map_err(|e| FileError::other(format!("model: {e}"))),
+        };
+        results[i] = Some(HeadsResult { path: job.path.clone(), result });
+    }
+    results
+        .into_iter()
+        .zip(files)
+        .map(|(r, j)| r.unwrap_or_else(|| HeadsResult { path: j.path.clone(), result: Err(FileError::other("not prepared")) }))
         .collect()
 }
 
@@ -694,22 +688,47 @@ mod tests {
         // A box well inside stays inside: nothing black.
         let inner = crop_square(&px, [0.1, 0.1, 0.2, 0.1], CROP_MARGIN);
         assert!(inner.data.iter().all(|&v| v == 255));
-        // The DINOv2 input is 224² × 3, ImageNet-normalised white.
-        let x = dino_input(&c);
-        assert_eq!(x.len(), 3 * (DINO_INPUT * DINO_INPUT) as usize);
-        let white = (1.0 - IMAGENET_MEAN[0]) / IMAGENET_STD[0];
-        assert!((x[(DINO_INPUT * DINO_INPUT / 2 + DINO_INPUT / 2) as usize] - white).abs() < 1e-4, "the centre is white");
-    }
-
-    #[test]
-    fn pooling_is_cls_then_mean_patch_as_a_unit_vector() {
-        // 3 tokens of width 2: CLS (1, 0), patches (0, 2) and (0, 4).
-        let v = pool_tokens(&[1.0, 0.0, 0.0, 2.0, 0.0, 4.0], 3, 2);
-        assert_eq!(v.len(), 4);
-        let n = (1.0f32 + 9.0).sqrt();
-        assert!((v[0] - 1.0 / n).abs() < 1e-6 && v[1] == 0.0 && v[2] == 0.0 && (v[3] - 3.0 / n).abs() < 1e-6, "{v:?}");
         let (cos, diff) = compare(&[1.0, 0.0], &[1.0, 0.0]);
         assert!((cos - 1.0).abs() < 1e-6 && diff == 0.0);
+    }
+
+    /// v2: known heads are cut exactly as the detector's step cuts them
+    /// (the same square, the same margin) and go through the embedder in
+    /// one call; the vectors come back in the boxes' order; a photo
+    /// without boxes asks nothing.
+    #[test]
+    fn known_heads_are_cut_as_found_ones_and_embedded_in_order() {
+        let mut data = vec![0u8; 200 * 100 * 3];
+        for (i, p) in data.chunks_exact_mut(3).enumerate() {
+            p.fill(((i % 200) + (i / 200)) as u8);
+        }
+        let px = Pixels::new(200, 100, 3, data);
+        let boxes = [[0.1, 0.2, 0.1, 0.3], [0.6, 0.1, 0.2, 0.2]];
+        let mut seen: Vec<Pixels> = Vec::new();
+        let mut calls = 0;
+        let mut embed = |crops: &[Pixels]| -> ort::Result<Vec<Vec<f32>>> {
+            calls += 1;
+            seen.extend(crops.iter().cloned());
+            Ok(crops.iter().map(|c| vec![c.width as f32, 0.0]).collect())
+        };
+        let heads = embed_known(&px, &boxes, &mut embed).unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(heads.len(), 2);
+        for (h, b) in heads.iter().zip(&boxes) {
+            assert_eq!(h.bbox, *b);
+            assert!(h.tile.is_empty(), "the store keeps the tile it has");
+        }
+        for (got, b) in seen.iter().zip(&boxes) {
+            let want = crop_square(&px, *b, CROP_MARGIN);
+            assert!(got.width == want.width && got.height == want.height && got.data == want.data, "cut as the detector's step cuts");
+        }
+        assert_eq!(heads[0].vector, vec![seen[0].width as f32, 0.0]);
+        assert_eq!(heads[1].size, 40, "the longer side in preview pixels");
+        let mut never = |_: &[Pixels]| -> ort::Result<Vec<Vec<f32>>> { panic!("nothing to embed") };
+        assert!(embed_known(&px, &[], &mut never).unwrap().is_empty());
+        // An embedder that loses a crop is an error, never a shifted vector.
+        let mut short = |_: &[Pixels]| -> ort::Result<Vec<Vec<f32>>> { Ok(vec![vec![1.0]]) };
+        assert!(embed_known(&px, &boxes, &mut short).is_err());
     }
 
     #[test]
@@ -749,7 +768,7 @@ mod tests {
 
     /// The real models on the study's previews: boxes against the study's
     /// detections and the cost per photo.  `PP_MODEL_DIR=<models folder>`
-    /// (with `owlv2-b16-ensemble/` and `dinov2-base/`), `PP_HEADS_PREVIEWS=
+    /// (with `owlv2-b16-ensemble/` and `siglip2-b16-256/`), `PP_HEADS_PREVIEWS=
     /// <folder of JPEGs>`, `PP_HEADS_DEVICE=gpu|cpu` (cpu by default),
     /// `PP_HEADS_N=<photos>` (16).  Prints per-photo times; `PP_HEADS_REF=
     /// <det_owlv2_*.json>` compares with the study.
@@ -764,11 +783,17 @@ mod tests {
             super::super::gpu::pin().ok().expect("a card");
         }
         let t = std::time::Instant::now();
-        let mut m = match HeadModels::load(&dir.join(ModelId::Owlv2.dir_name()), &dir.join(ModelId::Dinov2.dir_name()), device) {
+        let mut m = match HeadModels::load(&dir.join(ModelId::Owlv2.dir_name()), device) {
             Ok(m) => m,
             Err(Load::Card(f)) => panic!("card: {f:?}"),
             Err(Load::Other(e)) => panic!("{e}"),
         };
+        let mut search = match super::super::worker::Models::load(&dir.join(ModelId::Siglip2.dir_name()), &dir, device, false, None, false) {
+            Ok(m) => m,
+            Err(Load::Card(f)) => panic!("card: {f:?}"),
+            Err(Load::Other(e)) => panic!("{e}"),
+        };
+        let mut embed = |crops: &[Pixels]| search.embed_crops(crops);
         eprintln!("loaded in {:.1} s, self-check {:?}", t.elapsed().as_secs_f64(), m.self_check);
         let mut files: Vec<PathBuf> = std::fs::read_dir(&previews).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "jpg")).collect();
         files.sort();
@@ -784,7 +809,7 @@ mod tests {
         let mut owl_ms = 0.0;
         let mut all_ms = 0.0;
         let mut prep_ms = 0.0;
-        let _ = m.find(&[&imgs[0]]);
+        let _ = m.find(&[&imgs[0]], &mut embed);
         for img in imgs.iter().take(8) {
             let t = std::time::Instant::now();
             let _ = owl_input(img);
@@ -796,7 +821,7 @@ mod tests {
             let dets = m.detect(&refs_imgs).unwrap();
             owl_ms += t.elapsed().as_secs_f64() * 1000.0;
             let t = std::time::Instant::now();
-            let found = m.find(&refs_imgs).unwrap();
+            let found = m.find(&refs_imgs, &mut embed).unwrap();
             all_ms += t.elapsed().as_secs_f64() * 1000.0;
             for (k, (f, hs)) in chunk_imgs.iter().zip(&found).enumerate() {
                 let file = &files[ci * chunk + k];
@@ -826,7 +851,7 @@ mod tests {
         }
         let per = imgs.len() as f64;
         eprintln!(
-            "{} photos on {:?} (chunk {chunk}): OWLv2 {:.0} ms a photo (of which the input {prep_ms:.0} ms), with crops and DINOv2 {:.0} ms a photo; {heads} heads, {matched} of them match the study's {studied}",
+            "{} photos on {:?} (chunk {chunk}): OWLv2 {:.0} ms a photo (of which the input {prep_ms:.0} ms), with crops and their vectors {:.0} ms a photo; {heads} heads, {matched} of them match the study's {studied}",
             imgs.len(),
             device,
             owl_ms / per,

@@ -22,7 +22,7 @@ use crate::search::index::Key;
 use crate::util;
 
 /// The head step's models (the registry's *Fursuits* pair), named as the
-/// pages say them: "OWLv2 and DINOv2".
+/// pages say them ("OWLv2"; v2 dropped DINOv2).
 pub fn models_name() -> String {
     let names: Vec<&str> = models::fursuit_models().map(|m| m.name.split(',').next().unwrap_or(m.name).trim()).collect();
     names.join(" and ")
@@ -649,10 +649,10 @@ mod tests {
     fn head_models_are_rows_only_while_missing() {
         let mut st = Status::default();
         assert_eq!(missing_models(&st), models::FURSUIT_MODELS.to_vec());
-        assert!(models::bytes_for(&missing_models(&st)) > 900_000_000, "the pair is about a gigabyte");
+        assert!(models::bytes_for(&missing_models(&st)) > 600_000_000, "the detector is about 600 MB");
         st.heads.models_installed = true;
         assert!(missing_models(&st).is_empty(), "in place: no row waits for a download that never comes");
-        assert_eq!(models_name(), "OWLv2 and DINOv2");
+        assert_eq!(models_name(), "OWLv2");
     }
 
     #[test]
