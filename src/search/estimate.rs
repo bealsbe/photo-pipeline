@@ -175,10 +175,11 @@ pub fn head_vector_bytes_read(photos: usize) -> u64 {
 pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.1;
 #[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub const JUDGE_LOAD_SECONDS: f64 = 6.0;
-/// Qwen3-VL-Reranker (Q8_0, 280 image tokens): the research's server,
-/// 0.86 s a pair and 2–3 s to load.  *Provisional* until measured
-/// through the helper.
-pub const QWEN_SECONDS_PER_PAIR: f64 = 0.86;
+/// Qwen3-VL-Reranker (Q8_0, 280 image tokens), **measured through the
+/// helper** on the RX 7900 XTX (2026-10-09): 0.77–0.79 s a pair, both
+/// orders (the research's server: 0.86), and 1.8–3.5 s to load with the
+/// files cached.
+pub const QWEN_SECONDS_PER_PAIR: f64 = 0.8;
 pub const QWEN_LOAD_SECONDS: f64 = 3.0;
 
 /// Seconds a close call (a pair, both orders) with `choice`.

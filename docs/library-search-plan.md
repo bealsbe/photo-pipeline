@@ -2483,6 +2483,36 @@ close calls.  DINOv2 is no longer run.
   replaces the helper; `PP_JUDGE_FAKE_CARD=no-card|no-fit|crash` and
   `PP_JUDGE_FAKE_OFFLOAD=<n>` make the real helper fail its card checks.
 
+### The second judge: Qwen3-VL-Reranker (2026-10-09)
+
+The user approved Qwen3-VL-Reranker-8B as a second choice, listed first
+(Off / Qwen3-VL-Reranker / Gemma 4; Off stays the default).
+
+- **Files:** mradermacher's Q8_0 GGUF and fp16 projector, pinned to the
+  repository's commit a0e8b54 by SHA-256 (tensor for tensor the
+  research's own conversion of Qwen's weights; within 0.034 of
+  PyTorch's scores on 52 pairs).  The same vendored llama.cpp and libmtmd,
+  no bump; never the server's `/rerank` (text only).
+- **Asked and scored as its official code:** the reranker's chat
+  template (system line, `<Instruct>`, the query image, the candidate
+  image, the assistant turn) with the research's instruct 0; head crop,
+  280 image tokens, both orders; score sigmoid(logit yes − logit no),
+  read from the top 100 candidates as the research did; same suit at a
+  mean of 0.45 (`judge::QWEN_P_YES_CUT`, a narrow good zone, 0.40–0.50 on
+  every set with a cliff above 0.55: derived again if the prompt, crop or
+  budget change).
+- **Per judge** (`JudgeChoice`): image tokens, prompt, score, threshold;
+  the helper takes `--judge <choice>`.  Verdicts are kept per model.  One
+  judge on the card at a time: choosing another waits for the loaded
+  helper to leave.  Storage counts each judge's folder.
+- **Measured through the helper** on the RX 7900 XTX: all 37 layers on
+  the card; load 1.8–3.5 s with the files cached; 661 prompt tokens a
+  question; on 40 of the research's pairs (its crops) the verdicts agree
+  40/40 with the research's llama.cpp scores, |ΔP| median 0.0012, largest
+  0.0050; 0.77–0.79 s a pair, both orders.  Card memory 0.36 GB before,
+  11.38 GB loaded (+11.0 GB), 0.36 GB after the helper is let go and
+  after its idle exit; a partial offload is refused as for Gemma.
+
 ### Measured
 
 - **The whitening:** the app's fit against the research's numpy on the
