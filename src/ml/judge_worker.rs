@@ -237,7 +237,9 @@ pub fn main(args: &[String]) -> i32 {
     let load_ms = started.elapsed().as_millis() as u64;
     eprintln!("judge-worker: loaded on {} ({}) in {load_ms} ms", device.description, device.name);
     send(&mut out, &Reply::Ready { device: device.description.clone(), layers: loaded.1, load_ms });
-    serve(&loaded.0, std::io::BufReader::new(std::io::stdin()), out, Duration::from_secs(IDLE_SECS))
+    // `PP_JUDGE_IDLE_SECS` shortens the idle exit (tests of the unload).
+    let idle = std::env::var("PP_JUDGE_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(IDLE_SECS);
+    serve(&loaded.0, std::io::BufReader::new(std::io::stdin()), out, Duration::from_secs(idle))
 }
 
 /// Load on `device`, refusing anything short of every layer there.

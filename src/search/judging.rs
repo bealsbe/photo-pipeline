@@ -40,6 +40,12 @@ use crate::model::subjects::{FaceRef, private_dir, private_file};
 pub const SURE_YES: f32 = 0.639;
 /// Beyond this a candidate is not considered at all.
 pub const SURE_NO: f32 = 0.786;
+/// Close calls judged for one request at most, the nearest ones (about
+/// two and a half minutes at 2.3 s a pair); the rest wait for the next
+/// request (the review again, *Find more*), when those judged meanwhile
+/// answer from the kept verdicts at once.  A well-photographed suit can
+/// have hundreds of heads in the band.
+pub const MAX_CLOSE_CALLS: usize = 60;
 
 const MAGIC: &[u8; 8] = b"PPJUDGD\0";
 const VERSION: u32 = 1;

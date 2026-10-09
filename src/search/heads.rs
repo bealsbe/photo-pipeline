@@ -2279,6 +2279,73 @@ mod store_tests {
         }
     }
 
+    /// v2's head vectors through the app's own path (the search helper's
+    /// `EmbedHeads`: each photo's preview read as the head step reads it,
+    /// the known boxes cut and through the image tower on the card) for
+    /// the research's labelled heads, written in the research's row order
+    /// for its evaluation (`evaluate.py`, `rerank.py whiten`).
+    /// `PP_DUMP=<heads.json>` (the research's dump: root, photos, rows),
+    /// `PP_OUT=<vectors.f32>`, the search model by `PP_MODEL_DIR`.  Prints
+    /// the seconds a photo.  Run under the card lock.
+    #[test]
+    #[ignore = "needs the research's dump (PP_DUMP), the library it names, the search model (PP_MODEL_DIR), PP_OUT and the card"]
+    fn fursuit_v2_vectors_of_the_research_heads() {
+        use crate::ml::client::{Client, Spec};
+        let dump: serde_json::Value = serde_json::from_slice(&fs::read(std::env::var("PP_DUMP").expect("PP_DUMP")).unwrap()).unwrap();
+        let out = PathBuf::from(std::env::var("PP_OUT").expect("PP_OUT"));
+        let root = PathBuf::from(dump["root"].as_str().unwrap());
+        let n_rows = dump["rows"].as_array().unwrap().len();
+        let mut jobs: Vec<(KnownHeads, Vec<usize>)> = Vec::new();
+        for p in dump["photos"].as_array().unwrap() {
+            let rows: Vec<(usize, [f32; 4])> = p["heads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|h| {
+                    let b: Vec<f32> = h["bbox"].as_array()?.iter().map(|v| v.as_f64().unwrap() as f32).collect();
+                    Some((h["row"].as_u64()? as usize, [b[0], b[1], b[2], b[3]]))
+                })
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let rel = p["rel"].as_str().unwrap();
+            let hex = p["key"].as_str().unwrap();
+            let key = Key(u128::from_str_radix(hex, 16).unwrap().to_be_bytes());
+            let file_type = if rel.to_lowercase().ends_with(".jpg") { FileType::Jpg } else { FileType::Raw };
+            jobs.push((KnownHeads { path: root.join(rel), file_type, key, boxes: rows.iter().map(|r| r.1).collect() }, rows.iter().map(|r| r.0).collect()));
+        }
+        let client = Client::start(Spec::images(Device::Gpu, None)).ok().expect("the search helper on the card");
+        let mut vectors = vec![0f32; n_rows * crate::ml::heads::DIM];
+        let (mut done, mut failed) = (0usize, 0usize);
+        let t = Instant::now();
+        for chunk in jobs.chunks(BATCH) {
+            let known: Vec<KnownHeads> = chunk.iter().map(|(k, _)| k.clone()).collect();
+            let results = client.embed_heads(&known).expect("embedded");
+            for ((_, rows), r) in chunk.iter().zip(results) {
+                match r.result {
+                    Ok(p) => {
+                        for (row, h) in rows.iter().zip(&p.heads) {
+                            vectors[row * crate::ml::heads::DIM..(row + 1) * crate::ml::heads::DIM].copy_from_slice(&h.vector);
+                        }
+                        done += 1;
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        if failed < 5 {
+                            eprintln!("{}: {}", r.path.display(), e.message);
+                        }
+                    }
+                }
+            }
+        }
+        let secs = t.elapsed().as_secs_f64();
+        let bytes: Vec<u8> = vectors.iter().flat_map(|x| x.to_le_bytes()).collect();
+        fs::write(&out, bytes).unwrap();
+        eprintln!("{done} photos ({failed} failed), {n_rows} rows, in {secs:.0} s: {:.3} s a photo on the card; wrote {}", secs / jobs.len().max(1) as f64, out.display());
+        client.shutdown();
+    }
+
     /// A cache from before v2 (phase 4's DINOv2 vectors in
     /// `headvecs-dinov2-base.bin`, no SigLIP2 vectors, no whitening):
     /// loading it neither fails nor reads the old vectors; its heads are
