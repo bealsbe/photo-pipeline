@@ -537,6 +537,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// The app's whitening against the research's own (numpy's SVD on
+    /// the same SigLIP2 head vectors): pairwise whitened distances agree
+    /// (eigenvectors may flip sign, distances can't), and the fit's time
+    /// on the cohort.  `PP_WHITEN_RAW=<siglip2.f32>` (n × 768),
+    /// `PP_WHITEN_REF=<whiten_siglip2_all.npy>` (n × 256, float32).
+    #[test]
+    #[ignore = "needs the research's vectors (PP_WHITEN_RAW, PP_WHITEN_REF)"]
+    fn the_fit_matches_the_researchs_numpy_whitening() {
+        let raw = std::fs::read(std::env::var("PP_WHITEN_RAW").expect("PP_WHITEN_RAW")).unwrap();
+        let data: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let npy = std::fs::read(std::env::var("PP_WHITEN_REF").expect("PP_WHITEN_REF")).unwrap();
+        let hlen = u16::from_le_bytes([npy[8], npy[9]]) as usize;
+        let reference: Vec<f32> = npy[10 + hlen..].chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let n = data.len() / 768;
+        assert_eq!(reference.len(), n * K, "the same heads");
+        let t = std::time::Instant::now();
+        let w = Whitening::fit(&data, 768, K).unwrap();
+        let fit = t.elapsed().as_secs_f64();
+        let z = w.apply_rows(&data);
+        let mut g = Lcg(9);
+        let (mut worst, mut sum) = (0f32, 0f64);
+        let pairs = 20_000;
+        for _ in 0..pairs {
+            let i = ((g.next() + 1.0) / 2.0 * n as f64) as usize % n;
+            let j = ((g.next() + 1.0) / 2.0 * n as f64) as usize % n;
+            let d = |m: &[f32]| 1.0 - m[i * K..(i + 1) * K].iter().zip(&m[j * K..(j + 1) * K]).map(|(a, b)| a * b).sum::<f32>();
+            let diff = (d(&z) - d(&reference)).abs();
+            worst = worst.max(diff);
+            sum += diff as f64;
+        }
+        eprintln!("{n} heads: fit {fit:.2} s; whitened distances vs numpy over {pairs} pairs: mean |Δ| {:.2e}, max {worst:.2e}", sum / pairs as f64);
+        assert!(worst < 2e-3, "{worst}");
+    }
+
     /// The fit's cost at the research cohort's size (10 826 heads × 768)
     /// and the library's expected one (`PP_WHITEN_ROWS`, 68 000 by
     /// default): the plan's bar is under 10 s on the processor.

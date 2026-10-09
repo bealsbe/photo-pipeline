@@ -393,6 +393,72 @@ mod tests {
         assert_eq!(FakeMode::parse("maybe"), None);
     }
 
+    /// The card's memory in use, from the driver (AMD's sysfs; the
+    /// largest card), in bytes.
+    fn vram_used() -> u64 {
+        (0..8).filter_map(|i| std::fs::read_to_string(format!("/sys/class/drm/card{i}/device/mem_info_vram_used")).ok()).filter_map(|s| s.trim().parse::<u64>().ok()).max().unwrap_or(0)
+    }
+
+    /// The real judge through its helper, on the card: the load time,
+    /// the seconds a pair, the card's memory before, while loaded and
+    /// after the helper leaves (on request, and on its own after the idle
+    /// time, shortened by `PP_JUDGE_IDLE_SECS`); and, with
+    /// `PP_JUDGE_FAKE_OFFLOAD` set for a second helper, a partial offload
+    /// refused as a card failure with the memory given back.
+    /// `PP_JUDGE_MODEL_DIR` holds the two GGUF files, `PP_JUDGE_CROPS`
+    /// research crops (`<row>.jpg`), `PP_JUDGE_ROWS=a,b,c,d` two pairs.
+    /// Run under the card lock, with nothing else on the card.
+    #[test]
+    #[ignore = "needs the model (PP_JUDGE_MODEL_DIR), crops (PP_JUDGE_CROPS, PP_JUDGE_ROWS) and the card"]
+    fn the_real_judge_loads_judges_and_gives_the_card_back() {
+        let crops = PathBuf::from(std::env::var("PP_JUDGE_CROPS").expect("PP_JUDGE_CROPS"));
+        let rows: Vec<String> = std::env::var("PP_JUDGE_ROWS").expect("PP_JUDGE_ROWS").split(',').map(str::to_string).collect();
+        let pair = |a: &str, b: &str| PairAsk { a: Crop::File(crops.join(format!("{a}.jpg"))), b: Crop::File(crops.join(format!("{b}.jpg"))) };
+        let gb = |b: u64| b as f64 / 1e9;
+        let before = vram_used();
+        let c = Client::new(JudgeChoice::Gemma4);
+        let t = std::time::Instant::now();
+        let first = c.judge(&[pair(&rows[0], &rows[1])]).expect("judged on the card");
+        let load_and_first = t.elapsed().as_secs_f64();
+        let loaded = vram_used();
+        let t = std::time::Instant::now();
+        let second = c.judge(&[pair(&rows[2], &rows[3])]).expect("judged");
+        let per_pair = t.elapsed().as_secs_f64();
+        eprintln!("first pair {:?} (with the load) in {load_and_first:.1} s; second {:?} in {per_pair:.2} s", first[0].result, second[0].result);
+        c.unload();
+        std::thread::sleep(Duration::from_millis(500));
+        let after = vram_used();
+        eprintln!("card memory: {:.2} GB before, {:.2} GB loaded (+{:.2}), {:.2} GB after unload", gb(before), gb(loaded), gb(loaded.saturating_sub(before)), gb(after));
+        assert!(!c.loaded());
+        assert!(after < before + 500_000_000, "the memory went back");
+        // Idle: the helper leaves on its own.
+        let idle: u64 = std::env::var("PP_JUDGE_IDLE_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(crate::ml::judge::IDLE_SECS);
+        c.judge(&[pair(&rows[0], &rows[1])]).expect("judged again");
+        let reloaded = vram_used();
+        let t = std::time::Instant::now();
+        while c.loaded() {
+            assert!(t.elapsed().as_secs() < idle + 30, "never left");
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        eprintln!("idle exit after {:.0} s: {:.2} GB loaded, {:.2} GB after", t.elapsed().as_secs_f64(), gb(reloaded), gb(vram_used()));
+        assert!(vram_used() < before + 500_000_000);
+        // Card only: a partial offload is refused, never run.
+        temp_env("PP_JUDGE_FAKE_OFFLOAD", "20", || {
+            let p = Client::new(JudgeChoice::Gemma4);
+            let r = p.judge(&[pair(&rows[0], &rows[1])]);
+            eprintln!("partial offload: {r:?}");
+            assert!(matches!(r, Err(JudgeError::Card(CardFailure::Failed(m))) if m.contains("only 20")));
+            assert!(!p.loaded());
+        });
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(vram_used() < before + 500_000_000, "nothing left on the card after the refusal");
+    }
+
+    fn temp_env(k: &str, v: &str, f: impl FnOnce()) {
+        crate::ml::client::tests::temp_env(k, v, f)
+    }
+
     /// The real helper with its model missing says so plainly: nothing
     /// is loaded, nothing touches the card.  Needs the app binary beside
     /// the tests (`cargo build --release` first).

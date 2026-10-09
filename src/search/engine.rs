@@ -1343,6 +1343,10 @@ impl Worker {
                 None => pending.push(i),
             }
         }
+        // The nearest close calls only; the rest wait for the next request.
+        let later = pending.len().saturating_sub(judging::MAX_CLOSE_CALLS);
+        pending.truncate(judging::MAX_CLOSE_CALLS);
+        total -= later;
         let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group: group.clone(), list: Arc::new(offered) });
         let _ = self.bus.unbounded_send(BgEvent::Judged { seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total });
         self.judge_token += 1;
@@ -1361,6 +1365,8 @@ impl Worker {
     /// a head scan holds the card (they wait, "waiting for the card"),
     /// and with the search helper's idle card memory let go first.
     fn judge_go(&mut self) {
+        // A pass's end drops the key → shot table; the crops need it.
+        self.ensure_resolver();
         let Some(j) = &self.judging else { return };
         if j.pending.is_empty() {
             return;
@@ -1386,6 +1392,9 @@ impl Worker {
         j.pending.retain(|i| !unshowable.contains(i));
         j.done += unshowable.len();
         let (group, done, total) = (j.group.clone(), j.done, j.total);
+        if !unshowable.is_empty() {
+            let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(Vec::new()), done, total });
+        }
         if tasks.is_empty() {
             self.judge_state = JudgeState::Idle;
             self.publish_judge();
@@ -1760,6 +1769,11 @@ impl Worker {
             self.people.reset_grouping();
             self.fursuits.reset_grouping();
             self.start_regroup();
+            // The fursuits' groups too, once a whitening is fitted (v2):
+            // their rows are built for it and let go again when idle.
+            if self.fursuits.store.as_ref().is_some_and(|s| s.whitening().is_some()) {
+                self.start_heads_regroup();
+            }
         }
         self.publish_subjects();
         if root_changed {
@@ -3241,6 +3255,123 @@ mod tests {
         assert!(judged.is_empty());
         e.try_card_again();
         wait_for(&e, "tried again", |s| matches!(s.judge.state, crate::ml::judge::JudgeState::Idle));
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// [`Suits`], with search embedding held back while `slow` is set (a
+    /// pass that keeps the card busy).
+    struct SlowSuits(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Embedder for SlowSuits {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            Suits.device_report()
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            while self.0.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Suits.embed_images(files, want)
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Suits.encode_text(texts)
+        }
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            Suits.find_heads(files)
+        }
+    }
+
+    /// The judge never takes the card while a pass holds it: close calls
+    /// asked for during a pass wait ("waiting for the card"), nothing is
+    /// judged, and they are judged once the pass ends.
+    #[test]
+    fn close_calls_wait_for_the_card_while_a_pass_runs() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.3)), (3, -Suits::at(0.70)), (4, -Suits::at(0.75))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("judge-wait", &refs);
+        let slow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = slow.clone();
+        let factory: EmbedderFactory = Box::new(move |_| Ok(Arc::new(SlowSuits(s2.clone())) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Yes));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.set_judge(JudgeChoice::Gemma4);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key1 = Key::of(1, lib_path(&d, &files[0]).as_os_str().as_encoded_bytes());
+        let started = Instant::now();
+        let cluster = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.kind == Kind::Fursuit && g.photos == 2 && g.cover.face.key != Key::of(1, lib_path(&d, &files[2]).as_os_str().as_encoded_bytes())) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = key1;
+        e.name_group(cluster, "Suit".into());
+        let started = Instant::now();
+        let suit = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // A pass that holds the card: the face catch-up, held back.
+        slow.store(true, std::sync::atomic::Ordering::Relaxed);
+        e.find_faces();
+        wait_for(&e, "the pass", |s| s.pass.is_some());
+        e.suggestions(9, suit.clone());
+        wait_for(&e, "waiting for the card", |s| s.judge.state == crate::ml::judge::JudgeState::WaitingForCard);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(fake.pairs.lock().is_empty() && !crate::ml::judge_client::Judge::loaded(fake.as_ref()), "nothing judged, nothing loaded while the pass holds the card");
+        slow.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (_, judged) = review(&mut ev, 9, Duration::from_secs(10));
+        let last = judged.last().expect("verdicts after the pass");
+        assert_eq!((last.2, last.3), (2, 2), "both close calls judged once the card was free");
+        assert_eq!(fake.pairs.lock().len(), 2);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A library whose heads were whitened before (an interrupted
+    /// catch-up, a restart) has its fursuit groups again when it opens,
+    /// with no pass or command.
+    #[test]
+    fn fursuit_groups_come_back_when_a_whitened_library_opens() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.1)), (3, -Suits::at(0.9)), (4, -Suits::at(0.95))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("judge-reopen", &refs);
+        let config = || Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib.clone());
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        e.shutdown();
+        std::thread::sleep(Duration::from_millis(200));
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib);
+        let started = Instant::now();
+        while e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count() < 2 {
+            assert!(started.elapsed() < Duration::from_secs(5), "no fursuit groups at open: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(e.status().heads.whitened);
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }
