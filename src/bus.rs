@@ -125,6 +125,9 @@ pub enum BgEvent {
     /// A group's faces, clearest first (`Engine::faces`), for the split
     /// view.  `group` is as asked.
     SubjectFaces { seq: u64, group: crate::model::subjects::GroupId, faces: Arc<Vec<crate::model::subjects::Face>> },
+    /// The viewer's labels for a photo (`Engine::photo_labels`): its
+    /// faces and fursuit heads with their names, for request `seq`.
+    PhotoLabels { seq: u64, labels: Arc<crate::model::subjects::PhotoLabels> },
     /// Suggestions for review (`Engine::suggestions`): one entry per burst
     /// (its frames' faces, best first), most likely first; for a cluster,
     /// its own members to check.  Never a face of another kind.
@@ -198,6 +201,7 @@ impl BgEvent {
             BgEvent::Subjects(_) => "Subjects",
             BgEvent::SubjectsUndone(_) => "SubjectsUndone",
             BgEvent::SubjectFaces { .. } => "SubjectFaces",
+            BgEvent::PhotoLabels { .. } => "PhotoLabels",
             BgEvent::Suggestions { .. } => "Suggestions",
             BgEvent::Judged { .. } => "Judged",
             BgEvent::ModelDownload { .. } => "ModelDownload",

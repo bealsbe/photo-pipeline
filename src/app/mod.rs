@@ -36,6 +36,7 @@ pub mod viewer;
 pub mod viewer_advance;
 pub mod viewer_burst;
 pub mod viewer_filmstrip;
+pub mod viewer_labels;
 pub mod viewer_window;
 
 use std::collections::{HashMap, HashSet};
@@ -1839,6 +1840,7 @@ impl App {
             Cmd::AdvanceAfterMark => viewer_advance::toggle(self),
             Cmd::PrevBurst => viewer_burst::skip(self, -1),
             Cmd::NextBurst => viewer_burst::skip(self, 1),
+            Cmd::LabelFaces => viewer_labels::toggle(self),
             Cmd::Preferences => preferences::open(self),
             Cmd::Analyse => hints_ui::analyse(self),
             Cmd::KeepThisPruneRest => bulk::open(self, bulk::Action::KeepThis),
@@ -2208,8 +2210,15 @@ impl App {
                     }
                 }
                 BgEvent::SearchThings(things) => search::on_things(self, things),
-                BgEvent::Subjects(all) => tasks.push(subjects::on_subjects(self, all)),
-                BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
+                BgEvent::Subjects(all) => {
+                    tasks.push(subjects::on_subjects(self, all));
+                    viewer_labels::on_subjects(self);
+                }
+                BgEvent::SubjectsUndone(what) => {
+                    viewer_labels::on_undone(self, &what);
+                    tasks.push(subjects::on_undone(self, what));
+                }
+                BgEvent::PhotoLabels { seq, labels } => viewer_labels::on_labels(self, seq, labels),
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),

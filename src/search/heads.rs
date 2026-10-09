@@ -436,6 +436,9 @@ pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
     pub scanned: HashMap<Key, Vec<HeadDetection>>,
+    /// Heads the user drew in the viewer (the detector missed them):
+    /// cache, like the rest; the user's own list is the subjects file.
+    pub drawn: HashMap<Key, Vec<HeadDetection>>,
     /// In memory only once asked for ([`HeadStore::vectors`]): whitened.
     pub(crate) vectors: Option<HeadVectors>,
     /// The heads with a vector of the current model in the file (refs
@@ -448,6 +451,28 @@ pub struct HeadStore {
 impl HeadStore {
     fn heads_file(dir: &Path) -> PathBuf {
         dir.join("heads.bin")
+    }
+
+    fn drawn_file(dir: &Path) -> PathBuf {
+        dir.join("heads-drawn.bin")
+    }
+
+    /// A detections file (`heads.bin`, or the drawn heads'), by photo;
+    /// later blocks for a photo replace earlier ones.
+    fn read_detections(path: &Path) -> HashMap<Key, Vec<HeadDetection>> {
+        let mut out = HashMap::new();
+        if let Ok(data) = fs::read(path) {
+            let bs = blocks(&data);
+            if bs.first().is_some_and(|h| Self::read_heads_header(h)) {
+                for b in &bs[1..] {
+                    let Some(entries) = Self::read_heads_block(b) else { break };
+                    for (k, d) in entries {
+                        out.insert(k, d);
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn vectors_file(dir: &Path) -> PathBuf {
@@ -469,23 +494,13 @@ impl HeadStore {
         let whitening = Whitening::load(&Self::whitening_file(dir), VECTOR_MODEL.dir_name(), models::info(VECTOR_MODEL).weights_sha256(), CROP_VERSION).map(Arc::new);
         let mut store = HeadStore {
             dir: dir.to_path_buf(),
-            scanned: HashMap::new(),
+            scanned: Self::read_detections(&Self::heads_file(dir)),
+            drawn: Self::read_detections(&Self::drawn_file(dir)),
             vectors: None,
             with_vectors: HashSet::new(),
             whitening,
             tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })),
         };
-        if let Ok(data) = fs::read(Self::heads_file(dir)) {
-            let bs = blocks(&data);
-            if bs.first().is_some_and(|h| Self::read_heads_header(h)) {
-                for b in &bs[1..] {
-                    let Some(entries) = Self::read_heads_block(b) else { break };
-                    for (k, d) in entries {
-                        store.scanned.insert(k, d);
-                    }
-                }
-            }
-        }
         store.load_tiles();
         store.with_vectors = Self::read_vector_refs(dir);
         store
@@ -789,12 +804,48 @@ impl HeadStore {
         f.sync_data()
     }
 
+    /// Record heads the user drew (their vectors from the helper, the
+    /// search model's on the head crop, raw): kept beside the detections,
+    /// never mixed with what the detector found.  The user said it is a
+    /// head, so its score is full.
+    pub fn add_drawn(&mut self, key: Key, heads: &[Head]) -> io::Result<()> {
+        if heads.is_empty() {
+            return Ok(());
+        }
+        let mut dets = self.drawn.get(&key).cloned().unwrap_or_default();
+        for h in heads {
+            let r = FaceRef::new(key, h.bbox);
+            dets.retain(|d| d.head_ref(key) != r);
+            dets.push(HeadDetection { bbox: h.bbox, score: 1.0, size_px: h.size as f32, sharpness: h.sharpness });
+        }
+        Self::append(&Self::drawn_file(&self.dir), &Self::heads_header(), &Self::heads_block(&[(key, dets.clone())]))?;
+        self.drawn.insert(key, dets);
+        self.add_vector_rows(key, heads)?;
+        self.add_tiles(key, heads)
+    }
+
+    /// The user drew this head (as against the detector finding it).
+    pub fn is_drawn(&self, r: &FaceRef) -> bool {
+        self.drawn.get(&r.key).is_some_and(|d| d.iter().any(|d| d.head_ref(r.key) == *r))
+    }
+
+    /// The head has a vector in the file.
+    pub fn has_vector(&self, r: &FaceRef) -> bool {
+        self.with_vectors.contains(r)
+    }
+
+    /// The heads the detector found in a photo (not the drawn ones).
     pub fn heads_of(&self, key: &Key) -> &[HeadDetection] {
         self.scanned.get(key).map_or(&[], Vec::as_slice)
     }
 
+    /// The heads the user drew in a photo.
+    pub fn drawn_of(&self, key: &Key) -> &[HeadDetection] {
+        self.drawn.get(key).map_or(&[], Vec::as_slice)
+    }
+
     pub fn detection(&self, r: &FaceRef) -> Option<&HeadDetection> {
-        self.heads_of(&r.key).iter().find(|d| d.head_ref(r.key) == *r)
+        self.heads_of(&r.key).iter().chain(self.drawn_of(&r.key)).find(|d| d.head_ref(r.key) == *r)
     }
 
     /// Photos looked at.
@@ -807,9 +858,9 @@ impl HeadStore {
         self.scanned.values().map(Vec::len).sum()
     }
 
-    /// Every head, as (ref, detection).
+    /// Every head, found or drawn, as (ref, detection).
     pub fn all(&self) -> impl Iterator<Item = (FaceRef, &HeadDetection)> {
-        self.scanned.iter().flat_map(|(k, dets)| dets.iter().map(move |d| (d.head_ref(*k), d)))
+        self.scanned.iter().chain(self.drawn.iter()).flat_map(|(k, dets)| dets.iter().map(move |d| (d.head_ref(*k), d)))
     }
 
     /// The tile index, shared with `Engine::crop` on other threads.
@@ -822,8 +873,10 @@ impl HeadStore {
     pub fn retain(&mut self, live: &HashSet<Key>) {
         let before = self.scanned.len();
         self.scanned.retain(|k, _| live.contains(k));
+        let drawn = self.drawn.len();
+        self.drawn.retain(|k, _| live.contains(k));
         let dropped = before - self.scanned.len();
-        if dropped > 0 && dropped as f64 > COMPACT_SHARE * before as f64 {
+        if (dropped > 0 && dropped as f64 > COMPACT_SHARE * before as f64) || self.drawn.len() < drawn {
             if let Err(e) = self.rewrite() {
                 eprintln!("heads: couldn't compact the head cache: {e}");
             }
@@ -842,6 +895,17 @@ impl HeadStore {
         }
         fsutil::atomic_write(&Self::heads_file(&dir), &out, true)?;
         private_file(&Self::heads_file(&dir));
+        let drawn: Vec<(Key, Vec<HeadDetection>)> = self.drawn.iter().map(|(k, d)| (*k, d.clone())).collect();
+        if drawn.is_empty() {
+            let _ = fs::remove_file(Self::drawn_file(&dir));
+        } else {
+            let mut out = framed(&Self::heads_header());
+            for chunk in drawn.chunks(1024) {
+                out.extend(framed(&Self::heads_block(chunk)));
+            }
+            fsutil::atomic_write(&Self::drawn_file(&dir), &out, true)?;
+            private_file(&Self::drawn_file(&dir));
+        }
         let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
         let was_loaded = self.vectors.take().is_some();
         let all = Self::read_raw(&dir);
@@ -895,6 +959,7 @@ impl HeadStore {
             let _ = fs::remove_file(p);
         }
         self.scanned.clear();
+        self.drawn.clear();
         self.vectors = None;
         self.with_vectors.clear();
         self.whitening = None;
@@ -910,7 +975,7 @@ impl HeadStore {
     /// Every file the head cache may have in an index folder, the legacy
     /// vector files included.
     fn files(dir: &Path) -> Vec<PathBuf> {
-        let mut v = vec![Self::heads_file(dir), Self::vectors_file(dir), Self::tiles_file(dir), Self::whitening_file(dir)];
+        let mut v = vec![Self::heads_file(dir), Self::drawn_file(dir), Self::vectors_file(dir), Self::tiles_file(dir), Self::whitening_file(dir)];
         v.extend(LEGACY_VECTOR_FILES.iter().map(|f| dir.join(f)));
         v
     }
@@ -956,6 +1021,10 @@ impl KindStep for HeadStore {
     /// *Find more* (0.14) and the review (0.17) join a suit across time.
     fn linkage(&self) -> subjects::Linkage {
         subjects::Linkage::Average
+    }
+
+    fn is_added(&self, r: &FaceRef) -> bool {
+        self.is_drawn(r)
     }
 }
 
@@ -1343,7 +1412,8 @@ impl Fursuits {
                 }
                 let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
                 let confirmed = file.confirmed(Kind::Fursuit);
-                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+                let out = step::Exclusion::new(file, Kind::Fursuit);
+                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i]) && !out.excludes(store, &refs[i])).collect();
                 let cutoffs = store.cutoffs();
                 subjects::candidates(&rows, &members, &pool, if strict { cutoffs.strict } else { cutoffs.suggest })
             }
@@ -1587,7 +1657,8 @@ impl Fursuits {
         let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
         let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
         let confirmed = file.confirmed(Kind::Fursuit);
-        let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+        let out = step::Exclusion::new(file, Kind::Fursuit);
+        let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i]) && !out.excludes(store, &refs[i])).collect();
         let (sure_yes, sure_no) = store.band();
         let near = nearest_members(&rows, &members, &pool, sure_no);
         let items: Vec<((Face, f32, FaceRef), Option<u64>)> = near

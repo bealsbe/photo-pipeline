@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Linkage, Rows, SubjectsFile};
+use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Linkage, Removed, Rows, SubjectsFile};
 
 /// What a kind's step gives the grouping.
 pub trait KindStep: Send {
@@ -35,6 +35,36 @@ pub trait KindStep: Send {
     fn linkage(&self) -> Linkage {
         Linkage::PEOPLE
     }
+    /// A box the user drew (the viewer's labels), as against one the
+    /// step found: it takes part only while the user's file lists it.
+    fn is_added(&self, r: &FaceRef) -> bool {
+        let _ = r;
+        false
+    }
+}
+
+/// The rows the user's labels keep out of a kind's grouping and
+/// suggestions: detections they removed ("Not a face"), and boxes drawn
+/// once whose drawing was taken back (their vectors stay in the cache).
+pub struct Exclusion {
+    removed: Removed,
+    added: HashSet<FaceRef>,
+}
+
+impl Exclusion {
+    pub fn new(file: &SubjectsFile, kind: Kind) -> Exclusion {
+        Exclusion { removed: file.removed_index(kind), added: file.added_of(kind).copied().collect() }
+    }
+
+    /// `r` (a row of `step`) is kept out.
+    pub fn excludes(&self, step: &dyn KindStep, r: &FaceRef) -> bool {
+        self.removed.covers(r) || (step.is_added(r) && !self.added.contains(r))
+    }
+
+    /// Per row of `step`: kept out or not.
+    pub fn rows(&self, step: &dyn KindStep) -> Vec<bool> {
+        step.refs().iter().map(|r| self.excludes(step, r)).collect()
+    }
 }
 
 /// What a regroup works on: a copy of the step's data, so the worker
@@ -49,6 +79,8 @@ pub struct RegroupJob {
     pub cutoffs: Cutoffs,
     pub linkage: Linkage,
     pub file: SubjectsFile,
+    /// Per row: kept out by the user's labels ([`Exclusion`]).
+    pub excluded: Vec<bool>,
 }
 
 /// What a regroup gives back.
@@ -123,7 +155,8 @@ impl Grouped {
             return;
         }
         let confirmed = file.confirmed(step.kind());
-        let new: Vec<usize> = (self.rows..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i])).collect();
+        let out = Exclusion::new(file, step.kind());
+        let new: Vec<usize> = (self.rows..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !out.excludes(step, &refs[i])).collect();
         let rows = step.rows();
         subjects::assign_with(&mut self.clusters, &rows, &new, step.cutoffs().group, step.linkage());
         self.sureness.resize(refs.len(), 1.0);
@@ -152,6 +185,7 @@ pub fn job(step: &dyn KindStep, file: &SubjectsFile, generation: u64) -> Regroup
         cutoffs: step.cutoffs(),
         linkage: step.linkage(),
         file: file.clone(),
+        excluded: Exclusion::new(file, step.kind()).rows(step),
     }
 }
 
@@ -162,7 +196,8 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
     let rows = Rows::F32 { dim: j.dim, data: &j.data };
     let n = rows.len().min(j.refs.len());
     let confirmed = j.file.confirmed(j.kind);
-    let mut order: Vec<usize> = (0..n).filter(|&i| !confirmed.contains_key(&j.refs[i])).collect();
+    let out = |i: usize| j.excluded.get(i).copied().unwrap_or(false);
+    let mut order: Vec<usize> = (0..n).filter(|&i| !confirmed.contains_key(&j.refs[i]) && !out(i)).collect();
     order.sort_by(|&a, &b| j.clarity[b].total_cmp(&j.clarity[a]).then(a.cmp(&b)));
     let clusters = subjects::cluster_with(&rows, &order, j.cutoffs.group, j.linkage);
     let mut sureness = vec![1.0f32; n];
@@ -278,6 +313,46 @@ mod tests {
         assert_eq!(g.cluster(g.ids[0]).map(|c| c.members.len()), Some(5), "{:?}", g.clusters);
         g.assign_new(&more, &file);
         assert_eq!(g.rows, 10, "nothing new twice");
+    }
+
+    /// The viewer's labels in the grouping: with none, a regroup is what
+    /// it was (people's grouping unchanged); a removed face (or one found
+    /// again a thousandth off) takes no part, nor does it count as a
+    /// suggestion; a removal of a fursuit head says nothing about a face.
+    #[test]
+    fn removed_faces_take_no_part_and_no_labels_change_nothing() {
+        let toy = Toy::new();
+        let mut file = SubjectsFile::default();
+        let a = file.create(Kind::Person, Some("A".into()), vec![toy.refs[0], toy.refs[1]]);
+        let plain = regroup(&job(&toy, &file, 1));
+        assert!(job(&toy, &file, 1).excluded.iter().all(|x| !x), "no labels: nothing kept out");
+        // A fursuit removal on the same box changes nothing for people.
+        file.remove_box(Kind::Fursuit, toy.refs[2]).unwrap();
+        assert_eq!(regroup(&job(&toy, &file, 1)).clusters, plain.clusters);
+        // Face 2 (A's suggestion) and face 5 (in B's group) removed; face
+        // 5 slightly off, as a rebuild would find it.
+        file.remove_box(Kind::Person, toy.refs[2]).unwrap();
+        let off = FaceRef::new(toy.refs[5].key, [toy.refs[5].bbox[0] + 0.001, toy.refs[5].bbox[1], toy.refs[5].bbox[2], toy.refs[5].bbox[3]]);
+        file.remove_box(Kind::Person, off).unwrap();
+        let j = job(&toy, &file, 2);
+        assert_eq!(j.excluded.iter().filter(|x| **x).count(), 2);
+        let r = regroup(&j);
+        assert!(r.clusters.iter().all(|c| !c.members.contains(&2) && !c.members.contains(&5)), "{:?}", r.clusters);
+        assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 9 - 2 - 2, "the two confirmed and the two removed out");
+        assert_eq!((plain.suggestion_counts[&a], r.suggestion_counts[&a]), (2, 1), "a removed face is never a suggestion (face 3 still is)");
+        // New rows arriving: a removed one stays out of the clusters too.
+        let mut g = Grouped::default();
+        g.apply(regroup(&job(&toy, &SubjectsFile::default(), 3)), &toy.refs, &|r| toy.clarity(r));
+        let mut more = Toy::new();
+        let mut v = vec![0f32; 8];
+        v[1] = 1.0;
+        more.data.extend(v);
+        let late = FaceRef::new(Key([77; 16]), [0.1, 0.1, 0.5, 0.2]);
+        more.refs.push(late);
+        file.remove_box(Kind::Person, late).unwrap();
+        let before: usize = g.clusters.iter().map(|c| c.members.len()).sum();
+        g.assign_new(&more, &file);
+        assert_eq!(g.clusters.iter().map(|c| c.members.len()).sum::<usize>(), before, "the removed newcomer joins nothing");
     }
 
     /// Kinds never mix in the grouping: a job for one kind counts only

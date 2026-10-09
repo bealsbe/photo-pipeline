@@ -111,6 +111,8 @@ pub enum Glyph {
     Plus,
     /// The close-call judge: two heads weighed on one beam.
     CloseCall,
+    /// The viewer's labels: a box with a name tag.
+    Label,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -403,6 +405,12 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.line(&[(15.0, 4.5), (18.5, 8.0), (15.0, 11.5)]);
             p.line(&[(19.0, 16.0), (5.5, 16.0)]);
             p.line(&[(9.0, 12.5), (5.5, 16.0), (9.0, 19.5)]);
+        }
+        Label => {
+            // A box with its name tag hanging off its top edge, as the
+            // viewer's labels draw them.
+            p.closed(&[(4.0, 10.0), (20.0, 10.0), (20.0, 20.5), (4.0, 20.5)]);
+            p.closed(&[(4.0, 10.0), (4.0, 4.0), (11.5, 4.0), (13.5, 7.0), (11.5, 10.0)]);
         }
         Crop => {
             p.line(&[(7.0, 3.0), (7.0, 17.0), (21.0, 17.0)]);

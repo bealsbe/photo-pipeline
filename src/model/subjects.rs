@@ -34,8 +34,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::search::index::Key;
 
-/// The file's format version.
-pub const FILE_VERSION: u32 = 1;
+/// The file's format version.  2 means "may hold optional lists added
+/// after version 1" (the viewer's `added` and `removed` boxes); every
+/// such list is `#[serde(default)]`, and the version is written as 2
+/// only when one of them holds something, so a file without them keeps
+/// version 1's shape and an older build reads it as before.
+pub const FILE_VERSION: u32 = 2;
+/// The version written when no optional list holds anything.
+pub const FILE_VERSION_PLAIN: u32 = 1;
+/// A detection matches a removed box when they overlap at least this
+/// much (intersection over union): a box found again a thousandth off,
+/// after a rebuild, is still the one the user removed.
+pub const REMOVED_IOU: f32 = 0.6;
 /// Undo steps the engine keeps for the subjects file.
 pub const UNDO_DEPTH: usize = 50;
 
@@ -148,6 +158,26 @@ impl FaceRef {
         let smaller = (a[2] * a[3]).min(b[2] * b[3]).max(1e-9);
         inter / smaller
     }
+
+    /// Intersection over union of two boxes of one photo (0 for two
+    /// photos).
+    pub fn iou(&self, other: &FaceRef) -> f32 {
+        if self.key != other.key {
+            return 0.0;
+        }
+        iou_boxes(&self.bbox, &other.bbox)
+    }
+}
+
+/// Intersection over union of two `[x, y, w, h]` boxes.
+pub fn iou_boxes(a: &[f32; 4], b: &[f32; 4]) -> f32 {
+    let x0 = a[0].max(b[0]);
+    let y0 = a[1].max(b[1]);
+    let x1 = (a[0] + a[2]).min(b[0] + b[2]);
+    let y1 = (a[1] + a[3]).min(b[1] + b[3]);
+    let inter = (x1 - x0).max(0.0) * (y1 - y0).max(0.0);
+    let union = a[2] * a[3] + b[2] * b[3] - inter;
+    if union <= 0.0 { 0.0 } else { inter / union }
 }
 
 impl PartialEq for FaceRef {
@@ -305,6 +335,101 @@ impl fmt::Display for Refused {
     }
 }
 
+/// Where a labelled box's name goes (the viewer's labels).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameTo {
+    /// Join this subject (of the box's own kind; another is refused).
+    Subject(SubjectId),
+    /// This name: the subject of the kind called so, else a new one.
+    New(String),
+    /// Out of the subject it was in, and not suggested for it again.
+    Unnamed,
+}
+
+/// A change made on a box in the viewer's labels.  Each is one undo step.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelEdit {
+    /// Name the box (or move it to "Unnamed").
+    Name { face: FaceRef, kind: Kind, to: NameTo },
+    /// "This is a fursuit, not a face" (or the reverse): out of `from`
+    /// entirely, into `to`, named there if `name` says so.
+    Kind { face: FaceRef, from: Kind, to: Kind, name: Option<NameTo> },
+    /// A box the detector missed, drawn by the user.
+    Add { face: FaceRef, kind: Kind, name: Option<NameTo> },
+    /// "Not a face" / "Not a fursuit head".
+    Remove { face: FaceRef, kind: Kind },
+}
+
+impl LabelEdit {
+    /// The box the edit is about.
+    pub fn face(&self) -> FaceRef {
+        match self {
+            LabelEdit::Name { face, .. } | LabelEdit::Kind { face, .. } | LabelEdit::Add { face, .. } | LabelEdit::Remove { face, .. } => *face,
+        }
+    }
+}
+
+/// One box of the viewer's labels: a face or a fursuit head found in the
+/// photo, or drawn by the user, with its name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LabelBox {
+    pub face: FaceRef,
+    pub kind: Kind,
+    /// The subject it is a confirmed member of, and that subject's name
+    /// (`None`: "Unnamed").
+    pub subject: Option<SubjectId>,
+    pub name: Option<String>,
+    /// The user drew it.
+    pub drawn: bool,
+    /// Drawn, and not matched yet (no vector): it waits for the card.
+    pub pending: bool,
+}
+
+/// Why drawn boxes wait to be matched.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingWhy {
+    /// On the graphics card now.
+    Matching,
+    /// The processor is chosen: drawn boxes are matched on the card only.
+    ProcessorChosen,
+    /// The card failed or isn't there.
+    NoCard,
+    /// The face model isn't downloaded.
+    NoFaceModel,
+    /// The search model isn't downloaded.
+    NoSearchModel,
+}
+
+/// The viewer's labels for one photo (`Engine::photo_labels`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PhotoLabels {
+    /// The photo's content key in the index; `None`: the photo isn't in
+    /// the library (or not indexed yet), so nothing was looked for.
+    pub key: Option<Key>,
+    /// People's faces first, then fursuit heads; never one box as both.
+    pub boxes: Vec<LabelBox>,
+    /// Why the pending boxes wait, when some do.
+    pub pending: Option<PendingWhy>,
+}
+
+/// Which photo the viewer shows, for its labels: its files (the engine
+/// finds its key: from the library's paths, else by reading the file's
+/// head on a worker), or a key already known.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LabelTarget {
+    Files { jpg: Option<PathBuf>, raw: Option<PathBuf> },
+    Key(Key),
+}
+
+/// What a box is called in copy: "face", "fursuit head", "pet".
+pub fn box_noun(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Person => "face",
+        Kind::Fursuit => "fursuit head",
+        Kind::Pet => "pet",
+    }
+}
+
 /// One subject in the user's file (§6.5).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subject {
@@ -333,11 +458,65 @@ pub struct Subject {
 pub struct SubjectsFile {
     pub version: u32,
     pub subjects: Vec<Subject>,
+    /// Boxes the user drew in the viewer, of either kind (an optional
+    /// list, version 2).  Their vectors are cache, made again after a
+    /// rebuild.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub added: Vec<Labelled>,
+    /// Detections the user removed ("Not a face", "Not a fursuit head";
+    /// an optional list, version 2): never shown, grouped or suggested
+    /// as that kind again, however often the photo is looked at.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removed: Vec<Labelled>,
 }
 
 impl Default for SubjectsFile {
     fn default() -> Self {
-        SubjectsFile { version: FILE_VERSION, subjects: Vec::new() }
+        SubjectsFile { version: FILE_VERSION_PLAIN, subjects: Vec::new(), added: Vec::new(), removed: Vec::new() }
+    }
+}
+
+/// A box the user labelled in the viewer: drawn (a face or head the
+/// detector missed) or removed.  Spelled `{"kind": "person", "key":
+/// "<32 hex>", "box": [x, y, w, h]}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Labelled {
+    pub kind: Kind,
+    pub face: FaceRef,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LabelledJson {
+    kind: Kind,
+    #[serde(flatten)]
+    face: FaceRefJson,
+}
+
+impl Serialize for Labelled {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        LabelledJson { kind: self.kind, face: FaceRefJson { key: self.face.key.to_string(), bbox: self.face.bbox } }.serialize(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for Labelled {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Labelled, D::Error> {
+        let j = LabelledJson::deserialize(d)?;
+        let key = parse_key(&j.face.key).ok_or_else(|| serde::de::Error::custom("a key is 32 hex digits"))?;
+        Ok(Labelled { kind: j.kind, face: FaceRef::new(key, j.face.bbox) })
+    }
+}
+
+/// The removed boxes of one kind, by photo, for matching detections
+/// quickly ([`SubjectsFile::removed_index`]).
+#[derive(Debug, Clone, Default)]
+pub struct Removed {
+    by_key: HashMap<Key, Vec<[f32; 4]>>,
+}
+
+impl Removed {
+    /// The user removed this detection (or one it overlaps closely).
+    pub fn covers(&self, r: &FaceRef) -> bool {
+        self.by_key.get(&r.key).is_some_and(|boxes| boxes.iter().any(|b| iou_boxes(b, &r.bbox) >= REMOVED_IOU))
     }
 }
 
@@ -370,7 +549,9 @@ impl SubjectsFile {
             std::fs::create_dir_all(dir)?;
             private_dir(dir);
         }
-        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        let mut out = self.clone();
+        out.version = if out.has_optional() { FILE_VERSION } else { FILE_VERSION_PLAIN };
+        let text = serde_json::to_string_pretty(&out).map_err(io::Error::other)?;
         crate::ops::fsutil::atomic_write(path, text.as_bytes(), true)?;
         private_file(path);
         Ok(())
@@ -530,6 +711,122 @@ impl SubjectsFile {
     /// Subjects named, of `kind`.
     pub fn named_count(&self, kind: Kind) -> usize {
         self.subjects.iter().filter(|s| s.kind == kind && s.name.is_some()).count()
+    }
+
+    /// An optional list (version 2) holds something: the file is written
+    /// as version 2.
+    pub fn has_optional(&self) -> bool {
+        !self.added.is_empty() || !self.removed.is_empty()
+    }
+
+    /// Nothing left in the file.
+    pub fn is_empty(&self) -> bool {
+        self.subjects.is_empty() && !self.has_optional()
+    }
+
+    /// *Forget all* of a kind: its subjects and its labels go.
+    pub fn forget_kind(&mut self, kind: Kind) {
+        self.subjects.retain(|s| s.kind != kind);
+        self.added.retain(|l| l.kind != kind);
+        self.removed.retain(|l| l.kind != kind);
+    }
+
+    // ---- the viewer's labels (version 2) ----
+
+    /// The removed boxes of `kind`, indexed for [`Removed::covers`].
+    pub fn removed_index(&self, kind: Kind) -> Removed {
+        let mut by_key: HashMap<Key, Vec<[f32; 4]>> = HashMap::new();
+        for l in self.removed.iter().filter(|l| l.kind == kind) {
+            by_key.entry(l.face.key).or_default().push(l.face.bbox);
+        }
+        Removed { by_key }
+    }
+
+    /// The user drew this box, as `kind`.
+    pub fn is_added(&self, kind: Kind, face: &FaceRef) -> bool {
+        self.added.contains(&Labelled { kind, face: *face })
+    }
+
+    /// The boxes drawn as `kind`.
+    pub fn added_of(&self, kind: Kind) -> impl Iterator<Item = &FaceRef> {
+        self.added.iter().filter(move |l| l.kind == kind).map(|l| &l.face)
+    }
+
+    /// A box the detector missed, drawn as `kind`.  Refused (nothing)
+    /// when the user drew it already; a removal of the same box as this
+    /// kind is taken back.
+    pub fn add_box(&mut self, kind: Kind, face: FaceRef) -> Result<(), Refused> {
+        let l = Labelled { kind, face };
+        let removed = self.removed.len();
+        self.removed.retain(|r| !(r.kind == kind && r.face.iou(&face) >= REMOVED_IOU));
+        if self.added.contains(&l) {
+            return if self.removed.len() < removed { Ok(()) } else { Err(Refused::Nothing) };
+        }
+        self.added.push(l);
+        Ok(())
+    }
+
+    /// "Not a face" (or "Not a fursuit head"): the box leaves every
+    /// subject of `kind` (members, cover and answers) and is never shown
+    /// or grouped as `kind` again.  A box the user drew just goes; a
+    /// detection is remembered as removed, so a rebuild doesn't bring it
+    /// back.  The other kinds know nothing of it.
+    pub fn remove_box(&mut self, kind: Kind, face: FaceRef) -> Result<(), Refused> {
+        for s in self.subjects.iter_mut().filter(|s| s.kind == kind) {
+            s.members.retain(|m| *m != face);
+            s.rejected.retain(|m| *m != face);
+            if s.cover == Some(face) {
+                s.cover = None;
+            }
+        }
+        let l = Labelled { kind, face };
+        if self.added.contains(&l) {
+            self.added.retain(|a| *a != l);
+            return Ok(());
+        }
+        if self.removed_index(kind).covers(&face) {
+            return Err(Refused::Nothing);
+        }
+        self.removed.push(l);
+        Ok(())
+    }
+
+    /// "It's the other kind": the box leaves `from` entirely (as
+    /// [`SubjectsFile::remove_box`]) and is drawn as `to`.  Never a mix:
+    /// no subject of one kind ever holds it as the other.
+    pub fn change_kind(&mut self, face: FaceRef, from: Kind, to: Kind) -> Result<(), Refused> {
+        if from == to {
+            return Err(Refused::Nothing);
+        }
+        match self.remove_box(from, face) {
+            Ok(()) | Err(Refused::Nothing) => {}
+            Err(e) => return Err(e),
+        }
+        match self.add_box(to, face) {
+            Ok(()) | Err(Refused::Nothing) => Ok(()),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Name a box: it joins `id`, a subject of its own kind (another
+    /// kind is refused and nothing changes).
+    pub fn name_box(&mut self, kind: Kind, face: FaceRef, id: &SubjectId) -> Result<(), Refused> {
+        let s = self.get(id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?;
+        if s.kind != kind {
+            return Err(Refused::MixedKinds);
+        }
+        if s.members.contains(&face) {
+            return Err(Refused::Nothing);
+        }
+        self.add_members(id, vec![face]).map(|_| ())
+    }
+
+    /// "Unnamed": the box leaves the subject of `kind` it was in and
+    /// isn't suggested for it again.
+    pub fn unname_box(&mut self, kind: Kind, face: FaceRef) -> Result<SubjectId, Refused> {
+        let id = self.member_of(kind, &face).map(|s| s.id.clone()).ok_or(Refused::Nothing)?;
+        self.reject(&id, vec![face])?;
+        Ok(id)
     }
 }
 
@@ -991,7 +1288,7 @@ mod tests {
         assert_eq!(back, f);
         assert_eq!(back.subjects[0].name.as_deref(), Some("Some One"));
         assert_eq!(back.subjects[0].members, [face(1, 0.1), face(2, 0.1)], "deduplicated, in order");
-        assert_eq!(back.version, FILE_VERSION);
+        assert_eq!(back.version, FILE_VERSION_PLAIN, "no labels: written as version 1");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1064,6 +1361,118 @@ mod tests {
         assert_eq!(Refused::MixedKinds.to_string(), "people, fursuits and pets are never combined");
         assert_eq!(Kind::Person.noun(), "person");
         assert_eq!(Kind::Fursuit.plural(), "Fursuits");
+    }
+
+    /// A version 1 file (as phase 3 and 4 wrote it) loads as it was, with
+    /// no labels, and saves back as version 1 in the same shape: nothing
+    /// a label added shows in a file that was never labelled.
+    #[test]
+    fn an_old_file_loads_and_saves_back_unchanged() {
+        let d = std::env::temp_dir().join(format!("pp-subjects-v1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("subjects.json");
+        let v1 = r#"{
+  "version": 1,
+  "subjects": [
+    {
+      "id": "0123456789abcdef0123456789abcdef",
+      "name": "Someone",
+      "kind": "person",
+      "hidden": false,
+      "cover": null,
+      "members": [
+        {
+          "key": "01010101010101010101010101010101",
+          "box": [
+            0.1,
+            0.2,
+            0.1,
+            0.15
+          ]
+        }
+      ],
+      "rejected": []
+    }
+  ]
+}"#;
+        std::fs::write(&path, v1).unwrap();
+        let f = SubjectsFile::load(&path);
+        assert_eq!((f.version, f.subjects.len(), f.added.len(), f.removed.len()), (1, 1, 0, 0));
+        assert_eq!(f.subjects[0].members, [face(1, 0.1)]);
+        f.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), v1, "byte for byte as it was");
+        // With a label it is version 2, and back again without.
+        let mut g = f.clone();
+        g.remove_box(Kind::Person, face(1, 0.1)).unwrap();
+        g.save(&path).unwrap();
+        let back = SubjectsFile::load(&path);
+        assert_eq!((back.version, back.removed.len()), (FILE_VERSION, 1));
+        assert!(std::fs::read_to_string(&path).unwrap().contains(r#""kind": "person""#));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The viewer's labels in the file: drawn and removed boxes, a name,
+    /// "Unnamed", a kind change; each kind keeps to itself.
+    #[test]
+    fn labels_add_remove_name_and_change_kind_without_mixing() {
+        let mut f = SubjectsFile::default();
+        let a = f.create(Kind::Person, Some("A".into()), vec![face(1, 0.1)]);
+        let suit = f.create(Kind::Fursuit, Some("Suit".into()), vec![face(2, 0.1)]);
+        // Remove: out of A, remembered; again is nothing.
+        f.remove_box(Kind::Person, face(1, 0.1)).unwrap();
+        assert!(f.get(&a).unwrap().members.is_empty());
+        assert_eq!(f.remove_box(Kind::Person, face(1, 0.1)), Err(Refused::Nothing));
+        let removed = f.removed_index(Kind::Person);
+        assert!(removed.covers(&face(1, 0.1)));
+        // Found again a thousandth off after a rebuild: still removed.
+        assert!(removed.covers(&FaceRef::new(Key([1; 16]), [0.101, 0.201, 0.1, 0.15])));
+        assert!(!removed.covers(&face(1, 0.5)), "another face of the photo");
+        assert!(!f.removed_index(Kind::Fursuit).covers(&face(1, 0.1)), "people only");
+        // Drawn: listed; drawing the removed box again takes the removal back.
+        f.add_box(Kind::Person, face(3, 0.4)).unwrap();
+        assert!(f.is_added(Kind::Person, &face(3, 0.4)) && !f.is_added(Kind::Fursuit, &face(3, 0.4)));
+        assert_eq!(f.add_box(Kind::Person, face(3, 0.4)), Err(Refused::Nothing));
+        f.add_box(Kind::Person, face(1, 0.1)).unwrap();
+        assert!(!f.removed_index(Kind::Person).covers(&face(1, 0.1)));
+        // Removing a drawn box just takes it out.
+        f.remove_box(Kind::Person, face(1, 0.1)).unwrap();
+        assert!(!f.is_added(Kind::Person, &face(1, 0.1)) && !f.removed_index(Kind::Person).covers(&face(1, 0.1)));
+        // Name: same kind only; Unnamed rejects it for its subject.
+        assert_eq!(f.name_box(Kind::Person, face(3, 0.4), &suit), Err(Refused::MixedKinds));
+        f.name_box(Kind::Person, face(3, 0.4), &a).unwrap();
+        assert_eq!(f.member_of(Kind::Person, &face(3, 0.4)).unwrap().id, a);
+        assert_eq!(f.unname_box(Kind::Person, face(3, 0.4)), Ok(a.clone()));
+        assert!(f.get(&a).unwrap().rejected.contains(&face(3, 0.4)) && f.member_of(Kind::Person, &face(3, 0.4)).is_none());
+        assert_eq!(f.unname_box(Kind::Person, face(3, 0.4)), Err(Refused::Nothing));
+        // Kind change: the suit's head is a person's face.  It leaves the
+        // fursuit entirely and is a drawn person; no subject holds it as
+        // both.
+        f.change_kind(face(2, 0.1), Kind::Fursuit, Kind::Person).unwrap();
+        assert!(f.get(&suit).unwrap().members.is_empty());
+        assert!(f.removed_index(Kind::Fursuit).covers(&face(2, 0.1)) && f.is_added(Kind::Person, &face(2, 0.1)));
+        assert_eq!(f.name_box(Kind::Person, face(2, 0.1), &suit), Err(Refused::MixedKinds));
+        f.name_box(Kind::Person, face(2, 0.1), &a).unwrap();
+        assert!(f.subjects.iter().all(|s| s.kind == Kind::Person || !s.members.contains(&face(2, 0.1))), "never in a fursuit");
+        // And back: out of A, a drawn fursuit again.
+        f.change_kind(face(2, 0.1), Kind::Person, Kind::Fursuit).unwrap();
+        assert!(!f.is_added(Kind::Person, &face(2, 0.1)) && f.member_of(Kind::Person, &face(2, 0.1)).is_none());
+        assert!(f.is_added(Kind::Fursuit, &face(2, 0.1)) && !f.removed_index(Kind::Fursuit).covers(&face(2, 0.1)));
+        assert_eq!(f.change_kind(face(2, 0.1), Kind::Fursuit, Kind::Fursuit), Err(Refused::Nothing));
+        // Forgetting a kind takes its labels too, and leaves the other's.
+        f.remove_box(Kind::Person, face(5, 0.1)).unwrap();
+        f.forget_kind(Kind::Fursuit);
+        assert!(f.added.iter().all(|l| l.kind == Kind::Person) && f.removed.iter().all(|l| l.kind == Kind::Person));
+        assert!(f.removed_index(Kind::Person).covers(&face(5, 0.1)) && f.get(&a).is_some());
+        f.forget_kind(Kind::Person);
+        assert!(f.is_empty());
+        // Labels round-trip as JSON.
+        let mut g = SubjectsFile::default();
+        g.add_box(Kind::Fursuit, face(7, 0.3)).unwrap();
+        g.remove_box(Kind::Person, face(8, 0.2)).unwrap();
+        let back: SubjectsFile = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!((back.added.clone(), back.removed.clone()), (g.added.clone(), g.removed.clone()));
+        assert!((iou_boxes(&[0.0, 0.0, 1.0, 1.0], &[0.0, 0.0, 0.5, 1.0]) - 0.5).abs() < 1e-6);
     }
 
     /// Three people's faces as unit vectors around three directions, with

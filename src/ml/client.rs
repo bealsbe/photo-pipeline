@@ -81,6 +81,14 @@ pub struct KnownFaces {
     pub faces: Vec<FaceSpot>,
 }
 
+/// Faces the user drew in one file (the viewer's labels): boxes as
+/// fractions of the oriented preview, with no landmarks yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DrawnFaces {
+    pub path: PathBuf,
+    pub boxes: Vec<[f32; 4]>,
+}
+
 /// What face work a batch asks for.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "faces", rename_all = "snake_case")]
@@ -92,6 +100,10 @@ pub enum FaceAsk {
     Detect,
     /// Recognise these faces again (a face-model change): no detection.
     Known { files: Vec<KnownFaces> },
+    /// Faces the user drew: their landmarks looked for inside each box
+    /// (the template fitted to it when none is found), then recognised.
+    /// The box stays the user's.
+    Drawn { files: Vec<DrawnFaces> },
 }
 
 /// What a batch of photos should yield.
@@ -122,6 +134,11 @@ impl Want {
     /// Known faces recognised again (a face-model change).
     pub fn known(known: Vec<KnownFaces>) -> Want {
         Want { search: false, faces: FaceAsk::Known { files: known } }
+    }
+
+    /// Faces the user drew, recognised.
+    pub fn drawn(files: Vec<DrawnFaces>) -> Want {
+        Want { search: false, faces: FaceAsk::Drawn { files } }
     }
 }
 

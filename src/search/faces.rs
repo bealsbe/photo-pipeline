@@ -31,7 +31,7 @@ use crate::ml::face;
 use crate::ml::models::{self, ModelId};
 use crate::model::binfile::{Reader, Writer};
 use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
-use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, private_dir, private_file};
+use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, LabelEdit, NameTo, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, box_noun, private_dir, private_file};
 use crate::ops::fsutil;
 
 const FACES_MAGIC: &[u8; 8] = b"PPFACED\0";
@@ -176,6 +176,10 @@ pub struct FaceStore {
     model: ModelId,
     /// Photos looked at, with the faces found in each (maybe none).
     pub scanned: HashMap<Key, Vec<Detection>>,
+    /// Faces the user drew in the viewer (the detector missed them), with
+    /// the landmarks the helper found for them: cache, like the rest; the
+    /// user's own list of them is in the subjects file.
+    pub drawn: HashMap<Key, Vec<Detection>>,
     pub vectors: FaceVectors,
     tiles: Arc<Mutex<TileIndex>>,
 }
@@ -183,6 +187,10 @@ pub struct FaceStore {
 impl FaceStore {
     fn faces_file(dir: &Path) -> PathBuf {
         dir.join("faces.bin")
+    }
+
+    fn drawn_file(dir: &Path) -> PathBuf {
+        dir.join("faces-drawn.bin")
     }
 
     fn vectors_file(dir: &Path, model: ModelId) -> PathBuf {
@@ -196,21 +204,30 @@ impl FaceStore {
     /// Load the cache in `dir` for `model` (empty where there is nothing,
     /// or files of another detector or model).
     pub fn load(dir: &Path, model: ModelId) -> FaceStore {
-        let mut store = FaceStore { dir: dir.to_path_buf(), model, scanned: HashMap::new(), vectors: FaceVectors::default(), tiles: Arc::new(Mutex::new(TileIndex { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
-        if let Ok(data) = fs::read(Self::faces_file(dir)) {
+        let mut store = FaceStore { dir: dir.to_path_buf(), model, scanned: HashMap::new(), drawn: HashMap::new(), vectors: FaceVectors::default(), tiles: Arc::new(Mutex::new(TileIndex { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
+        store.scanned = Self::read_detections(&Self::faces_file(dir));
+        store.drawn = Self::read_detections(&Self::drawn_file(dir));
+        store.load_vectors();
+        store.load_tiles();
+        store
+    }
+
+    /// A detections file (`faces.bin`, or the drawn faces'), by photo;
+    /// later blocks for a photo replace earlier ones.
+    fn read_detections(path: &Path) -> HashMap<Key, Vec<Detection>> {
+        let mut out = HashMap::new();
+        if let Ok(data) = fs::read(path) {
             let bs = blocks(&data);
             if bs.first().is_some_and(|h| Self::read_faces_header(h)) {
                 for b in &bs[1..] {
                     let Some(entries) = Self::read_faces_block(b) else { break };
                     for (k, d) in entries {
-                        store.scanned.insert(k, d);
+                        out.insert(k, d);
                     }
                 }
             }
         }
-        store.load_vectors();
-        store.load_tiles();
-        store
+        out
     }
 
     fn load_vectors(&mut self) {
@@ -362,6 +379,35 @@ impl FaceStore {
         self.add_tiles(key, faces)
     }
 
+    /// Record faces the user drew (the helper's landmarks, vector and
+    /// tile for each): kept beside the detections, never mixed with what
+    /// the detector found, so looking at the photo again keeps them.
+    pub fn add_drawn(&mut self, key: Key, faces: &[FaceFound]) -> io::Result<()> {
+        if faces.is_empty() {
+            return Ok(());
+        }
+        let mut dets = self.drawn.get(&key).cloned().unwrap_or_default();
+        for f in faces {
+            let r = FaceRef::new(key, f.bbox);
+            dets.retain(|d| d.face_ref(key) != r);
+            dets.push(Detection { bbox: f.bbox, landmarks: f.landmarks, score: f.score, size_px: f.size_px, sharpness: f.sharpness });
+        }
+        Self::append(&Self::drawn_file(&self.dir), &Self::faces_header(), &Self::faces_block(&[(key, dets.clone())]))?;
+        self.drawn.insert(key, dets);
+        self.add_vectors(key, faces)?;
+        self.add_tiles(key, faces)
+    }
+
+    /// The user drew this face (as against the detector finding it).
+    pub fn is_drawn(&self, r: &FaceRef) -> bool {
+        self.drawn.get(&r.key).is_some_and(|d| d.iter().any(|d| d.face_ref(r.key) == *r))
+    }
+
+    /// The face has a vector under the current model.
+    pub fn has_vector(&self, r: &FaceRef) -> bool {
+        self.vectors.by_ref.contains_key(r)
+    }
+
     /// Record faces' vectors (a model change: the detections are known).
     pub fn add_vectors(&mut self, key: Key, faces: &[FaceFound]) -> io::Result<()> {
         let rows: Vec<(FaceRef, Vec<f32>)> = faces.iter().filter(|f| !f.vector.is_empty()).map(|f| (FaceRef::new(key, f.bbox), f.vector.clone())).filter(|(r, _)| !self.vectors.by_ref.contains_key(r)).collect();
@@ -407,24 +453,31 @@ impl FaceStore {
     /// Photos whose faces lack vectors under the current model, with the
     /// faces to recognise again (a model change).
     pub fn needing_vectors(&self) -> Vec<(Key, Vec<FaceSpot>)> {
-        let mut out: Vec<(Key, Vec<FaceSpot>)> = self
-            .scanned
-            .iter()
-            .filter_map(|(k, dets)| {
-                let missing: Vec<FaceSpot> = dets.iter().filter(|d| !self.vectors.by_ref.contains_key(&d.face_ref(*k))).map(Detection::spot).collect();
-                (!missing.is_empty()).then(|| (*k, missing))
-            })
-            .collect();
+        // Drawn faces too: they have their landmarks, so a model change
+        // recognises them again with the rest.
+        let mut by_key: HashMap<Key, Vec<FaceSpot>> = HashMap::new();
+        for (k, dets) in self.scanned.iter().chain(self.drawn.iter()) {
+            for d in dets.iter().filter(|d| !self.vectors.by_ref.contains_key(&d.face_ref(*k))) {
+                by_key.entry(*k).or_default().push(d.spot());
+            }
+        }
+        let mut out: Vec<(Key, Vec<FaceSpot>)> = by_key.into_iter().collect();
         out.sort_by(|a, b| a.0.cmp(&b.0));
         out
     }
 
+    /// The faces the detector found in a photo (not the drawn ones).
     pub fn faces_of(&self, key: &Key) -> &[Detection] {
         self.scanned.get(key).map_or(&[], Vec::as_slice)
     }
 
+    /// The faces the user drew in a photo.
+    pub fn drawn_of(&self, key: &Key) -> &[Detection] {
+        self.drawn.get(key).map_or(&[], Vec::as_slice)
+    }
+
     pub fn detection(&self, r: &FaceRef) -> Option<&Detection> {
-        self.faces_of(&r.key).iter().find(|d| d.face_ref(r.key) == *r)
+        self.faces_of(&r.key).iter().chain(self.drawn_of(&r.key)).find(|d| d.face_ref(r.key) == *r)
     }
 
     /// Photos looked at.
@@ -442,9 +495,9 @@ impl FaceStore {
         self.scanned.iter().flat_map(|(k, d)| d.iter().map(move |d| d.face_ref(*k))).filter(|r| !self.vectors.by_ref.contains_key(r)).count()
     }
 
-    /// Every face, as (ref, detection).
+    /// Every face, found or drawn, as (ref, detection).
     pub fn all(&self) -> impl Iterator<Item = (FaceRef, &Detection)> {
-        self.scanned.iter().flat_map(|(k, dets)| dets.iter().map(move |d| (d.face_ref(*k), d)))
+        self.scanned.iter().chain(self.drawn.iter()).flat_map(|(k, dets)| dets.iter().map(move |d| (d.face_ref(*k), d)))
     }
 
     /// The tile index, shared with `Engine::crop` on other threads.
@@ -457,8 +510,10 @@ impl FaceStore {
     pub fn retain(&mut self, live: &HashSet<Key>) {
         let before = self.scanned.len();
         self.scanned.retain(|k, _| live.contains(k));
+        let drawn = self.drawn.len();
+        self.drawn.retain(|k, _| live.contains(k));
         let dropped = before - self.scanned.len();
-        if dropped > 0 && dropped as f64 > COMPACT_SHARE * before as f64 {
+        if (dropped > 0 && dropped as f64 > COMPACT_SHARE * before as f64) || self.drawn.len() < drawn {
             if let Err(e) = self.rewrite() {
                 eprintln!("faces: couldn't compact the face cache: {e}");
             }
@@ -478,6 +533,18 @@ impl FaceStore {
         }
         fsutil::atomic_write(&Self::faces_file(&dir), &out, true)?;
         private_file(&Self::faces_file(&dir));
+        // The drawn faces.
+        let drawn: Vec<(Key, Vec<Detection>)> = self.drawn.iter().map(|(k, d)| (*k, d.clone())).collect();
+        if drawn.is_empty() {
+            let _ = fs::remove_file(Self::drawn_file(&dir));
+        } else {
+            let mut out = framed(&Self::faces_header());
+            for chunk in drawn.chunks(1024) {
+                out.extend(framed(&Self::faces_block(chunk)));
+            }
+            fsutil::atomic_write(&Self::drawn_file(&dir), &out, true)?;
+            private_file(&Self::drawn_file(&dir));
+        }
         // Vectors of the live faces.
         let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
         let rows: Vec<(FaceRef, Vec<f32>)> = (0..self.vectors.len()).filter(|&i| live.contains(&self.vectors.refs[i])).map(|i| (self.vectors.refs[i], self.vectors.row(i))).collect();
@@ -531,6 +598,7 @@ impl FaceStore {
     /// *Forget all* and *Clear*: every file goes.
     pub fn forget_all(&mut self) {
         let _ = fs::remove_file(Self::faces_file(&self.dir));
+        let _ = fs::remove_file(Self::drawn_file(&self.dir));
         let _ = fs::remove_file(Self::tiles_file(&self.dir));
         if let Ok(rd) = fs::read_dir(&self.dir) {
             for e in rd.flatten() {
@@ -540,6 +608,7 @@ impl FaceStore {
             }
         }
         self.scanned.clear();
+        self.drawn.clear();
         self.vectors = FaceVectors::default();
         self.tiles.lock().offsets.clear();
     }
@@ -548,7 +617,7 @@ impl FaceStore {
     /// *People*; a stat walk, on a worker).
     pub fn bytes_in(dir: &Path) -> u64 {
         let mut n = 0;
-        for p in [Self::faces_file(dir), Self::tiles_file(dir)] {
+        for p in [Self::faces_file(dir), Self::drawn_file(dir), Self::tiles_file(dir)] {
             n += fs::metadata(p).map_or(0, |m| m.len());
         }
         if let Ok(rd) = fs::read_dir(dir) {
@@ -581,6 +650,10 @@ impl KindStep for FaceStore {
 
     fn cutoffs(&self) -> subjects::Cutoffs {
         subjects::cutoff_for(self.model)
+    }
+
+    fn is_added(&self, r: &FaceRef) -> bool {
+        self.is_drawn(r)
     }
 }
 
@@ -898,14 +971,37 @@ impl People {
         Ok(sid)
     }
 
+    /// A change made on a box in the viewer's labels: one undo step, the
+    /// file saved; refused (and nothing changed, no undo step) when it
+    /// would mix kinds or changes nothing.  Returns what it did, in the
+    /// words the undo uses ("Named a face Someone").
+    pub fn label(&mut self, edit: &LabelEdit) -> Result<String, Refused> {
+        let before = self.file.clone();
+        match apply_label(&mut self.file, edit) {
+            Ok(what) => {
+                self.undo.push((before, what.clone()));
+                if self.undo.len() > UNDO_DEPTH {
+                    self.undo.remove(0);
+                }
+                self.save();
+                Ok(what)
+            }
+            Err(e) => {
+                self.file = before;
+                Err(e)
+            }
+        }
+    }
+
     /// *Forget all people* (or fursuits, or pets): that kind's subjects
     /// go from the user's file, and for people the face cache too; the
     /// other kinds' names, answers and caches stay untouched.  Beyond
     /// undo's reach, like [`People::forget_all`].
     pub fn forget_kind(&mut self, kind: Kind) {
-        self.file.subjects.retain(|s| s.kind != kind);
+        // The kind's labels from the viewer go with its names.
+        self.file.forget_kind(kind);
         self.undo.clear();
-        if self.file.subjects.is_empty() {
+        if self.file.is_empty() {
             if let Some(p) = &self.file_path {
                 let _ = std::fs::remove_file(p);
             }
@@ -968,7 +1064,8 @@ impl People {
                 }
                 let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
                 let confirmed = self.file.confirmed(Kind::Person);
-                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+                let out = step::Exclusion::new(&self.file, Kind::Person);
+                let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i]) && !out.excludes(store, &refs[i])).collect();
                 let cutoffs = store.cutoffs();
                 let cutoff = if strict { cutoffs.strict } else { cutoffs.suggest };
                 subjects::candidates(&rows, &members, &pool, cutoff)
@@ -1027,10 +1124,81 @@ impl People {
     pub fn clarity_by_photo(&self, keys: &HashSet<Key>) -> HashMap<Key, f32> {
         keys.iter()
             .map(|k| {
-                let best = self.store.as_ref().map_or(0.0, |s| s.faces_of(k).iter().map(|d| self.clarity(&d.face_ref(*k))).fold(0.0, f32::max));
+                let best = self.store.as_ref().map_or(0.0, |s| s.faces_of(k).iter().chain(s.drawn_of(k)).map(|d| self.clarity(&d.face_ref(*k))).fold(0.0, f32::max));
                 (*k, best)
             })
             .collect()
+    }
+}
+
+/// Apply a label edit to the user's file; what it did, in words.
+fn apply_label(file: &mut SubjectsFile, edit: &LabelEdit) -> Result<String, Refused> {
+    match edit {
+        LabelEdit::Name { face, kind, to } => {
+            let named = name_box(file, *kind, *face, to)?;
+            Ok(match named {
+                Some(n) => format!("Named a {} {n}", box_noun(*kind)),
+                None => format!("Moved a {} to Unnamed", box_noun(*kind)),
+            })
+        }
+        LabelEdit::Kind { face, from, to, name } => {
+            file.change_kind(*face, *from, *to)?;
+            let named = match name {
+                Some(n) => name_box(file, *to, *face, n)?,
+                None => None,
+            };
+            let what = format!("Changed a {} to a {}", box_noun(*from), box_noun(*to));
+            Ok(match named {
+                Some(n) => format!("{what}, {n}"),
+                None => what,
+            })
+        }
+        LabelEdit::Add { face, kind, name } => {
+            file.add_box(*kind, *face)?;
+            let named = match name {
+                Some(n) => name_box(file, *kind, *face, n)?,
+                None => None,
+            };
+            Ok(match named {
+                Some(n) => format!("Added a {} for {n}", box_noun(*kind)),
+                None => format!("Added a {}", box_noun(*kind)),
+            })
+        }
+        LabelEdit::Remove { face, kind } => {
+            file.remove_box(*kind, *face)?;
+            Ok(format!("Removed a {}", box_noun(*kind)))
+        }
+    }
+}
+
+/// Name a box as `to` says; the name it now has (`None`: Unnamed).
+fn name_box(file: &mut SubjectsFile, kind: Kind, face: FaceRef, to: &NameTo) -> Result<Option<String>, Refused> {
+    match to {
+        NameTo::Subject(id) => {
+            file.name_box(kind, face, id)?;
+            Ok(Some(file.get(id).and_then(|s| s.name.clone()).unwrap_or_else(|| "a group".to_string())))
+        }
+        NameTo::New(name) => {
+            let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+            if name.is_empty() {
+                return Err(Refused::Nothing);
+            }
+            // A name the kind has already is that subject.
+            match file.named(kind, &name).first().map(|s| s.id.clone()) {
+                Some(id) => {
+                    file.name_box(kind, face, &id)?;
+                    Ok(Some(file.get(&id).and_then(|s| s.name.clone()).unwrap_or(name)))
+                }
+                None => {
+                    file.create(kind, Some(name.clone()), vec![face]);
+                    Ok(Some(name))
+                }
+            }
+        }
+        NameTo::Unnamed => {
+            file.unname_box(kind, face)?;
+            Ok(None)
+        }
     }
 }
 
@@ -1305,6 +1473,78 @@ mod tests {
         p.forget_kind(Kind::Fursuit);
         assert!(p.file.subjects.is_empty() && !path.exists(), "the last kind gone: no file");
         assert!(p.undo().is_none(), "beyond undo");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The viewer's labels through the people state: every change is one
+    /// undo step with its words, saved to the file; a mix of kinds is
+    /// refused and leaves no step; a kind change leaves the old kind
+    /// entirely.
+    #[test]
+    fn label_edits_are_one_undo_step_each_and_never_mix_kinds() {
+        let d = std::env::temp_dir().join(format!("pp-labels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("subjects.json");
+        let mut p = People::load(Some(path.clone()));
+        let someone = p.file.create(Kind::Person, Some("Someone".into()), vec![face(1)]);
+        let suit = p.file.create(Kind::Fursuit, Some("Suit".into()), vec![face(2)]);
+        let f3 = face(3);
+        // Name: a person's name on a face; a fursuit's is refused.
+        assert_eq!(p.label(&LabelEdit::Name { face: f3, kind: Kind::Person, to: NameTo::Subject(suit.clone()) }), Err(Refused::MixedKinds));
+        assert!(p.undo.is_empty(), "a refusal leaves no step");
+        assert_eq!(p.label(&LabelEdit::Name { face: f3, kind: Kind::Person, to: NameTo::Subject(someone.clone()) }).as_deref(), Ok("Named a face Someone"));
+        // A typed name the kind has is that subject; a new one is made.
+        assert_eq!(p.label(&LabelEdit::Name { face: face(4), kind: Kind::Person, to: NameTo::New(" someone ".into()) }).as_deref(), Ok("Named a face Someone"));
+        assert_eq!(p.file.member_of(Kind::Person, &face(4)).unwrap().id, someone);
+        p.label(&LabelEdit::Name { face: face(5), kind: Kind::Person, to: NameTo::New("Other".into()) }).unwrap();
+        let other = p.file.member_of(Kind::Person, &face(5)).unwrap().id.clone();
+        assert_ne!(other, someone);
+        // "Suit" typed for a face is a new person, never the fursuit.
+        p.label(&LabelEdit::Name { face: face(6), kind: Kind::Person, to: NameTo::New("Suit".into()) }).unwrap();
+        assert_eq!(p.file.member_of(Kind::Person, &face(6)).unwrap().kind, Kind::Person);
+        assert_ne!(p.file.member_of(Kind::Person, &face(6)).unwrap().id, suit);
+        // Unnamed.
+        assert_eq!(p.label(&LabelEdit::Name { face: f3, kind: Kind::Person, to: NameTo::Unnamed }).as_deref(), Ok("Moved a face to Unnamed"));
+        assert!(p.file.get(&someone).unwrap().rejected.contains(&f3));
+        // Kind: the suit's head is a person's face, named Someone.
+        assert_eq!(
+            p.label(&LabelEdit::Kind { face: face(2), from: Kind::Fursuit, to: Kind::Person, name: Some(NameTo::Subject(someone.clone())) }).as_deref(),
+            Ok("Changed a fursuit head to a face, Someone")
+        );
+        assert!(p.file.get(&suit).unwrap().members.is_empty() && p.file.member_of(Kind::Person, &face(2)).unwrap().id == someone);
+        assert!(p.file.subjects.iter().all(|s| !(s.kind == Kind::Fursuit && s.members.contains(&face(2)))));
+        // A kind change naming a subject of the old kind is refused whole.
+        let before = p.file.clone();
+        assert_eq!(p.label(&LabelEdit::Kind { face: face(1), from: Kind::Person, to: Kind::Fursuit, name: Some(NameTo::Subject(someone.clone())) }), Err(Refused::MixedKinds));
+        assert_eq!(p.file, before, "nothing changed");
+        // Add, Remove.
+        let drawn = FaceRef::new(Key([9; 16]), [0.5, 0.5, 0.1, 0.1]);
+        assert_eq!(p.label(&LabelEdit::Add { face: drawn, kind: Kind::Fursuit, name: Some(NameTo::Subject(suit.clone())) }).as_deref(), Ok("Added a fursuit head for Suit"));
+        assert!(p.file.is_added(Kind::Fursuit, &drawn) && p.file.get(&suit).unwrap().members.contains(&drawn));
+        assert_eq!(p.label(&LabelEdit::Remove { face: face(1), kind: Kind::Person }).as_deref(), Ok("Removed a face"));
+        assert!(!p.file.get(&someone).unwrap().members.contains(&face(1)));
+        let saved = SubjectsFile::load(&path);
+        assert_eq!((&saved.subjects, &saved.added, &saved.removed, saved.version), (&p.file.subjects, &p.file.added, &p.file.removed, subjects::FILE_VERSION), "every change is saved");
+        // Undo, newest first, one step each.
+        for want in [
+            "Removed a face",
+            "Added a fursuit head for Suit",
+            "Changed a fursuit head to a face, Someone",
+            "Moved a face to Unnamed",
+            "Named a face Suit",
+            "Named a face Other",
+            "Named a face Someone",
+            "Named a face Someone",
+        ] {
+            assert_eq!(p.undo().as_deref(), Some(want));
+        }
+        assert!(p.undo().is_none());
+        assert!(!p.file.has_optional() && p.file.get(&suit).unwrap().members == [face(2)]);
+        // Forgetting fursuits takes their labels, not the people's.
+        p.label(&LabelEdit::Remove { face: face(7), kind: Kind::Person }).unwrap();
+        p.label(&LabelEdit::Add { face: drawn, kind: Kind::Fursuit, name: None }).unwrap();
+        p.forget_kind(Kind::Fursuit);
+        assert!(p.file.added.is_empty() && p.file.removed.len() == 1);
         let _ = std::fs::remove_dir_all(&d);
     }
 

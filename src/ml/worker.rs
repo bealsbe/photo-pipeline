@@ -397,6 +397,11 @@ impl Models {
     /// Run the detector over canvases (in batches of [`DETECT_BATCH`]):
     /// the faces found on each, best first.
     pub fn detect(&mut self, canvases: &[&face::Canvas]) -> ort::Result<Vec<Vec<face::Detected>>> {
+        self.detect_gated(canvases, face::MIN_SCORE)
+    }
+
+    /// [`Models::detect`] with the score gate given (drawn faces).
+    pub fn detect_gated(&mut self, canvases: &[&face::Canvas], min_score: f32) -> ort::Result<Vec<Vec<face::Detected>>> {
         let pad = self.device == Device::Gpu;
         let session = self.detector.as_mut().ok_or_else(|| ort::Error::new("this helper has no face detector"))?;
         let name = session.inputs()[0].name().to_string();
@@ -430,7 +435,7 @@ impl Models {
                         face::Level { stride: *s, cls: block(cls, i, c, 1), obj: block(obj, i, c, 1), bbox: block(bbox, i, c, 4), kps: block(kps, i, c, 10) }
                     })
                     .collect();
-                out.push(face::decode_levels(&levels));
+                out.push(face::decode_levels_gated(&levels, min_score));
             }
         }
         Ok(out)
@@ -913,6 +918,41 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
     }
 }
 
+/// Faces the user drew, placed: for each box, YuNet on a square cut
+/// around it (a lower gate: the user says a face is there) gives the
+/// landmarks of the detection over it; with none, the ArcFace template
+/// is fitted to the box.  The box itself is the user's, unchanged.
+fn drawn_faces(models: &mut Models, ready: &[(usize, Prepared)], preps: &[&FacePrep], drawn: &[super::client::DrawnFaces], files: &[(PathBuf, FileType)]) -> ort::Result<Vec<Vec<face::Placed>>> {
+    let mut placed: Vec<Vec<face::Placed>> = vec![Vec::new(); ready.len()];
+    // (photo, the box, its cut, the preview's size) per canvas.
+    let mut asks: Vec<(usize, [f32; 4], (u32, u32, u32), (u32, u32))> = Vec::new();
+    let mut canvases: Vec<face::Canvas> = Vec::new();
+    for (pi, ((i, _), p)) in ready.iter().zip(preps).enumerate() {
+        let Some(d) = drawn.iter().find(|d| d.path == files[*i].0) else { continue };
+        if d.boxes.is_empty() {
+            continue;
+        }
+        let Some(full) = p.full_pixels() else { continue };
+        for b in &d.boxes {
+            let region = face::drawn_region(b, full.width, full.height);
+            let cut = decode::crop(&full, region.0, region.1, region.2, region.2);
+            let small = decode::resize_to(&cut, face::DRAWN_EDGE, face::DRAWN_EDGE);
+            canvases.push(face::canvas(&small));
+            asks.push((pi, *b, region, (full.width, full.height)));
+        }
+    }
+    let refs: Vec<&face::Canvas> = canvases.iter().collect();
+    let found = if refs.is_empty() { Vec::new() } else { models.detect_gated(&refs, face::DRAWN_MIN_SCORE)? };
+    for ((pi, b, region, (w, h)), dets) in asks.into_iter().zip(found) {
+        let (fw, fh) = (w as f32, h as f32);
+        let px = [b[0] * fw, b[1] * fh, b[2] * fw, b[3] * fh];
+        let (lm, score) = face::pick_drawn(&dets, region, &px).unwrap_or_else(|| (face::template_landmarks(&px), 0.0));
+        let landmarks = lm.map(|[x, y]| [x / fw, y / fh]);
+        placed[pi].push(face::Placed { bbox: b, landmarks, score, size_px: px[2].max(px[3]) });
+    }
+    Ok(placed)
+}
+
 /// The faces of a chunk: detected on the canvases (or taken as known
 /// landmarks for a model change), cut from the full previews, recognised
 /// and tiled.  One list per photo of `ready`, in its order.
@@ -945,6 +985,7 @@ fn faces_in(models: &mut Models, ready: &[(usize, Prepared)], ask: &FaceAsk, fil
                     .unwrap_or_default()
             })
             .collect(),
+        FaceAsk::Drawn { files: drawn } => drawn_faces(models, ready, &preps, drawn, files)?,
         FaceAsk::None => vec![Vec::new(); n],
     };
     let cuts = cut_faces(&preps, &placed);

@@ -94,6 +94,12 @@ pub const WARN: Color = hex(0xf9e2af);
 /// File types.
 pub const RAW: Color = hex(0x89b4fa);
 pub const JPG: Color = hex(0xfab387);
+/// The viewer's labels: a person's face (teal) and a fursuit head
+/// (peach), cool against warm so the two kinds never read alike, and
+/// clear of keep, prune and warn.  Drawn as outlines and small tags over
+/// the photo, never as a fill on it.
+pub const LABEL_PERSON: Color = hex(0x94e2d5);
+pub const LABEL_FURSUIT: Color = hex(0xfab387);
 
 // ── type ────────────────────────────────────────────────────────────────────
 
