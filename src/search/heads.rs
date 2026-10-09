@@ -87,6 +87,10 @@ pub enum Why {
     CatchUp,
     /// Carrying on after a stop (the library came back, the card works).
     Resume,
+    /// Heads found before fursuits were told apart by the search model
+    /// get its vectors: the known boxes, re-read (asked for, never
+    /// automatic).  PROVISIONAL until the backend's stage 1 lands.
+    Vectors,
 }
 
 /// A head scan waiting for the user's answer (the processor is chosen).
@@ -128,6 +132,10 @@ pub struct HeadsStatus {
     pub found: usize,
     pub named: usize,
     pub step: Step,
+    /// Photos with heads but no search-model head vectors yet (found
+    /// before fursuit matching v2): the catch-up offers them, with its
+    /// cost.  PROVISIONAL until the backend's stage 1 lands.
+    pub vectors_missing: usize,
 }
 
 impl HeadsStatus {

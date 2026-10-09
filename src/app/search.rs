@@ -109,6 +109,9 @@ pub struct Dialog {
     /// Asked from the Fursuits tab: only the head models (the library is
     /// indexed already).
     pub fursuits_only: bool,
+    /// Asked from Preferences ▸ Fursuits ▸ *Close-call judge*: only that
+    /// judge's model, and nothing is indexed.
+    pub judge: Option<crate::ml::judge::JudgeChoice>,
 }
 
 impl Dialog {
@@ -116,7 +119,12 @@ impl Dialog {
     /// Preferences says.
     pub fn new(stage: Stage, settings: &Settings) -> Dialog {
         let fursuits = settings.find_heads && settings.search_device == Device::Gpu;
-        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: settings.face_model(), fursuits, fursuits_only: false }
+        Dialog { stage, sums: false, faces_only: false, faces: settings.find_faces, face_model: settings.face_model(), fursuits, fursuits_only: false, judge: None }
+    }
+
+    /// The dialog for a close-call judge's download alone.
+    pub fn judge(choice: crate::ml::judge::JudgeChoice, settings: &Settings) -> Dialog {
+        Dialog { judge: Some(choice), ..Dialog::new(Stage::Ask, settings) }
     }
 }
 
@@ -260,6 +268,7 @@ pub enum DialogMsg {
 impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
         let link = Link::new(bus, settings.search_device, settings.search_index_exports, settings.find_faces, settings.face_model(), settings.find_heads);
+        link.set_judge(settings.fursuit_judge);
         let (status, things) = (link.status(), link.things());
         let pass_start = super::search_setup::pass_start(None, &status);
         Search {
@@ -613,7 +622,7 @@ fn on_built(app: &mut App, seq: u64, built: Option<Arc<Results>>) -> Task<Messag
 pub fn on_status(app: &mut App, new: Arc<Status>) -> Task<Message> {
     let old = std::mem::replace(&mut app.search.status, (*new).clone());
     super::search_setup::settle_downloads(&mut app.search.downloads, &app.search.status);
-    let mut tasks = vec![super::subjects::on_status(app, &old), super::subjects_fursuits::on_status(app, &old)];
+    let mut tasks = vec![super::subjects::on_status(app, &old), super::subjects_fursuits::on_status(app, &old), super::fursuit_judge::on_status(app, &old)];
     let st = &app.search.status;
     if st.stopped.is_some() && old.stopped != st.stopped {
         app.search.banner_hidden = false;

@@ -149,6 +149,8 @@ pub struct Status {
     /// The fursuit-head step (phase 4): on or off, how far, what it waits
     /// for.
     pub heads: heads::HeadsStatus,
+    /// The fursuit close-call judge (fursuit matching v2).
+    pub judge: crate::ml::judge::JudgeStatus,
 }
 
 /// One entry of *Things in your photos*: a vocabulary word with how many

@@ -95,6 +95,8 @@ pub struct Subjects {
     pub forget: Option<GroupId>,
     pub person: Option<Person>,
     pub review: Option<Review>,
+    /// The close-call judge's latest run (fursuits).
+    pub judge: Option<super::fursuit_judge::Run>,
     pub crops: Crops,
     pub(super) seq: u64,
 }
@@ -113,6 +115,7 @@ impl Subjects {
             forget: None,
             person: None,
             review: None,
+            judge: None,
             crops: Crops::new(CROP_CACHE_BYTES),
             seq: 0,
         }

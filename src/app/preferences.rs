@@ -38,6 +38,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Recta
 
 use super::commands::Cmd;
 use super::preferences_storage::{self as storage, Cache, Cleared, Survey, Usage};
+use crate::ml::judge::JudgeChoice;
 use crate::ml::{CardFailure, Device, SelfCheck};
 use crate::search::{CLOSENESS_DEFAULT, CLOSENESS_MAX, CLOSENESS_MIN, Stopped, estimate};
 use super::{App, FilterMsg, FolderTarget, Message, dialogs, kit, style, viewer_advance, viewer_filmstrip};
@@ -96,6 +97,15 @@ pub enum Control {
     FindHeadsNow,
     /// *Forget all…* (fursuits).
     ForgetFursuits,
+    /// *Close-call judge*: one of the choices.
+    Judge(JudgeChoice),
+    /// Download the chosen judge (chosen, not in place).
+    JudgeDownload,
+    /// Give the heads found before v2 the search model's vectors.
+    UpdateHeads,
+    /// Storage ▸ *Close-call judge*: open its folder, delete it.
+    JudgeOpen,
+    JudgeDelete,
     Open(Cache),
     Clear(Cache),
     SearchRebuild,
@@ -139,6 +149,12 @@ impl Control {
             Control::FindHeads => "pref-find-heads",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
+            Control::Judge(JudgeChoice::Off) => "pref-judge-off",
+            Control::Judge(JudgeChoice::Gemma4) => "pref-judge-gemma4",
+            Control::JudgeDownload => "pref-judge-download",
+            Control::UpdateHeads => "pref-update-heads",
+            Control::JudgeOpen => "pref-judge-open",
+            Control::JudgeDelete => "pref-judge-delete",
             Control::SearchRebuild => "pref-search-rebuild",
             Control::SearchClear => "pref-search-clear",
             Control::ModelsOpen => "pref-models-open",
@@ -194,6 +210,8 @@ pub enum Ask {
     ForgetPeople,
     /// Forget every fursuit head found and every fursuit name given.
     ForgetFursuits,
+    /// Delete the close-call judge's model.
+    DeleteJudge,
 }
 
 /// The Preferences window and what it has counted.
@@ -489,6 +507,17 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
             link.forget_all_fursuits();
             "Forgot every fursuit head found and every fursuit name given. Your photos are not changed."
         }
+        Ask::DeleteJudge => {
+            let was = app.settings.fursuit_judge;
+            let deleted = if was.model().is_some() { was } else { JudgeChoice::Gemma4 };
+            if was.model().is_some() {
+                app.settings.fursuit_judge = JudgeChoice::Off;
+                app.settings.save_in_background();
+                app.search.link.set_judge(JudgeChoice::Off);
+            }
+            app.search.link.delete_judge(deleted);
+            "Deleted the close-call judge, and turned it off. The close calls it checked are remembered."
+        }
         Ask::ForgetPeople => {
             link.forget_all_people();
             app.subjects.crops.clear();
@@ -637,6 +666,33 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::Judge(c) => choose_judge(app, c),
+        Control::JudgeDownload => {
+            let c = app.settings.fursuit_judge;
+            if c.model().is_none() || app.search.status.judge.downloaded.contains(&c) || judge_downloading(app) {
+                return Task::none();
+            }
+            app.search.dialog = Some(super::search::Dialog::judge(c, &app.settings));
+            close(app)
+        }
+        Control::UpdateHeads => {
+            if !heads_to_update(app) {
+                return Task::none();
+            }
+            super::subjects_fursuits::update(app, super::subjects_fursuits::Msg::UpdateHeads)
+        }
+        Control::JudgeOpen => {
+            if let Some(d) = judge_dir().filter(|_| judge_exists(&app.prefs)) {
+                dialogs::open_folder(&d);
+            }
+            Task::none()
+        }
+        Control::JudgeDelete => {
+            if judge_exists(&app.prefs) {
+                app.prefs.confirm = Some(Ask::DeleteJudge);
+            }
+            Task::none()
+        }
         Control::SearchRebuild | Control::SearchClear | Control::ModelsDelete => {
             if search_action_ready(app, c) {
                 app.prefs.confirm = Some(match c {
@@ -711,6 +767,47 @@ fn heads_catch_up(app: &App) -> bool {
     app.settings.find_heads && app.search.status.heads.catch_up_wanted() && app.search.status.indexed_shots > 0
 }
 
+/// A close-call judge was picked: Off at once; a judge in place at once;
+/// one not downloaded asks first, in the download dialog (the main
+/// window's), with its size, and is chosen when that is answered.
+fn choose_judge(app: &mut App, c: JudgeChoice) -> Task<Message> {
+    if app.settings.fursuit_judge == c {
+        return Task::none();
+    }
+    if c.model().is_some() && !app.search.status.judge.downloaded.contains(&c) {
+        app.search.dialog = Some(super::search::Dialog::judge(c, &app.settings));
+        return close(app);
+    }
+    app.settings.fursuit_judge = c;
+    app.settings.save_in_background();
+    app.search.link.set_judge(c);
+    match c {
+        JudgeChoice::Off => app.show_status("The close-call judge is off: close calls are left out. Its model stays downloaded until deleted in Storage.", 6000),
+        _ => app.show_status(format!("{} checks close calls from now on, in Find more and the \u{201c}Same fursuit?\u{201d} review.", c.label()), 6000),
+    }
+}
+
+/// The chosen judge's model is coming down now.
+fn judge_downloading(app: &App) -> bool {
+    app.search.downloading() && super::search_setup::judge_downloads(&app.search.downloads)
+}
+
+/// Heads found before v2 wait for the search model's vectors, with
+/// nothing running or waiting.
+fn heads_to_update(app: &App) -> bool {
+    let h = &app.search.status.heads;
+    h.vectors_missing > 0 && matches!(h.step, super::fursuits::Step::Idle)
+}
+
+/// The judges' model folder (the first judge's: there is one so far).
+fn judge_dir() -> Option<PathBuf> {
+    crate::ml::models::judge_models().next().and_then(|m| crate::ml::models::model_dir(m.id))
+}
+
+fn judge_exists(p: &Prefs) -> bool {
+    p.search_storage().is_some_and(|s| s.judge_bytes > 0)
+}
+
 fn models_exist(p: &Prefs) -> bool {
     p.search_storage().is_some_and(|s| s.models_bytes > 0)
 }
@@ -775,6 +872,13 @@ fn controls(app: &App) -> Vec<Control> {
     if heads_catch_up(app) {
         v.push(Control::FindHeadsNow);
     }
+    if heads_to_update(app) {
+        v.push(Control::UpdateHeads);
+    }
+    v.extend(JudgeChoice::ALL.iter().map(|&c| Control::Judge(c)));
+    if judge_wants_download(app) {
+        v.push(Control::JudgeDownload);
+    }
     if fursuits_to_forget(app) {
         v.push(Control::ForgetFursuits);
     }
@@ -793,6 +897,9 @@ fn controls(app: &App) -> Vec<Control> {
         if search_action_ready(app, c) {
             v.push(c);
         }
+    }
+    if judge_exists(p) {
+        v.extend([Control::JudgeOpen, Control::JudgeDelete]);
     }
     if models_exist(p) {
         v.push(Control::ModelsOpen);
@@ -1178,6 +1285,7 @@ fn storage_section(app: &App) -> Element<'_, Message> {
             ),
             search_index_row(app),
             heads_row(app),
+            judge_row(app),
             models_row(app),
             unsaved_row(app),
         ],
@@ -1220,11 +1328,11 @@ fn heads_row(app: &App) -> Element<'_, Message> {
     let h = &app.search.status.heads;
     let (value, sub) = match p.search_storage() {
         None => ("…".to_string(), Some("counting".to_string())),
-        Some(s) if s.heads_bytes == 0 => ("Empty".to_string(), Some("nothing saved yet".to_string())),
-        Some(s) => (util::fmt_bytes(s.heads_bytes), Some(util::plural(h.found as u64, "head"))),
+        Some(s) if s.heads_bytes + s.judged_bytes == 0 => ("Empty".to_string(), Some("nothing saved yet".to_string())),
+        Some(s) => (util::fmt_bytes(s.heads_bytes + s.judged_bytes), Some(util::plural(h.found as u64, "head"))),
     };
     let about = column![
-        text("The fursuit heads found in your photos, so the Fursuits tab and its reviews read no photos. Forget them in Preferences ▸ Fursuits.").size(t::T_SMALL).color(t::INK3),
+        text("The fursuit heads found in your photos, and the close calls the judge checked, so the Fursuits tab and its reviews read no photos. Forget them in Preferences ▸ Fursuits.").size(t::T_SMALL).color(t::INK3),
         text(crate::search::index::cache_dir().map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
     ]
     .spacing(2);
@@ -1504,6 +1612,24 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
         about(format!("Looks for fursuit heads while indexing, after search and faces, only on photos with fursuits: {cost}. Nothing is named for you.")),
         switch(p, Control::FindHeads, s.find_heads, true),
     )];
+    if heads_to_update(app) {
+        let n = h.vectors_missing;
+        let on_share = app.library.as_deref().and_then(|l| super::network::share_of(app, l)).is_some();
+        let go = focusable(p, Control::UpdateHeads, kit::btn("Update them", style::secondary(), Some(m(Msg::Press(Control::UpdateHeads)))));
+        rows.push(setting(
+            "Heads to update",
+            about(format!(
+                "{} with fursuit heads {} found before fursuits were told apart by the search model. Updating reads their previews again: {} from the library{}, {}. Until then they aren't grouped or suggested; your names and answers are kept.",
+                util::plural(n as u64, "photo"),
+                if n == 1 { "was" } else { "were" },
+                estimate::describe_bytes(fursuits::vector_bytes_read(n)),
+                if on_share { " on the share" } else { "" },
+                fursuits::describe_vector_cost(n, device),
+            )),
+            go,
+        ));
+    }
+    rows.push(judge_setting(app));
     if heads_catch_up(app) {
         let n = h.unscanned();
         let go = focusable(p, Control::FindHeadsNow, kit::btn("Find their heads…", style::secondary(), Some(m(Msg::Press(Control::FindHeadsNow)))));
@@ -1522,6 +1648,144 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
     ));
     let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people."), rows);
     container(sec).id("pref-section-fursuits").width(Length::Fill).into()
+}
+
+/// The judge's choice wants its download: chosen, not in place, not
+/// coming down now.
+fn judge_wants_download(app: &App) -> bool {
+    let c = app.settings.fursuit_judge;
+    c.model().is_some() && !app.search.status.judge.downloaded.contains(&c) && !judge_downloading(app)
+}
+
+/// Preferences ▸ Fursuits ▸ *Close-call judge*: what it is for, the
+/// choices (each with its size and speed in plain words), and a line on
+/// where it stands.  A choice list, so another judge is another row.
+fn judge_setting(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let chosen = app.settings.fursuit_judge;
+    let mut list = column![].spacing(2).padding(2);
+    for c in JudgeChoice::ALL {
+        list = list.push(focusable(p, Control::Judge(c), judge_option(app, c, c == chosen)));
+    }
+    let mut col = column![
+        text("Close-call judge").size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
+        about("When Find more or the \u{201c}Same fursuit?\u{201d} review has photos too close to call, a judge can look at the two heads side by side and offer those it thinks are the same fursuit, for your Y or N. Those it thinks are different are left out, and counted, so you can still look."),
+        Space::new().height(t::S1),
+        container(list).width(Length::Fill).style(style::group()),
+    ]
+    .spacing(3);
+    if let Some(note) = judge_note(app) {
+        col = col.push(Space::new().height(t::S1));
+        col = col.push(note);
+    }
+    container(col).padding(Padding::from([t::S3, t::S4])).width(Length::Fill).into()
+}
+
+/// One judge in the list: a radio, its name, its size (or that it is
+/// downloaded, or coming down), and what it costs, in words.
+fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
+    let j = &app.search.status.judge;
+    let mut top = row![text(c.label()).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
+    let mut lines = column![].spacing(2);
+    match c.model().map(crate::ml::models::info) {
+        None => {
+            top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
+            lines = lines.push(text("Close calls are left out, as before: Find more and the review offer only photos close enough to be sure of.").size(t::T_SMALL).color(t::INK2));
+        }
+        Some(mi) => {
+            let coming = app.search.downloads.iter().find(|d| d.model == mi.id && !d.state.is_final());
+            let right = match coming {
+                Some(d) => super::search_setup::progress_bytes(d.done, d.total),
+                None if j.downloaded.contains(&c) => "Downloaded".to_string(),
+                None => format!("{} to download", super::search_setup::size(mi.bytes())),
+            };
+            top = top.push(Space::new().width(Length::Fill));
+            top = top.push(text(right).size(t::T_SMALL).color(t::INK2));
+            lines = lines.push(text(super::fursuit_judge::choice_words(c).unwrap_or_default()).size(t::T_SMALL).color(t::INK2));
+            lines = lines.push(text(format!("{}. Licence: {}, {}. From {}.", mi.name, mi.licence, mi.licence_plain, mi.publisher)).size(t::T_SMALL).color(t::INK3));
+        }
+    }
+    let dot = container(if on {
+        Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() }))
+    } else {
+        Space::new().into()
+    })
+    .width(16)
+    .height(16)
+    .center(16)
+    .style(move |_| container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(if on { t::SIGNAL } else { t::LINE_HI }, 1.0, 8.0), ..Default::default() });
+    let body = column![top, lines].spacing(2).width(Length::Fill);
+    iced::widget::button(row![container(dot).padding(Padding { top: 1.0, ..Padding::ZERO }), body].spacing(t::S3))
+        .width(Length::Fill)
+        .padding(Padding::from([7.0, 12.0]))
+        .style(move |_t, status| {
+            let hot = matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+            iced::widget::button::Style { background: (on || hot).then_some(Background::Color(t::RAISED)), text_color: t::INK, border: Border { radius: t::R_CONTROL.into(), ..Border::default() }, ..iced::widget::button::Style::default() }
+        })
+        .on_press(m(Msg::Press(Control::Judge(c))))
+        .into()
+}
+
+/// Where the chosen judge stands, under the list: not downloaded (with
+/// *Download…*), coming down, waiting on the processor's choice, on the
+/// card now, or stopped (said as an error, never with the processor).
+fn judge_note(app: &App) -> Option<Element<'_, Message>> {
+    let p = &app.prefs;
+    let c = app.settings.fursuit_judge;
+    let j = &app.search.status.judge;
+    c.model()?;
+    let line = |g: Glyph, tone: Color, s: String| row![icons::view(g, 13.0, tone), text(s).size(t::T_SMALL).color(tone).width(Length::Fill)].spacing(6).align_y(Alignment::Center);
+    let note: Element<'_, Message> = match &j.state {
+        crate::ml::judge::JudgeState::Failed(f) => row![
+            line(Glyph::GraphicsCard, t::WARN, format!("Checking close calls stopped: {} {}", lowercase_first(f.title().trim_start_matches("Indexing stopped: ")), f.detail().trim())),
+            focusable(p, Control::CheckCard, kit::btn(super::search_setup::retry_label(f), style::secondary(), Some(m(Msg::Press(Control::CheckCard))))),
+        ]
+        .spacing(t::S2)
+        .align_y(Alignment::Center)
+        .into(),
+        crate::ml::judge::JudgeState::Broken(why) => line(Glyph::Warning, t::WARN, format!("The close-call judge couldn't run. {why}")).into(),
+        _ if judge_downloading(app) => line(Glyph::Info, t::INK2, format!("{} is downloading; close calls are checked once it's in place.", c.label())).into(),
+        _ if !j.downloaded.contains(&c) => row![
+            line(Glyph::Info, t::INK2, format!("{} isn't downloaded, so close calls are left out for now.", c.label())),
+            focusable(p, Control::JudgeDownload, kit::btn("Download…", style::secondary(), Some(m(Msg::Press(Control::JudgeDownload))))),
+        ]
+        .spacing(t::S2)
+        .align_y(Alignment::Center)
+        .into(),
+        _ if app.settings.search_device == Device::Cpu => {
+            line(Glyph::Info, t::INK2, "The processor is chosen in Search, and the judge runs on the graphics card only, so close calls are left out until the card is chosen again.".into()).into()
+        }
+        _ if j.loaded => line(Glyph::GraphicsCard, t::INK3, format!("{} is on the graphics card now; it lets the card go after two quiet minutes.", c.label())).into(),
+        _ => return None,
+    };
+    Some(note)
+}
+
+fn lowercase_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().chain(c).collect(),
+        None => String::new(),
+    }
+}
+
+/// Storage ▸ *Close-call judge*: the judge's model, apart from the other
+/// models, deleted on its own (which turns the judge off).
+fn judge_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let (value, sub) = match p.search_storage() {
+        None => ("…".to_string(), Some("counting".to_string())),
+        Some(s) if s.judge_bytes == 0 => ("None".to_string(), Some("not downloaded".to_string())),
+        Some(s) => (util::fmt_bytes(s.judge_bytes), Some(app.search.status.judge.downloaded.first().map_or("downloaded", |c| c.label()).to_string())),
+    };
+    let open = focusable(p, Control::JudgeOpen, kit::btn("Open", style::ghost(), judge_exists(p).then(|| m(Msg::Press(Control::JudgeOpen)))));
+    let delete = focusable(p, Control::JudgeDelete, kit::btn("Delete…", style::secondary(), judge_exists(p).then(|| m(Msg::Press(Control::JudgeDelete)))));
+    let about = column![
+        text("The fursuit close-call judge's model, chosen in Preferences ▸ Fursuits. Deleted, the judge turns off; choosing it again downloads it again, after asking.").size(t::T_SMALL).color(t::INK3),
+        text(judge_dir().map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
+    ]
+    .spacing(2);
+    setting("Close-call judge", about.into(), row![size_column(value, sub), open, delete].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
 /// A model's name without what follows a comma ("InsightFace").
@@ -1805,6 +2069,18 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
                     util::plural(h.found as u64, "fursuit head")
                 ),
                 "Forget all",
+                true,
+            )
+        }
+        Ask::DeleteJudge => {
+            let bytes = app.prefs.search_storage().map(|s| s.judge_bytes).unwrap_or(0);
+            (
+                "Delete the close-call judge?",
+                format!(
+                    "{} is freed, and the close-call judge turns off: close calls are left out again. The close calls it checked are remembered. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.",
+                    if bytes > 0 { util::fmt_bytes(bytes) } else { "Its space".to_string() }
+                ),
+                "Delete",
                 true,
             )
         }

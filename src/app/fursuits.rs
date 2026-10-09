@@ -15,6 +15,7 @@ use chrono::NaiveDate;
 pub use crate::search::heads::*;
 
 use super::people::{Face, FaceRef, Group, GroupId, Kind, Shot, SubjectId, shots_of};
+use crate::ml::Device;
 use crate::ml::models::{self, ModelId};
 use crate::model::library_index::LibraryIndex;
 use crate::search::Status;
@@ -41,6 +42,39 @@ pub fn missing_models(st: &Status) -> Vec<ModelId> {
 pub fn library_photos(h: &HeadsStatus, shots: usize) -> usize {
     if h.tagged > 0 { h.tagged } else { shots * 3 / 4 }
 }
+
+/// Seconds to give `photos` photos' known heads the search model's
+/// vectors (their previews read again).  PROVISIONAL: the backend's
+/// measured `estimate::head_vector_seconds`.
+pub fn vector_seconds(photos: usize, device: Device) -> f64 {
+    photos as f64 * if device == Device::Gpu { 0.06 } else { 0.25 }
+}
+
+/// Bytes read from the library to do so.  PROVISIONAL: the backend's
+/// `estimate::head_vector_bytes_read`.
+pub fn vector_bytes_read(photos: usize) -> u64 {
+    crate::search::estimate::bytes_read(photos)
+}
+
+/// "about 7 minutes with the graphics card".
+pub fn describe_vector_cost(photos: usize, device: Device) -> String {
+    let time = crate::search::estimate::describe_seconds(vector_seconds(photos, device));
+    format!("{time} {} {}", if device == Device::Gpu { "with" } else { "on" }, device.phrase())
+}
+
+/// "about 1 second", "about 2 seconds": a close call's time (the general
+/// `describe_seconds` says "under a minute" for anything this short).
+pub fn call_seconds_words(secs: f64) -> String {
+    let n = secs.round().max(1.0) as u64;
+    format!("about {}", util::plural(n, "second"))
+}
+
+/// Seconds to put the judge on the card the first time (the research's
+/// 29 s).  PROVISIONAL: the backend's `estimate::JUDGE_LOAD_SECONDS`.
+pub const JUDGE_LOAD_SECONDS: f64 = 29.0;
+/// Seconds a close call takes (the plan's "about 1 s").  PROVISIONAL: the
+/// backend's `estimate::JUDGE_SECONDS_PER_PAIR`.
+pub const JUDGE_SECONDS_PER_CALL: f64 = 1.0;
 
 // ── the stand-in ────────────────────────────────────────────────────────────
 //
@@ -168,6 +202,8 @@ struct FakeGroup {
     suit: usize,
     /// *Find more* rounds asked so far.
     rounds: usize,
+    /// The judge's verdicts on close calls, by the press's first head.
+    judged: HashMap<FaceRef, bool>,
 }
 
 /// The stand-in's fursuits: groups of heads made up from the library,
@@ -187,6 +223,8 @@ pub struct FakeFursuits {
     /// Name the two largest suits once heads are found (a library already
     /// worked on, for screenshots).
     pub name_first: bool,
+    /// A close-call judge is chosen and in place.
+    pub judge_on: bool,
 }
 
 const NAMES: [&str; 2] = ["Fursuit 1", "Fursuit 2"];
@@ -259,7 +297,7 @@ impl FakeFursuits {
             let named = self.name_first && suit < NAMES.len();
             let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 1000 * (self.generation + 1)) };
             let confirmed = if named { heads.iter().copied().collect() } else { HashSet::new() };
-            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, rounds: 0 });
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, rounds: 0, judged: HashMap::new() });
         }
         // Groups the user made by moving heads out stay.
         for g in old {
@@ -330,13 +368,13 @@ impl FakeFursuits {
         self.group(id).map(|g| g.members.iter().map(|f| f.key).collect()).unwrap_or_default()
     }
 
-    /// The heads that may show `g`'s suit, one entry per press, strictest
-    /// first: its own held-back heads, then (from the first *Find more*)
-    /// look-alikes; never a member or one answered No; only as many as the
-    /// rounds asked let through.
-    fn suggestions_of(&self, g: &FakeGroup) -> Vec<Vec<Face>> {
+    /// The heads that may show `g`'s suit, one entry per press, nearest
+    /// first, with whether each is the suit's own (else a look-alike):
+    /// its own held-back heads, then look-alikes; never a member or one
+    /// answered No.
+    fn candidates_of(&self, g: &FakeGroup) -> Vec<(bool, Vec<Face>)> {
         let have: HashSet<FaceRef> = g.members.iter().copied().collect();
-        let mut by_press: BTreeMap<(u64, u64), Vec<Face>> = BTreeMap::new();
+        let mut by_press: BTreeMap<(u64, u64), (bool, Vec<Face>)> = BTreeMap::new();
         for &i in &self.tagged[..self.scanned] {
             let s = &self.shots[i];
             for (suit, f) in heads_of(s) {
@@ -344,27 +382,82 @@ impl FakeFursuits {
                     continue;
                 }
                 let own = suit == g.suit && placed(&f, suit) == Placed::Held;
-                let alike = g.rounds > 0 && suit == lookalike(g.suit) && suit != g.suit && unit(&(f, g.suit, "alike")) < 0.12;
+                // With a judge, more look-alikes reach the close calls.
+                let alike = suit == lookalike(g.suit) && suit != g.suit && unit(&(f, g.suit, "alike")) < if self.judge_on { 0.4 } else { 0.12 };
                 if !(own || alike) {
                     continue;
                 }
                 let press = s.burst.unwrap_or_else(|| hash64(&s.key));
                 // Look-alikes rank after the suit's own.
-                let rank = (unit(&(press, g.suit, "rank")) * 1e6) as u64 + if alike { 1_000_000 } else { 0 };
+                // (With a judge, the close calls mix, nearest first.)
+                let rank = (unit(&(press, g.suit, "rank")) * 1e6) as u64 + if alike && !self.judge_on { 1_000_000 } else { 0 };
                 if let Some(face) = self.face_of(f, false) {
-                    by_press.entry((rank, press)).or_default().push(face);
+                    let e = by_press.entry((rank, press)).or_insert((own, Vec::new()));
+                    e.1.push(face);
                 }
             }
         }
-        let limit = FIRST_BATCH + MORE_BATCH * g.rounds;
         by_press
             .into_values()
-            .map(|mut v| {
+            .map(|(own, mut v)| {
                 v.sort_by(|a, b| b.clarity.total_cmp(&a.clarity));
-                v
+                (own, v)
             })
-            .take(limit)
             .collect()
+    }
+
+    /// What the review offers `g`, one entry per press, strictest first.
+    /// Without the judge: its own held-back heads, then (from the first
+    /// *Find more*) look-alikes, only as many as the rounds asked let
+    /// through.  With the judge: the sure ones (its own, as many as the
+    /// rounds let through), then the close calls it judged the same suit.
+    fn suggestions_of(&self, g: &FakeGroup) -> Vec<Vec<Face>> {
+        let limit = FIRST_BATCH + MORE_BATCH * g.rounds;
+        let all = self.candidates_of(g);
+        if !self.judge_on {
+            return all.into_iter().filter(|(own, _)| *own || g.rounds > 0).map(|(_, v)| v).take(limit).collect();
+        }
+        let (sure, band) = self.split(g, all);
+        let yes = band.into_iter().filter(|e| g.judged.get(&e[0].face) == Some(&true));
+        sure.into_iter().chain(yes).collect()
+    }
+
+    /// The sure suggestions and the close calls (the judge's band).
+    fn split(&self, g: &FakeGroup, all: Vec<(bool, Vec<Face>)>) -> (Vec<Vec<Face>>, Vec<Vec<Face>>) {
+        let limit = FIRST_BATCH + MORE_BATCH * g.rounds;
+        let (mut sure, mut band) = (Vec::new(), Vec::new());
+        for (own, v) in all {
+            if own && sure.len() < limit {
+                sure.push(v);
+            } else {
+                band.push(v);
+            }
+        }
+        (sure, band)
+    }
+
+    /// The judge's work for a named fursuit: the close calls it judged
+    /// different (left out), and those not judged yet, nearest first.
+    pub fn close_calls(&self, id: &GroupId) -> (Vec<Vec<Face>>, Vec<Vec<Face>>) {
+        let Some(g) = self.group(id).filter(|g| g.name.is_some()) else { return (Vec::new(), Vec::new()) };
+        let (_, band) = self.split(g, self.candidates_of(g));
+        let left_out = band.iter().filter(|e| g.judged.get(&e[0].face) == Some(&false)).cloned().collect();
+        let todo = band.into_iter().filter(|e| !g.judged.contains_key(&e[0].face)).collect();
+        (left_out, todo)
+    }
+
+    /// The stand-in judge's verdict on a close call: the suit's own heads
+    /// are the same fursuit, look-alikes not, with a few mistakes.
+    pub fn judge(&mut self, id: &GroupId, entry: &[Face]) -> bool {
+        let Some(first) = entry.first().map(|f| f.face) else { return false };
+        let own = self.group(id).is_some_and(|g| self.look_of(&first) == Some(g.suit));
+        let wrong = unit(&(first, "judge-wrong")) < 0.06;
+        let yes = own != wrong;
+        if let Some(g) = self.group_mut(id) {
+            g.judged.insert(first, yes);
+        }
+        self.generation += 1;
+        yes
     }
 
     /// What the review offers: a named fursuit's suggestions, or an
@@ -510,6 +603,7 @@ impl FakeFursuits {
             g.rejected.clear();
             g.hidden = false;
             g.rounds = 0;
+            g.judged.clear();
             g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 1000 * (generation + 1));
         }
     }
@@ -545,7 +639,7 @@ impl FakeFursuits {
                 self.next_id += 1;
                 let id = GroupId::Cluster(made_id(self.next_id));
                 let s = faces.first().and_then(|f| self.look_of(f)).unwrap_or(suit);
-                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, rounds: 0 });
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, rounds: 0, judged: HashMap::new() });
             }
         }
         Ok(())
@@ -704,6 +798,38 @@ mod tests {
             last = now;
         }
         assert_eq!(f.find_more(&one), 0, "eventually nothing more is close enough");
+    }
+
+    /// The stand-in judge: close calls beyond the sure ones; a verdict of
+    /// yes offers one, no leaves it out (counted, never offered); nothing
+    /// is added to the fursuit by a verdict.
+    #[test]
+    fn the_stand_in_judge_offers_and_leaves_out_but_never_adds() {
+        let mut f = fursuits(true);
+        f.judge_on = true;
+        let one = named_one(&f);
+        let sure = f.suggestions(&one);
+        let (left, todo) = f.close_calls(&one);
+        assert!(left.is_empty() && todo.len() > 5, "{}", todo.len());
+        let members = f.faces(&one).len();
+        let (mut yes, mut no) = (0, 0);
+        for e in &todo {
+            if f.judge(&one, e) {
+                yes += 1;
+            } else {
+                no += 1;
+            }
+        }
+        assert!(yes > 0 && no > 0, "some of each: {yes} {no}");
+        assert_eq!(f.faces(&one).len(), members, "a verdict adds nothing");
+        assert_eq!(f.suggestions(&one).len(), sure.len() + yes, "offered after the sure ones");
+        assert_eq!(&f.suggestions(&one)[..sure.len()], &sure[..]);
+        let (left, todo) = f.close_calls(&one);
+        assert_eq!((left.len(), todo.len()), (no, 0));
+        assert!(left.iter().all(|e| !f.suggestions(&one).contains(e)), "left out is never offered");
+        // An unnamed group's close calls are never judged.
+        let unnamed = f.groups().into_iter().find(|g| g.name.is_none()).unwrap().id;
+        assert_eq!(f.close_calls(&unnamed), (Vec::new(), Vec::new()));
     }
 
     #[test]

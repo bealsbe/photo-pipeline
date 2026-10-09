@@ -807,6 +807,9 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     if let Some(slot) = super::subjects_fursuits::status_slot(app) {
         r = r.push(slot);
     }
+    if let Some(slot) = super::fursuit_judge::status_slot(app) {
+        r = r.push(slot);
+    }
     if let Some(slot) = search_setup::status_slot(app) {
         r = r.push(slot);
     }

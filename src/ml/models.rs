@@ -52,6 +52,10 @@ pub enum ModelId {
     /// DINOv2 base: tells one fursuit from another from a head crop
     /// (phase 4).  Its vectors are kept apart from every other kind's.
     Dinov2,
+    /// Gemma 4 26B-A4B (unsloth's UD-Q4_K_M GGUF and its F16 vision
+    /// projector): the fursuit close-call judge, run by llama.cpp in its
+    /// own helper, on the card only (fursuit matching v2).
+    Gemma4,
 }
 
 impl ModelId {
@@ -65,6 +69,7 @@ impl ModelId {
             ModelId::SFace => "sface-2021dec",
             ModelId::Owlv2 => "owlv2-b16-ensemble",
             ModelId::Dinov2 => "dinov2-base",
+            ModelId::Gemma4 => "gemma4-26b-a4b-it-ud-q4km",
         }
     }
 
@@ -278,6 +283,28 @@ pub const DINOV2_FILES: &[ModelFile] = &[ModelFile {
     archive: None,
 }];
 
+const GEMMA4_BASE: &str = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF";
+
+/// Gemma 4 26B-A4B as unsloth's GGUF (Apache-2.0): the 4-bit weights and
+/// the vision projector at F16, as the research measured them.  Pinned
+/// 2026-10-08 (the research download's digests).
+pub const GEMMA4_FILES: &[ModelFile] = &[
+    ModelFile {
+        file: "gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        url: "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf",
+        sha256: "f2c28b3dc4776931ac6f879e11f203dec637ea0f14267a86ec8f6165f63f293f",
+        bytes: 16_947_541_728,
+        archive: None,
+    },
+    ModelFile {
+        file: "mmproj-F16.gguf",
+        url: "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF/resolve/main/mmproj-F16.gguf",
+        sha256: "418a6d8723067cd712235facbbc5cba6c8fbbd413fc1292d2aace5a027d5a42f",
+        bytes: 1_193_058_784,
+        archive: None,
+    },
+];
+
 /// Every model, in the dialog's order: search, the face detector, the
 /// face choices (the recommended one first), then the fursuit head step's
 /// two.
@@ -394,6 +421,22 @@ pub const ALL: &[ModelInfo] = &[
         recommended: false,
         restricted: false,
     },
+    ModelInfo {
+        id: ModelId::Gemma4,
+        role: "Close-call judge",
+        name: "Gemma 4, 26B-A4B",
+        what: "Looks at two fursuit heads side by side and says whether they are the same fursuit.",
+        licence: "Apache-2.0",
+        licence_plain: "free for any use",
+        publisher: "Google",
+        source_url: GEMMA4_BASE,
+        required: false,
+        files: GEMMA4_FILES,
+        preprocess_version: 1,
+        choice: Some("judge"),
+        recommended: false,
+        restricted: false,
+    },
 ];
 
 /// The registry entry for `id`.
@@ -430,6 +473,11 @@ pub fn models_for(face_model: Option<ModelId>) -> Vec<ModelId> {
 /// The face model among `ids`, if one.
 pub fn face_model_in(ids: &[ModelId]) -> Option<ModelId> {
     ids.iter().copied().find(|id| id.is_face_model())
+}
+
+/// The close-call judges a user can pick (Preferences ▸ Fursuits).
+pub fn judge_models() -> impl Iterator<Item = &'static ModelInfo> {
+    ALL.iter().filter(|m| m.choice == Some("judge"))
 }
 
 /// The fursuit head step's rows (the dialog's *Fursuits* pair, phase 4).

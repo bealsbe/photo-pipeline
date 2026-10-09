@@ -38,6 +38,7 @@ use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Kind, Subjects}
 use crate::bus::{BgEvent, Bus};
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
+use crate::ml::judge::{JudgeChoice, JudgeState, JudgeStatus};
 use crate::ml::{CardFailure, Device, DeviceStatus, SelfCheck};
 use crate::model::library_index::{self, LibraryIndex};
 use crate::model::record::FileType;
@@ -326,6 +327,7 @@ impl Link {
                     Arc::new(if s.fursuits.owns(id) { s.fursuits.suggestions(id) } else { s.people.suggestions(id) })
                 };
                 let _ = f.bus.unbounded_send(BgEvent::Suggestions { seq, group: id.clone(), list });
+                f.start_judging(seq, id);
             }
         }
     }
@@ -499,6 +501,83 @@ impl Link {
         }
     }
 
+    // ── the close-call judge (fursuit matching v2) ──
+    // ENGINE: the engine's calls land with the backend's stage 2; until
+    // then the real engine ignores these.
+
+    /// Preferences ▸ Fursuits ▸ *Close-call judge*.  Off unloads it and
+    /// drops a run.
+    pub fn set_judge(&self, choice: JudgeChoice) {
+        match self {
+            Link::Engine(_) => {}
+            Link::Fake(f) => f.change(|s| {
+                s.status.judge.choice = choice;
+                s.fursuits.judge_on = s.status.judge.installed();
+                if !s.status.judge.installed() {
+                    s.judge_run = None;
+                    s.status.judge.loaded = false;
+                    s.status.judge.state = JudgeState::Idle;
+                }
+                s.refresh_people();
+            }),
+        }
+    }
+
+    /// Download `choice`'s model alone (`BgEvent::ModelDownload`).
+    pub fn download_judge(&self, choice: JudgeChoice) {
+        match self {
+            Link::Engine(_) => {}
+            Link::Fake(f) => f.change(|s| {
+                if let Some(m) = choice.model() {
+                    s.downloads = vec![(m, 0, models::info(m).bytes(), DownloadState::Waiting)];
+                }
+            }),
+        }
+    }
+
+    /// × on the judge's line: stop judging (what was judged is kept).
+    pub fn stop_judging(&self) {
+        match self {
+            Link::Engine(_) => {}
+            Link::Fake(f) => f.change(|s| {
+                s.judge_run = None;
+                s.status.judge.state = JudgeState::Idle;
+            }),
+        }
+    }
+
+    /// Delete `choice`'s model files (the judged pairs are kept).
+    pub fn delete_judge(&self, choice: JudgeChoice) {
+        match self {
+            Link::Engine(_) => {}
+            Link::Fake(f) => f.change(|s| {
+                s.status.judge.downloaded.retain(|c| *c != choice);
+                if s.status.judge.choice == choice {
+                    s.status.judge.choice = JudgeChoice::Off;
+                    s.judge_run = None;
+                    s.status.judge.state = JudgeState::Idle;
+                }
+                s.status.judge.loaded = false;
+                s.fursuits.judge_on = false;
+                s.refresh_people();
+            }),
+        }
+    }
+
+    /// Stage 1's catch-up: the heads found before fursuits were told apart
+    /// by the search model get its vectors (asked for, never automatic).
+    pub fn catch_up_head_vectors(&self) {
+        match self {
+            Link::Engine(_) => {}
+            Link::Fake(f) => f.change(|s| {
+                let total = s.status.heads.vectors_missing;
+                if total > 0 && !s.status.heads.scanning() {
+                    s.status.heads.step = fursuits::Step::Scanning { why: fursuits::Why::Vectors, done: 0, total };
+                }
+            }),
+        }
+    }
+
     /// What draws crops: on a worker, never the UI thread.
     pub fn cropper(&self) -> Cropper {
         match self {
@@ -571,6 +650,31 @@ struct FakeState {
     subjects: Arc<Subjects>,
     /// The generation of the groups last sent (sent again on a change).
     sent_people: Option<u64>,
+    /// The stand-in judge's run over a fursuit's close calls.
+    judge_run: Option<JudgeRun>,
+    /// Ticks the judge has been loading (it is loaded after a few).
+    loading: u32,
+    /// Pretend another step holds the card (`judge-wait`).
+    card_held: bool,
+}
+
+/// The stand-in judge's work for one request.
+struct JudgeRun {
+    seq: u64,
+    group: GroupId,
+    todo: Vec<Vec<Face>>,
+    done: usize,
+    total: usize,
+}
+
+/// A judged event waiting to be sent.
+struct JudgeEvent {
+    seq: u64,
+    group: GroupId,
+    offered: Vec<Vec<Face>>,
+    left_out: Vec<Vec<Face>>,
+    done: usize,
+    total: usize,
 }
 
 impl FakeState {
@@ -588,7 +692,54 @@ impl FakeState {
 
     fn busy(&self) -> bool {
         let heads = self.status.heads.scanning() && self.status.stopped.is_none();
-        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()) || heads)
+        let judging = self.judge_run.is_some();
+        !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()) || heads || judging)
+    }
+
+    /// Something else holds the card: a pass, the head step (or a test
+    /// says so).
+    fn card_in_use(&self) -> bool {
+        self.card_held || (self.status.stopped.is_none() && (self.status.pass.is_some() || self.status.heads.scanning()))
+    }
+
+    /// One tick of the judge: wait for the card, load, then judge one
+    /// close call.  The verdict, if one was reached.
+    fn step_judge(&mut self) -> Option<JudgeEvent> {
+        self.judge_run.as_ref()?;
+        if self.card_in_use() {
+            self.status.judge.state = JudgeState::WaitingForCard;
+            return None;
+        }
+        if !self.status.judge.loaded {
+            self.status.judge.state = JudgeState::Loading;
+            self.loading += 1;
+            if self.loading >= 4 {
+                self.status.judge.loaded = true;
+                self.loading = 0;
+            }
+            return None;
+        }
+        let run = self.judge_run.as_mut()?;
+        let entry = (!run.todo.is_empty()).then(|| run.todo.remove(0));
+        let (seq, group, total) = (run.seq, run.group.clone(), run.total);
+        let mut ev = JudgeEvent { seq, group: group.clone(), offered: Vec::new(), left_out: Vec::new(), done: 0, total };
+        if let Some(e) = entry {
+            if self.fursuits.judge(&group, &e) {
+                ev.offered.push(e);
+            } else {
+                ev.left_out.push(e);
+            }
+        }
+        let run = self.judge_run.as_mut()?;
+        run.done = (run.done + 1).min(run.total);
+        ev.done = run.done;
+        self.status.judge.state = JudgeState::Judging { group: group.clone(), done: run.done, total: run.total };
+        if run.done >= run.total {
+            self.judge_run = None;
+            self.status.judge.state = JudgeState::Idle;
+        }
+        self.refresh_people();
+        Some(ev)
     }
 
     /// The groups and the faces counts, after the people changed.
@@ -636,6 +787,18 @@ impl FakeState {
     /// One tick of a head scan; false when none runs.
     fn step_heads(&mut self) -> bool {
         let fursuits::Step::Scanning { why, done, total } = self.status.heads.step else { return false };
+        if why == fursuits::Why::Vectors {
+            // The known heads get the search model's vectors.
+            let done = (done + (total / 30).max(1)).min(total);
+            self.status.heads.vectors_missing = total - done;
+            self.status.heads.step = if done >= total { fursuits::Step::Idle } else { fursuits::Step::Scanning { why, done, total } };
+            if done >= total && self.fursuits.groups().is_empty() {
+                let n = self.fursuits.tagged_in(self.status.indexed_shots);
+                self.fursuits.scan(n);
+            }
+            self.refresh_people();
+            return true;
+        }
         let base = self.fursuits.scanned.saturating_sub(done);
         let done = (done + (total / 30).max(1)).min(total);
         self.fursuits.scan(base + done);
@@ -646,6 +809,36 @@ impl FakeState {
 }
 
 impl Fake {
+    fn send_judged(&self, e: JudgeEvent) {
+        let _ = self.bus.unbounded_send(BgEvent::Judged { seq: e.seq, group: e.group, offered: Arc::new(e.offered), left_out: Arc::new(e.left_out), done: e.done, total: e.total });
+    }
+
+    /// A fursuit's suggestions were asked for with a judge on: judge its
+    /// close calls, nearest first; those judged before count at once.
+    fn start_judging(&self, seq: u64, id: &GroupId) {
+        let first = {
+            let mut s = self.state.lock();
+            if !s.fursuits.owns(id) || !s.status.judge.installed() || s.subjects.group(id).is_none_or(|g| g.name.is_none()) {
+                return;
+            }
+            let (left_out, todo) = s.fursuits.close_calls(id);
+            let total = todo.len();
+            s.judge_run = (total > 0).then(|| JudgeRun { seq, group: id.clone(), todo, done: 0, total });
+            if total > 0 {
+                s.status.judge.state = if s.card_in_use() {
+                    JudgeState::WaitingForCard
+                } else if s.status.judge.loaded {
+                    JudgeState::Judging { group: id.clone(), done: 0, total }
+                } else {
+                    JudgeState::Loading
+                };
+            }
+            JudgeEvent { seq, group: id.clone(), offered: Vec::new(), left_out, done: 0, total }
+        };
+        self.send_judged(first);
+        self.change(|_| {});
+    }
+
     fn new(bus: Bus, device: Device, index_exports: bool, indexed: bool, find_faces: bool, face_model: ModelId, find_heads: bool) -> Fake {
         let mut status = Status {
             index_exports,
@@ -683,6 +876,9 @@ impl Fake {
             edits: Vec::new(),
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
+            judge_run: None,
+            loading: 0,
+            card_held: false,
         };
         let fake = Fake { bus, state: Arc::new(Mutex::new(state)) };
         fake.publish(&fake.state.lock());
@@ -795,6 +991,9 @@ impl Fake {
                 return;
             }
             step(&mut s);
+            if let Some(e) = s.step_judge() {
+                self.send_judged(e);
+            }
             self.publish(&s);
             self.publish_downloads(&s);
             self.publish_things(&mut s);
@@ -1041,6 +1240,46 @@ impl Fake {
                     st.fursuits.scan(tagged - skip);
                     st.refresh_people();
                 }
+                // The close-call judge: chosen and in place, off, chosen
+                // but not downloaded, the card held by another step (or
+                // let go), a card failure, a broken helper.
+                "judge-on" | "judge-off" | "judge-notinstalled" => {
+                    let choice = if word == "judge-off" { JudgeChoice::Off } else { JudgeChoice::Gemma4 };
+                    let downloaded = if word == "judge-on" { vec![JudgeChoice::Gemma4] } else { Vec::new() };
+                    s.judge = JudgeStatus { choice, downloaded, loaded: false, state: JudgeState::Idle };
+                    st.fursuits.judge_on = s.judge.installed();
+                    st.judge_run = None;
+                    st.refresh_people();
+                }
+                "judge-wait" => st.card_held = true,
+                "judge-free" => st.card_held = false,
+                "judge-cardcrash" => {
+                    st.judge_run = None;
+                    s.judge.loaded = false;
+                    s.judge.state = JudgeState::Failed(CardFailure::Crashed);
+                }
+                "judge-broken" => {
+                    st.judge_run = None;
+                    s.judge.loaded = false;
+                    s.judge.state = JudgeState::Broken("The judge's model file is damaged. Delete it in Preferences ▸ Storage and download it again.".into());
+                }
+                // Heads found before fursuit matching v2, without the
+                // search model's head vectors.
+                "heads-vectors" => {
+                    let tagged = st.fursuits.tagged_in(s.indexed_shots);
+                    s.heads.on = true;
+                    s.heads.models_installed = true;
+                    s.heads.vectors_missing = if n > 0 { n } else { tagged * 3 / 5 };
+                    s.heads.step = fursuits::Step::Idle;
+                    // `heads-vectors all`: none has them yet, so nothing
+                    // is grouped (a library from before v2).
+                    if arg.trim() == "all" {
+                        s.heads.vectors_missing = tagged * 3 / 5;
+                        st.fursuits.forget_all();
+                        st.refresh_people();
+                        st.status.heads.found = tagged;
+                    }
+                }
                 "heads-cardcrash" => {
                     s.stopped = Some(Stopped::Card(CardFailure::Crashed));
                     s.heads.step = fursuits::Step::Failed(CardFailure::Crashed);
@@ -1250,6 +1489,15 @@ fn step(s: &mut FakeState) {
         }
         if d.3 != DownloadState::Checked && d.3.is_final() {
             s.fail_next = None;
+            return;
+        }
+        // The judge's model alone: it is in place, nothing else changes.
+        if s.downloads.iter().all(|d| d.3 == DownloadState::Checked && d.0 == ModelId::Gemma4) {
+            if !s.status.judge.downloaded.contains(&JudgeChoice::Gemma4) {
+                s.status.judge.downloaded.push(JudgeChoice::Gemma4);
+            }
+            s.fursuits.judge_on = s.status.judge.installed();
+            s.refresh_people();
             return;
         }
         if s.downloads.iter().all(|d| d.3 == DownloadState::Checked) {

@@ -105,6 +105,10 @@ pub struct Settings {
     /// photos the index tags as fursuits, after the search step.  With the
     /// processor chosen every scan asks first, whatever this says.
     pub find_heads: bool,
+    /// *Close-call judge* (fursuit matching v2): off by default; a judge
+    /// looks at the close calls *Find more* and the review would
+    /// otherwise leave out, and offers those it judges the same fursuit.
+    pub fursuit_judge: crate::ml::judge::JudgeChoice,
     /// *Smallest group to show*: clusters with fewer photos fold under
     /// *Smaller groups* (3, 5 or 10; §10 says 5).
     pub people_min_photos: usize,
@@ -166,6 +170,7 @@ impl Default for Settings {
             find_faces: true,
             face_model: crate::ml::models::FACE_MODEL_DEFAULT,
             find_heads: true,
+            fursuit_judge: crate::ml::judge::JudgeChoice::Off,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
     }

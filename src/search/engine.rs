@@ -93,6 +93,11 @@ pub struct Storage {
     pub faces_bytes: u64,
     /// The head cache's files (the Storage row's *Fursuits*).
     pub heads_bytes: u64,
+    /// The close-call judges' model files (not in `models_bytes`), and
+    /// the judged pairs beside the index (not in `index_bytes`).
+    /// PROVISIONAL until the backend's lands.
+    pub judge_bytes: u64,
+    pub judged_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -495,6 +500,8 @@ pub fn storage(library_root: Option<&Path>) -> Storage {
     if let Some(dir) = models::models_dir() {
         out.models_bytes = dir_bytes(&dir);
     }
+    out.judge_bytes = models::judge_models().filter_map(|m| models::model_dir(m.id)).map(|d| dir_bytes(&d)).sum();
+    out.models_bytes = out.models_bytes.saturating_sub(out.judge_bytes);
     out
 }
 

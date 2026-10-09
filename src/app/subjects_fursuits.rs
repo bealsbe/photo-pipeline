@@ -13,6 +13,9 @@
 //! - **Progress** on the tab and in the status bar, with × to stop.
 //! - **A failed card** says what failed and offers to try the card again
 //!   or open Preferences; never the processor.
+//! - **Heads to update** (fursuit matching v2): heads found before fursuits
+//!   were told apart by the search model need its vectors once.  The tab
+//!   and Preferences say what that costs; it runs only when asked.
 
 use iced::widget::{Space, button, column, container, progress_bar, row, scrollable, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
@@ -48,6 +51,9 @@ pub enum Msg {
     TryCard,
     OpenPrefs,
     IndexLibrary,
+    /// Give the heads found before v2 the search model's vectors (the
+    /// offer states the cost, so the click is the answer).
+    UpdateHeads,
 }
 
 // ── state ───────────────────────────────────────────────────────────────────
@@ -63,6 +69,9 @@ pub enum State {
     Off,
     /// Indexed, no head looked for yet: the offer with its cost.
     CatchUp,
+    /// Heads found before v2, none with the search model's vectors yet, so
+    /// nothing is grouped: the offer to update them, with its cost.
+    Vectors,
     /// A scan waits for start or skip (the processor), nothing found yet.
     Asking,
     /// Looking (the first index, an export's photos, the catch-up), nothing
@@ -89,6 +98,9 @@ pub fn state(app: &App) -> State {
     let st = &app.search.status;
     if !h.on {
         return State::Off;
+    }
+    if h.vectors_missing > 0 && matches!(h.step, Step::Idle) {
+        return State::Vectors;
     }
     match h.step {
         Step::Asking(_) => return State::Asking,
@@ -137,7 +149,7 @@ fn photos_phrase(o: Offer) -> String {
     match o.why {
         Why::NewExports => format!("the {n} new {photos} with fursuits"),
         Why::Resume => format!("the {n} {photos} with fursuits still to look at"),
-        Why::FirstIndex | Why::CatchUp => format!("the {n} {photos} with fursuits"),
+        Why::FirstIndex | Why::CatchUp | Why::Vectors => format!("the {n} {photos} with fursuits"),
     }
 }
 
@@ -151,7 +163,7 @@ pub fn ask_words(o: Offer) -> (String, String) {
     let before = match o.why {
         Why::FirstIndex => "The library is indexed for search. ",
         Why::NewExports => "Search already has them. ",
-        Why::CatchUp | Why::Resume => "",
+        Why::CatchUp | Why::Resume | Why::Vectors => "",
     };
     (
         title,
@@ -188,6 +200,7 @@ pub fn body(app: &App) -> Element<'_, Message> {
             None,
         ),
         State::CatchUp => catch_up(app),
+        State::Vectors => update_page(app),
         State::Asking | State::Looking | State::Failed => {
             let note = match state(app) {
                 State::Asking => "Nothing is looked at until you say so.",
@@ -198,7 +211,12 @@ pub fn body(app: &App) -> Element<'_, Message> {
             if let Some(card) = status_card(app) {
                 col = col.push(card);
             }
-            col = col.push(subj::later(Glyph::Fursuit, if h.scanning() { "Looking for fursuit heads" } else { "No fursuit heads yet" }, note));
+            let (title, note) = match h.step {
+                Step::Scanning { why: Why::Vectors, .. } => ("Updating the fursuit heads", "Groups appear here as their heads are updated, newest days first. You can keep culling meanwhile."),
+                _ if h.scanning() => ("Looking for fursuit heads", note),
+                _ => ("No fursuit heads yet", note),
+            };
+            col = col.push(subj::later(Glyph::Fursuit, title, note));
             container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
         }
         State::NoHeads => subj::message(
@@ -286,6 +304,56 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// Heads found before v2 and none updated yet: why they need the search
+/// model's vectors, what that costs on the device chosen, and the way to
+/// start it.  Nothing runs until asked.
+fn update_page(app: &App) -> Element<'_, Message> {
+    let h = &app.search.status.heads;
+    let device = app.search.status.device.chosen;
+    let n = h.vectors_missing;
+    let on_share = app.library.as_deref().and_then(|l| super::network::share_of(app, l)).is_some();
+    let facts = vec![
+        subj::fact("Looks at", format!("The {} photos where fursuit heads were found, at the heads already found", util::thousands(n as u64)), None),
+        subj::fact(
+            "Reads",
+            format!("Each of their previews again: {} from the library{}", estimate::describe_bytes(fursuits::vector_bytes_read(n)), if on_share { " on the share" } else { "" }),
+            None,
+        ),
+        subj::fact(
+            "Takes",
+            super::search_setup::capital(&fursuits::describe_vector_cost(n, device)),
+            Some("You can keep culling, and stop it from the status bar. Groups appear as their heads are updated, newest days first.".into()),
+        ),
+        subj::fact("Downloads", "Nothing: it uses the search model, already here.".into(), None),
+        subj::fact("Keeps", "The names you gave and your answers: they point at the heads, not at the groups.".into(), None),
+    ];
+    let mut group = column![];
+    for (i, f) in facts.into_iter().enumerate() {
+        if i > 0 {
+            group = group.push(kit::hairline());
+        }
+        group = group.push(f);
+    }
+    let action = row![kit::btn("Update the fursuit heads", style::primary(), Some(m(Msg::UpdateHeads))), kit::caption(format!("{} with fursuit heads", util::plural(n as u64, "photo")))]
+        .spacing(t::S3)
+        .align_y(Alignment::Center);
+    let col = column![
+        row![icons::view(Glyph::Fursuit, 26.0, t::INK), text("Update the fursuit heads").size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
+        text("Fursuits are now told apart by the search model, which finds the same fursuit across days and years more often. The heads found before need it once, so their previews are read again. Until then they aren't grouped or suggested. Nothing is named for you.")
+            .size(t::T_BODY)
+            .color(t::INK2),
+        container(group).width(Length::Fill).style(style::group()),
+        action,
+    ]
+    .spacing(14)
+    .max_width(600);
+    container(scrollable(container(col).center_x(Length::Fill).padding(Padding { top: 40.0, bottom: t::S5, left: t::S5, right: t::S5 })).style(style::scroll))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .style(style::fill(t::GROUND))
+        .into()
+}
+
 /// A card on the photos' grey, outlined, as the faces' progress is.
 fn card<'a>(glyph: Glyph, tone: iced::Color, title: String, detail: String, right: Element<'a, Message>) -> Element<'a, Message> {
     let words = column![text(title).size(t::T_BODY).font(paint::MEDIUM).color(t::PHOTO_INK), text(detail).size(t::T_SMALL).color(t::PHOTO_INK2)].spacing(2).width(Length::Fill);
@@ -311,6 +379,17 @@ pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
     let h = &app.search.status.heads;
     let device = app.search.status.device.chosen;
     match &h.step {
+        Step::Scanning { why: Why::Vectors, done, total } => {
+            let left = estimate::describe_seconds(fursuits::vector_seconds(total.saturating_sub(*done), device));
+            let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
+            Some(card(
+                Glyph::Fursuit,
+                t::PHOTO_INK2,
+                format!("Updating fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
+                format!("{} left {}. Their groups and suggestions come back as they're updated.", super::search_setup::capital(&left), on_device(device)),
+                bar(frac, 120.0, t::PHOTO_RAISED),
+            ))
+        }
         Step::Scanning { done, total, .. } => {
             let left = estimate::describe_seconds(fursuits::head_seconds(total.saturating_sub(*done), device));
             let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
@@ -346,6 +425,20 @@ pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
                 f.title().replacen("Indexing stopped", "Finding fursuit heads stopped", 1),
                 format!("{} What was found so far is kept. Nothing is moved to the processor: to look for heads on it instead, choose it in Preferences ▸ Search.", f.detail().trim()),
                 buttons.into(),
+            ))
+        }
+        Step::Idle if h.vectors_missing > 0 => {
+            let n = h.vectors_missing;
+            let go = kit::btn("Update them", style::secondary(), Some(m(Msg::UpdateHeads)));
+            Some(card(
+                Glyph::Fursuit,
+                t::PHOTO_INK3,
+                format!("{} with fursuit heads to update", util::plural(n as u64, "photo")),
+                format!(
+                    "They were found before fursuits were told apart by the search model, so they aren't grouped or suggested yet. Updating them reads their previews again: {}.",
+                    fursuits::describe_vector_cost(n, device)
+                ),
+                go.into(),
             ))
         }
         Step::Idle if h.on && h.unscanned() > 0 && h.scanned > 0 => {
@@ -400,13 +493,14 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     let of = format!("{} of {}", util::thousands(done as u64), util::thousands(total as u64));
     let label = match why {
         Why::NewExports => "Finding fursuit heads in them",
+        Why::Vectors => "Updating fursuit heads",
         _ => "Finding fursuit heads",
     };
     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
     let content = row![text(label).size(t::T_SMALL).color(t::INK3), text(of).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK), bar(frac, 56.0, t::RAISED)].spacing(t::S2).align_y(Alignment::Center);
     let stop = tip(
         button(container(icons::view(Glyph::Close, 11.0, t::INK2)).center(Length::Fill)).width(20).height(20).padding(0).style(style::ghost().radius(4.0).style()).on_press(m(Msg::Stop)),
-        "Stop looking for fursuit heads. What was found is kept.",
+        if why == Why::Vectors { "Stop updating fursuit heads. Those updated are kept." } else { "Stop looking for fursuit heads. What was found is kept." },
         false,
     );
     Some(row![content, stop, Space::new().width(t::S3), kit::vrule(12.0), Space::new().width(t::S3)].spacing(t::S1).align_y(Alignment::Center).into())
@@ -418,6 +512,12 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
 /// it was stopped).
 pub fn on_status(app: &mut App, old: &crate::search::Status) -> Task<Message> {
     let (was, now) = (&old.heads, &app.search.status.heads);
+    if let (Step::Scanning { why: Why::Vectors, .. }, Step::Idle) = (&was.step, &now.step) {
+        if now.vectors_missing == 0 {
+            return app.show_status("Updated the fursuit heads: fursuits are told apart by the search model now.", 8000);
+        }
+        return Task::none();
+    }
     if let (Step::Scanning { done, total, .. }, Step::Idle) = (&was.step, &now.step) {
         // Finished, not stopped: everything it set out to look at.
         if now.scanned >= was.scanned + total.saturating_sub(*done) {
@@ -450,6 +550,16 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             Task::none()
         }
         Msg::OpenPrefs => super::preferences::open_at(app, super::preferences::Control::FindHeads),
+        Msg::UpdateHeads => {
+            let h = &app.search.status.heads;
+            if h.vectors_missing == 0 || !matches!(h.step, Step::Idle) {
+                return Task::none();
+            }
+            let n = h.vectors_missing;
+            let device = app.search.status.device.chosen;
+            app.search.link.catch_up_head_vectors();
+            app.show_status(format!("Updating the fursuit heads in {}: {}.", util::plural(n as u64, "photo"), fursuits::describe_vector_cost(n, device)), 6000)
+        }
         Msg::IndexLibrary => {
             let t = super::search::open(app);
             Task::batch([t, Task::done(Message::Search(super::search::Msg::IndexLibrary))])
@@ -480,7 +590,7 @@ fn find_heads(app: &mut App) -> Task<Message> {
 pub fn debug_state(app: &App) -> String {
     let h = &app.search.status.heads;
     format!(
-        "fursuits=[state={:?} on={} installed={} tagged={} scanned={} skipped={} found={} named={} step={:?} strip={}]",
+        "fursuits=[state={:?} on={} installed={} tagged={} scanned={} skipped={} found={} named={} step={:?} strip={} vectors_missing={}]",
         state(app),
         h.on,
         h.models_installed,
@@ -490,7 +600,8 @@ pub fn debug_state(app: &App) -> String {
         h.found,
         h.named,
         h.step,
-        ask_strip(app).is_some()
+        ask_strip(app).is_some(),
+        h.vectors_missing,
     )
 }
 

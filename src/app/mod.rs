@@ -8,6 +8,7 @@ pub mod commands;
 pub mod compare;
 pub mod dialogs;
 pub mod fursuit_art;
+pub mod fursuit_judge;
 pub mod fursuits;
 pub mod global_menu;
 pub mod hints_ui;
@@ -285,6 +286,7 @@ pub enum Message {
     Subjects(subjects::Msg),
     /// The fursuit-head step: its offers, the processor's question, stop.
     Fursuits(subjects_fursuits::Msg),
+    Judge(fursuit_judge::Msg),
 }
 
 impl Message {
@@ -324,6 +326,7 @@ impl Message {
             Message::Search(_) => "Search",
             Message::Subjects(_) => "Subjects",
             Message::Fursuits(_) => "Fursuits",
+            Message::Judge(_) => "Judge",
         }
     }
 }
@@ -1695,6 +1698,7 @@ impl App {
             Message::Search(m) => search::update(self, m),
             Message::Subjects(m) => subjects::update(self, m),
             Message::Fursuits(m) => subjects_fursuits::update(self, m),
+            Message::Judge(m) => fursuit_judge::update(self, m),
         }
     }
 
@@ -2204,6 +2208,7 @@ impl App {
                 BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
+                BgEvent::Judged { seq, group, offered, left_out, done, total } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total)),
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }

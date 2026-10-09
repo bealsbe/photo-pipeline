@@ -529,7 +529,9 @@ pub fn on_more(app: &mut App, seq: u64, group: &GroupId, list: &[Vec<Face>]) -> 
     let Some((_, before)) = p.more.filter(|(s, _)| *s == seq && &p.group == group) else { return Task::none() };
     p.more = None;
     let name = subj::label(&app.subjects, group);
+    let judging = super::fursuit_judge::judging(app, group);
     let text = match list.len().saturating_sub(before) {
+        0 if judging => format!("Nothing more is sure to show {name}. Checking the close calls; those the judge offers join the suggestions."),
         0 => format!("Nothing more looks close enough to {name} yet. New exports bring new suggestions."),
         1 => format!("Found 1 more photo that may show {name}. Review it with Y."),
         n => format!("Found {n} more photos that may show {name}. Review them with Y."),
@@ -857,7 +859,8 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
                 1 => format!(" 1 more photo may show this {one}."),
                 n => format!(" {} more photos may show this {one}.", util::thousands(n as u64)),
             };
-            r = r.push(column![tip(name, "Rename  (F2)", true), text(format!("{counts}{more_line}")).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill));
+            let left_out = super::fursuit_judge::band_words(app, &p.group).unwrap_or_default();
+            r = r.push(column![tip(name, "Rename  (F2)", true), text(format!("{counts}{more_line}{left_out}")).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill));
         }
     }
     let seg = kit::segmented(vec![
@@ -873,6 +876,11 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         let review: Element<'a, Message> = if g.suggestions > 0 {
             let label = row![text(format!("Review {}", util::plural(g.suggestions as u64, "suggestion"))).size(t::T_BODY).font(paint::MEDIUM), keycap("Y")].spacing(8).align_y(Alignment::Center);
             tip(button(container(label).center_y(Length::Fill)).height(t::CONTROL_H).padding(Padding::from([0.0, t::S4])).style(style::primary().style()).on_press(pm(Msg::Review)), format!("One at a time: Y if it's this {one}, N if not"), true)
+        } else if super::fursuit_judge::judging(app, &p.group) {
+            // Nothing sure now, but the judge may find some among the
+            // close calls.
+            let label = row![text("Check close calls").size(t::T_BODY).font(paint::MEDIUM), quiet_keycap("Y")].spacing(8).align_y(Alignment::Center);
+            tip(button(container(label).center_y(Length::Fill)).height(t::CONTROL_H).padding(Padding::from([0.0, t::S4])).style(style::secondary().style()).on_press(pm(Msg::Review)), format!("The judge checks the photos that may show this {one}; you answer Y or N for those it offers"), true)
         } else {
             tip(kit::btn("No suggestions now", style::secondary(), None), "New exports bring new suggestions", true)
         };
