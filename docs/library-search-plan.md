@@ -2532,6 +2532,24 @@ close calls in *Find more* and the "Same fursuit?" review.
 - **A failing card** is said in the review's line as two lines in the warning tone, with *Try the card again* and *Preferences*, and in the status bar. The run it stopped is told as "Checked 6 of 81 close calls before the judge stopped". The processor is never offered (`failure_words`, tested).
 - **The fursuit download** is now the head finder alone; the copy names it from the registry (`fursuits::models_name`).
 
+- **One ask, sixty close calls** (the backend's `judging::MAX_CLOSE_CALLS`). A finished run with more beyond says "N more can be checked" with *Check the next N*, which is the review's *Find more*. With the judge on, a new ask keeps the review's list and adds what is new at the end (`Review::append`), so answers and place stay.
+- **Too few heads to group.** Until the whitening exists (`whiten::MIN_HEADS` heads with vectors), the tab says "Fursuits are grouped once 512 heads are found" and how many so far (`State::TooFew`), and a scan's card says when groups will appear.
+
+### Checked on the real engine
+
+All of this ran in a throwaway home: a copy of the relabel's v1 index (14,517 shots, 10,826 DINOv2-era heads), with the search and head models linked read-only. It ran through the card lock and never wrote to the library.
+- *Update the fursuit heads*:
+  - the page offered 7,033 photos ("about 6 minutes", 2.5 GB);
+  - it ran at about 25 photos a second on the card;
+  - groups appeared once whitened (160 to name by 2,000 photos);
+  - × kept what was done, and the rest was offered again.
+- The judge, under `PP_JUDGE_FAKE`:
+  - a group named, then the review;
+  - the sure suggestions came at once, and the judge's offers landed at the end of the list;
+  - *Find more* started a new run;
+  - the status bar and the review line followed `JudgeState`.
+- `PP_PROFILE=1`: the only slow updates are the test driver's (`update:Script`). `bg:Judged` and `update:Subjects` take well under a frame.
+
 ### The stand-in
 
 `FakeFursuits` judges a named fursuit's close calls:

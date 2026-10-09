@@ -547,7 +547,9 @@ never shown, merged, suggested or completed together with people or pets.
   of the strip counts those still to check); those it thinks are
   different are left out and counted ("14 checked and left out"), and
   *Show them* adds them to the end of the list, marked, to answer
-  yourself.  The status bar shows the same line in any view.  It only
+  yourself.  One ask checks the nearest 60 close calls (about two
+  minutes); when there are more, the line says so with *Check the next
+  60*, as *Find more* does.  The status bar shows the same line in any view.  It only
   suggests: every photo still takes your Y or N, and nothing is named,
   merged or marked for you.  Fursuits only, never people.  A failing card
   stops it and says so as an error, with *Try the card again* and
@@ -577,7 +579,10 @@ never shown, merged, suggested or completed together with people or pets.
   say how many photos, what is read and how long it takes, with *Update
   the fursuit heads*; it reads those previews again at the heads already
   found, so names and answers keep pointing at them.  Nothing runs until
-  asked; × in the status bar stops it.
+  asked; × in the status bar stops it.  Fursuits are grouped once 512
+  heads have the search model's vectors (telling suits apart is learnt
+  from the library's own heads); until then the tab says how many so
+  far.
 - **A failing card** stops the step and says so (the banner, and the tab
   once the banner is put away) with *Try the card again* and
   *Preferences*; nothing moves to the processor.
