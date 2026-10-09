@@ -176,7 +176,7 @@ fn header(choice: JudgeChoice) -> Vec<u8> {
     };
     w.bytes(dir.as_bytes());
     w.bytes(sha.as_bytes());
-    w.u32(crate::ml::judge::IMAGE_TOKENS as u32);
+    w.u32(choice.image_tokens() as u32);
     w.seal()
 }
 
@@ -187,7 +187,7 @@ fn read_header(data: &[u8], choice: JudgeChoice) -> bool {
         && r.u32() == Some(VERSION)
         && r.bytes() == Some(m.dir_name().as_bytes())
         && r.bytes() == Some(models::info(m).weights_sha256().as_bytes())
-        && r.u32() == Some(crate::ml::judge::IMAGE_TOKENS as u32)
+        && r.u32() == Some(choice.image_tokens() as u32)
         && r.done()
 }
 
@@ -468,7 +468,7 @@ mod tests {
         let mut got = Vec::new();
         while got.len() < 3 {
             match rx.recv_timeout(std::time::Duration::from_secs(5)).expect("an event") {
-                Event::Judged { token, key, result } => got.push((token, key, result.unwrap().same())),
+                Event::Judged { token, key, result } => got.push((token, key, result.unwrap().same(JudgeChoice::Gemma4))),
                 Event::Loading | Event::Idle => {}
                 e => panic!("{e:?}"),
             }
