@@ -2547,6 +2547,12 @@ All of this ran in a throwaway home: a copy of the relabel's v1 index (14,517 sh
   - the sure suggestions came at once, and the judge's offers landed at the end of the list;
   - *Find more* started a new run;
   - the status bar and the review line followed `JudgeState`.
+- With `PP_JUDGE_FAKE=card-fail`, the review's line showed the failure in the warning tone, with *Try the card again* and *Preferences* and no processor offer. The run was told as stopped.
+- The real Gemma 4 judge (the integration build, its files linked read-only):
+  - it loaded, then the line said "Checking 135 close calls…, about 2 minutes left";
+  - the 60 new close calls took about 2 s each;
+  - the review kept its place while verdicts landed; *Show them* listed the 90 left out;
+  - Preferences said "Gemma 4 is on the graphics card now".
 - `PP_PROFILE=1`: the only slow updates are the test driver's (`update:Script`). `bg:Judged` and `update:Subjects` take well under a frame.
 
 ### The stand-in
