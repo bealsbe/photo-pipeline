@@ -23,7 +23,7 @@ use crate::search::index::Key;
 use crate::util;
 
 /// The head step's models (the registry's *Fursuits* pair), named as the
-/// pages say them: "OWLv2 and DINOv2".
+/// pages say them ("OWLv2"; v2 dropped DINOv2).
 pub fn models_name() -> String {
     let names: Vec<&str> = models::fursuit_models().map(|m| m.name.split(',').next().unwrap_or(m.name).trim()).collect();
     names.join(" and ")
@@ -44,16 +44,14 @@ pub fn library_photos(h: &HeadsStatus, shots: usize) -> usize {
 }
 
 /// Seconds to give `photos` photos' known heads the search model's
-/// vectors (their previews read again).  PROVISIONAL: the backend's
-/// measured `estimate::head_vector_seconds`.
+/// vectors (their previews read again), as the engine measures it.
 pub fn vector_seconds(photos: usize, device: Device) -> f64 {
-    photos as f64 * if device == Device::Gpu { 0.06 } else { 0.25 }
+    crate::search::estimate::head_vector_seconds(photos, device)
 }
 
-/// Bytes read from the library to do so.  PROVISIONAL: the backend's
-/// `estimate::head_vector_bytes_read`.
+/// Bytes read from the library to do so.
 pub fn vector_bytes_read(photos: usize) -> u64 {
-    crate::search::estimate::bytes_read(photos)
+    crate::search::estimate::head_vector_bytes_read(photos)
 }
 
 /// "about 7 minutes with the graphics card".
@@ -69,13 +67,10 @@ pub fn call_seconds_words(secs: f64) -> String {
     format!("about {}", util::plural(n, "second"))
 }
 
-/// Seconds to put the judge on the card the first time (the research's
-/// 29 s).  PROVISIONAL: the backend's `estimate::JUDGE_LOAD_SECONDS`.
-pub const JUDGE_LOAD_SECONDS: f64 = 29.0;
-/// Seconds a close call takes: the research measured 2.3 s a pair, both
-/// orders at 560 image tokens.  PROVISIONAL: the backend's own
-/// measurement, `estimate::JUDGE_SECONDS_PER_PAIR`.
-pub const JUDGE_SECONDS_PER_CALL: f64 = 2.3;
+/// Seconds to put the judge on the card, and a close call's (both orders
+/// of the pair), as the engine measures them.
+pub const JUDGE_LOAD_SECONDS: f64 = crate::search::estimate::JUDGE_LOAD_SECONDS;
+pub const JUDGE_SECONDS_PER_CALL: f64 = crate::search::estimate::JUDGE_SECONDS_PER_PAIR;
 
 // ── the stand-in ────────────────────────────────────────────────────────────
 //
@@ -746,10 +741,10 @@ mod tests {
     fn head_models_are_rows_only_while_missing() {
         let mut st = Status::default();
         assert_eq!(missing_models(&st), models::FURSUIT_MODELS.to_vec());
-        assert!(models::bytes_for(&missing_models(&st)) > 900_000_000, "the pair is about a gigabyte");
+        assert!(models::bytes_for(&missing_models(&st)) > 600_000_000, "the detector is about 600 MB");
         st.heads.models_installed = true;
         assert!(missing_models(&st).is_empty(), "in place: no row waits for a download that never comes");
-        assert_eq!(models_name(), "OWLv2 and DINOv2");
+        assert_eq!(models_name(), "OWLv2");
     }
 
     #[test]

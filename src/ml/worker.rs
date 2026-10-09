@@ -79,6 +79,10 @@ pub enum Request {
     /// Find fursuit heads in these photos (phase 4): one result per path,
     /// in order.  Needs a helper started with `--heads`.
     FindHeads { id: u64, files: Vec<(PathBuf, FileType)> },
+    /// The search model's vectors of heads already found (fursuit
+    /// matching v2's catch-up): the known boxes cropped and embedded, one
+    /// result per photo, in order.  Any image helper serves it.
+    EmbedHeads { id: u64, files: Vec<heads::KnownHeads> },
     /// Exit now.
     Quit,
 }
@@ -207,8 +211,9 @@ pub struct Models {
     /// YuNet, with its declared shape made symbolic, when faces are on.
     detector: Option<Session>,
     face: Option<FaceModel>,
-    /// OWLv2 and DINOv2 for fursuit heads (phase 4), when asked for.
-    /// Their own sessions and vectors: nothing shared with faces.
+    /// OWLv2 for fursuit heads (phase 4), when asked for: its own
+    /// session, nothing shared with faces.  The heads' vectors come from
+    /// the image tower above (v2), kept in a store of their own.
     heads: Option<heads::HeadModels>,
 }
 
@@ -271,9 +276,9 @@ impl Models {
             out.load_faces(root, id)?;
         }
         if heads {
-            // The head step's pair, on the same device, checked against
-            // the processor on the card like the rest.
-            let hm = heads::HeadModels::load(&root.join(ModelId::Owlv2.dir_name()), &root.join(ModelId::Dinov2.dir_name()), device)?;
+            // The head detector, on the same device, checked against the
+            // processor on the card like the rest.
+            let hm = heads::HeadModels::load(&root.join(ModelId::Owlv2.dir_name()), device)?;
             if let SelfCheck::Passed { cosine, max_diff } = hm.self_check {
                 eprintln!("ml-worker: heads self-check cosine {cosine:.6}, largest difference {max_diff:.2e}");
             }
@@ -346,6 +351,23 @@ impl Models {
         };
         let (rows, dim) = pooled(&outputs, n)?;
         Ok(rows.chunks_exact(dim).map(normalised).collect())
+    }
+
+    /// Head crops (any size) through the image tower, squashed to its
+    /// input as the search step's previews are: unit vectors, one per
+    /// crop, in calls of `heads::EMBED_CHUNK`.
+    pub fn embed_crops(&mut self, crops: &[Pixels]) -> ort::Result<Vec<Vec<f32>>> {
+        let mut out = Vec::with_capacity(crops.len());
+        for chunk in crops.chunks(heads::EMBED_CHUNK) {
+            let inputs: Vec<Vec<f32>> = chunk.iter().map(prep::normalise).collect();
+            let refs: Vec<&[f32]> = inputs.iter().map(Vec::as_slice).collect();
+            let vs = self.embed(&refs)?;
+            if let Some(v) = vs.iter().find(|v| v.len() != heads::DIM) {
+                return Err(ort::Error::new(format!("the search model gives {}-wide vectors; head vectors are {} wide", v.len(), heads::DIM)));
+            }
+            out.extend(vs);
+        }
+        Ok(out)
     }
 
     /// Encode texts: canonicalised, tokenised with EOS, padded to the
@@ -752,7 +774,7 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
                 }
             }
             Request::FindHeads { id, files } => {
-                let Some(hm) = models.heads.as_mut() else {
+                let Some(mut hm) = models.heads.take() else {
                     send(&mut out, &Reply::Error { id, message: "this helper has no head models loaded".into() });
                     continue;
                 };
@@ -761,10 +783,30 @@ pub fn serve(mut models: Models, input: impl BufRead + Send + 'static, mut out: 
                     Device::Gpu => heads::CHUNK_GPU,
                     Device::Cpu => heads::CHUNK_CPU,
                 };
-                let results = heads::serve(hm, &pool, &files, per);
+                let results = {
+                    let mut embed = |crops: &[Pixels]| models.embed_crops(crops);
+                    heads::serve(&mut hm, &mut embed, &pool, &files, per)
+                };
+                models.heads = Some(hm);
                 if std::env::var_os("PP_PROFILE").is_some() {
                     let found: usize = results.iter().filter_map(|r| r.result.as_ref().ok()).map(|p| p.heads.len()).sum();
                     eprintln!("ml-worker: {} photos ({found} heads) in {:.0} ms", results.len(), started.elapsed().as_secs_f64() * 1000.0);
+                }
+                send(&mut out, &Reply::Heads { id, results });
+            }
+            Request::EmbedHeads { id, files } => {
+                if models.vision.is_none() {
+                    send(&mut out, &Reply::Error { id, message: "this helper runs the text tower only".into() });
+                    continue;
+                }
+                let started = Instant::now();
+                let results = {
+                    let mut embed = |crops: &[Pixels]| models.embed_crops(crops);
+                    heads::serve_known(&mut embed, &pool, &files)
+                };
+                if std::env::var_os("PP_PROFILE").is_some() {
+                    let n: usize = results.iter().filter_map(|r| r.result.as_ref().ok()).map(|p| p.heads.len()).sum();
+                    eprintln!("ml-worker: {} photos ({n} head vectors) in {:.0} ms", results.len(), started.elapsed().as_secs_f64() * 1000.0);
                 }
                 send(&mut out, &Reply::Heads { id, results });
             }

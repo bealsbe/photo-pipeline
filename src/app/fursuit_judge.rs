@@ -77,7 +77,15 @@ impl Run {
 pub fn judging(app: &App, group: &GroupId) -> bool {
     // Off, not downloaded, the processor chosen, or stopped: the request is
     // answered as with the judge off, and nothing waits for verdicts.
-    app.search.status.judge.active(app.search.status.device.chosen) && app.subjects.group(group).is_some_and(|g| g.kind == Kind::Fursuit && g.name.is_some())
+    active(&app.search.status) && app.subjects.group(group).is_some_and(|g| g.kind == Kind::Fursuit && g.name.is_some())
+}
+
+/// A request now would be judged: a judge chosen, in place and not
+/// stopped, and the card chosen (the judge runs on the card only).
+/// Otherwise the engine answers as with the judge off, and sends no
+/// verdicts.
+pub fn active(st: &crate::search::Status) -> bool {
+    st.judge.usable() && st.device.chosen == crate::ml::Device::Gpu
 }
 
 /// The run for `group`, if one is under way or finished.

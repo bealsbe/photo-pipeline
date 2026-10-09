@@ -135,6 +135,46 @@ pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
     }
 }
 
+/// Seconds per photo for the v2 catch-up (the search model's vectors
+/// of heads already found: the preview read again, each head cropped
+/// and through the image tower; no detector).  *Provisional*: the
+/// research measured 7.2 ms a crop on the card, so reading dominates
+/// there; on the processor the tower is about 0.25 s a crop and a photo
+/// holds about 1.6 heads.  Replaced by the measured figures in "As
+/// built — v2".
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_GPU: f64 = 0.05;
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_CPU: f64 = 0.4;
+
+/// Seconds for the v2 catch-up over `photos` photos with heads.
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn head_vector_seconds(photos: usize, device: Device) -> f64 {
+    let read = photos as f64 * SECONDS_PER_SHOT_GPU;
+    let work = photos as f64
+        * match device {
+            Device::Gpu => HEAD_VECTOR_SECONDS_PER_PHOTO_GPU,
+            Device::Cpu => HEAD_VECTOR_SECONDS_PER_PHOTO_CPU,
+        };
+    match device {
+        Device::Gpu => read.max(work),
+        Device::Cpu => read + work,
+    }
+}
+
+/// Bytes read from the library by the v2 catch-up (each preview again).
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn head_vector_bytes_read(photos: usize) -> u64 {
+    bytes_read(photos)
+}
+
+/// The close-call judge (v2): seconds a pair, both orders (the
+/// research's server: 2.30 s at 560 image tokens), and the load onto
+/// the card (about 10 s warm).  *Provisional* until the helper's own
+/// figures are measured ("As built — v2").
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.3;
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub const JUDGE_LOAD_SECONDS: f64 = 10.0;
+
 /// A duration in the invitation's words: "about 7 minutes", "about an
 /// hour", "about 1.4 hours", "under a minute".
 pub fn describe_seconds(s: f64) -> String {

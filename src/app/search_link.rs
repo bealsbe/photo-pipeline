@@ -325,7 +325,7 @@ impl Link {
                 let list = {
                     let mut s = f.state.lock();
                     // The judge counts only while it can run.
-                    s.fursuits.judge_on = s.status.judge.active(s.status.device.chosen);
+                    s.fursuits.judge_on = super::fursuit_judge::active(&s.status);
                     Arc::new(if s.fursuits.owns(id) { s.fursuits.suggestions(id) } else { s.people.suggestions(id) })
                 };
                 let _ = f.bus.unbounded_send(BgEvent::Suggestions { seq, group: id.clone(), list });
@@ -822,7 +822,7 @@ impl Fake {
             let mut s = self.state.lock();
             // Only an active judge (chosen, in place, the card, not
             // stopped) is asked; otherwise the answer is as with it off.
-            if !s.fursuits.owns(id) || !s.status.judge.active(s.status.device.chosen) || s.subjects.group(id).is_none_or(|g| g.name.is_none()) {
+            if !s.fursuits.owns(id) || !super::fursuit_judge::active(&s.status) || s.subjects.group(id).is_none_or(|g| g.name.is_none()) {
                 return;
             }
             let (left_out, todo) = s.fursuits.close_calls(id);

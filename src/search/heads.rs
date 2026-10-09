@@ -38,9 +38,10 @@ use serde::{Deserialize, Serialize};
 use super::index::{Key, blocks, framed};
 use super::query::{f16_to_f32, f32_to_f16};
 use super::tags::Tags;
+use super::whiten::{self, Whitening};
 use super::{Stopped, estimate};
 use crate::ml::client::{Embedder, FileError, HelperError};
-use crate::ml::heads::{Head, PhotoHeads};
+use crate::ml::heads::{Head, KnownHeads, PhotoHeads};
 use crate::ml::models::{self, ModelId};
 use crate::ml::{CardFailure, Device};
 use crate::model::binfile::{Reader, Writer};
@@ -87,9 +88,9 @@ pub enum Why {
     CatchUp,
     /// Carrying on after a stop (the library came back, the card works).
     Resume,
-    /// Heads found before fursuits were told apart by the search model
-    /// get its vectors: the known boxes, re-read (asked for, never
-    /// automatic).  PROVISIONAL until the backend's stage 1 lands.
+    /// Heads found before fursuit matching v2 get the search model's
+    /// vectors: their known boxes, read again (asked for, never
+    /// automatic; the catch-up).
     Vectors,
 }
 
@@ -134,7 +135,7 @@ pub struct HeadsStatus {
     pub step: Step,
     /// Photos with heads but no search-model head vectors yet (found
     /// before fursuit matching v2): the catch-up offers them, with its
-    /// cost.  PROVISIONAL until the backend's stage 1 lands.
+    /// cost.  Their heads aren't grouped or suggested until then.
     pub vectors_missing: usize,
 }
 
@@ -232,22 +233,36 @@ const HEADS_VERSION: u32 = 1;
 const HVECS_MAGIC: &[u8; 8] = b"PPHEADV\0";
 const HVECS_VERSION: u32 = 1;
 const HTILE_MAGIC: u32 = 0x5050_4854;
+/// How the head vectors' crops are cut and fed to the vector model (v2:
+/// the box widened 12 % each side, square, squashed to 256, the search
+/// step's normalisation); a change means the vectors are made again and
+/// the whitening refitted.
+pub const CROP_VERSION: u32 = 1;
 /// OWLv2 and the decode rule the detections were made with (the prompt,
 /// the score floor, the overlap and size gates); a change means the
 /// photos are looked at again.
 pub const DETECTOR_VERSION: u32 = 1;
-/// The vector model: one, not a choice (decision 11).
-pub const VECTOR_MODEL: ModelId = ModelId::Dinov2;
+/// The vector model: one, not a choice (decision 11).  v2: the search
+/// model's image tower on the head crop, whitened over the library's
+/// heads (`super::whiten`); phase 4's DINOv2 is not run any more.
+pub const VECTOR_MODEL: ModelId = ModelId::Siglip2;
+/// Head-vector files of models no longer run (phase 4's DINOv2): never
+/// read, counted in the cache's size, and removed with the rest by
+/// *Clear*, *Rebuild* and *Forget all*.
+pub const LEGACY_VECTOR_FILES: &[&str] = &["headvecs-dinov2-base.bin"];
 /// Dropped entries beyond this share get the files rewritten on load.
 const COMPACT_SHARE: f64 = 0.1;
 /// The word in the vocabulary that gates the step: a photo is looked at
 /// for heads only when the index tags it with it (decision 8, 11).
 pub const GATE_WORD: &str = "fursuit";
 
-// The cut-offs on DINOv2 cosine distance between two heads live in
-// `subjects::cutoff_for(ModelId::Dinov2)`, measured on the user's 258
-// pairwise answers (plan, "As built — phase 4"): groups and *Find more*
-// at 0.14, suggestions for the review at 0.17, nothing beyond.
+/// The fursuit cut-offs, in whitened cosine distance (v2), from the
+/// research's 791 labelled pairs in four time tiers, chosen on even days
+/// and held out on odd ones: under 0.671 a pair is the same suit at 95 %
+/// precision (*Find more*), under 0.711 at 90 % (the review's
+/// suggestions); the automatic groups use average linkage at 0.69 with
+/// no joining step.  Provisional until the confirmation round is scored.
+pub const CUTOFFS: Cutoffs = Cutoffs { group: 0.69, suggest: 0.711, strict: 0.671 };
 
 /// A head as the detector found it, kept per photo.
 #[derive(Debug, Clone, PartialEq)]
@@ -274,8 +289,9 @@ impl HeadDetection {
     }
 }
 
-/// The head vectors in memory: unit rows of the vector model's width,
-/// f32 for the grouping (f16 on disk).
+/// Head vectors as rows: on disk the vector model's own (768 wide, f16);
+/// in memory for the grouping, whitened ([`Whitening::k`] wide, f32,
+/// unit length).
 #[derive(Default)]
 pub struct HeadVectors {
     pub dim: usize,
@@ -351,6 +367,18 @@ impl HeadVectors {
     }
 }
 
+/// Raw rows whitened with `w` (a row of another width is dropped).
+fn whitened(raw: HeadVectors, w: &Whitening) -> HeadVectors {
+    let mut out = HeadVectors { dim: w.k, ..HeadVectors::default() };
+    if raw.dim != w.dim {
+        return out;
+    }
+    out.data = w.apply_rows(&raw.data);
+    out.by_ref = raw.by_ref;
+    out.refs = raw.refs;
+    out
+}
+
 /// Where each head's tile lies in `headtiles.bin`, for reading one at a
 /// time from any thread (`Engine::crop`).
 #[derive(Default)]
@@ -384,18 +412,24 @@ impl HeadTiles {
 }
 
 /// The head cache of one library: detections per photo looked at, a
-/// vector per head, a tile per head.  The vectors (1 536 wide, f32 in
-/// memory: 405 MB measured for the ~68 000 heads a library of 56 000
-/// shots is expected to hold) are read only when the fursuit work asks
-/// for them ([`HeadStore::vectors`]), never when the library opens, and
-/// are let go again once that work is quiet ([`Fursuits::release_if_idle`];
-/// the user's choice: full size, freed after use).
+/// vector per head (the search model's, raw), a tile per head, and the
+/// whitening fitted over the vectors (v2).  The vectors are read only
+/// when the fursuit work asks for them ([`HeadStore::vectors`]), never
+/// when the library opens, whitened as they are read (256 wide, f32: 70 MB
+/// for the ~68 000 heads a library of 56 000 shots is expected to hold),
+/// and let go again once that work is quiet ([`Fursuits::release_if_idle`];
+/// the user's choice: full size, freed after use).  Without a whitening
+/// (too few heads yet) there are no rows to group.
 pub struct HeadStore {
     dir: PathBuf,
     /// Photos looked at, with the heads found in each (maybe none).
     pub scanned: HashMap<Key, Vec<HeadDetection>>,
-    /// In memory only once asked for ([`HeadStore::vectors`]).
+    /// In memory only once asked for ([`HeadStore::vectors`]): whitened.
     pub(crate) vectors: Option<HeadVectors>,
+    /// The heads with a vector of the current model in the file (refs
+    /// only: what the catch-up and the refit rule count).
+    with_vectors: HashSet<FaceRef>,
+    whitening: Option<Arc<Whitening>>,
     tiles: Arc<Mutex<HeadTiles>>,
 }
 
@@ -412,10 +446,23 @@ impl HeadStore {
         dir.join("headtiles.bin")
     }
 
+    fn whitening_file(dir: &Path) -> PathBuf {
+        dir.join(format!("headwhiten-{}.bin", VECTOR_MODEL.dir_name()))
+    }
+
     /// Load the cache in `dir` (empty where there is nothing, or files of
-    /// another detector rule or model).
+    /// another detector rule or model).  Vector files of models no longer
+    /// run ([`LEGACY_VECTOR_FILES`]) are neither read nor a failure.
     pub fn load(dir: &Path) -> HeadStore {
-        let mut store = HeadStore { dir: dir.to_path_buf(), scanned: HashMap::new(), vectors: None, tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })) };
+        let whitening = Whitening::load(&Self::whitening_file(dir), VECTOR_MODEL.dir_name(), models::info(VECTOR_MODEL).weights_sha256(), CROP_VERSION).map(Arc::new);
+        let mut store = HeadStore {
+            dir: dir.to_path_buf(),
+            scanned: HashMap::new(),
+            vectors: None,
+            with_vectors: HashSet::new(),
+            whitening,
+            tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })),
+        };
         if let Ok(data) = fs::read(Self::heads_file(dir)) {
             let bs = blocks(&data);
             if bs.first().is_some_and(|h| Self::read_heads_header(h)) {
@@ -428,16 +475,69 @@ impl HeadStore {
             }
         }
         store.load_tiles();
+        store.with_vectors = Self::read_vector_refs(dir);
         store
     }
 
-    /// The vectors, read from the file the first time they are asked for
-    /// (the memory is built only when the fursuit work needs it).
+    /// The vectors, read from the file and whitened the first time they
+    /// are asked for (the memory is built only when the fursuit work
+    /// needs it); empty while there is no whitening.
     pub fn vectors(&mut self) -> &HeadVectors {
         if self.vectors.is_none() {
-            self.vectors = Some(Self::read_vectors(&self.dir));
+            self.vectors = Some(match &self.whitening {
+                Some(w) => whitened(Self::read_raw(&self.dir), w),
+                None => HeadVectors::default(),
+            });
         }
         self.vectors.as_ref().expect("just loaded")
+    }
+
+    /// The whitening the rows are made with, if one is fitted.
+    pub fn whitening(&self) -> Option<&Whitening> {
+        self.whitening.as_deref()
+    }
+
+    /// A new whitening (fitted on a worker): kept beside the index, and
+    /// the rows in memory let go to be built again with it.
+    pub fn set_whitening(&mut self, w: Whitening) -> io::Result<()> {
+        let r = w.save(&Self::whitening_file(&self.dir), VECTOR_MODEL.dir_name(), models::info(VECTOR_MODEL).weights_sha256(), CROP_VERSION);
+        self.whitening = Some(Arc::new(w));
+        self.vectors = None;
+        r
+    }
+
+    /// Fit a whitening on the raw vectors in `dir` (on a worker thread:
+    /// reads the vector file, then maths on the processor).  `None` with
+    /// fewer than `min` heads.
+    pub fn fit_whitening(dir: &Path, min: usize) -> Option<Whitening> {
+        let raw = Self::read_raw(dir);
+        if raw.len() < min.max(2) {
+            return None;
+        }
+        Whitening::fit(&raw.data, raw.dim, whiten::K)
+    }
+
+    /// The index folder this cache lives in.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Heads that have a vector (of photos still looked at).
+    pub fn vector_count(&self) -> usize {
+        self.all().filter(|(r, _)| self.with_vectors.contains(r)).count()
+    }
+
+    /// The photos with heads lacking a vector of the current model (found
+    /// before v2, or whose crop couldn't be embedded), with those heads'
+    /// boxes: the catch-up's work.
+    pub fn missing_vectors(&self) -> Vec<(Key, Vec<[f32; 4]>)> {
+        self.scanned
+            .iter()
+            .filter_map(|(k, dets)| {
+                let boxes: Vec<[f32; 4]> = dets.iter().filter(|d| !self.with_vectors.contains(&d.head_ref(*k))).map(|d| d.bbox).collect();
+                (!boxes.is_empty()).then_some((*k, boxes))
+            })
+            .collect()
     }
 
     /// Whether the vectors are in memory.
@@ -451,7 +551,31 @@ impl HeadStore {
         self.vectors = None;
     }
 
-    fn read_vectors(dir: &Path) -> HeadVectors {
+    /// The refs of the vectors in the file (the vectors themselves
+    /// skipped): what the catch-up and the refit rule count.
+    fn read_vector_refs(dir: &Path) -> HashSet<FaceRef> {
+        let mut out = HashSet::new();
+        let Ok(data) = fs::read(Self::vectors_file(dir)) else { return out };
+        let bs = blocks(&data);
+        let Some(dim) = bs.first().and_then(|h| Self::read_vectors_header(h)) else { return out };
+        for b in &bs[1..] {
+            let Some(mut r) = Reader::open(b) else { break };
+            let Some(n) = r.count(16 + 8 + dim * 2) else { break };
+            for _ in 0..n {
+                let (Some(k), Some(t)) = (r.take(16), r.take(8)) else { break };
+                let Ok(key) = k.try_into().map(Key) else { break };
+                let th: [u16; 4] = std::array::from_fn(|i| u16::from_le_bytes([t[2 * i], t[2 * i + 1]]));
+                out.insert(FaceRef::new(key, th.map(|v| v as f32 / 1000.0)));
+                if r.take(dim * 2).is_none() {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// The raw vectors in `dir`'s file, as the model gave them.
+    pub(crate) fn read_raw(dir: &Path) -> HeadVectors {
         let mut v = HeadVectors::default();
         let Ok(data) = fs::read(Self::vectors_file(dir)) else { return v };
         let bs = blocks(&data);
@@ -581,17 +705,39 @@ impl HeadStore {
         let dets: Vec<HeadDetection> = heads.iter().map(|h| HeadDetection { bbox: h.bbox, score: h.score, size_px: h.size as f32, sharpness: h.sharpness }).collect();
         Self::append(&Self::heads_file(&self.dir), &Self::heads_header(), &Self::heads_block(&[(key, dets.clone())]))?;
         self.scanned.insert(key, dets);
-        // New rows go to the file; into memory too only while the
-        // vectors are loaded (else they are read with the rest later).
-        let rows: Vec<(FaceRef, Vec<f32>)> = heads.iter().filter(|h| !h.vector.is_empty()).map(|h| (FaceRef::new(key, h.bbox), h.vector.clone())).filter(|(r, _)| !self.vectors.as_ref().is_some_and(|v| v.by_ref.contains_key(r))).collect();
-        if !rows.is_empty() {
-            let dim = rows[0].1.len();
-            Self::append(&Self::vectors_file(&self.dir), &Self::vectors_header(dim), &HeadVectors::block(&rows))?;
-            if let Some(v) = &mut self.vectors {
-                v.push(&rows);
-            }
-        }
+        self.add_vector_rows(key, heads)?;
         self.add_tiles(key, heads)
+    }
+
+    /// The catch-up's results: vectors for heads already found (their
+    /// detections and tiles stay as they are; a head the store doesn't
+    /// know is ignored).
+    pub fn add_vectors(&mut self, key: Key, heads: &[Head]) -> io::Result<()> {
+        let known: Vec<Head> = heads.iter().filter(|h| self.heads_of(&key).iter().any(|d| d.head_ref(key) == FaceRef::new(key, h.bbox))).cloned().collect();
+        self.add_vector_rows(key, &known)
+    }
+
+    /// New rows go to the file, raw; into memory too, whitened, only
+    /// while the vectors are loaded (else they are read with the rest
+    /// later).
+    fn add_vector_rows(&mut self, key: Key, heads: &[Head]) -> io::Result<()> {
+        let rows: Vec<(FaceRef, Vec<f32>)> = heads
+            .iter()
+            .filter(|h| !h.vector.is_empty())
+            .map(|h| (FaceRef::new(key, h.bbox), h.vector.clone()))
+            .filter(|(r, _)| !self.with_vectors.contains(r))
+            .collect();
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let dim = rows[0].1.len();
+        Self::append(&Self::vectors_file(&self.dir), &Self::vectors_header(dim), &HeadVectors::block(&rows))?;
+        self.with_vectors.extend(rows.iter().map(|(r, _)| *r));
+        if let (Some(v), Some(w)) = (&mut self.vectors, &self.whitening) {
+            let white: Vec<(FaceRef, Vec<f32>)> = rows.iter().map(|(r, x)| (*r, w.apply(x))).filter(|(_, z)| !z.is_empty()).collect();
+            v.push(&white);
+        }
+        Ok(())
     }
 
     fn add_tiles(&mut self, key: Key, heads: &[Head]) -> io::Result<()> {
@@ -670,9 +816,10 @@ impl HeadStore {
         fsutil::atomic_write(&Self::heads_file(&dir), &out, true)?;
         private_file(&Self::heads_file(&dir));
         let live: HashSet<FaceRef> = self.all().map(|(r, _)| r).collect();
-        let was_loaded = self.vectors.is_some();
-        let all = self.vectors.take().unwrap_or_else(|| Self::read_vectors(&dir));
+        let was_loaded = self.vectors.take().is_some();
+        let all = Self::read_raw(&dir);
         let rows: Vec<(FaceRef, Vec<f32>)> = (0..all.len()).filter(|&i| live.contains(&all.refs[i])).map(|i| (all.refs[i], all.row(i).to_vec())).collect();
+        self.with_vectors = rows.iter().map(|(r, _)| *r).collect();
         let vfile = Self::vectors_file(&dir);
         if rows.is_empty() {
             let _ = fs::remove_file(&vfile);
@@ -685,9 +832,7 @@ impl HeadStore {
             private_file(&vfile);
         }
         if was_loaded {
-            let mut v = HeadVectors::default();
-            v.push(&rows);
-            self.vectors = Some(v);
+            self.vectors();
         }
         let (path, kept): (PathBuf, Vec<(FaceRef, Vec<u8>)>) = {
             let index = self.tiles.lock();
@@ -716,20 +861,31 @@ impl HeadStore {
         Ok(())
     }
 
-    /// *Forget all* and *Clear*: every file goes.
+    /// *Forget all* and *Clear*: every file goes, older models' vector
+    /// files too.
     pub fn forget_all(&mut self) {
-        for p in [Self::heads_file(&self.dir), Self::vectors_file(&self.dir), Self::tiles_file(&self.dir)] {
+        for p in Self::files(&self.dir) {
             let _ = fs::remove_file(p);
         }
         self.scanned.clear();
         self.vectors = None;
+        self.with_vectors.clear();
+        self.whitening = None;
         self.tiles.lock().offsets.clear();
     }
 
     /// Bytes the head files in an index folder take (the Storage row's
     /// *Fursuits*; a stat walk, on a worker).
     pub fn bytes_in(dir: &Path) -> u64 {
-        [Self::heads_file(dir), Self::vectors_file(dir), Self::tiles_file(dir)].iter().map(|p| fs::metadata(p).map_or(0, |m| m.len())).sum()
+        Self::files(dir).iter().map(|p| fs::metadata(p).map_or(0, |m| m.len())).sum()
+    }
+
+    /// Every file the head cache may have in an index folder, the legacy
+    /// vector files included.
+    fn files(dir: &Path) -> Vec<PathBuf> {
+        let mut v = vec![Self::heads_file(dir), Self::vectors_file(dir), Self::tiles_file(dir), Self::whitening_file(dir)];
+        v.extend(LEGACY_VECTOR_FILES.iter().map(|f| dir.join(f)));
+        v
     }
 }
 
@@ -759,7 +915,7 @@ impl KindStep for HeadStore {
     }
 
     fn cutoffs(&self) -> Cutoffs {
-        subjects::cutoff_for(VECTOR_MODEL)
+        CUTOFFS
     }
 
     /// Tight groups, no joining step (the user's choice, 2026-10-08,
@@ -786,12 +942,15 @@ const EMIT_MS: u64 = 700;
 const FAILURE_RUN: usize = 8;
 
 /// One photo to look at: the shot's representative file (its JPG, else
-/// the RAW) and its index key.
+/// the RAW) and its index key.  With `boxes`, the heads are already
+/// known and only their vectors are wanted (the v2 catch-up): a scan is
+/// one kind of work or the other, never both.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadJob {
     pub path: PathBuf,
     pub file_type: FileType,
     pub key: Key,
+    pub boxes: Vec<[f32; 4]>,
 }
 
 /// Part of a scan's results.
@@ -803,6 +962,8 @@ pub struct HeadBatch {
     pub total: usize,
     pub restarted: bool,
     pub finished: Option<HeadsFinished>,
+    /// The catch-up's batch: vectors for heads already known.
+    pub vectors_only: bool,
 }
 
 /// How a scan ended.
@@ -873,8 +1034,16 @@ pub fn execute(root: &Path, jobs: &[HeadJob], embedder: &dyn Embedder, cancel: &
             std::thread::sleep(Duration::from_millis(20));
         }
         let chunk = &jobs[i..(i + BATCH).min(jobs.len())];
-        let files: Vec<(PathBuf, FileType)> = chunk.iter().map(|j| (j.path.clone(), j.file_type)).collect();
-        let results = match embedder.find_heads(&files) {
+        let vectors_only = chunk.iter().any(|j| !j.boxes.is_empty());
+        batch.vectors_only = vectors_only;
+        let answer = if vectors_only {
+            let known: Vec<KnownHeads> = chunk.iter().map(|j| KnownHeads { path: j.path.clone(), file_type: j.file_type, key: j.key, boxes: j.boxes.clone() }).collect();
+            embedder.embed_heads(&known)
+        } else {
+            let files: Vec<(PathBuf, FileType)> = chunk.iter().map(|j| (j.path.clone(), j.file_type)).collect();
+            embedder.find_heads(&files)
+        };
+        let results = match answer {
             Ok(r) => r,
             Err(HelperError::Restarted) => {
                 batch.restarted = true;
@@ -916,8 +1085,8 @@ pub fn execute(root: &Path, jobs: &[HeadJob], embedder: &dyn Embedder, cancel: &
             break;
         }
         if batch.found.len() + batch.failed.len() >= BATCH || last.elapsed() >= Duration::from_millis(EMIT_MS) {
-            let done = batch.done;
-            emit(std::mem::replace(&mut batch, HeadBatch { total: jobs.len(), done, ..HeadBatch::default() }));
+            let (done, vectors_only) = (batch.done, batch.vectors_only);
+            emit(std::mem::replace(&mut batch, HeadBatch { total: jobs.len(), done, vectors_only, ..HeadBatch::default() }));
             last = Instant::now();
         }
     }
@@ -961,11 +1130,14 @@ pub struct Fursuits {
     waiting: Vec<HeadJob>,
     /// The vocabulary index of [`GATE_WORD`].
     gate: Option<usize>,
+    /// Heads with vectors needed before a whitening is fitted
+    /// ([`whiten::MIN_HEADS`]; tests lower it).
+    pub min_fit: usize,
 }
 
 impl Default for Fursuits {
     fn default() -> Fursuits {
-        Fursuits { store: None, status: HeadsStatus::default(), last_use: None, grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD) }
+        Fursuits { store: None, status: HeadsStatus::default(), last_use: None, grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD), min_fit: whiten::MIN_HEADS }
     }
 }
 
@@ -1197,7 +1369,7 @@ impl Fursuits {
                 if !catch_up && self.skipped.contains(&key) {
                     continue;
                 }
-                jobs.push(HeadJob { path: fe.path.clone(), file_type: fe.file_type, key });
+                jobs.push(HeadJob { path: fe.path.clone(), file_type: fe.file_type, key, boxes: Vec::new() });
             }
         }
         let _ = tagged;
@@ -1255,8 +1427,13 @@ impl Fursuits {
     pub fn absorb(&mut self, batch: &HeadBatch) -> bool {
         if let Some(store) = &mut self.store {
             for (job, p) in &batch.found {
-                self.skipped.remove(&job.key);
-                if let Err(e) = store.add(p.key, &p.heads) {
+                let r = if batch.vectors_only {
+                    store.add_vectors(p.key, &p.heads)
+                } else {
+                    self.skipped.remove(&job.key);
+                    store.add(p.key, &p.heads)
+                };
+                if let Err(e) = r {
                     eprintln!("heads: couldn't write the head cache: {e}");
                 }
             }
@@ -1273,6 +1450,19 @@ impl Fursuits {
         }
         self.refresh();
         batch.finished.is_some()
+    }
+
+    /// The catch-up the user asked for (v2): its jobs start now, on either
+    /// device (the asking happened on the page, with the cost), whether
+    /// or not new scans are on: it only completes heads already found.
+    /// Nothing when there is nothing to do or something runs or waits.
+    pub fn start_catch_up(&mut self, jobs: &[HeadJob]) -> bool {
+        if jobs.is_empty() || !matches!(self.status.step, Step::Idle) || self.store.is_none() {
+            return false;
+        }
+        self.status.step = Step::Scanning { why: Why::Vectors, done: 0, total: jobs.len() };
+        self.waiting.clear();
+        true
     }
 
     /// The scan was cancelled or dropped before it finished.
@@ -1312,6 +1502,62 @@ impl Fursuits {
         let (scanned, found) = self.store.as_ref().map_or((0, 0), |s| (s.looked_at(), s.found()));
         self.status.scanned = scanned;
         self.status.found = found;
+        self.status.vectors_missing = self.store.as_ref().map_or(0, |s| s.missing_vectors().len());
+    }
+
+    // ---- v2: the whitening and the catch-up ----
+
+    /// Whether a (re)fit of the whitening is due: enough heads with
+    /// vectors and none fitted yet; or, at the end of a head pass or the
+    /// catch-up (`at_end`), heads added since the fit; or, any time, the
+    /// heads grown by a fifth since it.
+    pub fn fit_wanted(&self, at_end: bool) -> bool {
+        let Some(store) = &self.store else { return false };
+        let n = store.vector_count();
+        if n < self.min_fit {
+            return false;
+        }
+        match store.whitening() {
+            None => true,
+            Some(w) => (at_end && n != w.fitted_on) || n as f64 > w.fitted_on as f64 * whiten::REFIT_GROWTH,
+        }
+    }
+
+    /// A fit's result: kept, the rows built again with it, and the
+    /// grouping started over (names and answers point at detections, so
+    /// they survive).  `None` (too few heads) changes nothing.
+    pub fn apply_fit(&mut self, w: Option<Whitening>) -> bool {
+        let (Some(w), Some(store)) = (w, self.store.as_mut()) else { return false };
+        if let Err(e) = store.set_whitening(w) {
+            eprintln!("heads: couldn't keep the whitening: {e}");
+        }
+        self.reset_grouping();
+        true
+    }
+
+    /// The catch-up's work: every photo of the library with heads that
+    /// have no vector of the current model, with those heads' boxes,
+    /// newest day first.
+    pub fn vector_jobs(&self, lib: &LibraryIndex, index: &super::index::Index) -> Vec<HeadJob> {
+        let Some(store) = &self.store else { return Vec::new() };
+        let missing: HashMap<Key, Vec<[f32; 4]>> = store.missing_vectors().into_iter().collect();
+        if missing.is_empty() {
+            return Vec::new();
+        }
+        let mut jobs = Vec::new();
+        for day in lib.days.values().rev() {
+            for shot in day.shots() {
+                let rep = shot.iter().find(|&&i| day.files[i].file_type == FileType::Jpg).or(shot.first());
+                let Some(&i) = rep else { continue };
+                let fe = &day.files[i];
+                let rel = super::pass::rel_path(&lib.root, &fe.path);
+                let Some(key) = index.paths.key_for(&rel, fe.size, &fe.mtime) else { continue };
+                if let Some(boxes) = missing.get(&key) {
+                    jobs.push(HeadJob { path: fe.path.clone(), file_type: fe.file_type, key, boxes: boxes.clone() });
+                }
+            }
+        }
+        jobs
     }
 
 }
@@ -1355,6 +1601,9 @@ mod store_tests {
         let d = scratch("store");
         let mut s = HeadStore::load(&d);
         assert_eq!((s.looked_at(), s.found()), (0, 0));
+        assert_eq!(s.vectors().len(), 0, "no whitening yet: nothing to group");
+        s.release_vectors();
+        s.set_whitening(Whitening::identity(2)).unwrap();
         s.add(key(1), &[head(0.1, 300, &[1.0, 0.0]), head(0.5, 120, &[0.0, 1.0])]).unwrap();
         s.add(key(2), &[]).unwrap();
         assert!(!s.vectors_loaded(), "writing never builds the vector memory");
@@ -1372,7 +1621,9 @@ mod store_tests {
         assert_eq!(again.vectors().len(), 3, "a row written before the vectors were read is read with the rest");
         assert_eq!(again.tiles().lock().read(&r).unwrap(), vec![0xFF, 0xD8, 0xFF, 0xD9]);
         assert!(again.detection(&r).unwrap().clarity() > again.heads_of(&key(1))[1].clarity(), "the larger head is clearer");
-        for f in ["heads.bin", "headvecs-dinov2-base.bin", "headtiles.bin"] {
+        assert_eq!(again.vector_count(), 3);
+        assert!(again.missing_vectors().is_empty());
+        for f in ["heads.bin", "headvecs-siglip2-b16-256.bin", "headtiles.bin", "headwhiten-siglip2-b16-256.bin"] {
             use std::os::unix::fs::PermissionsExt;
             assert_eq!(fs::metadata(d.join(f)).unwrap().permissions().mode() & 0o777, 0o600, "{f}");
         }
@@ -1380,7 +1631,7 @@ mod store_tests {
         let mut s = again;
         s.retain(&HashSet::from([key(2)]));
         assert_eq!((s.looked_at(), s.found(), s.vectors().len()), (1, 0, 0));
-        assert!(!d.join("headvecs-dinov2-base.bin").exists() && !d.join("headtiles.bin").exists());
+        assert!(!d.join("headvecs-siglip2-b16-256.bin").exists() && !d.join("headtiles.bin").exists());
         assert_eq!(HeadStore::load(&d).looked_at(), 1);
         s.forget_all();
         assert_eq!(HeadStore::bytes_in(&d), 0);
@@ -1419,6 +1670,7 @@ mod store_tests {
         eprintln!("wrote {rows} rows in {:.1} s: {} MB on disk", t.elapsed().as_secs_f64(), HeadStore::bytes_in(&d) / 1_000_000);
         let before = rss_mb();
         let mut s = HeadStore::load(&d);
+        s.set_whitening(Whitening::identity(dim)).unwrap();
         let opened = rss_mb();
         let t = std::time::Instant::now();
         let n = s.vectors().len();
@@ -1448,7 +1700,7 @@ mod store_tests {
     fn linkages() -> Vec<(&'static str, f32, subjects::Linkage)> {
         use subjects::Linkage as L;
         vec![
-            ("ships now: average at the group cut", subjects::cutoff_for(VECTOR_MODEL).group, L::Average),
+            ("ships now: average at the group cut", CUTOFFS.group, L::Average),
             ("shipped before: centroid+merge 0.14", 0.14, L::PEOPLE),
             ("centroid, no merge 0.14", 0.14, L::Centroid { merge: false, seed_cap: None }),
             ("centroid+merge 0.12", 0.12, L::PEOPLE),
@@ -1741,9 +1993,9 @@ mod store_tests {
         let out = PathBuf::from(std::env::var("PP_DUMP_OUT").expect("PP_DUMP_OUT"));
         fs::create_dir_all(&out).unwrap();
         let index = super::super::index::Index::load(&root, &dir, models::info(ModelId::Siglip2));
-        let mut store = HeadStore::load(&dir);
+        let store = HeadStore::load(&dir);
         let (vrefs, vdim, vdata) = {
-            let v = store.vectors();
+            let v = HeadStore::read_raw(&dir);
             (v.refs.clone(), v.dim, v.data.clone())
         };
         let row_of: HashMap<FaceRef, usize> = vrefs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
@@ -1948,6 +2200,53 @@ mod store_tests {
         }
     }
 
+    /// A cache from before v2 (phase 4's DINOv2 vectors in
+    /// `headvecs-dinov2-base.bin`, no SigLIP2 vectors, no whitening):
+    /// loading it neither fails nor reads the old vectors; its heads are
+    /// listed for the catch-up; the old file is counted in the cache's
+    /// size and removed by *Clear*, *Rebuild* and *Forget all*.
+    #[test]
+    fn an_old_cache_with_dinov2_vectors_loads_and_is_cleared() {
+        let d = scratch("legacy");
+        {
+            let mut s = HeadStore::load(&d);
+            // Detections and tiles as phase 4 wrote them; its vectors
+            // went to the DINOv2 file, written below as it was.
+            let mut h = head(0.1, 300, &[]);
+            h.vector.clear();
+            s.add(key(1), &[h.clone(), head(0.5, 200, &[])]).unwrap();
+            s.add(key(2), &[]).unwrap();
+        }
+        let mut old = framed(&{
+            let mut w = Writer(Vec::new());
+            w.0.extend_from_slice(HVECS_MAGIC);
+            w.u32(HVECS_VERSION);
+            w.bytes(b"dinov2-base");
+            w.bytes(b"320d1012a6fc65b101fc85ca30ee7a47b2e4f6a2e8bd78fb9d7036def0e30cb0");
+            w.u32(1536);
+            w.seal()
+        });
+        old.extend(vec![0x5a; 4096]);
+        fs::write(d.join("headvecs-dinov2-base.bin"), &old).unwrap();
+        let mut s = HeadStore::load(&d);
+        assert_eq!((s.looked_at(), s.found(), s.vector_count()), (2, 2, 0), "the old vectors are not read");
+        assert_eq!(s.vectors().len(), 0, "nothing to group until the catch-up");
+        assert!(s.whitening().is_none());
+        let missing = s.missing_vectors();
+        assert_eq!(missing.len(), 1, "the photo with heads waits for the catch-up");
+        assert_eq!(missing[0].1.len(), 2);
+        assert!(HeadStore::bytes_in(&d) >= old.len() as u64, "the old file is counted");
+        // The catch-up's vectors land for the known heads (an unknown box is ignored).
+        s.add_vectors(key(1), &[head(0.1, 300, &[1.0, 0.0]), head(0.5, 200, &[0.0, 1.0]), head(0.9, 100, &[0.5, 0.5])]).unwrap();
+        assert_eq!(s.vector_count(), 2);
+        assert!(s.missing_vectors().is_empty());
+        assert!(d.join("headvecs-dinov2-base.bin").exists(), "loading leaves the old file alone");
+        s.forget_all();
+        assert!(!d.join("headvecs-dinov2-base.bin").exists(), "Clear and Rebuild remove it");
+        assert_eq!(HeadStore::bytes_in(&d), 0);
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
@@ -1994,7 +2293,7 @@ mod store_tests {
     }
 
     fn jobs(n: usize) -> Vec<HeadJob> {
-        (0..n).map(|i| HeadJob { path: PathBuf::from(format!("/mnt/nas/lib/{}.JPG", (b'a' + i as u8) as char)), file_type: FileType::Jpg, key: key(b'a' + i as u8) }).collect()
+        (0..n).map(|i| HeadJob { path: PathBuf::from(format!("/mnt/nas/lib/{}.JPG", (b'a' + i as u8) as char)), file_type: FileType::Jpg, key: key(b'a' + i as u8), boxes: Vec::new() }).collect()
     }
 
     #[test]
@@ -2092,8 +2391,8 @@ mod store_tests {
         assert_eq!(live.len(), 2, "{live:?}");
         let store = HeadStore::load(&scratch("linkage"));
         assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
-        assert_eq!(store.cutoffs(), subjects::cutoff_for(ModelId::Dinov2));
-        assert_eq!((store.cutoffs().group, store.cutoffs().suggest, store.cutoffs().strict), (0.17, 0.17, 0.14));
+        assert_eq!(store.cutoffs(), CUTOFFS);
+        assert_eq!((store.cutoffs().group, store.cutoffs().suggest, store.cutoffs().strict), (0.69, 0.711, 0.671));
     }
 
     /// Kinds never mix in the fursuit grouping: the step is Kind::Fursuit,
@@ -2107,6 +2406,7 @@ mod store_tests {
         f.open(&d);
         {
             let store = f.store.as_mut().unwrap();
+            store.set_whitening(Whitening::identity(2)).unwrap();
             for (n, v) in [(1u8, [1.0f32, 0.0]), (2, [1.0, 0.0]), (3, [0.0, 1.0]), (4, [0.0, 1.0])] {
                 store.add(key(n), &[head(0.1, 300, &v)]).unwrap();
             }
@@ -2119,8 +2419,7 @@ mod store_tests {
         assert_eq!(f.store.as_ref().unwrap().kind(), Kind::Fursuit);
         let job = f.regroup_job(&file).unwrap();
         assert_eq!((job.kind, job.dim, job.refs.len()), (Kind::Fursuit, 2, 4));
-        assert_eq!(job.cutoffs, subjects::cutoff_for(ModelId::Dinov2));
-        assert_eq!((job.cutoffs.group, job.cutoffs.suggest, job.cutoffs.strict), (0.17, 0.17, 0.14), "the measured cut-offs: groups and the review at 0.17, Find more strict at 0.14");
+        assert_eq!(job.cutoffs, CUTOFFS, "the measured cut-offs: groups at 0.69, the review at 0.711, Find more strict at 0.671");
         let r = step::regroup(&job);
         assert!(!r.suggestion_counts.contains_key(&person), "a person is not counted among fursuits");
         assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 4, "the person's refs are not confirmed here");
