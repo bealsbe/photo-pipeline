@@ -685,6 +685,7 @@ user's choice:
 | SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
 | InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
 | OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
+| Qwen3-VL-Reranker 8B (Alibaba's Qwen team, converted by mradermacher), *Close-call judge*, off by default | weights (Q8_0 GGUF), vision projector (F16 GGUF) | 9.9 GB | Apache-2.0 | Hugging Face `mradermacher/Qwen3-VL-Reranker-8B-GGUF`, pinned to commit `a0e8b54` |
 | Gemma 4 26B-A4B-it (Google, quantised by Unsloth), *Close-call judge*, off by default | weights (UD-Q4_K_M GGUF), vision projector (F16 GGUF) | 18.1 GB | Apache-2.0 | Hugging Face `unsloth/gemma-4-26B-A4B-it-GGUF` |
 
 Fursuits are told apart by the **search model itself** (fursuit matching
@@ -716,15 +717,21 @@ nearest-centroid grouping people use chained the library's fursuit heads
 into one group and is not used for this kind.
 
 **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*:
-*Off*, the default, or *Gemma 4*) looks at the candidates the vectors
+*Off*, the default, *Qwen3-VL-Reranker* or *Gemma 4*) looks at the candidates the vectors
 can't settle: for a named fursuit, a head nearer than 0.639 is offered
 at once, one beyond 0.786 is not considered, and one in between is shown
-to Gemma 4 beside the fursuit's nearest confirmed head, both ways round
+to the judge beside the fursuit's nearest confirmed head, both ways round
 (so is a sure match when either head is unclear, clarity under 0.2: the
 vectors pull dark, cut-off and turned-away heads together),
-and offered only when the mean P(yes) of the first answer token is at
-least 0.6 (left out, and counted, otherwise).  The research's pick, on
-the same labels: recall at 95 % precision 106/110, 81/84, 102/102, 63/63.
+and offered only when the mean P(yes) is at least the judge's threshold
+(left out, and counted, otherwise).  Qwen3-VL-Reranker is scored as its
+official code scores it, sigmoid(logit yes − logit no) with its own
+reranker prompt and 280 image tokens, yes at 0.45; Gemma 4 by the first
+answer token's P(yes) at 560 image tokens, yes at 0.6.  On the research's
+labels both are nearly always right in the band (relabel 137/139 and
+135/139; confirmation round 130/133 and 128/133); Qwen is twice as fast
+(0.8 s a close call against 2.1 s) on half the card's memory (11 GB
+against 21 GB).  Only one judge is on the card at a time.
 It only reorders and filters suggestions: nothing is named, merged or
 marked by it, people and pets never go near it, and verdicts are kept
 beside the index (`judged-<model>.bin`, 0600) so asking again is free.
