@@ -86,7 +86,8 @@ impl Process {
         let dir = super::models::model_dir(model).ok_or_else(|| JudgeError::Broken("no home folder for the models".into()))?;
         let exe = helper_exe().map_err(|e| JudgeError::Broken(format!("can't find the app's own binary: {e}")))?;
         let mut cmd = Command::new(&exe);
-        cmd.arg(super::judge_worker::FLAG).arg("--model-dir").arg(std::env::var_os("PP_JUDGE_MODEL_DIR").map(PathBuf::from).unwrap_or(dir));
+        let name = serde_json::to_value(choice).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+        cmd.arg(super::judge_worker::FLAG).arg("--judge").arg(name).arg("--model-dir").arg(std::env::var_os("PP_JUDGE_MODEL_DIR").map(PathBuf::from).unwrap_or(dir));
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit());
         let mut child = cmd.spawn().map_err(|e| JudgeError::Broken(format!("can't start the close-call judge: {e}")))?;
         let stdin = child.stdin.take().expect("piped stdin");
@@ -379,14 +380,14 @@ mod tests {
         let f = Fake::new(FakeMode::Alternate);
         assert!(!f.loaded());
         let r = f.judge(&[pair(), pair(), pair()]).unwrap();
-        let same: Vec<bool> = r.iter().map(|x| x.result.as_ref().unwrap().same()).collect();
+        let same: Vec<bool> = r.iter().map(|x| x.result.as_ref().unwrap().same(JudgeChoice::Gemma4)).collect();
         assert_eq!(same, [true, false, true]);
         assert!(f.loaded());
         f.unload();
         assert!(!f.loaded());
         assert!(matches!(Fake::new(FakeMode::CardFail).judge(&[pair()]), Err(JudgeError::Card(_))));
         assert!(matches!(Fake::new(FakeMode::Broken).judge(&[pair()]), Err(JudgeError::Broken(_))));
-        assert!(Fake::new(FakeMode::No).judge(&[pair()]).unwrap().iter().all(|x| !x.result.as_ref().unwrap().same()));
+        assert!(Fake::new(FakeMode::No).judge(&[pair()]).unwrap().iter().all(|x| !x.result.as_ref().unwrap().same(JudgeChoice::Qwen3VlReranker)));
         for m in ["yes", "no", "alternate", "slow", "card-fail", "broken"] {
             assert!(FakeMode::parse(m).is_some(), "{m}");
         }
@@ -416,7 +417,9 @@ mod tests {
         let pair = |a: &str, b: &str| PairAsk { a: Crop::File(crops.join(format!("{a}.jpg"))), b: Crop::File(crops.join(format!("{b}.jpg"))) };
         let gb = |b: u64| b as f64 / 1e9;
         let before = vram_used();
-        let c = Client::new(JudgeChoice::Gemma4);
+        // `PP_JUDGE_CHOICE=qwen3_vl_reranker` checks Qwen (gemma4 by default).
+        let choice: JudgeChoice = std::env::var("PP_JUDGE_CHOICE").ok().and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()).unwrap_or(JudgeChoice::Gemma4);
+        let c = Client::new(choice);
         let t = std::time::Instant::now();
         let first = c.judge(&[pair(&rows[0], &rows[1])]).expect("judged on the card");
         let load_and_first = t.elapsed().as_secs_f64();
@@ -445,7 +448,7 @@ mod tests {
         assert!(vram_used() < before + 500_000_000);
         // Card only: a partial offload is refused, never run.
         temp_env("PP_JUDGE_FAKE_OFFLOAD", "20", || {
-            let p = Client::new(JudgeChoice::Gemma4);
+            let p = Client::new(choice);
             let r = p.judge(&[pair(&rows[0], &rows[1])]);
             eprintln!("partial offload: {r:?}");
             assert!(matches!(r, Err(JudgeError::Card(CardFailure::Failed(m))) if m.contains("only 20")));

@@ -53,6 +53,9 @@ pub enum ModelId {
     /// projector): the fursuit close-call judge (v2), run by the judge
     /// helper on the card alone.
     Gemma4,
+    /// Qwen3-VL-Reranker-8B (mradermacher's Q8_0 GGUF with its fp16
+    /// vision projector): the other close-call judge (v2), listed first.
+    Qwen3VlReranker,
 }
 
 impl ModelId {
@@ -66,6 +69,7 @@ impl ModelId {
             ModelId::SFace => "sface-2021dec",
             ModelId::Owlv2 => "owlv2-b16-ensemble",
             ModelId::Gemma4 => "gemma4-26b-a4b-it-ud-q4km",
+            ModelId::Qwen3VlReranker => "qwen3-vl-reranker-8b-q8",
         }
     }
 
@@ -83,7 +87,7 @@ impl ModelId {
 
     /// One of the close-call judge choices (v2).
     pub fn is_judge_model(self) -> bool {
-        matches!(self, ModelId::Gemma4)
+        matches!(self, ModelId::Gemma4 | ModelId::Qwen3VlReranker)
     }
 }
 
@@ -299,6 +303,30 @@ pub const GEMMA4_FILES: &[ModelFile] = &[
     },
 ];
 
+const QWEN3VL_RR_BASE: &str = "https://huggingface.co/mradermacher/Qwen3-VL-Reranker-8B-GGUF";
+
+/// Qwen3-VL-Reranker-8B as mradermacher's static Q8_0 GGUF with its fp16
+/// vision projector (Apache-2.0), pinned to the repository's commit
+/// a0e8b54: tensor for tensor the research's own conversion of Qwen's
+/// weights with the vendored llama.cpp, and within 0.034 of PyTorch's
+/// scores on 52 pairs (r 0.9995).  Pinned 2026-10-09.
+pub const QWEN3VL_RR_FILES: &[ModelFile] = &[
+    ModelFile {
+        file: "Qwen3-VL-Reranker-8B.Q8_0.gguf",
+        url: "https://huggingface.co/mradermacher/Qwen3-VL-Reranker-8B-GGUF/resolve/a0e8b54c5ac2f0bd9c3e1a2c4eb497c1b98908ed/Qwen3-VL-Reranker-8B.Q8_0.gguf",
+        sha256: "275e1f566cdc3355ce99d1b9a764737b7829b06566f356d9a6b5fdcf701c2779",
+        bytes: 8_709_520_352,
+        archive: None,
+    },
+    ModelFile {
+        file: "Qwen3-VL-Reranker-8B.mmproj-f16.gguf",
+        url: "https://huggingface.co/mradermacher/Qwen3-VL-Reranker-8B-GGUF/resolve/a0e8b54c5ac2f0bd9c3e1a2c4eb497c1b98908ed/Qwen3-VL-Reranker-8B.mmproj-f16.gguf",
+        sha256: "15cd9bd4882dae771344f0ac204fce07de91b47c1438ada3861dfc817403c31e",
+        bytes: 1_159_030_336,
+        archive: None,
+    },
+];
+
 /// Every model, in the dialog's order: search, the face detector, the
 /// face choices (the recommended one first), the fursuit head detector,
 /// then the close-call judge choices (v2).
@@ -396,6 +424,22 @@ pub const ALL: &[ModelInfo] = &[
         files: OWLV2_FILES,
         preprocess_version: 1,
         choice: None,
+        recommended: false,
+        restricted: false,
+    },
+    ModelInfo {
+        id: ModelId::Qwen3VlReranker,
+        role: "Close-call judge",
+        name: "Qwen3-VL-Reranker, 8B",
+        what: "Looks at two fursuit heads side by side and says whether they are the same fursuit.",
+        licence: "Apache-2.0",
+        licence_plain: "free for any use",
+        publisher: "Alibaba's Qwen team, converted by mradermacher",
+        source_url: QWEN3VL_RR_BASE,
+        required: false,
+        files: QWEN3VL_RR_FILES,
+        preprocess_version: 1,
+        choice: Some("judge"),
         recommended: false,
         restricted: false,
     },
@@ -600,7 +644,13 @@ mod tests {
     #[test]
     fn the_judge_is_a_pinned_choice_of_its_own() {
         let rows: Vec<&ModelInfo> = judge_models().collect();
-        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), [ModelId::Gemma4]);
+        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), [ModelId::Qwen3VlReranker, ModelId::Gemma4], "Qwen listed first");
+        let q = info(ModelId::Qwen3VlReranker);
+        assert!(q.role == "Close-call judge" && q.licence == "Apache-2.0" && !q.required && q.choice == Some("judge") && q.id.is_judge_model());
+        assert_eq!((q.files[0].bytes, q.files[1].bytes), (8_709_520_352, 1_159_030_336));
+        assert_eq!(q.weights_sha256(), "275e1f566cdc3355ce99d1b9a764737b7829b06566f356d9a6b5fdcf701c2779");
+        assert!(q.files.iter().all(|f| f.url.starts_with(QWEN3VL_RR_BASE) && f.url.contains("/resolve/a0e8b54c5ac2f0bd9c3e1a2c4eb497c1b98908ed/")), "pinned to the commit");
+        assert_eq!(serde_json::to_string(&ModelId::Qwen3VlReranker).unwrap(), "\"qwen3-vl-reranker\"");
         let g = info(ModelId::Gemma4);
         assert!(g.role == "Close-call judge" && g.licence == "Apache-2.0" && !g.required && !g.restricted && g.choice == Some("judge"));
         assert!(g.id.is_judge_model() && !g.id.is_fursuit_model() && !g.id.is_face_model());

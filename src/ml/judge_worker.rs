@@ -32,8 +32,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use super::client::FileError;
-use super::judge::{self, Crop, IDLE_SECS, PairAsk, PairResult, Reply, Request, Verdict, check_offload, p_yes};
-use super::models::{self, ModelId};
+use super::judge::{self, Crop, IDLE_SECS, JudgeChoice, PairAsk, PairResult, Reply, Request, Verdict, check_offload};
+use super::models;
 use super::CardFailure;
 
 /// The flag that makes the binary the judge helper.
@@ -135,6 +135,7 @@ pub fn pick<'a>(devices: &'a [Device], adapter: &str) -> Option<&'a Device> {
 struct Loaded {
     raw: *mut RawJudge,
     prompt: CString,
+    choice: JudgeChoice,
 }
 
 impl Drop for Loaded {
@@ -147,10 +148,10 @@ impl Drop for Loaded {
 impl Loaded {
     /// One question about two encoded images: P(yes).
     fn ask(&self, a: &[u8], b: &[u8]) -> Result<(f32, i32), String> {
-        let top = judge::TOP_TOKENS;
+        let top = self.choice.top_tokens();
         let mut ids = vec![0 as c_int; top];
         let mut lps = vec![0f32; top];
-        let mut pieces = vec![0u8; 4096];
+        let mut pieces = vec![0u8; 64 * top];
         let mut err = vec![0u8; 1024];
         let mut n_prompt: c_int = 0;
         // SAFETY: every pointer is valid for the length passed; the shim
@@ -181,23 +182,28 @@ impl Loaded {
         if std::env::var_os("PP_JUDGE_TRACE").is_some() {
             eprintln!("judge-worker: {n_prompt} prompt tokens; top {top:?}");
         }
-        Ok((p_yes(&top), n_prompt))
+        Ok((self.choice.score(&top), n_prompt))
     }
 }
 
-/// The helper's main.  `args` are those after [`FLAG`]: `--model-dir
-/// <dir>` (the model's folder; the registry's by default).  Returns the
-/// exit code.
+/// The helper's main.  `args` are those after [`FLAG`]: `--judge <choice>`
+/// (`gemma4` by default, `qwen3_vl_reranker`), `--model-dir <dir>` (the
+/// model's folder; the registry's by default).  Returns the exit code.
 pub fn main(args: &[String]) -> i32 {
     let arg = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
-    let dir = arg("--model-dir").map(PathBuf::from).or_else(|| models::model_dir(ModelId::Gemma4));
+    let choice = arg("--judge").map_or(Some(JudgeChoice::Gemma4), |s| serde_json::from_value::<JudgeChoice>(serde_json::Value::String(s)).ok());
+    let Some((choice, model_id)) = choice.and_then(|c| Some((c, c.model()?))) else {
+        send(&mut out, &Reply::Failed { message: "no such close-call judge".into() });
+        return 1;
+    };
+    let dir = arg("--model-dir").map(PathBuf::from).or_else(|| models::model_dir(model_id));
     let Some(dir) = dir else {
         send(&mut out, &Reply::Failed { message: "no home folder for the models".into() });
         return 1;
     };
-    let info = models::info(ModelId::Gemma4);
+    let info = models::info(model_id);
     let (model, mmproj) = (dir.join(info.files[0].file), dir.join(info.files[1].file));
     for f in [&model, &mmproj] {
         if !f.is_file() {
@@ -227,7 +233,7 @@ pub fn main(args: &[String]) -> i32 {
         return 2;
     };
     let started = Instant::now();
-    let loaded = match load(&model, &mmproj, &device) {
+    let loaded = match load(choice, &model, &mmproj, &device) {
         Ok(l) => l,
         Err(f) => {
             send(&mut out, &Reply::CardFailed { failure: f });
@@ -243,7 +249,7 @@ pub fn main(args: &[String]) -> i32 {
 }
 
 /// Load on `device`, refusing anything short of every layer there.
-fn load(model: &Path, mmproj: &Path, device: &Device) -> Result<(Loaded, i32), CardFailure> {
+fn load(choice: JudgeChoice, model: &Path, mmproj: &Path, device: &Device) -> Result<(Loaded, i32), CardFailure> {
     let c = |p: &Path| CString::new(p.as_os_str().as_encoded_bytes()).map_err(|_| CardFailure::Failed("a model path holds a NUL".into()));
     let (m, x, d) = (c(model)?, c(mmproj)?, CString::new(device.name.clone()).map_err(|_| CardFailure::NoCard)?);
     let (mut offloaded, mut layers): (c_int, c_int) = (-1, -1);
@@ -259,7 +265,7 @@ fn load(model: &Path, mmproj: &Path, device: &Device) -> Result<(Loaded, i32), C
             judge::N_CTX,
             judge::N_BATCH,
             judge::N_UBATCH,
-            judge::IMAGE_TOKENS,
+            choice.image_tokens(),
             threads,
             &mut offloaded,
             &mut layers,
@@ -274,7 +280,7 @@ fn load(model: &Path, mmproj: &Path, device: &Device) -> Result<(Loaded, i32), C
     }
     // SAFETY: the shim returns a static string.
     let marker = unsafe { CStr::from_ptr(pp_judge_marker()) }.to_string_lossy().into_owned();
-    let loaded = Loaded { raw, prompt: CString::new(judge::prompt(&marker)).expect("no NUL in the prompt") };
+    let loaded = Loaded { raw, prompt: CString::new(choice.prompt(&marker)).expect("no NUL in the prompt"), choice };
     // `PP_JUDGE_FAKE_OFFLOAD=<n>` pretends only n layers fit (tests of
     // the refusal on a real card).
     let offloaded = std::env::var("PP_JUDGE_FAKE_OFFLOAD").ok().and_then(|s| s.parse().ok()).unwrap_or(offloaded);
@@ -422,9 +428,11 @@ mod tests {
         unsafe { pp_judge_init(std::env::var_os("PP_JUDGE_VERBOSE").is_some() as c_int) };
         let listed = devices();
         let device = pick(&listed, &adapter.name).expect("the card in llama.cpp's list").clone();
-        let info = models::info(ModelId::Gemma4);
+        // `PP_JUDGE_CHOICE=qwen3_vl_reranker` checks Qwen (gemma4 by default).
+        let choice: JudgeChoice = std::env::var("PP_JUDGE_CHOICE").ok().and_then(|s| serde_json::from_value(serde_json::Value::String(s)).ok()).unwrap_or(JudgeChoice::Gemma4);
+        let info = models::info(choice.model().expect("a judge"));
         let t = Instant::now();
-        let (model, layers) = load(&dir.join(info.files[0].file), &dir.join(info.files[1].file), &device).expect("loaded on the card");
+        let (model, layers) = load(choice, &dir.join(info.files[0].file), &dir.join(info.files[1].file), &device).expect("loaded on the card");
         eprintln!("loaded {layers} layers on {} in {:.1} s", device.description, t.elapsed().as_secs_f64());
         let mut diffs = Vec::new();
         let mut agree = 0;
@@ -440,7 +448,7 @@ mod tests {
             let mine = (p_ab + p_ba) / 2.0;
             let theirs = (r_ab + r_ba) / 2.0;
             diffs.push((mine - theirs).abs());
-            agree += ((mine >= judge::P_YES_CUT) == (theirs >= judge::P_YES_CUT)) as usize;
+            agree += ((mine >= choice.yes_cut()) == (theirs >= choice.yes_cut())) as usize;
             eprintln!("pair {a}-{b}: mine {p_ab:.4}/{p_ba:.4}, research {r_ab:.4}/{r_ba:.4}; {n_ab} prompt tokens; same {}", r["same"]);
         }
         let secs = t.elapsed().as_secs_f64() / diffs.len().max(1) as f64;

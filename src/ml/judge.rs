@@ -29,27 +29,33 @@ use crate::model::record::FileType;
 use crate::model::subjects::GroupId;
 use crate::search::index::{KEY_HEAD_BYTES, Key};
 
-/// Preferences ▸ Fursuits ▸ *Close-call judge*: a choice list, so a second
-/// judge (the user may pick Qwen3-VL-Reranker after its comparison) slots
-/// in as a variant with its model.
+/// Preferences ▸ Fursuits ▸ *Close-call judge*: a choice list.  Each judge
+/// runs through the same helper and runtime with its own prompt, image
+/// budget, scoring and threshold (below), all as the research measured
+/// them; only one is on the card at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum JudgeChoice {
     /// No judge: the review and *Find more* use the vector cut-offs alone.
     #[default]
     Off,
-    /// Gemma 4 26B-A4B-it, the research's pick.
+    /// Qwen3-VL-Reranker-8B (Q8_0): the user's pick to list first
+    /// (2026-10-09): as right as Gemma on both test sets, twice as fast,
+    /// half the memory.
+    Qwen3VlReranker,
+    /// Gemma 4 26B-A4B-it, the research's first pick.
     Gemma4,
 }
 
 impl JudgeChoice {
     /// Every choice, in the list's order.
-    pub const ALL: [JudgeChoice; 2] = [JudgeChoice::Off, JudgeChoice::Gemma4];
+    pub const ALL: [JudgeChoice; 3] = [JudgeChoice::Off, JudgeChoice::Qwen3VlReranker, JudgeChoice::Gemma4];
 
     /// The list's label.
     pub fn label(self) -> &'static str {
         match self {
             JudgeChoice::Off => "Off",
+            JudgeChoice::Qwen3VlReranker => "Qwen3-VL-Reranker",
             JudgeChoice::Gemma4 => "Gemma 4",
         }
     }
@@ -58,6 +64,7 @@ impl JudgeChoice {
     pub fn description(self) -> &'static str {
         match self {
             JudgeChoice::Off => "Close calls are left to the vector cut-offs.",
+            JudgeChoice::Qwen3VlReranker => "About 10 GB to download; about 1 s a close call on the graphics card.",
             JudgeChoice::Gemma4 => "About 18 GB to download; about 2 s a close call on the graphics card.",
         }
     }
@@ -66,7 +73,50 @@ impl JudgeChoice {
     pub fn model(self) -> Option<ModelId> {
         match self {
             JudgeChoice::Off => None,
+            JudgeChoice::Qwen3VlReranker => Some(ModelId::Qwen3VlReranker),
             JudgeChoice::Gemma4 => Some(ModelId::Gemma4),
+        }
+    }
+
+    /// Image tokens per head crop, the minimum and the maximum: the
+    /// research's pick per judge.
+    pub fn image_tokens(self) -> i32 {
+        match self {
+            JudgeChoice::Qwen3VlReranker => QWEN_IMAGE_TOKENS,
+            _ => IMAGE_TOKENS,
+        }
+    }
+
+    /// A pair at or above this mean P(yes) is the same suit.
+    pub fn yes_cut(self) -> f32 {
+        match self {
+            JudgeChoice::Qwen3VlReranker => QWEN_P_YES_CUT,
+            _ => P_YES_CUT,
+        }
+    }
+
+    /// Candidate answer tokens read (with their log-probabilities).
+    pub fn top_tokens(self) -> usize {
+        match self {
+            JudgeChoice::Qwen3VlReranker => QWEN_TOP_TOKENS,
+            _ => TOP_TOKENS,
+        }
+    }
+
+    /// The whole prompt, with `marker` where each image goes (query then
+    /// candidate).
+    pub fn prompt(self, marker: &str) -> String {
+        match self {
+            JudgeChoice::Qwen3VlReranker => qwen_prompt(marker),
+            _ => prompt(marker),
+        }
+    }
+
+    /// P(yes) from the first answer token's candidates.
+    pub fn score(self, top: &[(String, f32)]) -> f32 {
+        match self {
+            JudgeChoice::Qwen3VlReranker => p_rerank(top),
+            _ => p_yes(top),
         }
     }
 
@@ -161,6 +211,45 @@ pub const CROP_QUALITY: u8 = 92;
 /// card's memory goes back.
 pub const IDLE_SECS: u64 = 120;
 
+/// Qwen3-VL-Reranker's instruction (the research's instruct 0).
+pub const QWEN_INSTRUCT: &str = "Is the candidate the same fursuit (same costume or character) as the query, regardless of lighting, pose or photo?";
+/// Its system line, from the official reranker code.
+pub const QWEN_SYSTEM: &str = "Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".";
+/// Image tokens per head crop for Qwen (the research's pick: 280; 560
+/// was no better and three times slower).
+pub const QWEN_IMAGE_TOKENS: i32 = 280;
+/// Candidates read for Qwen's answer: "yes" and "no" are found among
+/// them (a missing one counts as likely as the least likely read).
+pub const QWEN_TOP_TOKENS: usize = 100;
+/// Qwen says "same suit" at P ≥ 0.45 (mean of both orders).  A narrow
+/// good zone: 0.40–0.50 held on the relabel's 791 pairs, its odd-day
+/// hold-out and the confirmation round, with a cliff above 0.55.  It
+/// must be derived again if the prompt, the crop or the image budget
+/// change.
+pub const QWEN_P_YES_CUT: f32 = 0.45;
+
+/// Qwen3-VL-Reranker's official chat template, as the research rendered
+/// it for llama.cpp (no BOS: Qwen's vocabulary adds none; libmtmd puts the
+/// vision start and end tokens around each image itself).
+pub fn qwen_prompt(marker: &str) -> String {
+    format!("<|im_start|>system\n{QWEN_SYSTEM}<|im_end|>\n<|im_start|>user\n<Instruct>: {QWEN_INSTRUCT}<Query>:{marker}\n<Document>:{marker}<|im_end|>\n<|im_start|>assistant\n")
+}
+
+/// The reranker's score as its official code computes it:
+/// sigmoid(logit "yes" − logit "no") at the last position, which equals
+/// P(yes) / (P(yes) + P(no)) from the softmax.  Read from the candidates
+/// as the research did: the tokens "yes" and "no" exactly; one not among
+/// them counts as likely as the least likely read.
+pub fn p_rerank(top: &[(String, f32)]) -> f32 {
+    let floor = top.iter().map(|t| t.1).fold(f32::INFINITY, f32::min);
+    if !floor.is_finite() {
+        return 0.5;
+    }
+    let find = |w: &str| top.iter().find(|t| t.0 == w).map_or(floor, |t| t.1);
+    let (ly, ln) = (find("yes"), find("no"));
+    (1.0 / (1.0 + ((ln - ly) as f64).exp())) as f32
+}
+
 /// Gemma 4's chat template with thinking off, as llama-server renders
 /// one user turn of two images and the question (BOS is added by the
 /// tokenizer, as the server does after stripping it from the template).
@@ -219,9 +308,9 @@ impl Verdict {
         (self.p_ab + self.p_ba) / 2.0
     }
 
-    /// The same suit, by the research's threshold.
-    pub fn same(&self) -> bool {
-        self.p() >= P_YES_CUT
+    /// The same suit, by `choice`'s threshold.
+    pub fn same(&self, choice: JudgeChoice) -> bool {
+        self.p() >= choice.yes_cut()
     }
 }
 
@@ -364,7 +453,29 @@ mod tests {
         assert_eq!(p_yes(&[("perhaps".into(), lp(0.9))]), 0.5, "neither: undecided");
         assert!((p_yes(&[("No".into(), lp(0.5))]) - 0.0).abs() < 1e-6);
         assert!((p_yes(&[(" *yes*".into(), lp(0.2))]) - 1.0).abs() < 1e-6, "trimmed, then leading stars dropped");
-        assert!(Verdict { p_ab: 0.7, p_ba: 0.5 }.same() && !Verdict { p_ab: 0.7, p_ba: 0.4 }.same(), "the mean against 0.6");
+        assert!(Verdict { p_ab: 0.7, p_ba: 0.5 }.same(JudgeChoice::Gemma4) && !Verdict { p_ab: 0.7, p_ba: 0.4 }.same(JudgeChoice::Gemma4), "the mean against 0.6");
+        assert!(Verdict { p_ab: 0.5, p_ba: 0.4 }.same(JudgeChoice::Qwen3VlReranker) && !Verdict { p_ab: 0.5, p_ba: 0.39 }.same(JudgeChoice::Qwen3VlReranker), "Qwen's own: 0.45");
+    }
+
+    /// Qwen's prompt is the official template as the research rendered
+    /// it, and its score sigmoid(logit yes − logit no).
+    #[test]
+    fn qwen_is_asked_and_scored_as_the_research_did() {
+        let p = JudgeChoice::Qwen3VlReranker.prompt("<M>");
+        assert_eq!(
+            p,
+            format!("<|im_start|>system\n{QWEN_SYSTEM}<|im_end|>\n<|im_start|>user\n<Instruct>: {QWEN_INSTRUCT}<Query>:<M>\n<Document>:<M><|im_end|>\n<|im_start|>assistant\n")
+        );
+        assert_eq!(p.matches("<M>").count(), 2);
+        assert_eq!((JudgeChoice::Qwen3VlReranker.image_tokens(), JudgeChoice::Gemma4.image_tokens()), (280, 560));
+        assert_eq!(JudgeChoice::Gemma4.prompt("<M>"), prompt("<M>"));
+        // sigmoid(ly − ln): equal logits 0.5; yes two nats ahead 0.881.
+        let s = |v: &[(&str, f32)]| p_rerank(&v.iter().map(|(t, l)| (t.to_string(), *l)).collect::<Vec<_>>());
+        assert!((s(&[("yes", -1.0), ("no", -1.0)]) - 0.5).abs() < 1e-6);
+        assert!((s(&[("no", -3.0), ("yes", -1.0), ("x", -9.0)]) - 0.880_797).abs() < 1e-5);
+        // Exact tokens only, and one outside the list counts at the floor.
+        assert!((s(&[("Yes", -0.1), ("no", -0.2), ("x", -5.0)]) - (1.0 / (1.0 + (4.8f64).exp())) as f32).abs() < 1e-6);
+        assert_eq!(p_rerank(&[]), 0.5);
     }
 
     /// Card only: anything short of every layer on the card is a card
@@ -430,6 +541,9 @@ mod tests {
         assert_eq!(serde_json::from_str::<JudgeChoice>("\"off\"").unwrap(), JudgeChoice::Off);
         assert!(JudgeChoice::ALL.iter().all(|c| !c.label().is_empty() && !c.description().is_empty()));
         assert!(JudgeChoice::ALL.iter().all(|c| c.model().is_none_or(|m| m.is_judge_model())));
+        assert_eq!(JudgeChoice::ALL, [JudgeChoice::Off, JudgeChoice::Qwen3VlReranker, JudgeChoice::Gemma4], "Qwen listed first, Off the default");
+        assert_eq!(JudgeChoice::for_model(ModelId::Qwen3VlReranker), Some(JudgeChoice::Qwen3VlReranker));
+        assert_eq!(serde_json::to_string(&JudgeChoice::Qwen3VlReranker).unwrap(), "\"qwen3_vl_reranker\"");
     }
 
     #[test]

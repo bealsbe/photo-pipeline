@@ -175,6 +175,31 @@ pub fn head_vector_bytes_read(photos: usize) -> u64 {
 pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.1;
 #[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub const JUDGE_LOAD_SECONDS: f64 = 6.0;
+/// Qwen3-VL-Reranker (Q8_0, 280 image tokens): the research's server,
+/// 0.86 s a pair and 2–3 s to load.  *Provisional* until measured
+/// through the helper.
+pub const QWEN_SECONDS_PER_PAIR: f64 = 0.86;
+pub const QWEN_LOAD_SECONDS: f64 = 3.0;
+
+/// Seconds a close call (a pair, both orders) with `choice`.
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn judge_seconds_per_pair(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    match choice {
+        crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_SECONDS_PER_PAIR,
+        crate::ml::judge::JudgeChoice::Gemma4 => JUDGE_SECONDS_PER_PAIR,
+        crate::ml::judge::JudgeChoice::Off => 0.0,
+    }
+}
+
+/// Seconds to load `choice` onto the card (files cached).
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn judge_load_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    match choice {
+        crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_LOAD_SECONDS,
+        crate::ml::judge::JudgeChoice::Gemma4 => JUDGE_LOAD_SECONDS,
+        crate::ml::judge::JudgeChoice::Off => 0.0,
+    }
+}
 
 /// A duration in the invitation's words: "about 7 minutes", "about an
 /// hour", "about 1.4 hours", "under a minute".

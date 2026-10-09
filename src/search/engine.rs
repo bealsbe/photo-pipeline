@@ -124,6 +124,9 @@ pub struct Storage {
     /// The close-call judges' model files (not in `models_bytes`), and
     /// the verdicts kept beside the index (not in `index_bytes`; v2).
     pub judge_bytes: u64,
+    /// Each judge's folder, in the list's order (0 when absent); they sum
+    /// to `judge_bytes`.
+    pub judges: Vec<(JudgeChoice, u64)>,
     pub judged_bytes: u64,
 }
 
@@ -601,7 +604,8 @@ pub fn storage_in(index_dir: Option<&Path>, models_dir: Option<&Path>) -> Storag
         out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes + out.judged_bytes);
     }
     if let Some(dir) = models_dir {
-        out.judge_bytes = models::judge_models().map(|m| dir_bytes(&dir.join(m.id.dir_name()))).sum();
+        out.judges = JudgeChoice::ALL.iter().filter_map(|&c| Some((c, dir_bytes(&dir.join(c.model()?.dir_name()))))).collect();
+        out.judge_bytes = out.judges.iter().map(|j| j.1).sum();
         out.models_bytes = dir_bytes(dir).saturating_sub(out.judge_bytes);
     }
     out
@@ -868,7 +872,7 @@ impl Worker {
                         self.device = d;
                         // The judge runs on the card or not at all.
                         self.forget_judging();
-                        self.runner = None;
+                        self.drop_runner();
                         if matches!(self.judge_state, JudgeState::Failed(_)) {
                             self.judge_state = JudgeState::Idle;
                         }
@@ -1079,7 +1083,9 @@ impl Worker {
                 Cmd::SetJudge(choice) => {
                     if choice != self.judge_choice {
                         self.forget_judging();
-                        self.runner = None;
+                        // One judge on the card at a time: the one loaded
+                        // leaves (its process gone) before another loads.
+                        self.drop_runner();
                         self.verdicts = None;
                         self.judge_choice = choice;
                         self.judge_state = JudgeState::Idle;
@@ -1094,7 +1100,7 @@ impl Worker {
                 Cmd::DeleteJudge(choice) => {
                     if choice == self.judge_choice {
                         self.forget_judging();
-                        self.runner = None;
+                        self.drop_runner();
                     }
                     if let Some(dir) = choice.model().and_then(models::model_dir) {
                         let _ = std::fs::remove_dir_all(dir);
@@ -1280,6 +1286,14 @@ impl Worker {
 
     // ---- the close-call judge (v2) ----
 
+    /// Let the judge's helper go now and wait for it to leave, so its
+    /// card memory is back before anything else loads.
+    fn drop_runner(&mut self) {
+        if let Some(r) = self.runner.take() {
+            r.judge().unload();
+        }
+    }
+
     /// The judge as the pages see it.
     fn judge_status(&self) -> JudgeStatus {
         let downloaded = JudgeChoice::ALL.iter().copied().filter(|c| c.model().is_some_and(|m| (self.installed)(m))).collect();
@@ -1340,7 +1354,7 @@ impl Worker {
             match self.verdicts().get(c.candidate, c.member) {
                 Some(v) => {
                     done += 1;
-                    if v.same() { offered.push(c.faces.clone()) } else { left_out.push(c.faces.clone()) }
+                    if v.same(self.judge_choice) { offered.push(c.faces.clone()) } else { left_out.push(c.faces.clone()) }
                 }
                 None => pending.push(i),
             }
@@ -1468,7 +1482,7 @@ impl Worker {
                 j.done += 1;
                 let (mut offered, mut left_out) = (Vec::new(), Vec::new());
                 match &result {
-                    Ok(v) if v.same() => offered.push(j.calls[i].faces.clone()),
+                    Ok(v) if v.same(self.judge_choice) => offered.push(j.calls[i].faces.clone()),
                     Ok(_) => left_out.push(j.calls[i].faces.clone()),
                     Err(why) => eprintln!("judge: a close call couldn't be judged: {why}"),
                 }
@@ -3239,6 +3253,17 @@ mod tests {
         // Nothing named or merged by the judge: the suit is as named.
         let g = e.subjects().groups.iter().find(|g| g.id == suit).cloned().unwrap();
         assert_eq!(g.photos, 2);
+        // Another judge chosen: the loaded one leaves first (one on the
+        // card at a time); its verdicts stay its own.
+        assert!(crate::ml::judge_client::Judge::loaded(fake.as_ref()));
+        e.set_judge(JudgeChoice::Qwen3VlReranker);
+        wait_for(&e, "Qwen chosen", |s| s.judge.choice == JudgeChoice::Qwen3VlReranker);
+        assert!(!crate::ml::judge_client::Judge::loaded(fake.as_ref()), "Gemma let go before another loads");
+        e.suggestions(30, suit.clone());
+        let (_, judged) = review(&mut ev, 30, Duration::from_secs(5));
+        assert_eq!((judged[0].2, judged[0].3), (0, 3), "Qwen keeps no verdicts of Gemma's");
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "Gemma again", |s| s.judge.choice == JudgeChoice::Gemma4);
         // The processor: no judge, the vector cut-offs.
         e.set_device(Device::Cpu);
         wait_for(&e, "the processor", |s| s.device.chosen == Device::Cpu);
@@ -3525,6 +3550,7 @@ mod tests {
         std::fs::write(index_dir.join("judged-gemma4-26b-a4b-it-ud-q4km.bin"), vec![0u8; 50]).unwrap();
         let s = storage_in(Some(&index_dir), Some(&models_dir));
         assert_eq!((s.models_bytes, s.judge_bytes), (1300, 5000), "DINOv2's folder still counts; the judge's apart");
+        assert_eq!(s.judges, [(JudgeChoice::Qwen3VlReranker, 0), (JudgeChoice::Gemma4, 5000)], "per judge, in the list's order");
         assert_eq!((s.heads_bytes, s.judged_bytes), (700, 50));
         models::delete_all_but_judges(&models_dir);
         let s = storage_in(Some(&index_dir), Some(&models_dir));
