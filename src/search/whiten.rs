@@ -38,11 +38,20 @@ pub const K: usize = 256;
 pub const POWER: f64 = 0.5;
 /// Added to `λ^(POWER/2)` before dividing, as the research did.
 const EPS: f64 = 1e-6;
-/// Fewer heads than this aren't fitted: [`K`] components need several
-/// times as many samples to be estimated at all.  Below it the fursuit
-/// step has no rows to group (a library this small has a day or two of
-/// fursuit photos at most).
-pub const MIN_HEADS: usize = 2 * K;
+/// Heads with vectors before a whitening is fitted.  Below it the fursuit
+/// step groups the raw vectors with cut-offs of their own
+/// (`heads::RAW_CUTOFFS`): a whitening fitted on a smaller library ranks
+/// pairs well but its distances drift from the cut-offs, which were
+/// measured on a fit over 10 826 heads.  Fitted on the research library's
+/// first days as it grew (all 791 labelled pairs; `fursuit-id` data):
+/// precision under the suggest cut 0.72 at 384 heads, 0.74–0.78 from 589
+/// to 2 035, 0.85 at 3 158 and 0.84 at 5 025, 0.89 at 8 071 (the full
+/// fit's 0.90); raw vectors under their own suggest cut hold 0.90 at any
+/// size (AUC 0.95/0.95/0.96/0.92 against the full whitening's
+/// 0.97/0.97/0.96/0.92).  Fewer components for a small fit (k = n/2) kept
+/// the ranking but not the cut-offs either (precision 0.61–0.85 from 64
+/// to 455 heads).
+pub const MIN_HEADS: usize = 8_000;
 /// A refit is due once the heads with vectors grow past this share of
 /// those the fit saw (plan: "when the head count grows by more than
 /// 20 %").
