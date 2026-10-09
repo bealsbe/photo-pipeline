@@ -104,6 +104,14 @@ impl PairCache {
         }
     }
 
+    /// The verdicts the app keeps for `choice` in this index folder, or,
+    /// with the stand-in judge (`PP_JUDGE_FAKE`), an empty cache in memory
+    /// only: a test run must never leave made-up verdicts for the real
+    /// judge to serve, nor read real ones.
+    pub fn open(dir: &Path, choice: JudgeChoice) -> PairCache {
+        if std::env::var_os("PP_JUDGE_FAKE").is_some() { PairCache::none() } else { PairCache::load(dir, choice) }
+    }
+
     /// No folder: verdicts kept in memory only.
     pub fn none() -> PairCache {
         PairCache { path: None, map: HashMap::new() }
@@ -420,6 +428,26 @@ mod tests {
         assert_eq!(PairCache::load(&d, JudgeChoice::Off).len(), 0, "Off keeps nothing");
         PairCache::forget_in(&d);
         assert_eq!(PairCache::bytes_in(&d), 0);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The stand-in's verdicts stay in memory: nothing is written to the
+    /// index folder, so a test run can't leave false answers for the real
+    /// judge (and real ones aren't served to the stand-in).
+    #[test]
+    fn the_stand_in_never_keeps_verdicts() {
+        let d = std::env::temp_dir().join(format!("pp-judged-fake-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let v = Verdict { p_ab: 0.9, p_ba: 0.9 };
+        PairCache::load(&d, JudgeChoice::Gemma4).add(&[(PairKey::new(r(1, 0.1), r(2, 0.1)), v)], JudgeChoice::Gemma4).unwrap();
+        crate::ml::client::tests::temp_env("PP_JUDGE_FAKE", "alternate", || {
+            let mut c = PairCache::open(&d, JudgeChoice::Gemma4);
+            assert_eq!(c.len(), 0, "the real verdicts aren't served to the stand-in");
+            c.add(&[(PairKey::new(r(3, 0.1), r(4, 0.1)), v)], JudgeChoice::Gemma4).unwrap();
+        });
+        let real = PairCache::open(&d, JudgeChoice::Gemma4);
+        assert_eq!(real.len(), 1, "only the real verdict is kept");
+        assert_eq!(real.get(r(3, 0.1), r(4, 0.1)), None);
         let _ = fs::remove_dir_all(&d);
     }
 
