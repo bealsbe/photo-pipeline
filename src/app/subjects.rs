@@ -78,6 +78,34 @@ pub struct MergeAsk {
     pub keep: GroupId,
 }
 
+impl MergeAsk {
+    /// Merge `groups` (as `all` knows them): the named one keeps its
+    /// name, so the first named is kept by default; with none named,
+    /// `prefer` (the tile dropped onto), else the first.
+    pub fn new(all: &Found, groups: Vec<GroupId>, prefer: Option<&GroupId>) -> Option<MergeAsk> {
+        if groups.len() < 2 {
+            return None;
+        }
+        let named = |id: &GroupId| all.group(id).is_some_and(|g| g.name.is_some());
+        let keep = prefer.filter(|p| named(p)).or_else(|| groups.iter().find(|id| named(id))).or(prefer).unwrap_or(&groups[0]).clone();
+        Some(MergeAsk { groups, keep })
+    }
+
+    /// More than one of the groups has a name: the dialog asks which to
+    /// keep (otherwise the one name there is stays).
+    pub fn asks_name(&self, all: &Found) -> bool {
+        self.groups.iter().filter(|id| all.group(id).is_some_and(|g| g.name.is_some())).count() > 1
+    }
+}
+
+/// A group tile being dragged onto another (to merge them), and the
+/// tile the pointer is over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drag {
+    pub from: GroupId,
+    pub over: Option<GroupId>,
+}
+
 pub struct Subjects {
     /// The tab shown (saved).
     pub tab: Kind,
@@ -91,6 +119,8 @@ pub struct Subjects {
     pub small_open: bool,
     pub hidden_open: bool,
     pub merge: Option<MergeAsk>,
+    /// A tile dragged onto another, while the button is down.
+    pub drag: Option<Drag>,
     /// "Forget this person?" waiting for an answer.
     pub forget: Option<GroupId>,
     pub person: Option<Person>,
@@ -112,6 +142,7 @@ impl Subjects {
             small_open: false,
             hidden_open: false,
             merge: None,
+            drag: None,
             forget: None,
             person: None,
             review: None,
@@ -350,7 +381,8 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
                 v.extend(a.hidden.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
             }
             if let Some(mg) = &s.merge {
-                v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, 40.0), Framing::Face)));
+                let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
+                v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
             }
             v
         }
@@ -380,6 +412,12 @@ pub enum Msg {
     Hidden(bool),
     Unhide(GroupId),
     MergeAsk,
+    /// A tile's drag: it started, the pointer entered or left a tile, the
+    /// button came up (the dialog asks before anything merges).
+    DragStart(GroupId),
+    DragEnter(GroupId),
+    DragLeave(GroupId),
+    DragDrop,
     MergeKeep(GroupId),
     MergeGo,
     MergeCancel,
@@ -498,6 +536,12 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
             s.merge = None;
         }
     }
+    if s.drag.as_ref().is_some_and(|d| all.group(&d.from).is_none()) {
+        s.drag = None;
+    }
+    if let Some(d) = s.drag.as_mut().filter(|d| d.over.as_ref().is_some_and(|o| all.group(o).is_none())) {
+        d.over = None;
+    }
     let t = person::on_subjects(app);
     Task::batch([t, refresh_crops(app)])
 }
@@ -559,12 +603,42 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::MergeAsk => {
             let s = &mut app.subjects;
             let groups: Vec<GroupId> = s.picked.iter().filter(|id| s.all.group(id).is_some_and(|g| g.kind == s.tab)).cloned().collect();
-            if groups.len() < 2 {
+            // The named one keeps its name by default.
+            let Some(ask) = MergeAsk::new(&s.all, groups, None) else { return Task::none() };
+            s.merge = Some(ask);
+            refresh_crops(app)
+        }
+        Msg::DragStart(id) => {
+            let s = &mut app.subjects;
+            if s.page() == Page::Overview && s.merge.is_none() && s.group(&id).is_some_and(|g| g.kind == s.tab && !g.hidden) {
+                s.drag = Some(Drag { from: id, over: None });
+            }
+            Task::none()
+        }
+        Msg::DragEnter(id) => {
+            if let Some(d) = app.subjects.drag.as_mut() {
+                d.over = (d.from != id).then_some(id);
+            }
+            Task::none()
+        }
+        Msg::DragLeave(id) => {
+            if let Some(d) = app.subjects.drag.as_mut().filter(|d| d.over.as_ref() == Some(&id)) {
+                d.over = None;
+            }
+            Task::none()
+        }
+        Msg::DragDrop => {
+            let s = &mut app.subjects;
+            let Some(Drag { from, over: Some(to) }) = s.drag.take() else { return Task::none() };
+            // One kind only, the tab's; never a hidden group.
+            let ok = |id: &GroupId| s.all.group(id).is_some_and(|g| g.kind == s.tab && !g.hidden);
+            if !ok(&from) || !ok(&to) {
                 return Task::none();
             }
-            // The named one keeps its name by default.
-            let keep = groups.iter().find(|id| s.all.group(id).is_some_and(|g| g.name.is_some())).unwrap_or(&groups[0]).clone();
-            s.merge = Some(MergeAsk { groups, keep });
+            // The tile dropped onto is kept, unless only the dragged one
+            // has a name.
+            s.merge = MergeAsk::new(&s.all, vec![to.clone(), from], Some(&to));
+            s.focus = Some(to);
             refresh_crops(app)
         }
         Msg::MergeKeep(id) => {
@@ -702,7 +776,7 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.merge.take().is_some() || s.forget.take().is_some() {
+    if s.drag.take().is_some() || s.merge.take().is_some() || s.forget.take().is_some() {
         return Task::none();
     }
     match s.page() {
@@ -770,6 +844,16 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
             Some(id) => person::open(app, &id, true),
             None => Task::none(),
         },
+        // M: merge the groups picked (the one confirmation asks first).
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("m") && !mods.shift() => {
+            if s.picked.len() >= 2 {
+                return update(app, Msg::MergeAsk);
+            }
+            if !s.picked.is_empty() || s.select_mode {
+                return app.show_status("Pick two or more groups to merge them.", 3000);
+            }
+            Task::none()
+        }
         Key::Named(Named::Space) if s.select_mode => {
             if let Some(id) = s.focus.clone() {
                 toggle_pick(&mut app.subjects, id);
@@ -1130,14 +1214,36 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let name = if small && !g.hidden { None } else { g.name.clone() };
     let count = if g.hidden { "Show".to_string() } else { util::plural(g.photos as u64, "photo") };
     let on = if g.hidden { m(Msg::Unhide(g.id.clone())) } else { m(Msg::Tile(g.id.clone())) };
-    let picked = s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
+    let drag = s.drag.as_ref();
+    let target = drag.is_some_and(|d| d.over.as_ref() == Some(&g.id));
+    let source = drag.is_some_and(|d| d.from == g.id);
+    let picked = target || s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
     let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge: g.hidden.then_some(Glyph::Hide), on }.into();
-    let hint = if g.hidden {
-        "Show it on the tab again".to_string()
-    } else if g.name.is_none() {
-        format!("Open to name this {} (F2)", g.kind.one())
+    if g.hidden {
+        return tip(el, "Show it on the tab again", true);
+    }
+    let width = if small { tile::SMALL_W } else { tile::TILE_W };
+    // While dragged: the tile left behind is veiled; the one under the
+    // pointer says what letting go does.
+    let el: Element<'a, Message> = if source {
+        stack![el, container(Space::new()).width(width).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(t::alpha(t::PHOTO_GROUND, 0.6))), border: iced::Border { radius: t::R_CELL.into(), ..iced::Border::default() }, ..Default::default() })].into()
+    } else if target {
+        let pill = container(row![icons::view(Glyph::Merge, 12.0, t::ON_SIGNAL), text("Merge here").size(t::T_SMALL).font(paint::MEDIUM).color(t::ON_SIGNAL)].spacing(4).align_y(Alignment::Center))
+            .padding(Padding::from([2.0, 7.0]))
+            .style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: iced::Border { radius: 9.0.into(), ..iced::Border::default() }, ..Default::default() });
+        stack![el, container(pill).width(width).align_x(iced::alignment::Horizontal::Center).padding(Padding { top: 6.0, ..Padding::ZERO })].into()
     } else {
-        format!("{}: {}", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
+        el
+    };
+    let messages = crate::ui::drag::DragMessages { start: m(Msg::DragStart(g.id.clone())), enter: m(Msg::DragEnter(g.id.clone())), leave: m(Msg::DragLeave(g.id.clone())), drop: m(Msg::DragDrop) };
+    let ghost = s.crops.get(&g.cover.face, px(app, size), Framing::Face);
+    // The same widgets whether or not a drag is under way, so the dragged
+    // tile keeps its place in the tree (and its drag) as the page redraws.
+    let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, drag.is_some()).ghost(ghost, shape(g.kind).radius(64.0)).into();
+    let hint = if g.name.is_none() {
+        format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
+    } else {
+        format!("{}: {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
     };
     tip(el, hint, true)
 }
@@ -1224,7 +1330,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
 fn pick_strip(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let n = s.picked.len();
-    let merge = kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk)));
+    let merge = tip(kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk))), "Merge the picked groups into one  (M)", true);
     let hide = kit::icon_text_btn(Glyph::Hide, "Hide", t::INK2, style::ghost(), (n >= 1).then(|| m(Msg::HidePicked)));
     let close = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::ClearPicks))), "Stop picking  (Esc)", true);
     let words = if n == 0 { "Click groups to pick them".to_string() } else { format!("{n} picked") };
@@ -1235,7 +1341,72 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
     column![container(r).width(Length::Fill).style(style::fill(t::alpha(t::SIGNAL, 0.08))), container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::alpha(t::SIGNAL, 0.3)))].into()
 }
 
+/// The crop size of the two-group merge dialog's cards.
+const PAIR_CROP: f32 = 112.0;
+
+/// Two groups to merge (a drop, or two picked): both side by side, large,
+/// so the eye can check them; when both are named, a click on one keeps
+/// its name.
+fn merge_pair_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
+    let s = &app.subjects;
+    let one = s.tab.one();
+    let asks = mg.asks_name(&s.all);
+    let card = |id: &'a GroupId| -> Element<'a, Message> {
+        let Some(g) = s.group(id) else { return Space::new().into() };
+        let kept = *id == mg.keep && g.name.is_some();
+        let crop = tile::crop(s.crops.get(&g.cover.face, px(app, PAIR_CROP), Framing::Face), PAIR_CROP, shape(g.kind));
+        let mut col = column![
+            crop,
+            text(g.name.clone().unwrap_or_else(|| "Unnamed group".into())).size(t::T_BODY).font(paint::MEDIUM).color(if g.name.is_some() { t::INK } else { t::INK2 }),
+            text(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"))).size(t::T_SMALL).color(t::INK3),
+        ]
+        .spacing(6)
+        .width(Length::Fill)
+        .align_x(Alignment::Center);
+        if asks {
+            let line = if kept { "Its name stays" } else { "Keep this name instead" };
+            col = col.push(text(line).size(t::T_SMALL).font(paint::MEDIUM).color(if kept { t::SIGNAL } else { t::INK3 }));
+        }
+        let b = button(col).width(196).padding(Padding { top: 14.0, bottom: 12.0, left: 10.0, right: 10.0 }).style(move |_t, status| {
+            let hot = asks && matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(Background::Color(if hot { t::RAISED } else { t::DEEP })),
+                text_color: t::INK,
+                border: style::border(if kept { t::SIGNAL } else { t::LINE }, if kept { 2.0 } else { 1.0 }, t::R_CELL),
+                ..button::Style::default()
+            }
+        });
+        if asks { b.on_press(m(Msg::MergeKeep(id.clone()))).into() } else { b.into() }
+    };
+    let (a, b) = (&mg.groups[0], &mg.groups[1]);
+    let join = container(icons::view(Glyph::Merge, 20.0, t::INK3)).width(36).center_x(36);
+    let cards = row![card(a), join, card(b)].align_y(Alignment::Center);
+    let keep = s.group(&mg.keep).and_then(|g| g.name.clone());
+    let says = match (&keep, asks) {
+        (Some(_), true) => "Both have a name. Click the one to keep.".to_string(),
+        (Some(n), false) => format!("It keeps the name {n}."),
+        (None, _) => format!("Neither is named yet, so the merged {one} stays unnamed."),
+    };
+    let go = match &keep {
+        Some(n) => format!("Merge into {n}"),
+        None => "Merge".to_string(),
+    };
+    let content = column![
+        super::dialogs::header(format!("Merge these two groups into one {one}?"), None),
+        kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. {says}")),
+        container(cards).width(Length::Fill).center_x(Length::Fill).padding(Padding::from([t::S2, 0.0])),
+        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
+        Space::new().height(t::S1),
+        super::dialogs::footer(vec![], vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::MergeCancel))).into(), kit::btn(go, style::primary(), Some(m(Msg::MergeGo))).into()]),
+    ]
+    .spacing(t::S3);
+    super::dialogs::backdrop(super::dialogs::frame_fit(content.into(), 520f32.min(app.window_size_width() - 48.0)))
+}
+
 fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
+    if mg.groups.len() == 2 {
+        return merge_pair_dialog(app, mg);
+    }
     let s = &app.subjects;
     let one = s.tab.one();
     let mut list = column![].spacing(2).padding(4);
@@ -1277,7 +1448,11 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
     };
     let content = column![
         super::dialogs::header(format!("Merge {} groups into one {one}?", mg.groups.len()), None),
-        kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. Which name should it keep?")),
+        kit::secondary(match (&keep, mg.asks_name(&s.all)) {
+            (_, true) => format!("Their photos become one {one}, and suggestions come from all of them. Which name should it keep?"),
+            (Some(n), false) => format!("Their photos become one {one}, and suggestions come from all of them. It keeps the name {n}."),
+            (None, false) => format!("Their photos become one {one}, and suggestions come from all of them. None is named yet, so it stays unnamed."),
+        }),
         container(list).width(Length::Fill).style(style::group()),
         kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
         Space::new().height(t::S1),
@@ -1426,6 +1601,32 @@ mod tests {
         // Other tabs, other kinds.
         assert_eq!(arrange(&f, Kind::Fursuit, 5).named.len(), 1);
         assert_eq!(arrange(&f, Kind::Pet, 5).to_name.len(), 1);
+    }
+
+    /// The merge dialog's name: the named group keeps its name whichever
+    /// tile was dragged onto which; two named ones ask, the one dropped
+    /// onto chosen to start; none named, the one dropped onto.
+    #[test]
+    fn a_merge_keeps_the_name_and_asks_only_between_two() {
+        let mut f = found();
+        f.groups.push(group(8, Kind::Fursuit, None, 12, false));
+        f.groups.push(group(9, Kind::Fursuit, Some("Fursuit 2"), 30, false));
+        f.groups.push(group(10, Kind::Fursuit, None, 7, false));
+        let (named, other_named, a, b) = (GroupId::Cluster(5), GroupId::Cluster(9), GroupId::Cluster(8), GroupId::Cluster(10));
+        // An unnamed group dropped onto a named one, and the other way.
+        let ask = MergeAsk::new(&f, vec![named.clone(), a.clone()], Some(&named)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (named.clone(), false));
+        let ask = MergeAsk::new(&f, vec![a.clone(), named.clone()], Some(&a)).unwrap();
+        assert_eq!(ask.keep, named, "dropped onto the unnamed one, the name still stays");
+        // Two named: asks; starts on the one dropped onto.
+        let ask = MergeAsk::new(&f, vec![other_named.clone(), named.clone()], Some(&other_named)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (other_named, true));
+        // None named: the one dropped onto.
+        let ask = MergeAsk::new(&f, vec![b.clone(), a.clone()], Some(&b)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (b, false));
+        // Picked (S, then M): the first named, else the first picked.
+        assert_eq!(MergeAsk::new(&f, vec![a.clone(), named.clone(), GroupId::Cluster(10)], None).unwrap().keep, named);
+        assert!(MergeAsk::new(&f, vec![a], None).is_none(), "one group is nothing to merge");
     }
 
     #[test]

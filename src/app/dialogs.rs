@@ -1736,6 +1736,20 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "People and fursuits",
+        &[
+            ("Ctrl+4", "People and fursuits"),
+            ("←  →", "Previous and next group"),
+            ("Enter  /  F2", "Open the group; name it"),
+            ("S  or  Ctrl+click", "Pick several groups"),
+            ("M", "Merge the groups picked (asks first)"),
+            ("Drag a group", "Onto another to merge the two (asks first)"),
+            ("Y", "On a group's page: review its suggestions"),
+            ("Y  /  N", "In the review: the same, or not"),
+            ("Ctrl+Z", "Take back the last change to the groups"),
+        ],
+    ),
+    (
         "Quick look (grid)",
         &[
             ("Space", "See the selected photo large; again to close"),

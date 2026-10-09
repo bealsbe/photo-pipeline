@@ -2768,3 +2768,44 @@ All of this ran in a throwaway home: a copy of the relabel's v1 index (14,517 sh
 The fake engine runs them a tick at a time. It waits while a pass, the head step or `judge-wait` holds the card, and it takes a few ticks to load. It sends `Judged` deltas as the engine does.
 
 `search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|judge-cardcrash|judge-broken|heads-vectors [n|all]` set its states.
+
+## As built — easier fursuit merging, stage 1: merging by hand
+
+The user (2026-10-09): "Make it easier to merge fursuit groups together.
+I am seeing a lot of the same suit getting grouped into separate groups."
+The split is by design (tight average-linkage groups), so the answer is
+quick, safe joining, not looser grouping.  Shipped in three stages, each
+merged before the next: merging by hand (this), merge suggestions with
+the judges comparing groups, then splitting mixed groups.
+
+- **Drag a tile onto another** (`src/ui/drag.rs`, `DragArea`): a press
+  becomes a drag after 6 px, so clicks stay clicks.  The dragged tile
+  draws its crop under the pointer in its own layer (no message per
+  move, so the view isn't rebuilt while the pointer travels); the page
+  hears only start, the tiles the pointer enters and leaves, and the
+  drop.  The tile left behind is veiled, the one under the pointer ringed
+  with *Merge here*.  Letting go opens the merge dialog; a release over
+  the dragged tile's own place is never a click; Esc cancels.  The drag
+  logic is a small state machine with tests (`a_click_is_never_a_drag`,
+  `a_drag_starts_once_crosses_tiles_and_drops`,
+  `the_threshold_counts_in_the_tiles_own_coordinates`).  The script
+  driver drags by messages (`subjects drag 3 0`, `dragto`, `dragdrop`);
+  the virtual compositor has no pointer to move.
+- **S, clicks, M**: M on the tab (a page key, as Y and N are in the
+  review; not a `Cmd`, so nothing is bound twice) opens the one
+  confirmation for the picked groups; Enter merges.
+- **One dialog, the name rules** (`MergeAsk::new`, tested in
+  `a_merge_keeps_the_name_and_asks_only_between_two`): a named group
+  keeps its name whichever way round it was dropped; with two or more
+  named it asks which name to keep, starting on the one dropped onto (or
+  the first named picked).  Two groups show side by side, large
+  (112 px crops), so the eye can check them; more show as the list did.
+- **The existing merge path**: `Engine::merge` → `People::merge`, one
+  undo step per merge (`fursuit_merges_keep_the_name_and_undo_in_one_step`).
+  Kinds never mix: the dialog takes the tab's kind only, and the engine
+  refuses a mix as before.
+- **Fixed on the way**: a library under 8 000 heads (grouped by the raw
+  vectors) showed no fursuit groups after a restart until the next scan
+  or edit; opening it now regroups whenever heads have vectors
+  (`fursuit_groups_come_back_when_a_raw_library_opens`).
+- The shortcuts sheet has a *People and fursuits* section.

@@ -1778,9 +1778,11 @@ impl Worker {
             self.people.reset_grouping();
             self.fursuits.reset_grouping();
             self.start_regroup();
-            // The fursuits' groups too, once a whitening is fitted (v2):
-            // their rows are built for it and let go again when idle.
-            if self.fursuits.store.as_ref().is_some_and(|s| s.whitening().is_some()) {
+            // The fursuits' groups too, whenever heads have the search
+            // model's vectors: whitened from `whiten::MIN_HEADS` heads, raw
+            // below (v2's small-library rule).  Their rows are built for it
+            // and let go again when idle.
+            if self.fursuits.store.as_ref().is_some_and(|s| s.vector_count() > 0) {
                 self.start_heads_regroup();
             }
         }
@@ -3365,6 +3367,37 @@ mod tests {
         let last = judged.last().expect("verdicts after the pass");
         assert_eq!((last.2, last.3), (2, 2), "both close calls judged once the card was free");
         assert_eq!(fake.pairs.lock().len(), 2);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A library with too few heads to whiten (`whiten::MIN_HEADS`; the
+    /// step groups the raw vectors) has its fursuit groups again when it
+    /// opens, not only after the next scan or edit.
+    #[test]
+    fn fursuit_groups_come_back_when_a_raw_library_opens() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.1)), (3, -Suits::at(0.9)), (4, -Suits::at(0.95))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("raw-reopen", &refs);
+        let config = || Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib.clone());
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.shutdown();
+        std::thread::sleep(Duration::from_millis(200));
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib);
+        let started = Instant::now();
+        while e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count() < 2 {
+            assert!(started.elapsed() < Duration::from_secs(5), "no fursuit groups at open: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!e.status().heads.whitened, "raw: too few heads to whiten");
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

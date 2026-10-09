@@ -1,6 +1,7 @@
 pub mod burst_sheet;
 pub mod calendar_stage;
 pub mod compare_stage;
+pub mod drag;
 pub mod filmstrip;
 pub mod grid;
 pub mod hint_plate;
