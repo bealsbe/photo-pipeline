@@ -87,6 +87,8 @@
 //! prefs search-rebuild|search-clear|models-delete|models-open
 //! prefs find-faces|keep-faces|forget-faces|face-model|forget-people
 //! prefs smallest 3            # Smallest group to show: 3, 5 or 10
+//! prefs rail-subjects         # Show People and fursuits in the sidebar, on or off
+//!                             #   (show-people: Preferences at that row)
 //! prefs facepick 1|facego|facecancel   # the face model dialog
 //!                             # Preferences ▸ Search and its Storage rows
 //! prefs closeness 4.5         # set how close matches must be (the slider)
@@ -978,6 +980,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "forget-faces" => Some(Control::ForgetFaces),
         "face-model" => Some(Control::FaceModel),
         "forget-people" => Some(Control::ForgetPeople),
+        "rail-subjects" => Some(Control::RailSubjects),
         "smallest" => Some(Control::SmallestGroup(rest.parse().unwrap_or(5))),
         "close-button" => Some(Control::Close),
         _ => None,
@@ -1017,6 +1020,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
+        "show-people" => super::preferences::open_at(app, Control::RailSubjects),
         "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),

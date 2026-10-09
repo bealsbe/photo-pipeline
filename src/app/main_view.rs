@@ -397,6 +397,10 @@ fn side_menu(app: &App) -> Element<'_, Message> {
         match e {
             None if i == spacer => entries.push(Entry::Spacer),
             None => entries.push(Entry::Separator),
+            // Preferences ▸ People can hide this button; the shortcut and the
+            // View menu stay.  Nothing else moves: it sits between Search
+            // and a separator.
+            Some(Cmd::Subjects) if !app.settings.rail_subjects => {}
             Some(cmd) => {
                 let hint = match cmd {
                     Cmd::PruneSelected => "P".to_string(),
