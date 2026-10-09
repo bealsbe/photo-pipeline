@@ -109,6 +109,8 @@ pub enum Glyph {
     More,
     /// A new group, or add: a plus.
     Plus,
+    /// The close-call judge: two heads weighed on one beam.
+    CloseCall,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -620,6 +622,15 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.line(&[(12.0, 5.0), (12.0, 19.0)]);
             p.line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
+        CloseCall => {
+            // Two heads (the fursuit tiles' rounded squares) side by side
+            // on a beam with its post: a pair weighed.
+            p.rrect(2.5, 4.0, 8.0, 8.0, 2.5);
+            p.rrect(13.5, 4.0, 8.0, 8.0, 2.5);
+            p.line(&[(4.0, 16.0), (20.0, 16.0)]);
+            p.line(&[(12.0, 16.0), (12.0, 20.5)]);
+            p.line(&[(8.5, 20.5), (15.5, 20.5)]);
+        }
     }
 }
 
@@ -779,7 +790,7 @@ mod tests {
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
             Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut, Subjects, Person, Fursuit,
-            Merge, Split, Hide, Pencil, More, Plus,
+            Merge, Split, Hide, Pencil, More, Plus, CloseCall,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");

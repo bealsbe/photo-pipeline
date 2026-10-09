@@ -29,7 +29,7 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
-use super::heads::HeadsResult;
+use super::heads::{HeadsResult, KnownHeads};
 use super::models::ModelId;
 use super::worker::{self, Reply, Request};
 use super::{CardFailure, Device, SelfCheck};
@@ -202,6 +202,14 @@ pub trait Embedder: Send + Sync {
         let _ = files;
         Err(HelperError::Broken("this helper has no head step".into()))
     }
+    /// The search model's vectors of heads already found (fursuit
+    /// matching v2's catch-up): image work on the chosen device, under
+    /// the same card rule; one result per photo, in order.  Any image
+    /// helper serves it (the head detector isn't needed).
+    fn embed_heads(&self, files: &[KnownHeads]) -> Result<Vec<HeadsResult>, HelperError> {
+        let _ = files;
+        Err(HelperError::Broken("this helper can't embed heads".into()))
+    }
     /// Stop the helper (the app is quitting, or the device changed).
     fn shutdown(&self) {}
 }
@@ -225,7 +233,8 @@ pub struct Spec {
     pub text_only: bool,
     /// Load the face detector and this recognition model too.
     pub face_model: Option<ModelId>,
-    /// Load the fursuit head models too (OWLv2 and DINOv2; phase 4).
+    /// Load the fursuit head detector too (OWLv2; phase 4).  The heads'
+    /// vectors come from the search model's image tower (v2).
     pub heads: bool,
 }
 
@@ -375,7 +384,7 @@ impl Process {
 
     fn send(&mut self, req: &Request) -> Result<Receiver<Reply>, HelperError> {
         let id = match req {
-            Request::EmbedImages { id, .. } | Request::EncodeText { id, .. } | Request::FindHeads { id, .. } => *id,
+            Request::EmbedImages { id, .. } | Request::EncodeText { id, .. } | Request::FindHeads { id, .. } | Request::EmbedHeads { id, .. } => *id,
             Request::Quit => 0,
         };
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -474,7 +483,7 @@ impl Client {
     /// Make sure a helper is running for `req`'s kind of work, applying
     /// the restart rule, and send it.  Returns the reply channel.
     fn dispatch(&self, req: Request) -> Result<Receiver<Reply>, HelperError> {
-        let images = matches!(req, Request::EmbedImages { .. } | Request::FindHeads { .. });
+        let images = matches!(req, Request::EmbedImages { .. } | Request::FindHeads { .. } | Request::EmbedHeads { .. });
         let mut inner = self.inner.lock();
         if images {
             if let Some(f) = &inner.card_failed {
@@ -618,6 +627,16 @@ impl Embedder for Client {
         }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let rx = self.dispatch(Request::FindHeads { id, files: files.to_vec() })?;
+        match self.wait(rx)? {
+            Reply::Heads { results, .. } => Ok(results),
+            Reply::Error { message, .. } => Err(HelperError::Broken(message)),
+            other => Err(HelperError::Broken(format!("unexpected reply {other:?}"))),
+        }
+    }
+
+    fn embed_heads(&self, files: &[KnownHeads]) -> Result<Vec<HeadsResult>, HelperError> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let rx = self.dispatch(Request::EmbedHeads { id, files: files.to_vec() })?;
         match self.wait(rx)? {
             Reply::Heads { results, .. } => Ok(results),
             Reply::Error { message, .. } => Err(HelperError::Broken(message)),

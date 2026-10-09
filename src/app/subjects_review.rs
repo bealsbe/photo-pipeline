@@ -16,6 +16,7 @@
 //! - An unnamed group is checked the same way: its own faces, "Same person
 //!   as this group?".
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -55,7 +56,7 @@ pub struct Review {
     pub checking: bool,
     /// One entry per press, its frames best first.
     pub list: Option<Arc<Vec<Vec<Face>>>>,
-    seq: u64,
+    pub seq: u64,
     /// The person's confirmed faces, for the left column.
     pub refs: Vec<Face>,
     refs_seq: u64,
@@ -66,9 +67,65 @@ pub struct Review {
     beat: u64,
     /// The answer that started the last move, and when (the stamp).
     stamp: Option<(bool, Instant)>,
+    /// The close-call judge (fursuits): entries it offered, and those it
+    /// left out that the user asked to see, by their first frame.
+    pub judged_faces: HashSet<FaceRef>,
+    pub left_out_faces: HashSet<FaceRef>,
+    /// *Show them* was pressed: what it leaves out joins the list too.
+    pub left_out_shown: bool,
+    /// The judge has nothing more to add to this list.
+    pub judge_done: bool,
 }
 
 impl Review {
+    fn new(group: GroupId, kind: Kind, checking: bool, seq: u64, refs_seq: u64) -> Review {
+        Review {
+            group,
+            kind,
+            checking,
+            list: None,
+            seq,
+            refs: Vec::new(),
+            refs_seq,
+            at: 0,
+            answers: Vec::new(),
+            order: Vec::new(),
+            beat: 0,
+            stamp: None,
+            judged_faces: HashSet::new(),
+            left_out_faces: HashSet::new(),
+            left_out_shown: false,
+            judge_done: true,
+        }
+    }
+
+    /// Entries the judge sent join the end of the list (nothing on screen
+    /// moves), each once; `left_out` marks those it judged different.
+    pub fn take(&mut self, entries: &[Vec<Face>], left_out: bool) {
+        for f in self.append(entries) {
+            if left_out {
+                self.left_out_faces.insert(f);
+            } else {
+                self.judged_faces.insert(f);
+            }
+        }
+    }
+
+    /// Entries not listed yet join the end, each once; their first heads.
+    pub fn append(&mut self, entries: &[Vec<Face>]) -> Vec<FaceRef> {
+        let have = super::fursuit_judge::firsts(self.list.as_deref().map_or(&[][..], |l| &l[..]));
+        let new: Vec<Vec<Face>> = entries.iter().filter(|e| e.first().is_some_and(|f| !have.contains(&f.face))).cloned().collect();
+        if new.is_empty() && self.list.is_some() {
+            return Vec::new();
+        }
+        let firsts = new.iter().map(|e| e[0].face).collect();
+        let mut list: Vec<Vec<Face>> = self.list.as_deref().cloned().unwrap_or_default();
+        list.extend(new);
+        self.answers.resize(list.len(), None);
+        self.list = Some(Arc::new(list));
+        firsts
+    }
+
     /// Answered Yes (photos added) and No (taken out, not suggested again),
     /// counted by photo: a press counts all its frames.
     pub fn counts(&self) -> (usize, usize) {
@@ -137,11 +194,14 @@ pub enum Msg {
 pub fn start(app: &mut App, group: &GroupId) -> Task<Message> {
     let Some(g) = app.subjects.group(group).cloned() else { return Task::none() };
     let checking = g.name.is_none();
-    if !checking && g.suggestions == 0 {
+    // With a judge on, close calls may still be offered.
+    if !checking && g.suggestions == 0 && !super::fursuit_judge::judging(app, group) {
         return app.show_status(format!("No photos wait to be checked against {} now.", g.name.unwrap_or_default()), 5000);
     }
     let (seq, refs_seq) = (app.subjects.next_seq(), app.subjects.next_seq());
-    app.subjects.review = Some(Review { group: group.clone(), kind: g.kind, checking, list: None, seq, refs: Vec::new(), refs_seq, at: 0, answers: Vec::new(), order: Vec::new(), beat: 0, stamp: None });
+    let mut r = Review::new(group.clone(), g.kind, checking, seq, refs_seq);
+    r.judge_done = !super::fursuit_judge::judging(app, group);
+    app.subjects.review = Some(r);
     app.quicklook = None;
     app.search.link.suggestions(seq, group);
     app.search.link.faces(refs_seq, group);
@@ -149,9 +209,29 @@ pub fn start(app: &mut App, group: &GroupId) -> Task<Message> {
 }
 
 pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec<Face>>>) -> Task<Message> {
+    let judging = super::fursuit_judge::keeps_review_open(app, &group);
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
     if r.seq != seq || r.group != group {
         return Task::none();
+    }
+    // With the judge on, a list already shown keeps its place: a new ask
+    // (Find more, the next close calls) adds what is new at the end.
+    if judging && !r.checking && r.list.as_ref().is_some_and(|l| !l.is_empty()) {
+        r.judge_done = false;
+        r.append(&list);
+        return subj::refresh_crops(app);
+    }
+    // With the judge on, an empty first answer isn't the end: its close
+    // calls come next (and its first verdicts say if there are none).
+    if judging && !r.checking {
+        r.judge_done = false;
+        r.judged_faces.clear();
+        r.left_out_faces.clear();
+        r.answers = vec![None; list.len()];
+        r.order.clear();
+        r.at = 0;
+        r.list = Some(list);
+        return subj::refresh_crops(app);
     }
     if list.is_empty() {
         let first = r.list.is_none();
@@ -370,6 +450,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let Some(r) = s.review.as_ref() else { return Space::new().into() };
     let body: Element<'_, Message> = match &r.list {
         None => quiet("Finding the photos to check…".into(), String::new()),
+        Some(l) if l.is_empty() => waiting_page(app, r),
         Some(_) if r.at_end() => end_page(app, r),
         Some(list) => {
             let main = row![reference(app, r), suggestion(app, r, list), photo(app, r, list)].spacing(40).align_y(Alignment::Center);
@@ -383,7 +464,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
                 Some(st) => stack![centre, st].into(),
                 None => centre.into(),
             };
-            column![centre, strip(app, r, list), footer(app, r)].into()
+            let mut col = column![centre];
+            if let Some(line) = super::fursuit_judge::review_line(app, &r.group, r.seq, r.left_out_shown) {
+                col = col.push(line);
+            }
+            col.push(strip(app, r, list)).push(footer(app, r)).into()
         }
     };
     column![header(app, r), kit::hairline(), container(body).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND))].width(Length::Fill).height(Length::Fill).into()
@@ -491,7 +576,10 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
     let one = r.kind.one();
     let hint_yes = if r.checking { format!("Yes: the same {one} as this group  (Y)") } else { format!("Yes: add it to them  (Y)") };
     let hint_no = format!("No: not this {one}; never suggested again  (N)");
-    let burst = if entry.len() > 1 { format!("A burst of {} frames: one answer covers them all.", entry.len()) } else { String::new() };
+    let mut burst = if entry.len() > 1 { format!("A burst of {} frames: one answer covers them all.", entry.len()) } else { String::new() };
+    if let Some(o) = super::fursuit_judge::origin_words(r, &f.face) {
+        burst = if burst.is_empty() { o.to_string() } else { format!("{o} {burst}") };
+    }
     column![crop, row![tip(answer_btn(true), hint_yes, false), tip(answer_btn(false), hint_no, false)].spacing(10), text(burst).size(t::T_SMALL).color(t::PHOTO_INK2).height(16)]
         .spacing(14)
         .align_x(Alignment::Center)
@@ -547,6 +635,9 @@ fn strip<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element<'a, 
         });
         cells = cells.push(b.on_press(rm(Msg::At(i))));
     }
+    if let Some(tail) = super::fursuit_judge::strip_tail(app, &r.group, r.seq, STRIP, shape) {
+        cells = cells.push(tail);
+    }
     let row = scrollable(container(cells).padding(Padding::from([10.0, 16.0]))).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0)));
     column![container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::PHOTO_LINE)), row].into()
 }
@@ -560,6 +651,36 @@ fn footer<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
         .padding(Padding::from([7.0, 20.0]))
         .width(Length::Fill)
         .into()
+}
+
+/// Nothing sure to offer yet, while the judge checks the close calls (or
+/// after it left them all out).
+fn waiting_page<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
+    let s = &app.subjects;
+    let shape = subj::shape(r.kind);
+    let name = subj::label(s, &r.group);
+    let cover = s.group(&r.group).map(|g| tile::crop(s.crops.get(&g.cover.face, subj::px(app, REF), Framing::Face), 72.0, shape)).unwrap_or_else(|| Space::new().into());
+    let (title, body) = if r.judge_done {
+        (format!("Nothing more like {name} for now"), "The judge left out every close call it checked. You can still look at them.".to_string())
+    } else {
+        (format!("Checking close calls for {name}"), "No photo is close enough to offer straight away. Those the judge thinks are this fursuit appear here as they come, for your Y or N.".to_string())
+    };
+    let mut col = column![
+        Space::new().height(Length::FillPortion(2)),
+        cover,
+        text(title).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::PHOTO_INK),
+        text(body).size(t::T_BODY).color(t::PHOTO_INK2),
+        Space::new().height(t::S1),
+    ]
+    .spacing(t::S2)
+    .align_x(Alignment::Center)
+    .max_width(560);
+    if let Some(line) = super::fursuit_judge::review_line(app, &r.group, r.seq, r.left_out_shown) {
+        col = col.push(container(line).max_width(620));
+    }
+    col = col.push(kit::btn(format!("Back to {name}"), style::secondary(), Some(rm(Msg::Done))));
+    col = col.push(Space::new().height(Length::FillPortion(4)));
+    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
 }
 
 /// Every suggestion answered: what changed, and the next steps.
@@ -587,12 +708,19 @@ fn end_page<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
         cover,
         text(format!("All {n} answered")).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::PHOTO_INK),
         text(line).size(t::T_BODY).color(t::PHOTO_INK2),
-        Space::new().height(t::S1),
-        buttons,
     ]
     .spacing(t::S2)
     .align_x(Alignment::Center)
     .max_width(520);
+    // Close calls still being checked land here, and the review carries on.
+    if !r.judge_done {
+        col = col.push(text("Close calls are still being checked. Those the judge thinks are this fursuit appear here as they come.").size(t::T_BODY).color(t::PHOTO_INK2));
+    }
+    col = col.push(Space::new().height(t::S1));
+    col = col.push(buttons);
+    if let Some(line) = super::fursuit_judge::review_line(app, &r.group, r.seq, r.left_out_shown) {
+        col = col.push(container(line).max_width(620));
+    }
     if !r.checking {
         col = col.push(text("Find more looks again, using everything you confirmed. It's strict, so expect a few at a time.").size(t::T_SMALL).color(t::PHOTO_INK3));
     }
@@ -605,7 +733,7 @@ pub fn debug_state(app: &App) -> String {
     let (yes, no) = r.counts();
     let entries: Vec<usize> = r.list.as_ref().map(|l| l.iter().map(Vec::len).collect()).unwrap_or_default();
     format!(
-        "review=[group={} checking={} list={:?} at={} answers={:?} yes={yes} no={no} end={} refs={} advance={}]",
+        "review=[group={} checking={} list={:?} at={} answers={:?} yes={yes} no={no} end={} refs={} advance={} judged={} left_out={} shown={} judge_done={}]",
         people::short(&r.group),
         r.checking,
         entries,
@@ -618,6 +746,10 @@ pub fn debug_state(app: &App) -> String {
         r.at_end(),
         r.refs.len(),
         app.settings.viewer_advance,
+        r.judged_faces.len(),
+        r.left_out_faces.len(),
+        r.left_out_shown,
+        r.judge_done,
     )
 }
 
@@ -635,7 +767,10 @@ mod tests {
     fn review() -> Review {
         // Three suggestions: a single frame, a burst of three, a single.
         let list = vec![vec![face(1, None)], vec![face(2, Some(7)), face(3, Some(7)), face(4, Some(7))], vec![face(5, None)]];
-        Review { group: GroupId::Cluster(1), kind: Kind::Person, checking: false, answers: vec![None; list.len()], list: Some(Arc::new(list)), seq: 1, refs: Vec::new(), refs_seq: 2, at: 0, order: Vec::new(), beat: 0, stamp: None }
+        let mut r = Review::new(GroupId::Cluster(1), Kind::Person, false, 1, 2);
+        r.answers = vec![None; list.len()];
+        r.list = Some(Arc::new(list));
+        r
     }
 
     #[test]
@@ -654,6 +789,34 @@ mod tests {
         assert_eq!(r.next_open(0), 3, "0 is open but behind: the end comes after the last");
         r.at = 3;
         assert!(r.at_end());
+    }
+
+    /// The judge's verdicts join the end of the list, each once, so
+    /// nothing on screen moves and every answer stays where it was.
+    #[test]
+    fn judged_suggestions_join_the_end_and_answers_stay_put() {
+        let mut r = review();
+        r.answer(true);
+        let before: Vec<FaceRef> = r.list.as_ref().unwrap().iter().map(|e| e[0].face).collect();
+        r.take(&[vec![face(9, None)], vec![face(1, None)]], false);
+        let after: Vec<FaceRef> = r.list.as_ref().unwrap().iter().map(|e| e[0].face).collect();
+        assert_eq!(&after[..before.len()], &before[..], "nothing on screen moves");
+        assert_eq!(after.len(), before.len() + 1, "an entry already listed isn't added twice");
+        assert_eq!(r.answers, [Some(true), None, None, None]);
+        assert!(r.judged_faces.contains(&face(9, None).face) && r.left_out_faces.is_empty());
+        r.take(&[vec![face(10, None)]], true);
+        assert!(r.left_out_faces.contains(&face(10, None).face), "shown left-out ones are marked");
+        assert_eq!(r.len(), 5);
+        // At the end, a new arrival is the next to answer.
+        r.at = 5;
+        assert!(r.at_end());
+        r.take(&[vec![face(11, None)]], false);
+        assert!(!r.at_end());
+        // An empty first answer stays open for the judge's.
+        let mut e = Review::new(GroupId::Cluster(1), Kind::Fursuit, false, 1, 2);
+        e.take(&[], false);
+        assert_eq!(e.len(), 0);
+        assert!(e.list.is_some());
     }
 
     #[test]

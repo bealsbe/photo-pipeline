@@ -135,6 +135,73 @@ pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
     }
 }
 
+/// Seconds per photo for the v2 catch-up (the search model's vectors
+/// of heads already found: the preview read again, each head cropped
+/// and through the image tower; no detector), **measured through the
+/// helper** on the research's 7 033 photos (10 826 heads, 2026-10-09,
+/// `heads::store_tests::fursuit_v2_vectors_of_the_research_heads`):
+/// 0.015 s a photo on the card with the previews in the page cache, and
+/// 0.25 s a photo on the processor (300 photos).
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_GPU: f64 = 0.015;
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_CPU: f64 = 0.25;
+
+/// Seconds for the v2 catch-up over `photos` photos with heads.
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn head_vector_seconds(photos: usize, device: Device) -> f64 {
+    let read = photos as f64 * SECONDS_PER_SHOT_GPU;
+    let work = photos as f64
+        * match device {
+            Device::Gpu => HEAD_VECTOR_SECONDS_PER_PHOTO_GPU,
+            Device::Cpu => HEAD_VECTOR_SECONDS_PER_PHOTO_CPU,
+        };
+    match device {
+        Device::Gpu => read.max(work),
+        Device::Cpu => read + work,
+    }
+}
+
+/// Bytes read from the library by the v2 catch-up (each preview again).
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn head_vector_bytes_read(photos: usize) -> u64 {
+    bytes_read(photos)
+}
+
+/// The close-call judge (v2): seconds a pair, both orders, and the load
+/// onto the card, **measured through the helper** on the RX 7900 XTX
+/// (2026-10-09): 2.06–2.12 s a pair (the research's server: 2.30), the
+/// load 2.3–5.8 s with the files in the page cache (a cold disk reads
+/// 18 GB first).
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.1;
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub const JUDGE_LOAD_SECONDS: f64 = 6.0;
+/// Qwen3-VL-Reranker (Q8_0, 280 image tokens), **measured through the
+/// helper** on the RX 7900 XTX (2026-10-09): 0.77–0.79 s a pair, both
+/// orders (the research's server: 0.86), and 1.8–3.5 s to load with the
+/// files cached.
+pub const QWEN_SECONDS_PER_PAIR: f64 = 0.8;
+pub const QWEN_LOAD_SECONDS: f64 = 3.0;
+
+/// Seconds a close call (a pair, both orders) with `choice`.
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn judge_seconds_per_pair(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    match choice {
+        crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_SECONDS_PER_PAIR,
+        crate::ml::judge::JudgeChoice::Gemma4 => JUDGE_SECONDS_PER_PAIR,
+        crate::ml::judge::JudgeChoice::Off => 0.0,
+    }
+}
+
+/// Seconds to load `choice` onto the card (files cached).
+#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
+pub fn judge_load_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    match choice {
+        crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_LOAD_SECONDS,
+        crate::ml::judge::JudgeChoice::Gemma4 => JUDGE_LOAD_SECONDS,
+        crate::ml::judge::JudgeChoice::Off => 0.0,
+    }
+}
+
 /// A duration in the invitation's words: "about 7 minutes", "about an
 /// hour", "about 1.4 hours", "under a minute".
 pub fn describe_seconds(s: f64) -> String {

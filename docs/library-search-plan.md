@@ -2372,6 +2372,198 @@ contact sheet.  No automatic grouping on these vectors gathers the
 far-apart matches without mixing; that is what the review and *Find
 more* are for.
 
+## As built — fursuit matching v2 (backend): whitened search vectors and the close-call judge
+
+Decided by the user on 2026-10-08 from the fursuit-identification
+research (791 labelled pairs in four time tiers, even/odd day hold-out):
+fursuits are told apart by the search model's own vectors, whitened over
+the library's heads, with Gemma 4 26B-A4B as an optional judge of the
+close calls.  DINOv2 is no longer run.
+
+### Stage 1: whitened SigLIP2 head vectors
+
+- **The vector** (`ml::heads`, `ml::worker::Models::embed_crops`): the
+  head step's crop (the box widened 12 % each side, square, black beyond
+  the edge) cut from the preview the step already reads, squashed to 256
+  and normalised as the search step's input, through the installed
+  SigLIP 2 image tower: 768 wide, unit length.  The helper's `FindHeads`
+  embeds the crops OWLv2 finds; `EmbedHeads` embeds known boxes (the
+  catch-up), checking each photo's content key first.
+- **The whitening** (`search::whiten`): the research's `rerank.py whiten
+  --k 256 --power 0.5`: mean, covariance over n, the top 256
+  eigenvectors each divided by `λ^¼ + 1e-6`; `unit((v − μ)Pᵀ)`.  The
+  eigen-decomposition is EISPACK's tred2/tql2 (JAMA's port), no new
+  dependency.  Fitted on a worker from the raw vector file once 8 000
+  heads have vectors (`MIN_HEADS`), refitted when a head scan or the
+  catch-up ends with new vectors and whenever the heads grow by a fifth;
+  kept as
+  `headwhiten-siglip2-b16-256.bin` (0600, keyed by the model's SHA and
+  the crop recipe).  A refit starts the grouping over; names and answers
+  survive (they point at `FaceRef`s).
+- **Rows in memory** are whitened (256 wide, f32); raw vectors stay on
+  disk (f16, `headvecs-siglip2-b16-256.bin`).
+- **Smaller libraries** (under 8 000 heads with vectors) group the raw
+  vectors with their own cut-offs (`heads::RAW_CUTOFFS`: group 0.094,
+  suggest 0.097, strict 0.0885; the judge band 0.082–0.124), chosen on
+  even days of the same labels at the whitened cut-offs' precisions and
+  held on odd days (91 %, 89 %, 89 %).  Why not a smaller whitening: on
+  the research library, a fit on fewer heads keeps the ranking (AUC
+  0.94–0.97 from 64 heads) but its distances drift from the cut-offs.
+  Fitted on the first days as the library grew, precision under the
+  suggest cut was 0.72 at 384 heads, 0.74–0.78 from 589 to 2 035, 0.85 at
+  3 158, 0.84 at 5 025 and 0.89 at 8 071 (the full fit: 0.90); random
+  subsets with k = n/2 gave 0.61 (64 heads) to 0.86–0.89 (455); one event
+  day of 668 heads fitted alone, 0.72, its 95 % cut at 0.46 instead of
+  0.67.  Raw vectors need no fit and hold 0.90 at any size (AUC
+  0.95/0.95/0.96/0.92), and inside each growing library their recall
+  matched or beat the small whitening's.  `HeadsStatus.whitened` says
+  which distance is in use; the switch regroups once.
+- **Cut-offs** (`heads::CUTOFFS`, whitened cosine distance, chosen on even
+  days): groups 0.69 (average linkage, no joining step), the review's
+  suggestions 0.711 (90 % precision), *Find more* 0.671 (95 %).  People's
+  `subjects::cutoff_for` is unchanged.
+- **The catch-up** (`Engine::catch_up_head_vectors`, `Why::Vectors`):
+  heads found before v2 have no SigLIP2 vector; the command reads their
+  photos again on the chosen device and embeds the known boxes.  Only
+  ever started by the command.  `HeadsStatus.vectors_missing` counts the
+  photos; `estimate::head_vector_seconds` the cost.
+- **Old caches:** `headvecs-dinov2-base.bin` is never read and never a
+  failure; it counts in the head cache's size and goes with *Clear*,
+  *Rebuild* and *Forget all fursuits*.  The `dinov2-base` model folder
+  counts under *Downloaded models* until *Delete* removes it; *Delete*
+  keeps the judges' folders, which Storage shows apart (`judge_bytes`).
+  Tests: `an_old_cache_with_dinov2_vectors_loads_and_is_cleared`,
+  `storage_counts_an_old_dinov2_layout_and_delete_removes_it`.
+
+### Stage 2: the close-call judge
+
+- **Runtime:** llama.cpp and libmtmd as submodules at the research's
+  commit (`vendor/llama.cpp` de7fa0a; `vendor/SPIRV-Headers` 86f980c,
+  which ggml-vulkan needs to build), built by `build.rs` with CMake as
+  static archives (Vulkan on, `-march=native` off, nothing downloaded);
+  `build.rs` refuses a submodule at another commit.  The binding is our
+  own: `native/judge_shim.cpp`, a dozen C functions (load on a named
+  device, ask one question, free), because no maintained crate binds
+  libmtmd at this commit and the surface needed is small.
+- **Helper:** `photo-pipeline --judge-worker` (`ml::judge_worker`), its
+  own process, JSON lines like the search helper.  It picks the card by
+  `ml::gpu` (Vulkan narrowed to it), gives llama.cpp that device alone,
+  asks for every layer and refuses anything less (`judge::check_offload`
+  reads llama.cpp's own "offloaded N/M layers" report); the projector runs
+  on the same device.  A failed load, too little memory or no card is a
+  card failure and the helper exits; nothing runs on the processor.  It
+  exits after two idle minutes; the card's memory goes with the process.
+- **Scoring, exactly the research's:** the head crop cut from the photo
+  itself (the JPG decoded at the largest reduction keeping the crop at
+  least 448 px; a RAW's largest preview), resized to 448 and encoded at
+  quality 92; 560 image tokens each; Gemma 4's template with thinking
+  off and the research's prompt 0; both orders, each a fresh prompt;
+  P(yes) from the first token's ten most likely candidates; the mean,
+  same suit at ≥ 0.6.
+- **Use** (`search::judging`, `Engine::judge_calls`): for a named fursuit
+  (never a cluster, a person or a pet), candidates under 0.639 are
+  offered at once unless either head's clarity is under 0.2
+  (`judging::CLARITY_MIN`: the confirmation round found the vectors
+  pulling dark, cut-off and turned-away heads together, 41 of its 54
+  bad-head pairs under sure-yes; judged, 13 stay offered), and those
+  under sure-yes but unclear or between 0.639 and 0.786 are close calls judged
+  in the background nearest first against the subject's nearest confirmed
+  head, at most 60 a request (`MAX_CLOSE_CALLS`; `Judged.beyond` says how
+  many wait).  `BgEvent::Suggestions` (sure matches and kept yes
+  verdicts), then `BgEvent::Judged` deltas.  Verdicts are kept per pair
+  and model (`judged-<model>.bin`, 0600), cleared with the index.
+  Suggestions only: the user answers every one.
+- **The card:** never loaded while a pass or a head scan runs (close calls
+  wait, `JudgeState::WaitingForCard`, and the judge is let go when one
+  starts); the search helper's idle sessions are let go before it loads.
+  With *Processor* chosen, or the judge failed or broken, a request is
+  answered with the vector cut-offs as with *Off*.  *Try the card again*
+  clears a failure.
+- **Stand-ins:** `PP_JUDGE_FAKE=yes|no|alternate|slow|card-fail|broken`
+  replaces the helper; `PP_JUDGE_FAKE_CARD=no-card|no-fit|crash` and
+  `PP_JUDGE_FAKE_OFFLOAD=<n>` make the real helper fail its card checks.
+
+### The second judge: Qwen3-VL-Reranker (2026-10-09)
+
+The user approved Qwen3-VL-Reranker-8B as a second choice, listed first
+(Off / Qwen3-VL-Reranker / Gemma 4; Off stays the default).
+
+- **Files:** mradermacher's Q8_0 GGUF and fp16 projector, pinned to the
+  repository's commit a0e8b54 by SHA-256 (tensor for tensor the
+  research's own conversion of Qwen's weights; within 0.034 of
+  PyTorch's scores on 52 pairs).  The same vendored llama.cpp and libmtmd,
+  no bump; never the server's `/rerank` (text only).
+- **Asked and scored as its official code:** the reranker's chat
+  template (system line, `<Instruct>`, the query image, the candidate
+  image, the assistant turn) with the research's instruct 0; head crop,
+  280 image tokens, both orders; score sigmoid(logit yes − logit no),
+  read from the top 100 candidates as the research did; same suit at a
+  mean of 0.45 (`judge::QWEN_P_YES_CUT`, a narrow good zone, 0.40–0.50 on
+  every set with a cliff above 0.55: derived again if the prompt, crop or
+  budget change).
+- **Per judge** (`JudgeChoice`): image tokens, prompt, score, threshold;
+  the helper takes `--judge <choice>`.  Verdicts are kept per model.  One
+  judge on the card at a time: choosing another waits for the loaded
+  helper to leave.  Storage counts each judge's folder.
+- **Measured through the helper** on the RX 7900 XTX: all 37 layers on
+  the card; load 1.8–3.5 s with the files cached; 661 prompt tokens a
+  question; on 40 of the research's pairs (its crops) the verdicts agree
+  40/40 with the research's llama.cpp scores, |ΔP| median 0.0012, largest
+  0.0050; 0.77–0.79 s a pair, both orders.  Card memory 0.36 GB before,
+  11.38 GB loaded (+11.0 GB), 0.36 GB after the helper is let go and
+  after its idle exit; a partial offload is refused as for Gemma.
+
+### Measured
+
+- **The whitening:** the app's fit against the research's numpy on the
+  same 10 826 SigLIP2 vectors: whitened distances agree to 1.6e-7 on
+  average, 9.5e-7 at worst, over 20 000 pairs.  Fit 2.5 s (the
+  eigen-decomposition; the same at 68 000 heads), whitening 68 000 heads
+  1.0 s, on the processor.
+- **The vectors through the helper** (`EmbedHeads` over the research's
+  7 033 photos, the app's preview crops): median cosine 0.990 to the
+  research's own (crops cut from the full photo; 5th percentile 0.92).
+  Whitened and scored on the 791 pairs: AUC 0.971/0.968/0.962/0.921 per
+  tier, recall at 95 % precision 101/110, 63/84, 78/102, 40/63, against
+  the research crops' 0.972/0.971/0.958/0.923 and 101, 64, 80, 42: the
+  same.  Cost (the catch-up's): 0.015 s a photo on the card with the
+  previews cached (7 033 photos in 106 s), 0.25 s a photo on the
+  processor.
+- **The judge in its helper** on the RX 7900 XTX: all 31 layers on the
+  card; load 2.3–5.8 s with the files cached; 1 204 prompt tokens a
+  question, as the research's server logged; on 40 of the research's
+  pairs (its crops) the verdicts agree 40/40 with the server's, |ΔP|
+  median 0.0000, largest 0.043; 2.06–2.12 s a pair, both orders (the
+  server: 2.30).  The card's memory: 1.25 GB before, 22.02 GB loaded
+  (+20.8 GB), 1.25 GB after the helper is let go, and again 1.25 GB after
+  it leaves on its own when idle.  With only 20 of 31 layers reported
+  (`PP_JUDGE_FAKE_OFFLOAD=20`) the helper refuses ("needs all 31 of its
+  layers on the graphics card, and only 20 fit") and gives the memory
+  back; nothing runs on the processor.
+- **The binary** grows by about 50 MB (ggml's Vulkan shaders); the first
+  build compiles llama.cpp in about 3 minutes.
+
+### Checked
+
+- People untouched: the same synthetic library through `FaceStore`,
+  `People` and `step` on main (0a3b9a2) and on v2 gives identical groups,
+  naming and suggestions (apart from the random subject id); people's
+  code and tests are unchanged except `cutoff_for` losing its DINOv2 arm.
+- The app's whitening against the research's numpy: whitened distances
+  agree to 1e-6 over 20 000 pairs.
+- Engine tests with the stand-in: the judge filters a fursuit subject's
+  close calls (sure matches at once, nearest first, against the nearest
+  member, nothing beyond the band asked, verdicts reused, nothing named),
+  the processor and a failed card fall back to the vector cut-offs, close
+  calls wait while a pass holds the card, groups come back when a
+  whitened library opens.
+
+### Open
+
+- The cut-offs and the band await the confirmation round's scoring.
+- A second judge (Qwen3-VL-Reranker) would be a `JudgeChoice` variant and
+  a model row; the helper's prompt and scoring are Gemma's.
+
 ## As built — phase 4 (UI): fursuits
 
 The Fursuits tab and the head step as the user sees them (§7a.4–7a.8,
@@ -2496,3 +2688,83 @@ heads-catchup|heads-off|heads-running [n]|heads-asking [photos]
   models* still said "the search model" (it holds the face and head
   models too, and Delete removes them all); the stand-in's skipped scan
   left nothing to offer.
+
+## As built — fursuit matching v2 (UI): the close-call judge
+
+The user-facing side of v2 (decided 2026-10-08): whitened search-model
+head vectors in place of DINOv2, and Gemma 4 as an optional judge of the
+close calls in *Find more* and the "Same fursuit?" review.
+
+### Where it lives
+
+- `src/app/fursuit_judge.rs`: the judge as the pages show it.
+  - `Run`, one request's verdicts, kept in `Subjects::judge`.
+  - `on_judged` takes `BgEvent::Judged`.
+  - The review's line over the strip, the strip's hollow tail tile, the status bar's slot, the band's left-out count, and their messages (`Message::Judge`).
+- The review (`subjects_review.rs`): the judge's offers join the END of the list (`Review::take`, deduped by each entry's first head), so nothing on screen moves and answers keep their places.
+  - What the judge left out joins too, marked, when *Show them* is pressed.
+  - An empty first list stays open while a judge is on (`waiting_page`), and the end page says when close calls are still coming.
+- Preferences ▸ Fursuits:
+  - *Close-call judge*, a radio list built from `JudgeChoice::ALL` and the registry's `choice: "judge"` rows, so another judge is a new variant and a row, not a new control.
+  - A line under the list says where the chosen judge stands: not downloaded (with *Download…*), downloading, the processor chosen, on the card now, or stopped.
+  - *Heads to update* with *Update them*.
+  - Storage ▸ *Close-call judge*, a row of its own with *Open* and *Delete…*.
+- The download dialog: `Dialog::judge(choice)` shows the judge's row and what it costs, runs on and keeps. Its progress, failure and status-bar words name the judge.
+- The Fursuits tab: `State::Vectors` (a page when no head has the new vectors yet), a card over the groups otherwise, and `Why::Vectors` progress with ×.
+- Glyph `CloseCall`: two rounded-square heads on a beam.
+
+### As designed, with these differences
+
+- **Choosing a judge not downloaded** opens the dialog in the main window (Preferences closes, as *Find their heads…* does). The choice is made when *Download* is pressed. If the download stops or fails, the choice stays, and Preferences offers *Download…* again.
+- **Off is never an empty state.** With the judge off, the review and Find more are exactly as before: no line, no tile, no hint to turn it on.
+  - The same holds whenever the judge can't run: not downloaded, the processor chosen, or stopped. The engine answers with the plain cut-offs and sends no `Judged`.
+  - The page asks `JudgeStatus::active(device)` before waiting for verdicts.
+  - Preferences says "close calls are matched by look alone" for each case.
+- **Speed in words** comes from the measured time a close call takes (2.3 s a pair, both orders): "About 2 seconds a close call", and in the dialog "(about 4 minutes for 100)".
+- **A failing card** is said in the review's line as two lines in the warning tone, with *Try the card again* and *Preferences*, and in the status bar. The run it stopped is told as "Checked 6 of 81 close calls before the judge stopped". The processor is never offered (`failure_words`, tested).
+- **The fursuit download** is now the head finder alone; the copy names it from the registry (`fursuits::models_name`).
+
+- **One ask, sixty close calls** (the backend's `judging::MAX_CLOSE_CALLS`). A finished run with more beyond says "N more can be checked" with *Check the next N*, which is the review's *Find more*. With the judge on, a new ask keeps the review's list and adds what is new at the end (`Review::append`), so answers and place stay.
+
+### Checked on the real engine
+
+All of this ran in a throwaway home: a copy of the relabel's v1 index (14,517 shots, 10,826 DINOv2-era heads), with the search and head models linked read-only. It ran through the card lock and never wrote to the library.
+- *Update the fursuit heads*:
+  - the page offered 7,033 photos ("about 6 minutes", 2.5 GB);
+  - it ran at about 25 photos a second on the card;
+  - groups appeared once whitened (160 to name by 2,000 photos);
+  - × kept what was done, and the rest was offered again.
+- The judge, under `PP_JUDGE_FAKE`:
+  - a group named, then the review;
+  - the sure suggestions came at once, and the judge's offers landed at the end of the list;
+  - *Find more* started a new run;
+  - the status bar and the review line followed `JudgeState`.
+- With `PP_JUDGE_FAKE=card-fail`, the review's line showed the failure in the warning tone, with *Try the card again* and *Preferences* and no processor offer. The run was told as stopped.
+- The real Gemma 4 judge (the integration build, its files linked read-only):
+  - it loaded, then the line said "Checking 135 close calls…, about 2 minutes left";
+  - the 60 new close calls took about 2 s each;
+  - the review kept its place while verdicts landed; *Show them* listed the 90 left out;
+  - Preferences said "Gemma 4 is on the graphics card now".
+- `PP_PROFILE=1`: the only slow updates are the test driver's (`update:Script`). `bg:Judged` and `update:Subjects` take well under a frame.
+
+### Two judges (the user, 2026-10-09)
+
+*Qwen3-VL-Reranker* joined as a second choice, listed first: *Off / Qwen3-VL-Reranker / Gemma 4*, with Off still the default.
+- **One list, built from data.** The rows come from `JudgeChoice::ALL` and the registry. The speed and load time are per judge (`estimate::judge_seconds_per_pair(choice)`, `judge_load_seconds(choice)`), and sizes are said in whole gigabytes ("About 10 GB", `fursuit_judge::model_size`).
+- **Switching.** Choosing a downloaded judge switches at once; the engine lets the loaded one go first, so only one is ever on the card. Choosing one not downloaded asks in its own download dialog. A judge not chosen keeps its files, and the list says so ("Qwen3-VL-Reranker stays downloaded (9.2 GB) and isn't loaded; Storage deletes it").
+- **Storage**:
+  - one row per judge (`Storage.judges`), each with *Open* and *Delete…*;
+  - deleting the chosen judge turns the judge off;
+  - deleting the other changes nothing else, and its confirmation says so.
+- The review's loading line names the judge ("Getting Qwen3-VL-Reranker ready for 60 close calls").
+
+### The stand-in
+
+`FakeFursuits` judges a named fursuit's close calls:
+- its own suit's held-back heads beyond the sure batch;
+- look-alikes, mixed in nearest first;
+- verdicts as the suit, with a few mistakes.
+
+The fake engine runs them a tick at a time. It waits while a pass, the head step or `judge-wait` holds the card, and it takes a few ticks to load. It sends `Judged` deltas as the engine does.
+
+`search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|judge-cardcrash|judge-broken|heads-vectors [n|all]` set its states.

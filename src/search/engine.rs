@@ -23,7 +23,10 @@ use crossbeam_channel::{Receiver, Sender};
 use parking_lot::Mutex;
 
 use super::faces::{FaceStore, People};
-use super::heads::{self, Decision as HeadDecision, Fursuits, HeadStore, Why as HeadWhy};
+use super::heads::{self, CloseCall, Decision as HeadDecision, Fursuits, HeadStore, Why as HeadWhy};
+use super::judging::{self, PairCache, PairKey, Runner, Task};
+use crate::ml::judge::{JudgeChoice, JudgeState, JudgeStatus, PairAsk};
+use crate::ml::judge_client::{JudgeError, JudgeFactory};
 use super::index::{Index, Key, PathEntry, Record};
 use super::parse::{self, Parsed};
 use super::tags::{Tags, VocabVectors};
@@ -77,6 +80,30 @@ enum Cmd {
     AnswerHeads(bool),
     StopHeads,
     FindMore { seq: u64, group: GroupId },
+    // Fursuit matching v2.
+    #[allow(dead_code)] // Sent by `catch_up_head_vectors`, which the pages call.
+    CatchUpHeadVectors,
+    /// Tests: whiten with fewer heads than a library needs.
+    #[cfg(test)]
+    MinFit(usize),
+    #[allow(dead_code)] // The judge API's, which the pages call.
+    SetJudge(JudgeChoice),
+    #[allow(dead_code)]
+    DownloadJudge(JudgeChoice),
+    #[allow(dead_code)]
+    DeleteJudge(JudgeChoice),
+    #[allow(dead_code)]
+    StopJudging,
+    /// From the judge's runner thread.
+    JudgeEvent(judging::Event),
+    /// Tests: the judge to use (a stand-in).
+    #[cfg(test)]
+    JudgeFactory(JudgeFactory),
+    /// Tests: whiten with this (hand-made vectors at chosen distances).
+    #[cfg(test)]
+    Whiten(Box<super::whiten::Whitening>),
+    /// A whitening fit finished on its worker (`None`: too few heads).
+    Whitened(Option<Box<super::whiten::Whitening>>),
     Shutdown,
 }
 
@@ -91,8 +118,16 @@ pub struct Storage {
     /// The faces found, their vectors and tiles (the *People* row; the
     /// user's names live elsewhere and aren't counted).
     pub faces_bytes: u64,
-    /// The head cache's files (the Storage row's *Fursuits*).
+    /// The head cache's files (the Storage row's *Fursuits*), vector
+    /// files of models no longer run included.
     pub heads_bytes: u64,
+    /// The close-call judges' model files (not in `models_bytes`), and
+    /// the verdicts kept beside the index (not in `index_bytes`; v2).
+    pub judge_bytes: u64,
+    /// Each judge's folder, in the list's order (0 when absent); they sum
+    /// to `judge_bytes`.
+    pub judges: Vec<(JudgeChoice, u64)>,
+    pub judged_bytes: u64,
 }
 
 /// The app's handle: one per app.
@@ -216,6 +251,14 @@ impl Engine {
                     embedder_has_heads: false,
                     heads_regroup_running: false,
                     heads_regroup_wanted: false,
+                    fitting: false,
+                    judge_factory: crate::ml::judge_client::factory(),
+                    judge_choice: JudgeChoice::Off,
+                    runner: None,
+                    verdicts: None,
+                    judge_state: JudgeState::Idle,
+                    judging: None,
+                    judge_token: 0,
                 }
                 .run()
             })
@@ -412,6 +455,65 @@ impl Engine {
     pub fn find_more(&self, seq: u64, group: GroupId) {
         self.send(Cmd::FindMore { seq, group });
     }
+
+    /// *Update N photos' heads* (v2): the heads found before fursuit
+    /// matching v2 get the search model's vectors, their photos read
+    /// again on the chosen device (`HeadsStatus::vectors_missing`, the
+    /// cost from `estimate::head_vector_seconds`).  Only ever started by
+    /// this command, never on its own.
+    #[allow(dead_code)] // Called by the pages (fursuit matching v2's UI branch).
+    pub fn catch_up_head_vectors(&self) {
+        self.send(Cmd::CatchUpHeadVectors);
+    }
+
+    /// Tests: whiten with as few as `n` heads.
+    #[cfg(test)]
+    pub fn set_min_fit(&self, n: usize) {
+        self.send(Cmd::MinFit(n));
+    }
+
+    /// Tests: judge close calls with this (a stand-in), not the helper.
+    #[cfg(test)]
+    pub fn set_judge_factory(&self, f: JudgeFactory) {
+        self.send(Cmd::JudgeFactory(f));
+    }
+
+    /// Tests: whiten the head vectors with `w`.
+    #[cfg(test)]
+    pub fn set_whitening(&self, w: super::whiten::Whitening) {
+        self.send(Cmd::Whiten(Box::new(w)));
+    }
+}
+
+/// The close-call judge (fursuit matching v2): Preferences ▸ Fursuits ▸
+/// *Close-call judge* and the review.  Suggestions only, fursuits only:
+/// the judge filters what `suggestions` and `find_more` offer for a
+/// fursuit subject (`BgEvent::Judged` after `BgEvent::Suggestions`);
+/// nothing is named, merged or marked by it.  Card only: with the
+/// processor chosen, or the judge failed, close calls use the vector
+/// cut-offs as with *Off*.
+#[allow(dead_code)] // Called by the pages (fursuit matching v2's UI branch).
+impl Engine {
+    /// The choice (*Off* or a judge).  Its model is downloaded by
+    /// [`Engine::download_judge`], never by this.
+    pub fn set_judge(&self, choice: JudgeChoice) {
+        self.send(Cmd::SetJudge(choice));
+    }
+
+    /// Download a judge's model (the dialog's progress events).
+    pub fn download_judge(&self, choice: JudgeChoice) {
+        self.send(Cmd::DownloadJudge(choice));
+    }
+
+    /// Delete a judge's model files (Preferences ▸ Storage).
+    pub fn delete_judge(&self, choice: JudgeChoice) {
+        self.send(Cmd::DeleteJudge(choice));
+    }
+
+    /// Stop judging the current close calls (they stay unjudged).
+    pub fn stop_judging(&self) {
+        self.send(Cmd::StopJudging);
+    }
 }
 
 impl Engine {
@@ -484,16 +586,27 @@ impl Engine {
 /// Sizes of the index and the models folders.  Walks them: call on a
 /// worker (the Preferences storage survey).
 pub fn storage(library_root: Option<&Path>) -> Storage {
+    storage_in(library_root.and_then(super::index::dir_for).as_deref(), models::models_dir().as_deref())
+}
+
+/// [`storage`] for an index folder and a models folder.  Every model
+/// folder counts, ones no longer used too (phase 4's DINOv2 stays
+/// counted until *Delete* removes it); the judges' folders are counted
+/// apart.
+pub fn storage_in(index_dir: Option<&Path>, models_dir: Option<&Path>) -> Storage {
     let mut out = Storage::default();
-    if let Some(dir) = library_root.and_then(super::index::dir_for) {
-        out.index_bytes = dir_bytes(&dir);
-        out.index_shots = super::index::count_rows(&dir);
-        out.faces_bytes = FaceStore::bytes_in(&dir);
-        out.heads_bytes = HeadStore::bytes_in(&dir);
-        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes);
+    if let Some(dir) = index_dir {
+        out.index_bytes = dir_bytes(dir);
+        out.index_shots = super::index::count_rows(dir);
+        out.faces_bytes = FaceStore::bytes_in(dir);
+        out.heads_bytes = HeadStore::bytes_in(dir);
+        out.judged_bytes = PairCache::bytes_in(dir);
+        out.index_bytes = out.index_bytes.saturating_sub(out.faces_bytes + out.heads_bytes + out.judged_bytes);
     }
-    if let Some(dir) = models::models_dir() {
-        out.models_bytes = dir_bytes(&dir);
+    if let Some(dir) = models_dir {
+        out.judges = JudgeChoice::ALL.iter().filter_map(|&c| Some((c, dir_bytes(&dir.join(c.model()?.dir_name()))))).collect();
+        out.judge_bytes = out.judges.iter().map(|j| j.1).sum();
+        out.models_bytes = dir_bytes(dir).saturating_sub(out.judge_bytes);
     }
     out
 }
@@ -603,6 +716,32 @@ struct Worker {
     embedder_has_heads: bool,
     heads_regroup_running: bool,
     heads_regroup_wanted: bool,
+    /// A whitening fit is on its worker (v2).
+    fitting: bool,
+    /// The close-call judge (v2): the choice, its runner (none until a
+    /// close call needs it), the verdicts kept (choice, index folder),
+    /// where it is, and the review it is judging for.
+    judge_factory: JudgeFactory,
+    judge_choice: JudgeChoice,
+    runner: Option<Runner>,
+    verdicts: Option<(JudgeChoice, Option<PathBuf>, PairCache)>,
+    judge_state: JudgeState,
+    judging: Option<Judging>,
+    judge_token: u64,
+}
+
+/// The close calls of the request being judged.
+struct Judging {
+    seq: u64,
+    group: GroupId,
+    token: u64,
+    calls: Vec<CloseCall>,
+    /// Indices into `calls` still to judge, nearest first.
+    pending: Vec<usize>,
+    done: usize,
+    total: usize,
+    /// Close calls past the cap, left for the next request.
+    beyond: usize,
 }
 
 /// A running head scan.
@@ -694,6 +833,7 @@ impl Worker {
                             self.offer_head_scan(why, asked);
                         }
                     }
+                    self.publish_judge();
                 }
                 Cmd::StopIndexing => {
                     if let Some(p) = &self.pass {
@@ -716,6 +856,11 @@ impl Worker {
                     });
                     self.fursuits.card_back();
                     self.publish_heads();
+                    if matches!(self.judge_state, JudgeState::Failed(_)) {
+                        self.runner = None;
+                        self.judge_state = JudgeState::Idle;
+                        self.publish_judge();
+                    }
                     self.resume_pass();
                 }
                 Cmd::SetDevice(d) => {
@@ -725,6 +870,13 @@ impl Worker {
                         self.cancel_scan();
                         self.drop_embedder();
                         self.device = d;
+                        // The judge runs on the card or not at all.
+                        self.forget_judging();
+                        self.drop_runner();
+                        if matches!(self.judge_state, JudgeState::Failed(_)) {
+                            self.judge_state = JudgeState::Idle;
+                        }
+                        self.publish_judge();
                         self.fursuits.card_back();
                         self.publish_heads();
                         let stopped_by_card = matches!(self.shared.status.lock().stopped, Some(Stopped::Card(_)));
@@ -760,6 +912,7 @@ impl Worker {
                     self.cancel_scan();
                     self.fursuits.forget_all();
                     self.fursuits.reset_grouping();
+                    self.forget_verdicts();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -787,6 +940,7 @@ impl Worker {
                     self.cancel_scan();
                     self.fursuits.forget_all();
                     self.fursuits.reset_grouping();
+                    self.forget_verdicts();
                     self.publish_subjects();
                     self.tried.clear();
                     self.resolver = None;
@@ -801,7 +955,7 @@ impl Worker {
                     self.cancel_pass();
                     self.drop_embedder();
                     if let Some(dir) = models::models_dir() {
-                        let _ = std::fs::remove_dir_all(dir);
+                        models::delete_all_but_judges(&dir);
                     }
                     self.update(|s| s.models_installed = false);
                 }
@@ -867,6 +1021,7 @@ impl Worker {
                             self.cancel_scan();
                             self.fursuits.forget_all();
                             self.fursuits.reset_grouping();
+                            self.forget_verdicts();
                             self.people.set_other_clusters(Kind::Fursuit, Vec::new());
                             self.publish_heads();
                         }
@@ -913,6 +1068,64 @@ impl Worker {
                     self.publish_heads();
                 }
                 Cmd::StopHeads => self.cancel_scan(),
+                Cmd::CatchUpHeadVectors => self.catch_up_head_vectors(),
+                #[cfg(test)]
+                Cmd::MinFit(n) => self.fursuits.min_fit = n,
+                #[cfg(test)]
+                Cmd::Whiten(w) => {
+                    let _ = self.me.send(Cmd::Whitened(Some(w)));
+                }
+                #[cfg(test)]
+                Cmd::JudgeFactory(f) => {
+                    self.runner = None;
+                    self.judge_factory = f;
+                }
+                Cmd::SetJudge(choice) => {
+                    if choice != self.judge_choice {
+                        self.forget_judging();
+                        // One judge on the card at a time: the one loaded
+                        // leaves (its process gone) before another loads.
+                        self.drop_runner();
+                        self.verdicts = None;
+                        self.judge_choice = choice;
+                        self.judge_state = JudgeState::Idle;
+                    }
+                    self.publish_judge();
+                }
+                Cmd::DownloadJudge(choice) => {
+                    if let Some(m) = choice.model() {
+                        self.download_missing(&[m]);
+                    }
+                }
+                Cmd::DeleteJudge(choice) => {
+                    if choice == self.judge_choice {
+                        self.forget_judging();
+                        self.drop_runner();
+                    }
+                    if let Some(dir) = choice.model().and_then(models::model_dir) {
+                        let _ = std::fs::remove_dir_all(dir);
+                    }
+                    self.publish_judge();
+                }
+                Cmd::StopJudging => {
+                    self.forget_judging();
+                    if !matches!(self.judge_state, JudgeState::Failed(_) | JudgeState::Broken(_)) {
+                        self.judge_state = JudgeState::Idle;
+                    }
+                    self.publish_judge();
+                }
+                Cmd::JudgeEvent(e) => self.on_judge_event(e),
+                Cmd::Whitened(w) => {
+                    self.fitting = false;
+                    if self.fursuits.apply_fit(w.map(|b| *b)) {
+                        self.people.set_other_clusters(Kind::Fursuit, Vec::new());
+                        self.publish_subjects();
+                        self.start_heads_regroup();
+                        self.publish_heads();
+                    }
+                    // Heads that arrived meanwhile may call for another.
+                    self.maybe_fit(false);
+                }
                 Cmd::Undo => {
                     if let Some(what) = self.people.undo() {
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
@@ -950,6 +1163,10 @@ impl Worker {
             let _ = ix.save_paths();
         }
         self.drop_embedder();
+        // The judge's helper leaves with the engine (its card memory too).
+        if let Some(r) = self.runner.take() {
+            r.judge().unload();
+        }
     }
 
     fn update(&self, f: impl FnOnce(&mut Status)) {
@@ -1030,6 +1247,14 @@ impl Worker {
         let r = if self.fursuits.is_fursuit_group(&self.people.file, &group) {
             // The head vectors in memory first (the fursuit work asks).
             self.fursuits.step();
+            // A fursuit subject's close calls go to the judge when it
+            // can run (v2); otherwise the vector cut-offs, as before.
+            if self.judge_status().active(self.device) {
+                if let Some(calls) = self.fursuits.close_calls(&self.people.file, &group, &|f| self.resolve_face(f)) {
+                    self.judge_calls(seq, group, calls);
+                    return;
+                }
+            }
             self.fursuits.suggestions(&self.people.file, &group, &|f| self.resolve_face(f), strict)
         } else {
             self.people.suggestions(&group, &|f| self.resolve_face(f), strict)
@@ -1050,6 +1275,235 @@ impl Worker {
         if self.fursuits.release_if_idle(Instant::now()) && std::env::var_os("PP_PROFILE").is_some() {
             eprintln!("subjects: fursuit vectors released after {:?} idle", Fursuits::VECTORS_IDLE);
         }
+        // The judge's helper leaves after two idle minutes on its own;
+        // the status follows.  Close calls held for the card carry on.
+        let loaded = self.runner.as_ref().is_some_and(Runner::loaded);
+        if loaded != self.shared.status.lock().judge.loaded {
+            self.publish_judge();
+        }
+        self.judge_resume();
+    }
+
+    // ---- the close-call judge (v2) ----
+
+    /// Let the judge's helper go now and wait for it to leave, so its
+    /// card memory is back before anything else loads.
+    fn drop_runner(&mut self) {
+        if let Some(r) = self.runner.take() {
+            r.judge().unload();
+        }
+    }
+
+    /// The judge as the pages see it.
+    fn judge_status(&self) -> JudgeStatus {
+        let downloaded = JudgeChoice::ALL.iter().copied().filter(|c| c.model().is_some_and(|m| (self.installed)(m))).collect();
+        JudgeStatus { choice: self.judge_choice, downloaded, loaded: self.runner.as_ref().is_some_and(Runner::loaded), state: self.judge_state.clone() }
+    }
+
+    fn publish_judge(&mut self) {
+        let j = self.judge_status();
+        self.update(|s| s.judge = j);
+    }
+
+    /// The verdicts kept for the chosen judge in this library's folder.
+    fn verdicts(&mut self) -> &mut PairCache {
+        let dir = self.index.as_ref().map(|ix| ix.dir.clone());
+        let valid = matches!(&self.verdicts, Some((c, d, _)) if *c == self.judge_choice && *d == dir);
+        if !valid {
+            let cache = match &dir {
+                Some(d) => PairCache::open(d, self.judge_choice),
+                None => PairCache::none(),
+            };
+            self.verdicts = Some((self.judge_choice, dir, cache));
+        }
+        &mut self.verdicts.as_mut().expect("just made").2
+    }
+
+    /// The verdicts go (Clear, Rebuild, the fursuits forgotten).
+    fn forget_verdicts(&mut self) {
+        self.forget_judging();
+        if let Some(ix) = &self.index {
+            PairCache::forget_in(&ix.dir);
+        }
+        self.verdicts = None;
+    }
+
+    /// The review being judged is dropped (its close calls stay
+    /// unjudged; the helper stays loaded until it idles).
+    fn forget_judging(&mut self) {
+        self.judging = None;
+        if let Some(r) = &self.runner {
+            r.keep(0);
+        }
+    }
+
+    /// A fursuit subject's suggestions with the judge: the sure matches
+    /// and the close calls already judged at once (`Suggestions`, then a
+    /// first `Judged` with those left out), the rest judged in the
+    /// background, nearest first.
+    fn judge_calls(&mut self, seq: u64, group: GroupId, calls: Vec<CloseCall>) {
+        self.forget_judging();
+        let (mut offered, mut left_out, mut pending) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut done, mut total) = (0, 0);
+        for (i, c) in calls.iter().enumerate() {
+            if c.sure {
+                offered.push(c.faces.clone());
+                continue;
+            }
+            total += 1;
+            match self.verdicts().get(c.candidate, c.member) {
+                Some(v) => {
+                    done += 1;
+                    if v.same(self.judge_choice) { offered.push(c.faces.clone()) } else { left_out.push(c.faces.clone()) }
+                }
+                None => pending.push(i),
+            }
+        }
+        // The nearest close calls only; the rest wait for the next request.
+        let later = pending.len().saturating_sub(judging::MAX_CLOSE_CALLS);
+        pending.truncate(judging::MAX_CLOSE_CALLS);
+        total -= later;
+        let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group: group.clone(), list: Arc::new(offered) });
+        let _ = self.bus.unbounded_send(BgEvent::Judged { seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total, beyond: later });
+        self.judge_token += 1;
+        let token = self.judge_token;
+        let empty = pending.is_empty();
+        self.judging = Some(Judging { seq, group, token, calls, pending, done, total, beyond: later });
+        if empty {
+            self.judge_state = JudgeState::Idle;
+            self.publish_judge();
+        } else {
+            self.judge_go();
+        }
+    }
+
+    /// Hand the pending close calls to the runner: never while a pass or
+    /// a head scan holds the card (they wait, "waiting for the card"),
+    /// and with the search helper's idle card memory let go first.
+    fn judge_go(&mut self) {
+        // A pass's end drops the key → shot table; the crops need it.
+        self.ensure_resolver();
+        let Some(j) = &self.judging else { return };
+        if j.pending.is_empty() {
+            return;
+        }
+        if self.pass.is_some() || self.scan.is_some() {
+            self.judge_state = JudgeState::WaitingForCard;
+            self.publish_judge();
+            return;
+        }
+        let token = j.token;
+        let items: Vec<(usize, crate::model::subjects::Face, FaceRef, FaceRef)> = j.pending.iter().map(|&i| (i, j.calls[i].faces[0].clone(), j.calls[i].candidate, j.calls[i].member)).collect();
+        let mut tasks = Vec::new();
+        let mut unshowable = Vec::new();
+        for (i, face, cand, member) in items {
+            match (self.judge_crop(&face), self.resolve_face(&member).and_then(|f| self.judge_crop(&f))) {
+                (Some(a), Some(b)) => tasks.push(Task { token, key: PairKey::new(cand, member), ask: PairAsk { a, b } }),
+                // A photo no longer in the library: nothing to show, so
+                // nothing to judge; it counts as done, offered nowhere.
+                _ => unshowable.push(i),
+            }
+        }
+        let j = self.judging.as_mut().expect("judging");
+        j.pending.retain(|i| !unshowable.contains(i));
+        j.done += unshowable.len();
+        let (group, done, total) = (j.group.clone(), j.done, j.total);
+        if !unshowable.is_empty() {
+            let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(Vec::new()), done, total, beyond: j.beyond });
+        }
+        if tasks.is_empty() {
+            self.judge_state = JudgeState::Idle;
+            self.publish_judge();
+            return;
+        }
+        // The search helper's sessions on the card go while the judge
+        // works (they come back with the next query or pass).
+        if self.device == Device::Gpu && !self.runner.as_ref().is_some_and(Runner::loaded) {
+            self.drop_embedder();
+        }
+        if self.runner.is_none() {
+            let me = self.me.clone();
+            self.runner = Some(Runner::start(self.judge_choice, &self.judge_factory, move |e| drop(me.send(Cmd::JudgeEvent(e)))));
+        }
+        let runner = self.runner.as_ref().expect("a runner");
+        runner.keep(token);
+        runner.ask(tasks);
+        self.judge_state = JudgeState::Judging { group, done, total };
+        self.publish_judge();
+    }
+
+    /// The crop a judge is shown of a head: its photo (the JPG the head
+    /// was found on, else the RAW) and its box.
+    fn judge_crop(&self, f: &crate::model::subjects::Face) -> Option<crate::ml::judge::Crop> {
+        let (path, t) = match (&f.jpg, &f.raw) {
+            (Some(j), _) => (j, FileType::Jpg),
+            (None, Some(r)) => (r, FileType::Raw),
+            _ => return None,
+        };
+        Some(judging::crop(path, t, &f.face))
+    }
+
+    /// A pass or a head scan wants the card: the judge lets it go now;
+    /// the close calls left wait.
+    fn judge_yield(&mut self) {
+        if let Some(r) = &self.runner {
+            r.unload();
+        }
+        if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
+            self.judge_state = JudgeState::WaitingForCard;
+        }
+        self.publish_judge();
+    }
+
+    /// The card is free again: close calls held for it carry on.
+    fn judge_resume(&mut self) {
+        if matches!(self.judge_state, JudgeState::WaitingForCard) && self.pass.is_none() && self.scan.is_none() {
+            self.judge_go();
+        }
+    }
+
+    fn on_judge_event(&mut self, e: judging::Event) {
+        match e {
+            judging::Event::Loading => {
+                if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
+                    self.judge_state = JudgeState::Loading;
+                }
+            }
+            judging::Event::Judged { token, key, result } => {
+                if let Ok(v) = &result {
+                    let choice = self.judge_choice;
+                    if let Err(err) = self.verdicts().add(&[(key, *v)], choice) {
+                        eprintln!("judge: couldn't keep a verdict: {err}");
+                    }
+                }
+                let Some(j) = self.judging.as_mut().filter(|j| j.token == token) else { return };
+                let Some(pos) = j.pending.iter().position(|&i| PairKey::new(j.calls[i].candidate, j.calls[i].member) == key) else { return };
+                let i = j.pending.remove(pos);
+                j.done += 1;
+                let (mut offered, mut left_out) = (Vec::new(), Vec::new());
+                match &result {
+                    Ok(v) if v.same(self.judge_choice) => offered.push(j.calls[i].faces.clone()),
+                    Ok(_) => left_out.push(j.calls[i].faces.clone()),
+                    Err(why) => eprintln!("judge: a close call couldn't be judged: {why}"),
+                }
+                let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: j.group.clone(), offered: Arc::new(offered), left_out: Arc::new(left_out), done: j.done, total: j.total, beyond: j.beyond });
+                self.judge_state = if j.pending.is_empty() { JudgeState::Idle } else { JudgeState::Judging { group: j.group.clone(), done: j.done, total: j.total } };
+            }
+            judging::Event::Idle => {
+                if self.judging.as_ref().is_none_or(|j| j.pending.is_empty()) && !matches!(self.judge_state, JudgeState::WaitingForCard) {
+                    self.judge_state = JudgeState::Idle;
+                }
+            }
+            judging::Event::Failed(err) => {
+                self.runner = None;
+                self.judging = None;
+                self.judge_state = match err {
+                    JudgeError::Card(f) => JudgeState::Failed(f),
+                    JudgeError::Broken(m) => JudgeState::Broken(m),
+                };
+            }
+        }
+        self.publish_judge();
     }
 
     /// The two head models are in place.
@@ -1093,13 +1547,17 @@ impl Worker {
             return;
         }
         let Some(root) = self.library.as_ref().map(|l| l.root.clone()) else { return };
-        if !self.embedder_has_heads {
+        // Finding heads needs a helper with the detector; the catch-up
+        // (known boxes) any image helper.
+        let finding = jobs.iter().all(|j| j.boxes.is_empty());
+        if finding && !self.embedder_has_heads {
             self.drop_embedder();
         }
         let Some(embedder) = self.image_embedder() else {
             self.fursuits.stop();
             return;
         };
+        self.judge_yield();
         let (tx, rx) = crossbeam_channel::unbounded::<heads::HeadBatch>();
         let handle = heads::start(root, jobs, embedder, move |b| drop(tx.send(b)));
         self.scan = Some(HeadScan { handle, batches: rx });
@@ -1114,6 +1572,7 @@ impl Worker {
         }
         let over = self.fursuits.absorb(&batch);
         self.fursuits.assign_new(&self.people.file);
+        self.maybe_fit(over);
         if over {
             self.scan = None;
             if let Some(fin) = &batch.finished {
@@ -1127,10 +1586,51 @@ impl Worker {
             self.publish_subjects();
             self.start_heads_regroup();
             self.maybe_index_new();
+            self.judge_resume();
         } else {
             self.publish_heads();
             self.publish_subjects_throttled(false);
         }
+    }
+
+    /// Fit the whitening again on a worker when it is due (v2:
+    /// `Fursuits::fit_wanted`); `Cmd::Whitened` brings it back.  One at a
+    /// time.
+    fn maybe_fit(&mut self, at_end: bool) {
+        if self.fitting || !self.fursuits.fit_wanted(at_end) {
+            return;
+        }
+        let Some(dir) = self.fursuits.store.as_ref().map(|s| s.dir().to_path_buf()) else { return };
+        let min = self.fursuits.min_fit;
+        self.fitting = true;
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("fursuits-whiten".into())
+            .spawn(move || {
+                let t = Instant::now();
+                let w = HeadStore::fit_whitening(&dir, min);
+                if let Some(w) = &w {
+                    eprintln!("heads: whitening fitted on {} heads in {:.2} s", w.fitted_on, t.elapsed().as_secs_f64());
+                }
+                let _ = me.send(Cmd::Whitened(w.map(Box::new)));
+            })
+            .expect("spawn fursuits-whiten");
+    }
+
+    /// The v2 catch-up, asked for: the heads without vectors get them,
+    /// on the chosen device, as a head scan (never beside a pass).
+    fn catch_up_head_vectors(&mut self) {
+        if self.pass.is_some() || self.scan.is_some() || !self.models_ready() {
+            return;
+        }
+        let jobs = {
+            let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return };
+            self.fursuits.vector_jobs(lib, ix)
+        };
+        if self.fursuits.start_catch_up(&jobs) {
+            self.run_head_scan(jobs);
+        }
+        self.publish_heads();
     }
 
     fn cancel_scan(&mut self) {
@@ -1142,6 +1642,7 @@ impl Worker {
         }
         self.fursuits.stop();
         self.publish_heads();
+        self.judge_resume();
     }
 
     /// Group the faces again on a worker thread (`Cmd::Regrouped` brings
@@ -1263,6 +1764,8 @@ impl Worker {
             }
             *self.shared.head_tiles.lock() = self.fursuits.store.as_ref().map(HeadStore::tiles);
             self.resolver = None;
+            // Vectors without a whitening (an interrupted catch-up): fit.
+            self.maybe_fit(false);
         }
         let live: HashSet<PathBuf> = lib.days.values().flat_map(|d| d.files.iter().map(|f| pass::rel_path(&lib.root, &f.path))).collect();
         if let Some(ix) = &mut self.index {
@@ -1282,6 +1785,11 @@ impl Worker {
             self.people.reset_grouping();
             self.fursuits.reset_grouping();
             self.start_regroup();
+            // The fursuits' groups too, once a whitening is fitted (v2):
+            // their rows are built for it and let go again when idle.
+            if self.fursuits.store.as_ref().is_some_and(|s| s.whitening().is_some()) {
+                self.start_heads_regroup();
+            }
         }
         self.publish_subjects();
         if root_changed {
@@ -1434,6 +1942,7 @@ impl Worker {
         let (tx, rx) = crossbeam_channel::unbounded::<pass::Batch>();
         let total = jobs.len();
         let req = pass::Request { root, jobs, total, want: Want::faces_only() };
+        self.judge_yield();
         let handle = pass::start(req, embedder, 0, move |b| drop(tx.send(b)));
         self.pass = Some(Running { handle, kind: PassKind::Faces, batches: rx });
         self.update(|s| {
@@ -1616,6 +2125,7 @@ impl Worker {
         let already = plan.unchanged + plan.unreadable;
         let want = if self.find_faces && self.faces_ready() { Want::with_faces() } else { Want::search() };
         let req = pass::Request { root, jobs: plan.jobs, total, want };
+        self.judge_yield();
         let handle = pass::start(req, embedder, already, move |b| drop(tx.send(b)));
         self.pass = Some(Running { handle, kind, batches: rx });
         self.update(|s| {
@@ -1684,6 +2194,7 @@ impl Worker {
                     PassKind::Rebuild | PassKind::Faces => {}
                 }
             }
+            self.judge_resume();
         } else {
             self.update(|s| {
                 s.pass = Some(PassProgress { kind, done: batch.done, total: batch.total, oldest_day: batch.oldest_day });
@@ -2574,6 +3085,334 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Fursuit heads at chosen distances: a file `NNNN-fursuit-90-<a>`
+    /// has one head whose 2-wide vector lies at angle `<a>` (degrees
+    /// tenths, `m` for minus), so its cosine distance to the head at 0 is
+    /// `1 − cos a`.  Search vectors as [`Axes`] (so the files are tagged
+    /// fursuit).
+    struct Suits;
+
+    impl Suits {
+        fn angle(stem: &str) -> f32 {
+            let last = stem.rsplit('-').next().unwrap_or("0");
+            let (sign, digits) = match last.strip_prefix('m') {
+                Some(d) => (-1.0, d),
+                None => (1.0, last.trim_start_matches('p')),
+            };
+            sign * digits.parse::<f32>().unwrap_or(0.0) / 10.0
+        }
+
+        /// The tenths-of-a-degree angle at cosine distance `d` from 0.
+        fn at(d: f32) -> i32 {
+            ((1.0 - d).acos().to_degrees() * 10.0).round() as i32
+        }
+    }
+
+    impl Embedder for Suits {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            Axes.device_report()
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            Axes.embed_images(files, want)
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Axes.encode_text(texts)
+        }
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            Ok(files
+                .iter()
+                .map(|(p, _)| {
+                    let stem = crate::util::stem(p);
+                    let a = Suits::angle(&stem).to_radians();
+                    let key = Key::of(1, p.as_os_str().as_encoded_bytes());
+                    // `-dim-` in the name: a small, soft, doubtful head (clarity 0).
+                    let (size, sharpness, score) = if stem.contains("-dim-") { (100, 0.0, 0.3) } else { (300, 0.2, 0.5) };
+                    let heads = vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score, size, sharpness, vector: vec![a.cos(), a.sin()], tile: Vec::new() }];
+                    crate::ml::heads::HeadsResult { path: p.clone(), result: Ok(crate::ml::heads::PhotoHeads { key, heads }) }
+                })
+                .collect())
+        }
+    }
+
+    /// What the review was sent for request `seq`: the `Suggestions`
+    /// list, then each `Judged` (offered, left out, done, total), until
+    /// one has `done == total` (or none comes within `wait`).
+    #[allow(clippy::type_complexity)]
+    fn review(ev: &mut Events, seq: u64, wait: Duration) -> (Option<Vec<Vec<Face>>>, Vec<(Vec<Vec<Face>>, Vec<Vec<Face>>, usize, usize)>) {
+        let stream = &mut ev.stream;
+        ev.rt.block_on(async {
+            use iced::futures::StreamExt;
+            let deadline = Instant::now() + wait;
+            let (mut list, mut judged) = (None, Vec::new());
+            while Instant::now() < deadline {
+                let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await else { continue };
+                for e in batch {
+                    match e {
+                        BgEvent::Suggestions { seq: s, list: l, .. } if s == seq => list = Some((*l).clone()),
+                        BgEvent::Judged { seq: s, offered, left_out, done, total, .. } if s == seq => {
+                            let last = done == total;
+                            judged.push(((*offered).clone(), (*left_out).clone(), done, total));
+                            if last {
+                                return (list, judged);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (list, judged)
+        })
+    }
+
+    /// The close-call judge through the engine (fursuit matching v2),
+    /// with the stand-in: a fursuit subject's sure matches come at once,
+    /// its close calls are judged nearest first against its nearest
+    /// member and offered or left out as the judge says; a candidate
+    /// beyond the band is never asked about; verdicts are kept, so asking
+    /// again costs nothing; nothing is named, merged or marked by the
+    /// judge; with the processor chosen the vector cut-offs answer and no
+    /// judge runs; a failing card stops the judge and says so, and the
+    /// next review falls back to the vector cut-offs.
+    #[test]
+    fn the_judge_filters_a_fursuit_subjects_close_calls_and_never_names() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}{}", if n == 7 { "dim-" } else { "" }, if a < 0 { "m" } else { "p" }, a.abs());
+        // The member at 0; one that groups with it (0.3); a sure match
+        // (0.6) and a doubtful one under sure-yes too (0.55, a dim head:
+        // the judge sees it); two close calls (0.70, 0.75); one beyond the
+        // band (0.9).
+        let specs = [(1, 0), (2, Suits::at(0.3)), (3, -Suits::at(0.6)), (4, -Suits::at(0.70)), (5, -Suits::at(0.75)), (6, -Suits::at(0.9)), (7, -Suits::at(0.55))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("judge", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Alternate));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.on_library(lib);
+        wait_for(&e, "the library", |s| s.library_shots == 7);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 7 && s.heads.step == heads::Step::Idle);
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        // The member's group (with the 0.3 head) named as a fursuit.
+        let key_of = |n: u32| Key::of(1, lib_path(&d, &files[n as usize - 1]).as_os_str().as_encoded_bytes());
+        let started = Instant::now();
+        let cluster = loop {
+            let g = e.subjects().groups.iter().find(|g| g.kind == Kind::Fursuit && g.cover.face.key == key_of(1) || g.kind == Kind::Fursuit && g.cover.face.key == key_of(2)).map(|g| (g.id.clone(), g.photos));
+            if let Some((id, 2)) = g {
+                break id;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "no group of the member: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        e.name_group(cluster, "Suit".into());
+        let started = Instant::now();
+        let suit = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let keys = |l: &[Vec<Face>]| -> Vec<Key> { l.iter().map(|b| b[0].face.key).collect() };
+        // Off: the vector cut-offs (0.711), as before: the dim head, the
+        // sure match and the 0.70 one, nearest first.
+        e.suggestions(1, suit.clone());
+        let (list, judged) = review(&mut ev, 1, Duration::from_millis(800));
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)]);
+        assert!(judged.is_empty(), "no judge: no verdicts");
+        // The judge on: the clear sure match at once; the dim head under
+        // sure-yes and the two close calls judged, nearest first.
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "the choice", |s| s.judge.choice == JudgeChoice::Gemma4 && s.judge.active(Device::Gpu));
+        e.suggestions(2, suit.clone());
+        let (list, judged) = review(&mut ev, 2, Duration::from_secs(5));
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(3)], "only the clear sure match before the judge");
+        assert_eq!((judged[0].2, judged[0].3), (0, 3), "the first Judged: nothing judged yet; the dim head counts as a close call");
+        let offered: Vec<Key> = judged.iter().flat_map(|j| keys(&j.0)).collect();
+        let left: Vec<Key> = judged.iter().flat_map(|j| keys(&j.1)).collect();
+        assert_eq!((offered, left), (vec![key_of(7), key_of(5)], vec![key_of(4)]), "nearest first: yes, no, yes");
+        {
+            let asked = fake.pairs.lock();
+            assert_eq!(asked.len(), 3, "the head beyond the band is never asked about");
+            for p in asked.iter() {
+                assert!(matches!(&p.b, crate::ml::judge::Crop::Head { key, .. } if *key == key_of(1)), "against the nearest member");
+            }
+        }
+        // Asked again: the verdicts kept answer at once.
+        e.suggestions(3, suit.clone());
+        let (list, judged) = review(&mut ev, 3, Duration::from_secs(2));
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(5)]);
+        assert_eq!(judged.len(), 1);
+        assert_eq!((keys(&judged[0].1), judged[0].2, judged[0].3), (vec![key_of(4)], 3, 3));
+        assert_eq!(fake.pairs.lock().len(), 3, "nothing judged twice");
+        // Nothing named or merged by the judge: the suit is as named.
+        let g = e.subjects().groups.iter().find(|g| g.id == suit).cloned().unwrap();
+        assert_eq!(g.photos, 2);
+        // Another judge chosen: the loaded one leaves first (one on the
+        // card at a time); its verdicts stay its own.
+        assert!(crate::ml::judge_client::Judge::loaded(fake.as_ref()));
+        e.set_judge(JudgeChoice::Qwen3VlReranker);
+        wait_for(&e, "Qwen chosen", |s| s.judge.choice == JudgeChoice::Qwen3VlReranker);
+        assert!(!crate::ml::judge_client::Judge::loaded(fake.as_ref()), "Gemma let go before another loads");
+        e.suggestions(30, suit.clone());
+        let (_, judged) = review(&mut ev, 30, Duration::from_secs(5));
+        assert_eq!((judged[0].2, judged[0].3), (0, 3), "Qwen keeps no verdicts of Gemma's");
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "Gemma again", |s| s.judge.choice == JudgeChoice::Gemma4);
+        // The processor: no judge, the vector cut-offs.
+        e.set_device(Device::Cpu);
+        wait_for(&e, "the processor", |s| s.device.chosen == Device::Cpu);
+        e.suggestions(4, suit.clone());
+        let (list, judged) = review(&mut ev, 4, Duration::from_millis(800));
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)]);
+        assert!(judged.is_empty(), "card only: no judging on the processor");
+        // A failing card: reported, judging stops; the next review uses
+        // the vector cut-offs.
+        e.set_device(Device::Gpu);
+        e.set_judge_factory(Box::new(|_| Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::CardFail)) as Arc<dyn crate::ml::judge_client::Judge>));
+        e.forget_kind(Kind::Pet); // a no-op command, to order the queue
+        let _ = std::fs::remove_file(d.join("index").join("judged-gemma4-26b-a4b-it-ud-q4km.bin"));
+        e.set_judge(JudgeChoice::Off);
+        e.set_judge(JudgeChoice::Gemma4);
+        e.suggestions(5, suit.clone());
+        wait_for(&e, "the card failure", |s| matches!(s.judge.state, crate::ml::judge::JudgeState::Failed(_)));
+        assert!(!e.status().judge.active(Device::Gpu));
+        e.suggestions(6, suit.clone());
+        let (list, judged) = review(&mut ev, 6, Duration::from_millis(800));
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)], "the vector cut-offs");
+        assert!(judged.is_empty());
+        e.try_card_again();
+        wait_for(&e, "tried again", |s| matches!(s.judge.state, crate::ml::judge::JudgeState::Idle));
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// [`Suits`], with search embedding held back while `slow` is set (a
+    /// pass that keeps the card busy).
+    struct SlowSuits(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Embedder for SlowSuits {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            Suits.device_report()
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            while self.0.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Suits.embed_images(files, want)
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Suits.encode_text(texts)
+        }
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            Suits.find_heads(files)
+        }
+    }
+
+    /// The judge never takes the card while a pass holds it: close calls
+    /// asked for during a pass wait ("waiting for the card"), nothing is
+    /// judged, and they are judged once the pass ends.
+    #[test]
+    fn close_calls_wait_for_the_card_while_a_pass_runs() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.3)), (3, -Suits::at(0.70)), (4, -Suits::at(0.75))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("judge-wait", &refs);
+        let slow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = slow.clone();
+        let factory: EmbedderFactory = Box::new(move |_| Ok(Arc::new(SlowSuits(s2.clone())) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Yes));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.set_judge(JudgeChoice::Gemma4);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key1 = Key::of(1, lib_path(&d, &files[0]).as_os_str().as_encoded_bytes());
+        let started = Instant::now();
+        let cluster = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.kind == Kind::Fursuit && g.photos == 2 && g.cover.face.key != Key::of(1, lib_path(&d, &files[2]).as_os_str().as_encoded_bytes())) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let _ = key1;
+        e.name_group(cluster, "Suit".into());
+        let started = Instant::now();
+        let suit = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // A pass that holds the card: the face catch-up, held back.
+        slow.store(true, std::sync::atomic::Ordering::Relaxed);
+        e.find_faces();
+        wait_for(&e, "the pass", |s| s.pass.is_some());
+        e.suggestions(9, suit.clone());
+        wait_for(&e, "waiting for the card", |s| s.judge.state == crate::ml::judge::JudgeState::WaitingForCard);
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(fake.pairs.lock().is_empty() && !crate::ml::judge_client::Judge::loaded(fake.as_ref()), "nothing judged, nothing loaded while the pass holds the card");
+        slow.store(false, std::sync::atomic::Ordering::Relaxed);
+        let (_, judged) = review(&mut ev, 9, Duration::from_secs(10));
+        let last = judged.last().expect("verdicts after the pass");
+        assert_eq!((last.2, last.3), (2, 2), "both close calls judged once the card was free");
+        assert_eq!(fake.pairs.lock().len(), 2);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A library whose heads were whitened before (an interrupted
+    /// catch-up, a restart) has its fursuit groups again when it opens,
+    /// with no pass or command.
+    #[test]
+    fn fursuit_groups_come_back_when_a_whitened_library_opens() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.1)), (3, -Suits::at(0.9)), (4, -Suits::at(0.95))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("judge-reopen", &refs);
+        let config = || Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib.clone());
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        e.shutdown();
+        std::thread::sleep(Duration::from_millis(200));
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config());
+        e.on_library(lib);
+        let started = Instant::now();
+        while e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count() < 2 {
+            assert!(started.elapsed() < Duration::from_secs(5), "no fursuit groups at open: {:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(e.status().heads.whitened);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn lib_path(d: &Path, (day, file): &(String, String)) -> PathBuf {
+        d.join("lib").join(day).join("JPG").join(file)
+    }
+
     /// An embedder whose space is the vocabulary's axes: a text names
     /// vocabulary words and encodes to their axes (equally weighted, unit
     /// length); a file named `NNNN-word-60-other-30.JPG` embeds with
@@ -2694,6 +3533,32 @@ mod tests {
         (Arc::new(ix), d)
     }
 
+    /// Storage counts every model folder, phase 4's DINOv2 too until
+    /// *Delete* removes it, and the judges' apart; the head cache counts
+    /// its old vector file; Delete keeps the judge's folder (its own row).
+    #[test]
+    fn storage_counts_an_old_dinov2_layout_and_delete_removes_it() {
+        let d = std::env::temp_dir().join(format!("pp-storage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (models_dir, index_dir) = (d.join("models"), d.join("index"));
+        for (folder, bytes) in [("dinov2-base", 1000usize), ("siglip2-b16-256", 300), ("gemma4-26b-a4b-it-ud-q4km", 5000)] {
+            std::fs::create_dir_all(models_dir.join(folder)).unwrap();
+            std::fs::write(models_dir.join(folder).join("f"), vec![0u8; bytes]).unwrap();
+        }
+        std::fs::create_dir_all(&index_dir).unwrap();
+        std::fs::write(index_dir.join("headvecs-dinov2-base.bin"), vec![0u8; 700]).unwrap();
+        std::fs::write(index_dir.join("judged-gemma4-26b-a4b-it-ud-q4km.bin"), vec![0u8; 50]).unwrap();
+        let s = storage_in(Some(&index_dir), Some(&models_dir));
+        assert_eq!((s.models_bytes, s.judge_bytes), (1300, 5000), "DINOv2's folder still counts; the judge's apart");
+        assert_eq!(s.judges, [(JudgeChoice::Qwen3VlReranker, 0), (JudgeChoice::Gemma4, 5000)], "per judge, in the list's order");
+        assert_eq!((s.heads_bytes, s.judged_bytes), (700, 50));
+        models::delete_all_but_judges(&models_dir);
+        let s = storage_in(Some(&index_dir), Some(&models_dir));
+        assert_eq!((s.models_bytes, s.judge_bytes), (0, 5000), "Delete removed DINOv2's folder; the judge has its own row");
+        assert!(!models_dir.join("dinov2-base").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Decision 11 through the engine.  On the processor: the first
     /// index's end puts the fursuit photos to the user (`Step::Asking`),
     /// nothing scans on its own, a skip is remembered, and the tab's
@@ -2713,9 +3578,11 @@ mod tests {
         let (lib, d) = library_of("heads-cpu", &files);
         let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Cpu, true, false, ModelId::AuraFace, true, config);
+        // Three heads are enough to whiten here (the library needs 512).
+        e.set_min_fit(2);
         e.on_library(lib);
         wait_for(&e, "the library", |s| s.library_shots == 4);
-        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
         wait_for(&e, "the question", |s| matches!(s.heads.step, heads::Step::Asking(_)));
         let s = e.status();
@@ -2755,7 +3622,7 @@ mod tests {
         let e2 = Engine::with_config(bus2, Device::Gpu, true, false, ModelId::AuraFace, true, config);
         e2.on_library(lib2);
         wait_for(&e2, "the library", |s| s.library_shots == 4);
-        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+        e2.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e2, "the scan after the first index", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
         assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
         let _ = std::fs::remove_dir_all(&d);

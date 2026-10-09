@@ -129,6 +129,25 @@ pub enum BgEvent {
     /// (its frames' faces, best first), most likely first; for a cluster,
     /// its own members to check.  Never a face of another kind.
     Suggestions { seq: u64, group: crate::model::subjects::GroupId, list: Arc<Vec<Vec<crate::model::subjects::Face>>> },
+    /// The close-call judge's verdicts for the request `seq` (a fursuit's
+    /// `suggestions` or `find_more`), as they land, nearest first: the
+    /// entries new since the last event (one per burst, as `Suggestions`)
+    /// it offers, and those it left out; `done` of `total` close calls.
+    /// The first follows the request's `Suggestions` at once (with the
+    /// verdicts already kept); the last has `done == total`.  Fursuits
+    /// only.
+    Judged {
+        seq: u64,
+        group: crate::model::subjects::GroupId,
+        offered: Arc<Vec<Vec<crate::model::subjects::Face>>>,
+        left_out: Arc<Vec<Vec<crate::model::subjects::Face>>>,
+        done: usize,
+        total: usize,
+        /// Close calls past the cap (`search::judging::MAX_CLOSE_CALLS`)
+        /// this request won't judge: the next request (the review again,
+        /// *Find more*) judges them.  The same on every event of a request.
+        beyond: usize,
+    },
     /// *Things in your photos*: the hidden tags' objects and scenes with
     /// their photo counts, most first; sent when the index loads and
     /// whenever the tags change (`crate::search::Engine::things` reads
@@ -180,6 +199,7 @@ impl BgEvent {
             BgEvent::SubjectsUndone(_) => "SubjectsUndone",
             BgEvent::SubjectFaces { .. } => "SubjectFaces",
             BgEvent::Suggestions { .. } => "Suggestions",
+            BgEvent::Judged { .. } => "Judged",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }
     }

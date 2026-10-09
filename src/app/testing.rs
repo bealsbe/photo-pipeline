@@ -141,6 +141,15 @@
 //!                             # the head step's buttons: the processor's
 //!                             # question, ×, the catch-up offer, the card
 //! fursuits dump               # print the head step and the Fursuits tab
+//! fursuits updateheads        # the offer to update heads found before v2
+//! judge stop|showleftout|trycard|prefs   # the close-call judge's line
+//! judge dump                  # print the judge's state and its run
+//! prefs judge-off|judge-qwen|judge-gemma4|judge-download|update-heads
+//! prefs judge-open|judge-delete|show-judge-storage [qwen|gemma4]
+//!                             # Preferences ▸ Fursuits' judge, Storage's row
+//! search fake judge-on [qwen|gemma|both]|judge-off|judge-notinstalled|judge-wait|judge-free|
+//!             judge-cardcrash|judge-broken|judge-nosure|heads-vectors [n|all]
+//!                             # the stand-in's judge and heads to update
 //! search dlg fursuits         # the dialog's Find fursuit heads box
 //! prefs find-heads|find-heads-now|forget-fursuits
 //!                             # Preferences ▸ Fursuits
@@ -171,6 +180,7 @@
 //! subjects openday|back
 //! subjects review             # Y: start the review
 //! subjects y|n|next|prev|at 5|done|findmore|advance|open
+//! subjects pfindmore          # Find more on a fursuit's band
 //! subjects wait 3000          # wait for the subject's query in flight
 //! subjects dump               # print the page's state
 //! quit
@@ -332,12 +342,31 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "trycard" => app.update(m(F::TryCard)),
                 "prefs" => app.update(m(F::OpenPrefs)),
                 "index" => app.update(m(F::IndexLibrary)),
+                "updateheads" => app.update(m(F::UpdateHeads)),
                 "dump" => {
                     eprintln!("[fursuits] {}", debug_state(app));
                     Task::none()
                 }
                 other => {
                     eprintln!("[script] unknown fursuits action {other}");
+                    Task::none()
+                }
+            }
+        }
+        "judge" => {
+            use super::fursuit_judge::{Msg as J, debug_state};
+            let m = |j: J| Message::Judge(j);
+            match arg.trim() {
+                "stop" => app.update(m(J::Stop)),
+                "showleftout" => app.update(m(J::ShowLeftOut)),
+                "trycard" => app.update(m(J::TryCard)),
+                "prefs" => app.update(m(J::OpenPrefs)),
+                "dump" => {
+                    eprintln!("[judge] {}", debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown judge action {other}");
                     Task::none()
                 }
             }
@@ -896,6 +925,11 @@ fn quality_plans(app: &App) {
     }
 }
 
+/// `qwen` or (anything else) `gemma4`: which judge a step means.
+fn judge_arg(rest: &str) -> crate::ml::judge::JudgeChoice {
+    if rest.trim().starts_with("qwen") { crate::ml::judge::JudgeChoice::Qwen3VlReranker } else { crate::ml::judge::JudgeChoice::Gemma4 }
+}
+
 fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
     use super::preferences::{Control, Msg};
     use super::preferences_storage::Cache;
@@ -920,6 +954,13 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "find-heads" => Some(Control::FindHeads),
         "find-heads-now" => Some(Control::FindHeadsNow),
         "forget-fursuits" => Some(Control::ForgetFursuits),
+        "judge-off" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Off)),
+        "judge-gemma4" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
+        "judge-qwen" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Qwen3VlReranker)),
+        "judge-download" => Some(Control::JudgeDownload),
+        "update-heads" => Some(Control::UpdateHeads),
+        "judge-open" => Some(Control::JudgeOpen(judge_arg(rest))),
+        "judge-delete" => Some(Control::JudgeDelete(judge_arg(rest))),
         "search-gpu" => Some(Control::SearchDevice(crate::ml::Device::Gpu)),
         "search-cpu" => Some(Control::SearchDevice(crate::ml::Device::Cpu)),
         "checkcard" => Some(Control::CheckCard),
@@ -975,6 +1016,8 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
         "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
+        "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
+        "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
         "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),
@@ -1274,6 +1317,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "at" => app.update(r(R::At(n))),
         "done" => app.update(r(R::Done)),
         "findmore" => app.update(r(R::FindMore)),
+        "pfindmore" => app.update(p(P::FindMore)),
         "advance" => app.update(r(R::Advance)),
         "photo" => app.update(r(R::Open)),
         "wait" => {

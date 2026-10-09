@@ -684,7 +684,7 @@ fn fursuits_library() {
     let engine = Engine::with_config(bus, device, true, false, crate::ml::models::FACE_MODEL_DEFAULT, true, config);
     engine.on_library(lib.clone());
     let t = Instant::now();
-    engine.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2, ModelId::Dinov2]);
+    engine.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
     let deadline = Instant::now() + Duration::from_secs(3600);
     let status = loop {
         let s = engine.status();

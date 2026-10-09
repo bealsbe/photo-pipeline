@@ -536,6 +536,27 @@ never shown, merged, suggested or completed together with people or pets.
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
+- **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*,
+  off by default: *Qwen3-VL-Reranker* or *Gemma 4*).  With a judge chosen, *Find more* and the "Same
+  fursuit?" review offer the clear matches at once, and the judge looks
+  at the close calls, two heads side by side, nearest first.  A calm line
+  over the review's strip says how far it has got ("Checking 23 close
+  calls…", with ×), or that the close calls wait for the graphics card
+  while indexing or the head step uses it.  Those it thinks are the same
+  fursuit join the end of the list as they come (a hollow tile at the end
+  of the strip counts those still to check); those it thinks are
+  different are left out and counted ("14 checked and left out"), and
+  *Show them* adds them to the end of the list, marked, to answer
+  yourself.  One ask checks the nearest 60 close calls (about two
+  minutes); when there are more, the line says so with *Check the next
+  60*, as *Find more* does.  The status bar shows the same line in any view.  It only
+  suggests: every photo still takes your Y or N, and nothing is named,
+  merged or marked for you.  Fursuits only, never people.  A failing card
+  stops it and says so as an error, with *Try the card again* and
+  *Preferences*; it never moves to the processor, and what is already on
+  the list is kept.  Whenever the judge can't run (off, not downloaded,
+  the processor chosen, stopped), *Find more* and the review match by
+  look alone, as before.
 - **The head step.**  On the graphics card it runs on its own: after the
   first index (the download dialog's *Find fursuit heads*, ticked unless
   the processor is chosen) and on each export's new fursuit photos, with
@@ -550,17 +571,33 @@ never shown, merged, suggested or completed together with people or pets.
   the tab, which offers them again with their cost.
 - **A library indexed before** fursuit heads were looked for gets an
   offer on the tab: what it looks at, what it reads, how long it takes on
-  the device chosen and what it downloads (the *Fursuits* pair, if not in
-  place); nothing runs until asked.
+  the device chosen and what it downloads (the head finder, OWLv2, if
+  not in place); nothing runs until asked.
+- **Heads to update.**  Heads found before fursuits were told apart by
+  the search model need its vectors once: the tab (a page when none has
+  them yet, a card over the groups otherwise) and Preferences ▸ Fursuits
+  say how many photos, what is read and how long it takes, with *Update
+  the fursuit heads*; it reads those previews again at the heads already
+  found, so names and answers keep pointing at them.  Nothing runs until
+  asked; × in the status bar stops it.
 - **A failing card** stops the step and says so (the banner, and the tab
   once the banner is put away) with *Try the card again* and
   *Preferences*; nothing moves to the processor.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
-  heads…*, and *Forget all…*, which forgets the heads found and the
-  fursuit names given and leaves people alone (Preferences ▸ People's
-  *Forget all…* likewise leaves fursuits alone).  Preferences ▸ Storage
-  shows the heads' size.
+  heads…*, heads to update with *Update them*, *Close-call judge* (a
+  choice list: *Off*, the default; *Qwen3-VL-Reranker*, about 10 GB and
+  about 1 second a close call; or *Gemma 4*, about 18 GB and about
+  2 seconds; each on the graphics card only, one loaded at a time;
+  choosing one not downloaded opens the download dialog with its row, a
+  line under the list says where it stands, and a judge not chosen keeps
+  its files until deleted), and *Forget all…*, which forgets the
+  heads found and the fursuit names given and leaves people alone
+  (Preferences ▸ People's *Forget all…* likewise leaves fursuits alone).
+  Preferences ▸ Storage shows the heads' size (with the close calls the
+  judge checked) and each judge's model on a row of its own, with
+  *Delete…* (deleting the chosen one turns the judge off; another's goes
+  alone; choosing it again downloads it again, after asking).
 - **Look:** the tab's glyph is a furry head (full ears, cheek ruffs, a
   muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
   cartoon heads, never a photo.
@@ -650,33 +687,85 @@ user's choice:
 | SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
 | InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
 | OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
-| DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
+| Qwen3-VL-Reranker 8B (Alibaba's Qwen team, converted by mradermacher), *Close-call judge*, off by default | weights (Q8_0 GGUF), vision projector (F16 GGUF) | 9.9 GB | Apache-2.0 | Hugging Face `mradermacher/Qwen3-VL-Reranker-8B-GGUF`, pinned to commit `a0e8b54` |
+| Gemma 4 26B-A4B-it (Google, quantised by Unsloth), *Close-call judge*, off by default | weights (UD-Q4_K_M GGUF), vision projector (F16 GGUF) | 18.1 GB | Apache-2.0 | Hugging Face `unsloth/gemma-4-26B-A4B-it-GGUF` |
+
+Fursuits are told apart by the **search model itself** (fursuit matching
+v2): each head's crop (its box widened by 12 % each side, square) goes
+through SigLIP 2's image tower, and the 768-wide vectors are **whitened
+over the library's own heads** (`src/search/whiten.rs`: the mean, the top
+256 directions of their covariance, each scaled by λ^−¼), so the
+directions that tell one suit from another weigh as much as what every
+fursuit photo shares.  On the user's 791 labelled pairs this beat phase
+4's DINOv2 in every time tier (AUC 0.97/0.97/0.96/0.92 against
+0.82/0.85/0.87/0.87).  The whitening is maths on the processor (about
+2.5 s, at any library size), fitted on a worker once 8 000 heads have
+vectors, kept beside the index and refitted when a head scan ends or the
+heads grow by a fifth.  A smaller library groups the raw vectors with
+cut-offs of their own (0.094 / 0.097 / 0.0885, from the same labels): a
+whitening fitted on a few days' heads ranks pairs well, but its distances
+drift from the cut-offs, which raw vectors don't.  Names and answers
+point at heads, not rows, so a refit loses nothing.
 
 Fursuit groups are **tight by design**: a head joins a group only when it
-is close to the group's members on average (average linkage at 0.17 on
-DINOv2's cosine distance), and groups are never merged afterwards; so a
-group is one suit at one event, and *Find more* (strict, 0.14) and the
-"Same fursuit?" review (0.17), nearest first, are how a suit is gathered
-across days and years.  Both numbers come from the user's 791 pairwise
-answers over the library (`docs/library-search-plan.md`, phase 4 as
-built): under 0.14 two heads are the same suit 82–97 % of the time
-whatever the time between them; the nearest-centroid grouping people use
-chained the library's fursuit heads into one group and is not used for
-this kind.
+is close to the group's members on average (average linkage at 0.69 in
+whitened cosine distance), and groups are never merged afterwards; so a
+group is one suit at one event, and *Find more* (strict, 0.671: 95 %
+precision on the labels) and the "Same fursuit?" review (0.711: 90 %),
+nearest first, are how a suit is gathered across days and years.  The
+cut-offs were chosen on even days of the labels and held on the odd ones
+(`docs/library-search-plan.md`, "As built — fursuit matching v2"); the
+nearest-centroid grouping people use chained the library's fursuit heads
+into one group and is not used for this kind.
 
-The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
-asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
-DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
-token) that tells one suit from another.  The head cache lives beside the
-index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
-by the user alone, vectors stored as f16); for grouping and the Fursuits
-tab the vectors are held in memory as f32: **measured 405 MB for the
-~68 000 heads a library of 56 000 shots is expected to hold** (and about
-400 MB more for the few seconds a regroup's copy lives on its worker),
-built only when that work needs it, never at start-up, and let go again
-once fursuit work has been quiet for two minutes (the next request reads
-them back in 0.3 s): the user's decision, 2026-10-03, full size, freed
-after use, not the 768-wide CLS half that measured as well.
+**The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*:
+*Off*, the default, *Qwen3-VL-Reranker* or *Gemma 4*) looks at the candidates the vectors
+can't settle: for a named fursuit, a head nearer than 0.639 is offered
+at once, one beyond 0.786 is not considered, and one in between is shown
+to the judge beside the fursuit's nearest confirmed head, both ways round
+(so is a sure match when either head is unclear, clarity under 0.2: the
+vectors pull dark, cut-off and turned-away heads together),
+and offered only when the mean P(yes) is at least the judge's threshold
+(left out, and counted, otherwise).  Qwen3-VL-Reranker is scored as its
+official code scores it, sigmoid(logit yes − logit no) with its own
+reranker prompt and 280 image tokens, yes at 0.45; Gemma 4 by the first
+answer token's P(yes) at 560 image tokens, yes at 0.6.  On the research's
+labels both are nearly always right in the band (relabel 137/139 and
+135/139; confirmation round 130/133 and 128/133); Qwen is twice as fast
+(0.8 s a close call against 2.1 s) on half the card's memory (11 GB
+against 21 GB).  Only one judge is on the card at a time.
+It only reorders and filters suggestions: nothing is named, merged or
+marked by it, people and pets never go near it, and verdicts are kept
+beside the index (`judged-<model>.bin`, 0600) so asking again is free.
+At most 60 close calls are judged a request, nearest first (about two
+and a half minutes); the review or *Find more* asks for the next.
+
+It runs in a helper process of its own (`photo-pipeline --judge-worker`)
+through llama.cpp and libmtmd, vendored as submodules at the commit the
+research measured (`vendor/llama.cpp`, with `vendor/SPIRV-Headers` for
+the Vulkan build) and built by `build.rs` with Vulkan.  **On the card
+only:** every layer goes on the card the search helper would use, or it
+doesn't run and says so; the processor is never used for it (with
+*Processor* chosen, close calls use the vector cut-offs as with *Off*).
+It loads when a close call needs it, never while indexing or a head scan
+holds the card (it waits, "waiting for the card"), and leaves after two
+idle minutes, giving the card's memory back.
+
+The head cache lives beside the index (`heads.bin`,
+`headvecs-siglip2-b16-256.bin`, `headwhiten-siglip2-b16-256.bin`,
+`headtiles.bin`, readable by the user alone, vectors stored as f16).  For
+grouping and the Fursuits tab the whitened vectors are held in memory as
+f32 (about 70 MB for the ~68 000 heads a library of 56 000 shots is
+expected to hold), built only when that work needs it and let go again
+once fursuit work has been quiet for two minutes.  **A library from
+before v2** keeps its heads (names and answers too) but has no vectors
+of the search model for them: *Update N photos' heads* reads those photos
+again on the chosen device (asked for, never automatic), and until then
+those heads aren't grouped or suggested.  Phase 4's
+`headvecs-dinov2-base.bin` is never read; it is counted in the cache's
+size and removed by *Clear*, *Rebuild* and *Forget all fursuits*, and
+the `dinov2-base` model folder is counted under *Downloaded models* until
+*Delete* removes it (the judge's model has a row of its own).
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the
@@ -906,9 +995,14 @@ These are deliberate:
   library's shots (`search fake people`, `search fake fursuits`, and the
   head step's states: `heads-catchup`, `heads-off`, `heads-running [n]`,
   `heads-asking [photos] [first|export|resume]`, `heads-skipped [n]`,
-  `heads-cardcrash`), drawn as grey silhouettes and grey cartoon heads;
-  `fursuits start|skip|stop|findheads|trycard|prefs|dump` press the head
-  step's buttons.
+  `heads-cardcrash`, `heads-vectors [n|all]`), drawn as grey silhouettes
+  and grey cartoon heads; `fursuits start|skip|stop|findheads|updateheads|
+  trycard|prefs|dump` press the head step's buttons.  Its close-call judge
+  (`search fake judge-on|judge-off|judge-notinstalled|judge-wait|
+  judge-free|judge-cardcrash|judge-broken`) judges a named fursuit's close
+  calls a few a second, offering its own suit's heads and leaving
+  look-alikes out (with a few mistakes); `judge stop|showleftout|trycard|
+  prefs|dump` drive its line.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

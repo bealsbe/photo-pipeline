@@ -200,6 +200,29 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
             }
             Task::none()
         }
+        DialogMsg::Download | DialogMsg::Retry if s.dialog.as_ref().and_then(|d| d.judge).is_some() || judge_downloads(&s.downloads) => {
+            // The close-call judge alone: chosen now, used once in place.
+            let Some(choice) = s.dialog.as_ref().and_then(|d| d.judge).or(Some(app.settings.fursuit_judge).filter(|c| c.model().is_some())) else { return Task::none() };
+            if app.settings.fursuit_judge != choice {
+                app.settings.fursuit_judge = choice;
+                app.settings.save_in_background();
+            }
+            let s = &mut app.search;
+            s.link.set_judge(choice);
+            if s.status.judge.downloaded.contains(&choice) {
+                s.dialog = None;
+                return app.show_status(format!("{} checks close calls from now on.", choice.label()), 6000);
+            }
+            if let Some(model) = choice.model() {
+                s.downloads = waiting_rows(&[model]);
+            }
+            match s.dialog.as_mut() {
+                Some(d) => d.stage = Stage::Progress,
+                None => s.dialog = Some(Dialog { stage: Stage::Progress, ..Dialog::judge(choice, &app.settings) }),
+            }
+            app.search.link.download_judge(choice);
+            Task::none()
+        }
         DialogMsg::Download | DialogMsg::Retry => {
             let heads = s.dialog.as_ref().map(|d| (d.fursuits, d.fursuits_only));
             let (fursuits, fursuits_only) = heads.unwrap_or((app.settings.find_heads, false));
@@ -308,7 +331,8 @@ pub fn dialog_update(app: &mut App, msg: DialogMsg) -> Task<Message> {
         DialogMsg::StopDownload => {
             s.dialog = None;
             s.link.cancel_downloads();
-            app.show_status("Stopped the download. Nothing was indexed.", 5000)
+            let judge = judge_downloads(&s.downloads);
+            app.show_status(if judge { "Stopped the download." } else { "Stopped the download. Nothing was indexed." }, 5000)
         }
     }
 }
@@ -333,6 +357,7 @@ pub fn dialog(app: &App) -> Option<Element<'_, Message>> {
     let dl = app.search.dialog.as_ref()?;
     let w = (app.window_size_width() - 48.0).min(700.0);
     let body = match dl.stage {
+        Stage::Ask if dl.judge.is_some() => judge_ask_view(app, dl),
         Stage::Ask => ask_view(app, dl),
         Stage::Progress => progress_view(app),
     };
@@ -648,6 +673,84 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     iced::widget::scrollable(col.padding(Padding { right: t::S3, ..Padding::ZERO })).style(style::scroll).into()
 }
 
+/// Every download listed is a close-call judge's.
+pub fn judge_downloads(rows: &[Download]) -> bool {
+    !rows.is_empty() && rows.iter().all(|x| models::info(x.model).choice == Some("judge"))
+}
+
+/// Download a close-call judge: its row, what it does and costs, where it
+/// runs (the card only), and that it only suggests.
+fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
+    let st = &app.search.status;
+    let Some(mi) = dl.judge.and_then(|c| c.model()).map(models::info) else { return Space::new().into() };
+    let mut col = column![
+        dialogs::header("Download the close-call judge?", None),
+        kit::secondary(
+            "When Find more or the \u{201c}Same fursuit?\u{201d} review has photos too close to call, the judge looks at the two heads side by side and offers those it thinks are the same fursuit. It only suggests: you still answer each with Y or N, and nothing is named for you."
+        ),
+    ]
+    .spacing(t::S2 + 2.0);
+    col = col.push(row![kit::heading(mi.role), kit::caption("Fursuits only, never people.")].spacing(t::S2).align_y(Alignment::Center));
+    col = col.push(group(vec![model_row(mi, false)]));
+    let card = match &st.device.name {
+        Some(name) => format!("The graphics card ({name}), all of it on the card"),
+        None => "The graphics card, all of it on the card".to_string(),
+    };
+    let choice = dl.judge.unwrap_or_default();
+    let secs = super::fursuits::call_seconds_words(super::fursuits::judge_call_seconds(choice));
+    let facts = vec![
+        fact("Downloads", format!("{}, once", size(mi.bytes())), None),
+        fact("Runs on", card, Some("Never the processor. If it doesn't fit on the card, or the card fails, checking stops and says why.")),
+        fact(
+            "Takes",
+            format!(
+                "{} a close call ({} for 100), only while Find more or a review has some.",
+                capital(&secs),
+                crate::search::estimate::describe_seconds(100.0 * super::fursuits::judge_call_seconds(choice))
+            ),
+            Some("It waits while indexing or the fursuit-head step is using the card, and lets the card go after two quiet minutes."),
+        ),
+        fact("Keeps", format!("{} in the models folder. Preferences ▸ Storage deletes it.", size(mi.kept_bytes())), None),
+    ];
+    col = col.push(group(facts));
+    let sums_link = button(text(if dl.sums { "Hide sources and checksums" } else { "Show sources and checksums" }).size(t::T_SMALL))
+        .padding(Padding::from([0.0, 4.0]))
+        .style(style::link().style())
+        .on_press(d(DialogMsg::Sums));
+    let dir = models::models_dir().map(|p| tilde(&p)).unwrap_or_default();
+    col = col.push(
+        row![kit::caption(format!("Each file is checked against its SHA-256 before it's used, and deleted if it doesn't match. Saved in {dir}.")).width(Length::Fill), sums_link]
+            .spacing(t::S2)
+            .align_y(Alignment::Center),
+    );
+    if dl.sums {
+        let rows = mi
+            .files
+            .iter()
+            .map(|f| {
+                column![
+                    text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
+                    text(f.url).size(t::T_SMALL).color(t::INK3),
+                    text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                ]
+                .spacing(1)
+                .padding(Padding::from([6.0, 12.0]))
+                .into()
+            })
+            .collect();
+        col = col.push(group(rows));
+    }
+    col = col.push(Space::new().height(t::S1));
+    col = col.push(dialogs::footer(
+        vec![],
+        vec![
+            kit::btn("Cancel", style::secondary(), Some(d(DialogMsg::Cancel))).into(),
+            kit::btn(format!("Download {} and use it", size(mi.bytes())), style::primary(), Some(d(DialogMsg::Download))).into(),
+        ],
+    ));
+    iced::widget::scrollable(col.padding(Padding { right: t::S3, ..Padding::ZERO })).style(style::scroll).into()
+}
+
 /// One of the fursuit-head models' rows: its name, size, what it does, the
 /// licence in plain words and the publisher.  Dimmed while unticked.
 fn heads_row<'a>(mi: &models::ModelInfo, on: bool, installed: bool) -> Element<'a, Message> {
@@ -692,15 +795,17 @@ fn progress_view(app: &App) -> Element<'_, Message> {
             DownloadState::Mismatch { expected, got } => (
                 format!("The {} model didn't match its checksum", role.to_lowercase()),
                 format!(
-                    "{name} downloaded ({}), but the file isn't the one Photo Pipeline expects, so it was deleted and nothing was installed. This happens when a download is cut short or changed on the way. Nothing was indexed.",
-                    size(x.total)
+                    "{name} downloaded ({}), but the file isn't the one Photo Pipeline expects, so it was deleted and nothing was installed. This happens when a download is cut short or changed on the way.{}",
+                    size(x.total),
+                    if judge_downloads(&s.downloads) { "" } else { " Nothing was indexed." }
                 ),
                 Some((expected, got)),
             ),
             DownloadState::Offline => {
-                ("Couldn't reach the model's publisher".to_string(), "Nothing was downloaded or indexed. Try again when you're online.".to_string(), None)
+                let what = if judge_downloads(&s.downloads) { "Nothing was downloaded." } else { "Nothing was downloaded or indexed." };
+                ("Couldn't reach the model's publisher".to_string(), format!("{what} Try again when you're online."), None)
             }
-            DownloadState::Failed(why) => ("The download didn't finish".to_string(), format!("{} Nothing was indexed.", capital(why.trim_end_matches('.')) + "."), None),
+            DownloadState::Failed(why) => ("The download didn't finish".to_string(), format!("{} Nothing was {}.", capital(why.trim_end_matches('.')) + ".", if judge_downloads(&s.downloads) { "installed" } else { "indexed" }), None),
             _ => (String::new(), String::new(), None),
         };
         let mut words = column![kit::title(title), kit::secondary(body)].spacing(t::S2).width(Length::Fill);
@@ -720,7 +825,10 @@ fn progress_view(app: &App) -> Element<'_, Message> {
     }
     let done = !s.downloads.is_empty() && s.downloads.iter().all(|x| x.state == DownloadState::Checked);
     let several = s.downloads.len() > 1;
+    let judge = judge_downloads(&s.downloads);
     let (title, body) = match (done, several) {
+        (true, _) if judge => ("Close-call judge ready", "Downloaded and checked. Find more and the \u{201c}Same fursuit?\u{201d} review use it from now on."),
+        (false, _) if judge => ("Downloading the close-call judge", "It is used as soon as it's in place. You can close this: the download carries on, with its progress in the status bar."),
         (true, false) => ("Search model ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
         (true, true) => ("Models ready", "Downloaded and checked. Indexing is running; the status bar shows how far it has got."),
         (false, false) => ("Downloading the search model", "Indexing starts as soon as the search model is in place. You can close this: the download carries on, with its progress in the status bar."),
@@ -800,7 +908,13 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         let (done, total) = s.downloads.iter().fold((0u64, 0u64), |(a, b), x| (a + x.done, b + x.total));
         let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
         let content = row![
-            words(if s.downloads.len() > 1 { "Downloading the models".into() } else { "Downloading the search model".into() }),
+            words(if judge_downloads(&s.downloads) {
+                "Downloading the close-call judge".into()
+            } else if s.downloads.len() > 1 {
+                "Downloading the models".into()
+            } else {
+                "Downloading the search model".into()
+            }),
             text(progress_bytes(done, total)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
             bar(frac, Some(56.0)),
         ]

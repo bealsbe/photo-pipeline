@@ -575,21 +575,13 @@ pub struct Cutoffs {
     pub strict: f32,
 }
 
-/// The cut-offs per model.  Faces: the study's (AuraFace 0.6, SFace
-/// 0.5; InsightFace as Immich's 0.5), to be moved by phase 0's
-/// comparison; *Find more* at three quarters of it.  Fursuit heads
-/// (DINOv2, phase 4): measured on the user's labels, first 258 pairs
-/// over two days, then 791 pairs across the library in four tiers of
-/// time gap (plan, "As built — phase 4").  Under 0.14 a pair is the same
-/// suit 82–97 % of the time in every tier, so *Find more* is strict at
-/// 0.14; the review's suggestions go to 0.17 (62–83 % right); the
-/// automatic groups use average linkage at that 0.17 with no joining
-/// step (`Linkage::Average`), since nearest-centroid groups with the
-/// merge pass chained the library's heads into one group.
+/// The face cut-offs per model: the study's (AuraFace 0.6, SFace 0.5;
+/// InsightFace as Immich's 0.5), to be moved by phase 0's comparison;
+/// *Find more* at three quarters of it.  Fursuit heads have their own,
+/// in whitened distance (`search::heads::CUTOFFS`, v2).
 pub fn cutoff_for(model: crate::ml::models::ModelId) -> Cutoffs {
     use crate::ml::models::ModelId;
     let c = match model {
-        ModelId::Dinov2 => return Cutoffs { group: 0.17, suggest: 0.17, strict: 0.14 },
         ModelId::AuraFace => 0.6,
         ModelId::SFace => 0.5,
         _ => 0.5,
