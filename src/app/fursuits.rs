@@ -228,6 +228,9 @@ pub struct FakeFursuits {
     pub judge_on: bool,
     /// Nothing is sure: every candidate is a close call (`judge-nosure`).
     pub no_sure: bool,
+    /// Made-up groups of their own beside the suits (`fursuits-many n`),
+    /// for a tab of many tiles: covers only, not backed by photos.
+    pub many: usize,
 }
 
 const NAMES: [&str; 2] = ["Fursuit 1", "Fursuit 2"];
@@ -346,6 +349,7 @@ impl FakeFursuits {
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
             out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), days: days.len(), cover, suggestions });
         }
+        out.extend((0..self.many).map(many_group));
         out
     }
 
@@ -689,12 +693,43 @@ impl FakeFursuits {
     /// The suit a detection shows, if it is one of the stand-in's heads
     /// (for its grey drawing); `None` for anything else (a face).
     pub fn look_of(&self, face: &FaceRef) -> Option<usize> {
+        if let Some(i) = many_index(&face.key).filter(|&i| i < self.many) {
+            return Some(i % SUITS);
+        }
         let s = &self.shots[*self.by_key.get(&face.key)?];
         if !tagged(s) {
             return None;
         }
         heads_of(s).into_iter().find(|(_, f)| f == face).map(|(suit, _)| suit)
     }
+}
+
+/// The made-up groups' keys: a marker, then the number.
+const MANY_MARK: [u8; 8] = *b"manysuit";
+
+fn many_index(key: &Key) -> Option<usize> {
+    (key.0[..8] == MANY_MARK).then(|| u64::from_le_bytes(key.0[8..].try_into().expect("8 bytes")) as usize)
+}
+
+/// One of `fursuits-many`'s groups: a cover on a made-up file, a size
+/// above the smallest shown, falling with its number.
+fn many_group(i: usize) -> Group {
+    let mut k = [0u8; 16];
+    k[..8].copy_from_slice(&MANY_MARK);
+    k[8..].copy_from_slice(&(i as u64).to_le_bytes());
+    let day = NaiveDate::from_ymd_opt(2026, 7, 24).expect("a date");
+    let face = FaceRef::new(Key(k), [0.3, 0.16, 0.2, 0.32]);
+    let cover = Face {
+        face,
+        jpg: Some(format!("/mnt/nas/library/2026/07/24/suit-{i:04}.jpg").into()),
+        raw: None,
+        day,
+        capture: day.and_hms_opt(12, 0, 0).expect("a time"),
+        burst: None,
+        clarity: 0.9,
+        confirmed: false,
+    };
+    Group { id: GroupId::Cluster(ID_BASE + 2_000_000_000 + i as u64), kind: Kind::Fursuit, name: None, hidden: false, photos: 400usize.saturating_sub(i / 3).max(5), days: 1, cover, suggestions: 0 }
 }
 
 /// Clusters the user made by moving heads out: their own id range.

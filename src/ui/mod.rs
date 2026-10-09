@@ -6,6 +6,7 @@ pub mod grid;
 pub mod hint_plate;
 pub mod icons;
 pub mod image_stage;
+pub mod in_view;
 pub mod modifiers;
 pub mod motion;
 pub mod paint;

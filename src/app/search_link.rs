@@ -1193,11 +1193,14 @@ impl Fake {
                 // named, the library indexed before heads were looked for,
                 // finding them off, a scan running, a scan waiting on the
                 // processor's answer, scans skipped, the card failing.
-                "fursuits" | "fursuits-first" => {
+                // `fursuits-many [n]`: as `fursuits-first`, with `n` more
+                // made-up groups (800 by default), for a tab of many tiles.
+                "fursuits" | "fursuits-first" | "fursuits-many" => {
                     let indexed = s.indexed_shots;
                     s.heads = fursuits::HeadsStatus { on: true, models_installed: true, ..fursuits::HeadsStatus::default() };
                     st.fursuits.forget_all();
                     st.fursuits.name_first = word == "fursuits";
+                    st.fursuits.many = if word == "fursuits-many" { if n > 0 { n } else { 800 } } else { 0 };
                     let tagged = st.fursuits.tagged_in(indexed);
                     st.fursuits.scan(tagged);
                     st.refresh_people();
