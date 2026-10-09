@@ -458,11 +458,12 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
 
 ### People
 
-**People, fursuits and pets** (Ctrl+4, on the side rail under Search, or in
+**People and fursuits** (Ctrl+4, on the side rail under Search, or in
 the View menu) is where the faces found while indexing are grouped, so you
 can name the people you want to find, and where fursuit heads are grouped
-the same way (*Fursuits*, below).  Its header has *People | Fursuits |
-Pets*; the Pets tab says pets come later.  A tab shows one kind only, so a
+the same way (*Fursuits*, below).  Its header has *People | Fursuits*.
+Pets are on hold: there is no Pets tab, and a saved choice of it opens
+People (the model keeps the kind, so a tab can return).  A tab shows one kind only, so a
 merge, a move or a suggestion never crosses kinds.  Nothing is ever named
 for you.
 

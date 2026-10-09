@@ -88,7 +88,7 @@ pub enum View {
     /// Search the library (not kept between runs: the app starts where
     /// search was opened from).
     Search,
-    /// People, fursuits and pets (not kept between runs either).
+    /// People and fursuits (not kept between runs either).
     Subjects,
 }
 
@@ -281,7 +281,7 @@ pub enum Message {
     Bulk(bulk::Msg),
     /// The search page, its download dialog and indexing.
     Search(search::Msg),
-    /// People, fursuits and pets.
+    /// People and fursuits.
     Subjects(subjects::Msg),
     /// The fursuit-head step: its offers, the processor's question, stop.
     Fursuits(subjects_fursuits::Msg),
@@ -445,7 +445,7 @@ pub struct App {
     pub calendar: calendar::Calendar,
     /// The search page (Ctrl+F) and the engine's link.
     pub search: search::Search,
-    /// People, fursuits and pets (Ctrl+4).
+    /// People and fursuits (Ctrl+4).
     pub subjects: subjects::Subjects,
     /// Network shares: probes, failing saves, the banner, the quit prompt.
     pub net: network::Net,
@@ -1393,7 +1393,7 @@ impl App {
             }
             return search::escape(self);
         }
-        // Esc on People, fursuits and pets, even when a field took it: a
+        // Esc on People and fursuits, even when a field took it: a
         // dialog, a menu or the name field first, then the page below.
         if self.view == View::Subjects && key == Key::Named(Named::Escape) && self.quicklook.is_none() && self.modal.is_none() {
             return subjects::escape(self);
@@ -1787,7 +1787,7 @@ impl App {
                 }
                 self.refresh_mark(&ids)
             }
-            // On People, fursuits and pets: the last change to people.
+            // On People and fursuits: the last change to people.
             Cmd::Undo if self.view == View::Subjects => subjects::undo(self),
             Cmd::Undo => undo::undo(self),
             Cmd::Redo => undo::redo(self),

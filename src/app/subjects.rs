@@ -1,6 +1,6 @@
-//! People, fursuits and pets (Ctrl+4): a page of their own on the side
+//! People and fursuits (Ctrl+4): a page of their own on the side
 //! rail, beside Search, with a tab for each kind.  People work in this
-//! phase; the Fursuits and Pets tabs say plainly that they come later.
+//! phase.  Pets are on hold: no tab, though the model keeps the kind.
 //!
 //! - **The People tab** lists the groups of faces found while indexing:
 //!   the named first, then the groups to name, largest first, each a face
@@ -505,7 +505,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Tab(k) => {
             let s = &mut app.subjects;
-            if s.tab != k {
+            // Pets are on hold: no tab for them, so none to switch to.
+            if s.tab != k && KINDS.contains(&k) {
                 s.tab = k;
                 s.picked.clear();
                 s.focus = None;
@@ -804,9 +805,8 @@ pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
 /// The glyph of a kind's tab.
 pub fn kind_glyph(k: Kind) -> Glyph {
     match k {
-        Kind::Person => Glyph::Person,
+        Kind::Person | Kind::Pet => Glyph::Person,
         Kind::Fursuit => Glyph::Fursuit,
-        Kind::Pet => Glyph::Paw,
     }
 }
 
@@ -814,7 +814,7 @@ pub fn shape(k: Kind) -> Shape {
     if k == Kind::Person { Shape::Round } else { Shape::Rounded }
 }
 
-/// The tabs: People | Fursuits | Pets, each with its glyph.
+/// The tabs: People | Fursuits, each with its glyph.
 fn tabs(app: &App) -> Element<'_, Message> {
     let current = app.subjects.tab;
     let seg = |k: Kind| -> Element<'_, Message> {
@@ -849,7 +849,7 @@ fn header(app: &App) -> Element<'_, Message> {
             }
         }
         Kind::Fursuit => super::subjects_fursuits::caption(app),
-        Kind::Pet => "Coming later".to_string(),
+        Kind::Pet => String::new(),
     };
     let mut title = column![text(kind.title()).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(1);
     if !caption.is_empty() {
@@ -872,8 +872,6 @@ pub fn has_groups(app: &App, kind: Kind) -> bool {
 /// What a tab's body is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum State {
-    /// The kind's own step isn't built yet (fursuits, pets): it says so.
-    Later,
     NoLibrary,
     Reading,
     /// Nothing indexed yet: faces are found with the first index.
@@ -889,12 +887,8 @@ pub enum State {
     Groups,
 }
 
-/// The body of `kind`'s tab.  Each kind's step answers for itself; until
-/// one is built its tab says it comes later.
+/// The body of `kind`'s tab.  Each kind's step answers for itself.
 pub fn state(app: &App, kind: Kind) -> State {
-    if kind != Kind::Person {
-        return State::Later;
-    }
     let f = &app.search.status.faces;
     if app.library.is_none() {
         return State::NoLibrary;
@@ -933,7 +927,6 @@ fn overview(app: &App) -> Element<'_, Message> {
     let body: Element<'_, Message> = match s.tab {
         Kind::Fursuit => super::subjects_fursuits::body(app),
         kind => match state(app, kind) {
-            State::Later => coming_later(kind),
             State::NoLibrary => message(Glyph::Library, "Choose your library folder", "People are found in the library, the folder Export files photos into by date.".into(), Some(("Choose library folder…", Message::PickFolder(super::FolderTarget::Library))), None),
             State::Reading => message(Glyph::Person, "Reading the library…", String::new(), None, None),
             State::NotIndexed => message(
@@ -953,24 +946,7 @@ fn overview(app: &App) -> Element<'_, Message> {
     col.push(body).into()
 }
 
-/// A kind whose step isn't built yet: its tab says so, quietly.
-fn coming_later<'a>(kind: Kind) -> Element<'a, Message> {
-    match kind {
-        Kind::Person => later(Glyph::Person, "People are coming later", ""),
-        Kind::Fursuit => later(
-            Glyph::Fursuit,
-            "Fursuits are coming later",
-            "Naming fursuits and finding their photos is planned after people. Until then, search finds them by word: “fursuit”.",
-        ),
-        Kind::Pet => later(
-            Glyph::Paw,
-            "Pets are coming later",
-            "Finding and grouping pets is planned after fursuits, never together with them or with people. Until then, search finds animals by word: “dog”, “cat”. Fursuits are left out of those searches.",
-        ),
-    }
-}
-
-/// The quiet "comes later" body of the Fursuits and Pets tabs.
+/// A quiet centred message on the photos' grey.
 pub(super) fn later<'a>(glyph: Glyph, title: &'a str, body: &'a str) -> Element<'a, Message> {
     let col = column![
         Space::new().height(Length::FillPortion(2)),

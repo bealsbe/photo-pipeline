@@ -48,7 +48,7 @@ what waits for later, follow the table.
 | 12b | Animal words in search | **Fursuits left out by default.**  *Show fursuits too* adds them as a section of their own (UI 3); "dog fursuit" finds suits on purpose. | To the models here, "dog" means canine fursuits; the contrast puts the real dog first. |
 | 13 | Where models come from | **The publisher, or a maintained ONNX export, pinned by SHA-256, after a dialog with size and licence.**  Our own export on this repository's releases only where nobody maintains one.  InsightFace only from its publisher.  The user states this is a personal, non-commercial project (§11). | Nothing redistributed that needn't be; every file checked. |
 | 14 | Working folders | **Library only for now.** | Content keys make folder search cheap later (deferred). |
-| UI 1 | Where people, fursuits and pets live | **Their own side-rail entry, *Subjects*, next to Search**, with *People \| Fursuits \| Pets* tabs (Ctrl+4).  This replaces an earlier "inside Search" answer. | The user confirmed it when asked about the conflict. |
+| UI 1 | Where people, fursuits and pets live | **Their own side-rail entry, *Subjects*, next to Search**, with *People \| Fursuits* tabs (Ctrl+4); *Pets* was a third tab until pets were put on hold (no tab shows now; the model keeps the kind).  This replaces an earlier "inside Search" answer. | The user confirmed it when asked about the conflict. |
 | UI 2 | Pointing search out the first time | **Quietly**: the rail, the View menu, Ctrl+F, and the page explains itself. | No dot, tip or status line. |
 | UI 3 | Fursuits after *Show fursuits too* | **A section of their own**, after the real animals. | Pets and fursuits never share a list, anywhere. |
 | UI 4 | Loosening results | **A Preferences slider**, *How close matches must be*, with a small reset button; the default (set in phase 0) is what works for most people: good matches.  Nothing on the search page. | Keeps the page quiet; the slider was the user's choice over three steps. |
@@ -805,7 +805,7 @@ names in the wireframes are made up.*
   calendar* and in the View menu after it, so the KDE global menu and the
   shortcuts dialog follow:
   - `Cmd::Search`: "Search the library", Ctrl+F, a magnifier glyph;
-  - `Cmd::Subjects`: "People, fursuits and pets", Ctrl+4, a glyph of a
+  - `Cmd::Subjects`: "People and fursuits", Ctrl+4, a glyph of a
     person's head beside a fursuit's.
 - **Pointed out quietly** (UI 2): the rail, the View menu and Ctrl+F; the
   page explains itself.  No dot, tip or status line.
@@ -1011,8 +1011,11 @@ while the user culls:
 
 ### 7a.5 People, fursuits and pets
 
-- **One rail entry, three tabs** (UI 1).  *Subjects* opens on the tab last
-  used; *People | Fursuits | Pets* sit in its header.  A tab shows one kind
+- **Pets are on hold** (the user's call): no Pets tab, no route to one; a
+  saved tab of 2 opens People.  The model, search and engine keep the
+  kind, so the tab can return.
+- **One rail entry, two tabs** (UI 1).  *Subjects* opens on the tab last
+  used; *People | Fursuits* sit in its header.  A tab shows one kind
   only, so a merge, a move or a suggestion can never cross kinds;
   completions list each kind under its own heading.
 - **Shapes:** people are round crops of the face; fursuits and pets

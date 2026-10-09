@@ -1467,7 +1467,7 @@ fn people_section(app: &App) -> Element<'_, Message> {
     let forget = focusable(p, Control::ForgetPeople, kit::btn("Forget all…", style::secondary(), people_to_forget(app).then(|| m(Msg::Press(Control::ForgetPeople)))));
     let people = section(
         "People",
-        Some("Faces in your photos, grouped so you can name the people you want to find. Fursuits have a section of their own; pets come later."),
+        Some("Faces in your photos, grouped so you can name the people you want to find. Fursuits have a section of their own."),
         vec![
             setting("Find people's faces", find.into(), switch(p, Control::FindFaces, on, true)),
             setting("Face model", about(model_about), change.into()),
@@ -1520,7 +1520,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
         about(format!("{found} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
         forget,
     ));
-    let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people or pets."), rows);
+    let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people."), rows);
     container(sec).id("pref-section-fursuits").width(Length::Fill).into()
 }
 

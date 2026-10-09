@@ -16,7 +16,7 @@ pub enum Cmd {
     CalendarView,
     /// Ctrl+F: the search page, its field ready to type into.
     Search,
-    /// Ctrl+4: people, fursuits and pets, on the tab last used.
+    /// Ctrl+4: people and fursuits, on the tab last used.
     Subjects,
     SelectMode,
     QuickLook,
@@ -66,7 +66,7 @@ impl Cmd {
             Cmd::GridView => "Grid",
             Cmd::CalendarView => "Library calendar",
             Cmd::Search => "Search the library",
-            Cmd::Subjects => "People, fursuits and pets",
+            Cmd::Subjects => "People and fursuits",
             Cmd::SelectMode => "Select mode",
             Cmd::QuickLook => "Quick look",
             Cmd::PruneSelected => "Prune selected",

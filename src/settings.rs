@@ -88,9 +88,9 @@ pub struct Settings {
     /// *Forget them* in Preferences clears it.
     pub search_recent: Vec<String>,
 
-    // People, fursuits and pets (§7a.5).
-    /// The tab People, fursuits and pets opens on: 0 people, 1 fursuits,
-    /// 2 pets.
+    // People and fursuits (§7a.5).
+    /// The tab People and fursuits opens on: 0 people, 1 fursuits,
+    /// (2 was pets, now on hold: it opens people).
     pub subjects_tab: u8,
     // People (phase 3, §7a.8 Preferences ▸ People).
     /// *Find people's faces* (on by default, decision 9): faces are found

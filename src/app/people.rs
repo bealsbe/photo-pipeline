@@ -1,4 +1,4 @@
-//! People, fursuits and pets as the pages use them: the subjects API's
+//! People and fursuits as the pages use them: the subjects API's
 //! shapes (`crate::model::subjects`, re-exported here so the pages import
 //! from one place), the words each kind is spoken of with, and, behind
 //! `PP_SEARCH_FAKE`, a stand-in that makes people up.
@@ -27,12 +27,13 @@ use crate::util;
 
 // ── the words for each kind ─────────────────────────────────────────────────
 
-/// The kinds in their tabs' order.
-pub const KINDS: [Kind; 3] = [Kind::Person, Kind::Fursuit, Kind::Pet];
+/// The kinds in their tabs' order.  Pets are on hold: their model stays,
+/// but no tab shows them.
+pub const KINDS: [Kind; 2] = [Kind::Person, Kind::Fursuit];
 
 /// How the pages speak of a kind.
 pub trait KindWords {
-    /// The tab's name: "People", "Fursuits", "Pets".
+    /// The tab's name: "People", "Fursuits".
     fn title(self) -> &'static str;
     /// One of them: "person", "fursuit", "pet".
     fn one(self) -> &'static str;
@@ -68,11 +69,11 @@ impl KindWords for Kind {
     }
 }
 
-/// The kind saved as `i` (people for anything unknown).
+/// The kind saved as `i` (people for anything unknown, and for pets: their
+/// tab is gone, so a setting that names it opens People).
 pub fn kind_from_index(i: u8) -> Kind {
     match i {
         1 => Kind::Fursuit,
-        2 => Kind::Pet,
         _ => Kind::Person,
     }
 }
@@ -499,7 +500,7 @@ impl FakePeople {
     }
 
     /// Merge `others` into `into`; every group must be one kind (all people
-    /// here: the stand-in has no fursuits or pets to mix in).
+    /// here: the stand-in has no fursuits to mix in).
     pub fn merge(&mut self, into: &GroupId, others: &[GroupId], kinds: impl Fn(&GroupId) -> Option<Kind>) -> Result<(), String> {
         let k = kinds(into).ok_or("That group changed: look again.")?;
         if others.iter().any(|o| kinds(o) != Some(k)) {
@@ -900,8 +901,9 @@ mod tests {
 
     #[test]
     fn kinds_are_spoken_of_in_their_own_words() {
-        assert_eq!(KINDS.map(|k| k.title()), ["People", "Fursuits", "Pets"]);
-        assert_eq!(KINDS.map(|k| k.one()), ["person", "fursuit", "pet"]);
+        assert_eq!(KINDS.map(|k| k.title()), ["People", "Fursuits"]);
+        assert_eq!(KINDS.map(|k| k.one()), ["person", "fursuit"]);
+        assert_eq!(kind_from_index(Kind::Pet.index()), Kind::Person, "a saved Pets tab opens People");
         assert!(KINDS.iter().all(|k| kind_from_index(k.index()) == *k));
         assert!(!KINDS.iter().any(|k| k.title().contains("Character") || k.one().contains("character")), "Fursuits, never Characters");
     }

@@ -5,7 +5,7 @@
 //!
 //! Groups, naming, the review, merging, splitting and hiding are the
 //! subjects pages' own, on this kind's data; nothing here ever mixes
-//! fursuits with people or pets.
+//! fursuits with people.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};

@@ -91,14 +91,12 @@ pub enum Glyph {
     Clock,
     /// A word left out of a search: a ring with a bar across.
     LeaveOut,
-    /// People, fursuits and pets: a person's head beside a paw.
+    /// People and fursuits.
     Subjects,
     /// A person: a head on shoulders.
     Person,
     /// A fursuit: a head with full ears and a muzzle.
     Fursuit,
-    /// A pet: a paw print.
-    Paw,
     /// Merge groups: two lines joining.
     Merge,
     /// Move out of a group: one line parting.
@@ -574,10 +572,8 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
         Subjects => {
             p.circle(7.6, 7.8, 3.0);
             p.path("M2.6 19c.5-3.4 2.5-5.3 5-5.3 1.1 0 2 .3 2.8.9");
-            p.path("M17 14c1.8 0 3.4 1.6 3.4 3.1 0 1.1-.8 1.8-1.7 1.8-.6 0-1-.4-1.7-.4s-1.1.4-1.7.4c-.9 0-1.7-.7-1.7-1.8 0-1.5 1.6-3.1 3.4-3.1z");
-            for (x, y) in [(12.9, 12.2), (15.3, 9.6), (18.7, 9.6), (21.1, 12.2)] {
-                p.dot(x, y, 1.15);
-            }
+            p.circle(16.6, 9.6, 2.4);
+            p.path("M12.8 19.4c.4-2.8 1.8-4.4 3.8-4.4s3.4 1.6 3.8 4.4");
         }
         Person => {
             p.circle(12.0, 8.5, 3.5);
@@ -603,12 +599,6 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.path("M6.2 5.4c.6 1.1 1.3 2 2.2 2.7M17.8 5.4c-.6 1.1-1.3 2-2.2 2.7M10.9 14.7h2.2L12 16zM12 16c-.3.9-1 1.3-1.8 1.1M12 16c.3.9 1 1.3 1.8 1.1");
             p.dot(9.2, 11.8, 1.1);
             p.dot(14.8, 11.8, 1.1);
-        }
-        Paw => {
-            p.path("M12 12c2.6 0 4.9 2.3 4.9 4.4 0 1.6-1.1 2.6-2.5 2.6-.9 0-1.5-.5-2.4-.5s-1.5.5-2.4.5c-1.4 0-2.5-1-2.5-2.6 0-2.1 2.3-4.4 4.9-4.4z");
-            for (x, y) in [(5.6, 10.6), (9.4, 6.6), (14.6, 6.6), (18.4, 10.6)] {
-                p.dot(x, y, 1.6);
-            }
         }
         Merge => p.path("M6 4v4.5c0 3.5 6 4.5 6 8.5v3M18 4v4.5c0 3.5-6 4.5-6 8.5"),
         Split => p.path("M12 4v4c0 3.5-6 4.5-6 8.5V20M12 8c0 3.5 6 4.5 6 8.5V20"),
@@ -788,7 +778,7 @@ mod tests {
             Menu, FolderOpen, Folder, Library, Export, EditCopy, Trash, Sort, Grid, Calendar, Select, Keep, Prune,
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
-            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut, Subjects, Person, Fursuit, Paw,
+            Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut, Subjects, Person, Fursuit,
             Merge, Split, Hide, Pencil, More, Plus,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);

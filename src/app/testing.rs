@@ -146,8 +146,8 @@
 //!                             # Preferences ▸ Fursuits
 //! search dlg faces|face 1     # the dialog's Find people's faces box, the
 //!                             # 2nd face model (registry order)
-//! subjects open               # People, fursuits and pets (Ctrl+4)
-//! subjects tab person|fursuit|pet
+//! subjects open               # People and fursuits (Ctrl+4)
+//! subjects tab person|fursuit  # pets are on hold: `tab pet` says there is no such tab
 //! subjects click 2 [ctrl]     # the 3rd group tile in the tab's order
 //!                             # (opens it; ctrl picks it)
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
@@ -1172,11 +1172,17 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "open" => app.update(Message::Cmd(Cmd::Subjects)),
         "tab" => {
             let k = match rest {
-                "fursuit" | "fursuits" => Kind::Fursuit,
-                "pet" | "pets" => Kind::Pet,
-                _ => Kind::Person,
+                "fursuit" | "fursuits" => Some(Kind::Fursuit),
+                "pet" | "pets" => None,
+                _ => Some(Kind::Person),
             };
-            app.update(s(Msg::Tab(k)))
+            match k {
+                Some(k) => app.update(s(Msg::Tab(k))),
+                None => {
+                    println!("subjects tab: there is no pets tab (pets are on hold); use person or fursuit");
+                    Task::none()
+                }
+            }
         }
         "click" => match order(app).get(n).cloned() {
             Some(id) if rest.ends_with("ctrl") => app.update(s(Msg::Pick(id))),
