@@ -67,10 +67,15 @@ pub fn call_seconds_words(secs: f64) -> String {
     format!("about {}", util::plural(n, "second"))
 }
 
-/// Seconds to put the judge on the card, and a close call's (both orders
-/// of the pair), as the engine measures them.
-pub const JUDGE_LOAD_SECONDS: f64 = crate::search::estimate::JUDGE_LOAD_SECONDS;
-pub const JUDGE_SECONDS_PER_CALL: f64 = crate::search::estimate::JUDGE_SECONDS_PER_PAIR;
+/// Seconds `choice` takes to go on the card, and a close call's (both
+/// orders of the pair, as that judge asks), as the engine measures them.
+pub fn judge_load_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    crate::search::estimate::judge_load_seconds(choice)
+}
+
+pub fn judge_call_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
+    crate::search::estimate::judge_seconds_per_pair(choice)
+}
 
 // ── the stand-in ────────────────────────────────────────────────────────────
 //

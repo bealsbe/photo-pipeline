@@ -696,16 +696,17 @@ fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         Some(name) => format!("The graphics card ({name}), all of it on the card"),
         None => "The graphics card, all of it on the card".to_string(),
     };
-    let secs = super::fursuits::call_seconds_words(super::fursuits::JUDGE_SECONDS_PER_CALL);
+    let choice = dl.judge.unwrap_or_default();
+    let secs = super::fursuits::call_seconds_words(super::fursuits::judge_call_seconds(choice));
     let facts = vec![
-        fact("Downloads", format!("{}, once", size(mi.bytes())), None),
+        fact("Downloads", format!("{}, once", capital(&super::fursuit_judge::model_size(mi.bytes()))), None),
         fact("Runs on", card, Some("Never the processor. If it doesn't fit on the card, or the card fails, checking stops and says why.")),
         fact(
             "Takes",
             format!(
                 "{} a close call ({} for 100), only while Find more or a review has some.",
                 capital(&secs),
-                crate::search::estimate::describe_seconds(100.0 * super::fursuits::JUDGE_SECONDS_PER_CALL)
+                crate::search::estimate::describe_seconds(100.0 * super::fursuits::judge_call_seconds(choice))
             ),
             Some("It waits while indexing or the fursuit-head step is using the card, and lets the card go after two quiet minutes."),
         ),

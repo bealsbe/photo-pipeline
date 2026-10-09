@@ -219,8 +219,8 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
         JudgeState::WaitingForCard => (t::PHOTO_INK3, format!("{} wait for the graphics card", super::search_setup::capital(&calls)), format!("They're checked as soon as it's free: {}.", card_holder(app))),
         JudgeState::Loading => {
             // Seconds, not minutes: say them ("about 6 seconds").
-            let secs = super::fursuits::call_seconds_words(super::fursuits::JUDGE_LOAD_SECONDS);
-            (t::PHOTO_INK3, format!("Getting the close-call judge ready for {calls}"), format!("Putting it on the graphics card takes {secs}."))
+            let secs = super::fursuits::call_seconds_words(super::fursuits::judge_load_seconds(j.choice));
+            (t::PHOTO_INK3, format!("Getting {} ready for {calls}", j.choice.label()), format!("Putting it on the graphics card takes {secs}."))
         }
         JudgeState::Judging { done, total, .. } => (
             t::PHOTO_INK2,
@@ -229,7 +229,7 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
                 "{} of {}, {} left. Those the judge thinks are this fursuit join the end of the list.",
                 util::thousands(*done as u64),
                 util::thousands(*total as u64),
-                crate::search::estimate::describe_seconds(total.saturating_sub(*done) as f64 * super::fursuits::JUDGE_SECONDS_PER_CALL)
+                crate::search::estimate::describe_seconds(total.saturating_sub(*done) as f64 * super::fursuits::judge_call_seconds(j.choice))
             ),
         ),
         JudgeState::Failed(f) => {
@@ -257,14 +257,24 @@ fn sentence(s: &str) -> String {
     if s.is_empty() || s.ends_with(['.', '!', '?']) { s } else { format!("{s}.") }
 }
 
+/// A judge's download in round words: whole gigabytes from 5 GB up
+/// ("about 10 GB", "about 18 GB"), as people say a model's size.
+pub fn model_size(bytes: u64) -> String {
+    if bytes >= 5_000_000_000 {
+        format!("about {} GB", (bytes as f64 / 1e9).round() as u64)
+    } else {
+        crate::search::estimate::describe_bytes(bytes)
+    }
+}
+
 /// A judge's choice in Preferences, in plain words: its speed, where it
 /// runs, its size.  `None` for Off.
 pub fn choice_words(c: crate::ml::judge::JudgeChoice) -> Option<String> {
     let mi = crate::ml::models::info(c.model()?);
     Some(format!(
         "{} a close call, on the graphics card only. {}, downloaded once when you choose it.",
-        super::search_setup::capital(&super::fursuits::call_seconds_words(super::fursuits::JUDGE_SECONDS_PER_CALL)),
-        super::search_setup::capital(&crate::search::estimate::describe_bytes(mi.bytes()))
+        super::search_setup::capital(&super::fursuits::call_seconds_words(super::fursuits::judge_call_seconds(c))),
+        super::search_setup::capital(&model_size(mi.bytes()))
     ))
 }
 
@@ -357,7 +367,7 @@ pub fn review_line<'a>(app: &'a App, group: &GroupId, seq: u64, left_out_shown: 
                 r = r.push(text(format!("{} more can be checked.", util::thousands(run.beyond as u64))).size(t::T_SMALL).color(t::PHOTO_INK3));
                 r = r.push(tip(
                     link_btn(format!("Check the next {}", run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS)), m(Msg::CheckMore)),
-                    format!("About {} with the graphics card. Those the judge offers join the end of this list.", crate::search::estimate::describe_seconds(run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS) as f64 * super::fursuits::JUDGE_SECONDS_PER_CALL).trim_start_matches("about ")),
+                    format!("About {} with the graphics card. Those the judge offers join the end of this list.", crate::search::estimate::describe_seconds(run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS) as f64 * super::fursuits::judge_call_seconds(j.choice)).trim_start_matches("about ")),
                     false,
                 ));
             }
@@ -455,7 +465,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         .into(),
         JudgeState::WaitingForCard | JudgeState::Loading => {
             run?;
-            let what = if j.state == JudgeState::Loading { "Getting the close-call judge ready" } else { "Close calls wait for the graphics card" };
+            let what = if j.state == JudgeState::Loading { format!("Getting {} ready", j.choice.label()) } else { "Close calls wait for the graphics card".to_string() };
             row![icons::view(Glyph::CloseCall, 13.0, t::INK3), words(what.into(), t::INK3), stop_btn(t::INK2)].spacing(t::S2).align_y(Alignment::Center).into()
         }
         JudgeState::Failed(f) => tip(
@@ -510,6 +520,9 @@ mod tests {
     #[test]
     fn the_choice_says_its_speed_size_and_where_it_runs() {
         assert_eq!(choice_words(JudgeChoice::Off), None, "Off costs nothing to say");
+        let q = choice_words(JudgeChoice::Qwen3VlReranker).unwrap();
+        assert!(q.starts_with("About 1 second a close call") && q.contains("About 10 GB") && !q.contains("processor"), "{q}");
+        assert_eq!(JudgeChoice::ALL[1], JudgeChoice::Qwen3VlReranker, "Qwen is listed first after Off");
         let w = choice_words(JudgeChoice::Gemma4).unwrap();
         assert!(w.starts_with("About 2 seconds a close call"), "{w}");
         assert!(w.contains("About 18 GB"), "{w}");

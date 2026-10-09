@@ -1255,8 +1255,15 @@ impl Fake {
                 // but not downloaded, the card held by another step (or
                 // let go), a card failure, a broken helper.
                 "judge-on" | "judge-off" | "judge-notinstalled" => {
-                    let choice = if word == "judge-off" { JudgeChoice::Off } else { JudgeChoice::Gemma4 };
-                    let downloaded = if word == "judge-on" { vec![JudgeChoice::Gemma4] } else { Vec::new() };
+                    // `judge-on [qwen|gemma|both]`: which is chosen and in place.
+                    let qwen = arg.trim().starts_with("qwen");
+                    let picked = if qwen { JudgeChoice::Qwen3VlReranker } else { JudgeChoice::Gemma4 };
+                    let choice = if word == "judge-off" { JudgeChoice::Off } else { picked };
+                    let downloaded = match (word, arg.trim()) {
+                        (_, "both") => vec![JudgeChoice::Qwen3VlReranker, JudgeChoice::Gemma4],
+                        ("judge-on", _) => vec![picked],
+                        _ => Vec::new(),
+                    };
                     s.judge = JudgeStatus { choice, downloaded, loaded: false, state: JudgeState::Idle };
                     st.fursuits.judge_on = s.judge.installed();
                     st.judge_run = None;
@@ -1510,9 +1517,11 @@ fn step(s: &mut FakeState) {
             return;
         }
         // The judge's model alone: it is in place, nothing else changes.
-        if s.downloads.iter().all(|d| d.3 == DownloadState::Checked && d.0 == ModelId::Gemma4) {
-            if !s.status.judge.downloaded.contains(&JudgeChoice::Gemma4) {
-                s.status.judge.downloaded.push(JudgeChoice::Gemma4);
+        if s.downloads.iter().all(|d| d.3 == DownloadState::Checked && JudgeChoice::for_model(d.0).is_some()) {
+            for c in s.downloads.iter().filter_map(|d| JudgeChoice::for_model(d.0)).collect::<Vec<_>>() {
+                if !s.status.judge.downloaded.contains(&c) {
+                    s.status.judge.downloaded.push(c);
+                }
             }
             s.fursuits.judge_on = s.status.judge.installed();
             s.refresh_people();

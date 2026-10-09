@@ -144,7 +144,8 @@
 //! fursuits updateheads        # the offer to update heads found before v2
 //! judge stop|showleftout|trycard|prefs   # the close-call judge's line
 //! judge dump                  # print the judge's state and its run
-//! prefs judge-off|judge-gemma4|judge-download|update-heads|judge-open|judge-delete
+//! prefs judge-off|judge-qwen|judge-gemma4|judge-download|update-heads
+//! prefs judge-open|judge-delete|show-judge-storage [qwen|gemma4]
 //!                             # Preferences ▸ Fursuits' judge, Storage's row
 //! search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|
 //!             judge-cardcrash|judge-broken|judge-nosure|heads-vectors [n|all]
@@ -924,6 +925,11 @@ fn quality_plans(app: &App) {
     }
 }
 
+/// `qwen` or (anything else) `gemma4`: which judge a step means.
+fn judge_arg(rest: &str) -> crate::ml::judge::JudgeChoice {
+    if rest.trim().starts_with("qwen") { crate::ml::judge::JudgeChoice::Qwen3VlReranker } else { crate::ml::judge::JudgeChoice::Gemma4 }
+}
+
 fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
     use super::preferences::{Control, Msg};
     use super::preferences_storage::Cache;
@@ -950,10 +956,11 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "forget-fursuits" => Some(Control::ForgetFursuits),
         "judge-off" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Off)),
         "judge-gemma4" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
+        "judge-qwen" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Qwen3VlReranker)),
         "judge-download" => Some(Control::JudgeDownload),
         "update-heads" => Some(Control::UpdateHeads),
-        "judge-open" => Some(Control::JudgeOpen),
-        "judge-delete" => Some(Control::JudgeDelete),
+        "judge-open" => Some(Control::JudgeOpen(judge_arg(rest))),
+        "judge-delete" => Some(Control::JudgeDelete(judge_arg(rest))),
         "search-gpu" => Some(Control::SearchDevice(crate::ml::Device::Gpu)),
         "search-cpu" => Some(Control::SearchDevice(crate::ml::Device::Cpu)),
         "checkcard" => Some(Control::CheckCard),
@@ -1010,7 +1017,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
         "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
-        "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete),
+        "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
         "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),

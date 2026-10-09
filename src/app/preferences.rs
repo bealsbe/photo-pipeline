@@ -103,9 +103,9 @@ pub enum Control {
     JudgeDownload,
     /// Give the heads found before v2 the search model's vectors.
     UpdateHeads,
-    /// Storage ▸ *Close-call judge*: open its folder, delete it.
-    JudgeOpen,
-    JudgeDelete,
+    /// Storage ▸ a judge's row: open its folder, delete it.
+    JudgeOpen(JudgeChoice),
+    JudgeDelete(JudgeChoice),
     Open(Cache),
     Clear(Cache),
     SearchRebuild,
@@ -151,10 +151,13 @@ impl Control {
             Control::ForgetFursuits => "pref-forget-fursuits",
             Control::Judge(JudgeChoice::Off) => "pref-judge-off",
             Control::Judge(JudgeChoice::Gemma4) => "pref-judge-gemma4",
+            Control::Judge(JudgeChoice::Qwen3VlReranker) => "pref-judge-qwen",
             Control::JudgeDownload => "pref-judge-download",
             Control::UpdateHeads => "pref-update-heads",
-            Control::JudgeOpen => "pref-judge-open",
-            Control::JudgeDelete => "pref-judge-delete",
+            Control::JudgeOpen(JudgeChoice::Qwen3VlReranker) => "pref-judge-open-qwen",
+            Control::JudgeOpen(_) => "pref-judge-open-gemma4",
+            Control::JudgeDelete(JudgeChoice::Qwen3VlReranker) => "pref-judge-delete-qwen",
+            Control::JudgeDelete(_) => "pref-judge-delete-gemma4",
             Control::SearchRebuild => "pref-search-rebuild",
             Control::SearchClear => "pref-search-clear",
             Control::ModelsOpen => "pref-models-open",
@@ -210,8 +213,8 @@ pub enum Ask {
     ForgetPeople,
     /// Forget every fursuit head found and every fursuit name given.
     ForgetFursuits,
-    /// Delete the close-call judge's model.
-    DeleteJudge,
+    /// Delete a close-call judge's model.
+    DeleteJudge(JudgeChoice),
 }
 
 /// The Preferences window and what it has counted.
@@ -507,16 +510,24 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
             link.forget_all_fursuits();
             "Forgot every fursuit head found and every fursuit name given. Your photos are not changed."
         }
-        Ask::DeleteJudge => {
-            let was = app.settings.fursuit_judge;
-            let deleted = if was.model().is_some() { was } else { JudgeChoice::Gemma4 };
-            if was.model().is_some() {
+        Ask::DeleteJudge(c) => {
+            // The chosen judge turns off with its files; another one's
+            // files go alone.
+            let chosen = app.settings.fursuit_judge == c;
+            if chosen {
                 app.settings.fursuit_judge = JudgeChoice::Off;
                 app.settings.save_in_background();
                 app.search.link.set_judge(JudgeChoice::Off);
             }
-            app.search.link.delete_judge(deleted);
-            "Deleted the close-call judge, and turned it off. The close calls it checked are remembered."
+            app.search.link.delete_judge(c);
+            let text = if chosen {
+                format!("Deleted {}, and turned the close-call judge off. The close calls it checked are remembered.", c.label())
+            } else {
+                format!("Deleted {}. The close calls it checked are remembered.", c.label())
+            };
+            let status = app.show_status(text, 6000);
+            let later = Task::perform(tokio::time::sleep(Duration::from_millis(600)), |_| m(Msg::Recount));
+            return Task::batch([status, later]);
         }
         Ask::ForgetPeople => {
             link.forget_all_people();
@@ -681,15 +692,15 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             super::subjects_fursuits::update(app, super::subjects_fursuits::Msg::UpdateHeads)
         }
-        Control::JudgeOpen => {
-            if let Some(d) = judge_dir().filter(|_| judge_exists(&app.prefs)) {
+        Control::JudgeOpen(c) => {
+            if let Some(d) = judge_dir(c).filter(|_| judge_exists(&app.prefs, c)) {
                 dialogs::open_folder(&d);
             }
             Task::none()
         }
-        Control::JudgeDelete => {
-            if judge_exists(&app.prefs) {
-                app.prefs.confirm = Some(Ask::DeleteJudge);
+        Control::JudgeDelete(c) => {
+            if judge_exists(&app.prefs, c) {
+                app.prefs.confirm = Some(Ask::DeleteJudge(c));
             }
             Task::none()
         }
@@ -799,18 +810,32 @@ fn heads_to_update(app: &App) -> bool {
     h.vectors_missing > 0 && matches!(h.step, super::fursuits::Step::Idle)
 }
 
-/// The judges' model folder (the first judge's: there is one so far).
-fn judge_dir() -> Option<PathBuf> {
-    crate::ml::models::judge_models().next().and_then(|m| crate::ml::models::model_dir(m.id))
+/// A judge's model folder.
+fn judge_dir(c: JudgeChoice) -> Option<PathBuf> {
+    c.model().and_then(crate::ml::models::model_dir)
 }
 
-fn judge_exists(p: &Prefs) -> bool {
-    p.search_storage().is_some_and(|s| s.judge_bytes > 0)
+/// A judge's files on disk, once counted.
+fn judge_bytes(p: &Prefs, c: JudgeChoice) -> Option<u64> {
+    p.search_storage().map(|s| s.judges.iter().find(|(k, _)| *k == c).map_or(0, |(_, b)| *b))
+}
+
+fn judge_exists(p: &Prefs, c: JudgeChoice) -> bool {
+    judge_bytes(p, c).is_some_and(|b| b > 0)
+}
+
+/// The judges with a model, in the list's order.
+fn judges() -> impl Iterator<Item = JudgeChoice> {
+    JudgeChoice::ALL.into_iter().filter(|c| c.model().is_some())
 }
 
 fn models_exist(p: &Prefs) -> bool {
     p.search_storage().is_some_and(|s| s.models_bytes > 0)
 }
+
+/// The delete confirmation's title per judge (static: the dialog takes a
+/// `&'static str`).
+const DELETE_TITLES: [(JudgeChoice, &str); 2] = [(JudgeChoice::Qwen3VlReranker, "Delete Qwen3-VL-Reranker?"), (JudgeChoice::Gemma4, "Delete Gemma 4?")];
 
 /// Whether a search storage action can be asked for now.
 fn search_action_ready(app: &App, c: Control) -> bool {
@@ -898,8 +923,10 @@ fn controls(app: &App) -> Vec<Control> {
             v.push(c);
         }
     }
-    if judge_exists(p) {
-        v.extend([Control::JudgeOpen, Control::JudgeDelete]);
+    for c in judges() {
+        if judge_exists(p, c) {
+            v.extend([Control::JudgeOpen(c), Control::JudgeDelete(c)]);
+        }
     }
     if models_exist(p) {
         v.push(Control::ModelsOpen);
@@ -1285,7 +1312,7 @@ fn storage_section(app: &App) -> Element<'_, Message> {
             ),
             search_index_row(app),
             heads_row(app),
-            judge_row(app),
+            judge_rows(app),
             models_row(app),
             unsaved_row(app),
         ],
@@ -1678,6 +1705,19 @@ fn judge_setting(app: &App) -> Element<'_, Message> {
         col = col.push(Space::new().height(t::S1));
         col = col.push(note);
     }
+    // Another judge's files stay until deleted: say so, with their size.
+    for c in judges().filter(|&c| c != chosen) {
+        if let Some(b) = judge_bytes(p, c).filter(|&b| b > 0) {
+            col = col.push(
+                row![
+                    icons::view(Glyph::Info, 13.0, t::INK3),
+                    text(format!("{} stays downloaded ({}) and isn't loaded; Storage deletes it.", c.label(), util::fmt_bytes(b))).size(t::T_SMALL).color(t::INK3)
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            );
+        }
+    }
     container(col).padding(Padding::from([t::S3, t::S4])).width(Length::Fill).into()
 }
 
@@ -1769,23 +1809,38 @@ fn lowercase_first(s: &str) -> String {
     }
 }
 
-/// Storage ▸ *Close-call judge*: the judge's model, apart from the other
-/// models, deleted on its own (which turns the judge off).
-fn judge_row(app: &App) -> Element<'_, Message> {
+/// Storage ▸ one row per close-call judge, in the list's order: its model,
+/// apart from the other models, deleted on its own (the chosen one turns
+/// the judge off; another's goes alone).
+fn judge_rows(app: &App) -> Element<'_, Message> {
+    let mut col = column![];
+    for (i, c) in judges().enumerate() {
+        if i > 0 {
+            col = col.push(container(kit::hairline()).padding(Padding { left: t::S4, ..Padding::ZERO }));
+        }
+        col = col.push(judge_row(app, c));
+    }
+    col.into()
+}
+
+fn judge_row(app: &App, c: JudgeChoice) -> Element<'_, Message> {
     let p = &app.prefs;
-    let (value, sub) = match p.search_storage() {
+    let chosen = app.settings.fursuit_judge == c;
+    let (value, sub) = match judge_bytes(p, c) {
         None => ("…".to_string(), Some("counting".to_string())),
-        Some(s) if s.judge_bytes == 0 => ("None".to_string(), Some("not downloaded".to_string())),
-        Some(s) => (util::fmt_bytes(s.judge_bytes), Some(app.search.status.judge.downloaded.first().map_or("downloaded", |c| c.label()).to_string())),
+        Some(0) => ("None".to_string(), Some("not downloaded".to_string())),
+        Some(b) => (util::fmt_bytes(b), Some(if chosen { "the judge chosen" } else { "not chosen now" }.to_string())),
     };
-    let open = focusable(p, Control::JudgeOpen, kit::btn("Open", style::ghost(), judge_exists(p).then(|| m(Msg::Press(Control::JudgeOpen)))));
-    let delete = focusable(p, Control::JudgeDelete, kit::btn("Delete…", style::secondary(), judge_exists(p).then(|| m(Msg::Press(Control::JudgeDelete)))));
-    let about = column![
-        text("The fursuit close-call judge's model, chosen in Preferences ▸ Fursuits. Deleted, the judge turns off; choosing it again downloads it again, after asking.").size(t::T_SMALL).color(t::INK3),
-        text(judge_dir().map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
-    ]
-    .spacing(2);
-    setting("Close-call judge", about.into(), row![size_column(value, sub), open, delete].spacing(t::S1).align_y(Alignment::Center).into())
+    let exists = judge_exists(p, c);
+    let open = focusable(p, Control::JudgeOpen(c), kit::btn("Open", style::ghost(), exists.then(|| m(Msg::Press(Control::JudgeOpen(c))))));
+    let delete = focusable(p, Control::JudgeDelete(c), kit::btn("Delete…", style::secondary(), exists.then(|| m(Msg::Press(Control::JudgeDelete(c))))));
+    let what = if chosen {
+        "The close-call judge chosen in Preferences ▸ Fursuits. Deleted, the judge turns off; choosing it again downloads it again, after asking."
+    } else {
+        "A close-call judge, not chosen now. Its files stay until deleted; choosing it again uses them as they are."
+    };
+    let about = column![text(what).size(t::T_SMALL).color(t::INK3), text(judge_dir(c).map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)].spacing(2);
+    setting(format!("Close-call judge: {}", c.label()), about.into(), row![size_column(value, sub), open, delete].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
 /// A model's name without what follows a comma ("InsightFace").
@@ -2072,17 +2127,17 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
                 true,
             )
         }
-        Ask::DeleteJudge => {
-            let bytes = app.prefs.search_storage().map(|s| s.judge_bytes).unwrap_or(0);
-            (
-                "Delete the close-call judge?",
+        Ask::DeleteJudge(c) => {
+            let bytes = judge_bytes(&app.prefs, c).unwrap_or(0);
+            let freed = if bytes > 0 { util::fmt_bytes(bytes) } else { "Its space".to_string() };
+            let body = if app.settings.fursuit_judge == c {
                 format!(
-                    "{} is freed, and the close-call judge turns off: close calls are matched by look alone again. The close calls it checked are remembered. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.",
-                    if bytes > 0 { util::fmt_bytes(bytes) } else { "Its space".to_string() }
-                ),
-                "Delete",
-                true,
-            )
+                    "{freed} is freed, and the close-call judge turns off: close calls are matched by look alone again. The close calls it checked are remembered. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking."
+                )
+            } else {
+                format!("{freed} is freed. It isn't the judge chosen now, so nothing else changes. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.")
+            };
+            (DELETE_TITLES.iter().find(|(k, _)| *k == c).map_or("Delete the close-call judge?", |(_, t)| t), body, "Delete", true)
         }
         _ => (
             "Delete the downloaded models?",
