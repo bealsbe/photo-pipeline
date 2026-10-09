@@ -85,7 +85,7 @@ pub fn judging(app: &App, group: &GroupId) -> bool {
 /// Otherwise the engine answers as with the judge off, and sends no
 /// verdicts.
 pub fn active(st: &crate::search::Status) -> bool {
-    st.judge.usable() && st.device.chosen == crate::ml::Device::Gpu
+    st.judge.active(st.device.chosen)
 }
 
 /// The run for `group`, if one is under way or finished.

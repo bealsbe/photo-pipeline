@@ -24,6 +24,8 @@ pub mod face;
 pub mod gpu;
 pub mod heads;
 pub mod judge;
+pub mod judge_client;
+pub mod judge_worker;
 pub mod models;
 pub mod onnx_patch;
 pub mod prep;

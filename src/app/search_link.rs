@@ -504,14 +504,12 @@ impl Link {
     }
 
     // ── the close-call judge (fursuit matching v2) ──
-    // ENGINE: the engine's calls land with the backend's stage 2; until
-    // then the real engine ignores these.
 
     /// Preferences ▸ Fursuits ▸ *Close-call judge*.  Off unloads it and
     /// drops a run.
     pub fn set_judge(&self, choice: JudgeChoice) {
         match self {
-            Link::Engine(_) => {}
+            Link::Engine(e) => e.set_judge(choice),
             Link::Fake(f) => f.change(|s| {
                 s.status.judge.choice = choice;
                 s.fursuits.judge_on = s.status.judge.installed();
@@ -528,7 +526,7 @@ impl Link {
     /// Download `choice`'s model alone (`BgEvent::ModelDownload`).
     pub fn download_judge(&self, choice: JudgeChoice) {
         match self {
-            Link::Engine(_) => {}
+            Link::Engine(e) => e.download_judge(choice),
             Link::Fake(f) => f.change(|s| {
                 if let Some(m) = choice.model() {
                     s.downloads = vec![(m, 0, models::info(m).bytes(), DownloadState::Waiting)];
@@ -540,7 +538,7 @@ impl Link {
     /// × on the judge's line: stop judging (what was judged is kept).
     pub fn stop_judging(&self) {
         match self {
-            Link::Engine(_) => {}
+            Link::Engine(e) => e.stop_judging(),
             Link::Fake(f) => f.change(|s| {
                 s.judge_run = None;
                 s.status.judge.state = JudgeState::Idle;
@@ -551,7 +549,7 @@ impl Link {
     /// Delete `choice`'s model files (the judged pairs are kept).
     pub fn delete_judge(&self, choice: JudgeChoice) {
         match self {
-            Link::Engine(_) => {}
+            Link::Engine(e) => e.delete_judge(choice),
             Link::Fake(f) => f.change(|s| {
                 s.status.judge.downloaded.retain(|c| *c != choice);
                 if s.status.judge.choice == choice {
@@ -768,6 +766,9 @@ impl FakeState {
         h.scanned = self.fursuits.scanned.min(h.tagged);
         h.found = self.fursuits.found();
         h.named = self.fursuits.named();
+        // Every head the stand-in finds has the search model's vectors.
+        h.vectors = h.found;
+        h.whitened = h.vectors >= crate::search::whiten::MIN_HEADS;
     }
 
     /// A head scan would start: on the card it does; on the processor it

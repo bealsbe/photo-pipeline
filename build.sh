@@ -4,8 +4,9 @@
 #   ./build.sh          build target/release/photo-pipeline
 #   ./build.sh --test   build, then run the unit tests
 #
-# The first build compiles the vendored LibRaw and takes a few minutes;
-# later builds only recompile what changed.
+# The first build compiles the vendored LibRaw and llama.cpp (the fursuit
+# close-call judge, with Vulkan) and takes several minutes; later builds
+# only recompile what changed.
 set -euo pipefail
 
 cd "$(dirname "$(readlink -f "$0")")"
@@ -33,6 +34,12 @@ if command -v pkg-config >/dev/null; then
     pkg-config --exists zlib    || missing+=("zlib headers            (zlib-ng-compat-devel)")
     pkg-config --exists libjpeg || missing+=("libjpeg headers         (libjpeg-turbo-devel)")
 fi
+command -v cmake      >/dev/null || missing+=("CMake                   (cmake)")
+command -v glslc      >/dev/null || missing+=("GLSL compiler           (glslc)")
+command -v git        >/dev/null || missing+=("git                     (git)")
+if command -v pkg-config >/dev/null; then
+    pkg-config --exists vulkan || missing+=("Vulkan headers          (vulkan-headers, vulkan-loader-devel)")
+fi
 if command -v gcc >/dev/null && [[ "$(gcc -print-file-name=libgomp.so)" == "libgomp.so" ]]; then
     missing+=("OpenMP runtime          (libgomp)")
 fi
@@ -48,6 +55,16 @@ if [[ "$(printf '%s\n1.85.0\n' "$rust_ver" | sort -V | head -n1)" != "1.85.0" ]]
     echo "Rust $rust_ver is too old — 1.85 or newer is required." >&2
     exit 1
 fi
+
+# ── Vendored llama.cpp ───────────────────────────────────────────────────
+# Submodules pinned to the commits the judge was measured on (build.rs
+# refuses any other); fetched once, shallow.
+for sub in vendor/llama.cpp vendor/SPIRV-Headers; do
+    if [[ ! -f "$sub/CMakeLists.txt" ]]; then
+        echo "Fetching $sub (pinned)…"
+        git submodule update --init --depth 1 "$sub"
+    fi
+done
 
 # ── Build ────────────────────────────────────────────────────────────────
 echo "Building Photo Pipeline (release)…"
@@ -70,6 +87,12 @@ fi
 reply="$(env -u LD_LIBRARY_PATH "$bin" --ml-worker --device cpu --models /nonexistent </dev/null 2>/dev/null || true)"
 if [[ $reply != *'"reply":"failed"'* ]]; then
     echo "The search helper (photo-pipeline --ml-worker) doesn't start: ${reply:-no reply}" >&2
+    exit 1
+fi
+# The judge helper likewise: without its model it says so and exits.
+reply="$(env -u LD_LIBRARY_PATH "$bin" --judge-worker --model-dir /nonexistent </dev/null 2>/dev/null || true)"
+if [[ $reply != *'"reply":"failed"'* ]]; then
+    echo "The judge helper (photo-pipeline --judge-worker) doesn't start: ${reply:-no reply}" >&2
     exit 1
 fi
 

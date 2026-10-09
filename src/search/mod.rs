@@ -39,6 +39,7 @@ pub mod pass;
 pub mod query;
 pub mod step;
 pub mod tags;
+pub mod judging;
 pub mod vocab;
 pub mod whiten;
 

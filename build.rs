@@ -1,5 +1,7 @@
 //! Builds the vendored LibRaw 0.22 (the version rawpy ships, so RAW support
-//! matches the Python app) plus the small C shim in native/libraw_shim.cpp.
+//! matches the Python app) plus the small C shim in native/libraw_shim.cpp,
+//! and the vendored llama.cpp with libmtmd (Vulkan, pinned commits) plus
+//! native/judge_shim.cpp for the fursuit close-call judge.
 //!
 //! Optional codecs follow rawpy's build: zlib (deflate DNG) and libjpeg
 //! (lossy DNG) are enabled when pkg-config can find them, and OpenMP is used
@@ -155,6 +157,9 @@ fn main() {
     build.file("native/libraw_shim.cpp");
     build.compile("rawshim");
 
+    // The close-call judge's runtime (fursuit matching v2).
+    build_llama();
+
     // Static archives must precede the libraries they depend on.
     for lib in [&zlib, &jpeg].into_iter().flatten() {
         for p in &lib.link_paths {
@@ -188,4 +193,149 @@ fn main() {
     } else if !target.contains("msvc") {
         println!("cargo:rustc-link-lib=stdc++");
     }
+}
+
+// ---- the close-call judge: llama.cpp and libmtmd (fursuit matching v2) ----
+
+/// The llama.cpp commit the judge is built from (`vendor/llama.cpp`, a
+/// submodule): the one the research measured Gemma 4 on.
+const LLAMA_COMMIT: &str = "de7fa0a3c6a2e1b4cd9f22eb8d6bf5b12dbdb63b";
+/// SPIRV-Headers, which llama.cpp's Vulkan backend needs at build time
+/// (`vendor/SPIRV-Headers`, a submodule; headers only).
+const SPIRV_HEADERS_COMMIT: &str = "86f980c731e62ae4eaf383d320449d71687936bf";
+
+/// Fail the build when a submodule isn't at its pinned commit (a git
+/// checkout; a source tree without git metadata is taken as it is).
+fn check_commit(dir: &Path, commit: &str) {
+    let Ok(out) = std::process::Command::new("git").arg("-C").arg(dir).args(["rev-parse", "HEAD"]).output() else { return };
+    if !out.status.success() {
+        return;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if head != commit {
+        panic!("{} is at {head}, not the pinned {commit}: run `git submodule update --init --depth 1 {}`", dir.display(), dir.display());
+    }
+}
+
+fn run(cmd: &mut std::process::Command) {
+    let status = cmd.status().unwrap_or_else(|e| panic!("couldn't run {cmd:?}: {e}"));
+    if !status.success() {
+        panic!("{cmd:?} failed ({status})");
+    }
+}
+
+/// Build llama.cpp (Vulkan) and libmtmd as static archives in OUT_DIR,
+/// reproducibly from the pinned commits (no -march=native, nothing
+/// downloaded), then the shim the judge helper calls, and link them.
+fn build_llama() {
+    let llama = Path::new("vendor/llama.cpp");
+    let spirv = Path::new("vendor/SPIRV-Headers");
+    for dir in [llama, spirv] {
+        if !dir.join("CMakeLists.txt").is_file() {
+            panic!("{} is missing: run `git submodule update --init --depth 1 {}` (./build.sh does)", dir.display(), dir.display());
+        }
+    }
+    check_commit(llama, LLAMA_COMMIT);
+    check_commit(spirv, SPIRV_HEADERS_COMMIT);
+    println!("cargo:rerun-if-changed=native/judge_shim.cpp");
+    println!("cargo:rerun-if-changed=vendor/llama.cpp/CMakeLists.txt");
+    println!("cargo:rerun-if-changed=vendor/llama.cpp/include/llama.h");
+    println!("cargo:rerun-if-changed=vendor/llama.cpp/tools/mtmd/mtmd.h");
+    let out = std::path::PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    let jobs = std::env::var("NUM_JOBS").unwrap_or_else(|_| "8".into());
+    let generator = if std::process::Command::new("ninja").arg("--version").output().is_ok_and(|o| o.status.success()) { "Ninja" } else { "Unix Makefiles" };
+    let spirv_prefix = out.join("spirv");
+    run(std::process::Command::new("cmake")
+        .arg("-S").arg(spirv)
+        .arg("-B").arg(out.join("spirv-build"))
+        .arg("-G").arg(generator)
+        .arg(format!("-DCMAKE_INSTALL_PREFIX={}", spirv_prefix.display()))
+        .arg("-DCMAKE_BUILD_TYPE=Release")
+        .arg("-DSPIRV_HEADERS_ENABLE_TESTS=OFF")
+        .arg("-DSPIRV_HEADERS_ENABLE_INSTALL=ON")
+        .stdout(std::process::Stdio::null()));
+    run(std::process::Command::new("cmake").arg("--install").arg(out.join("spirv-build")).stdout(std::process::Stdio::null()));
+    let build = out.join("llama-build");
+    let mut cfg = std::process::Command::new("cmake");
+    cfg.arg("-S").arg(llama).arg("-B").arg(&build).arg("-G").arg(generator);
+    for d in [
+        "CMAKE_BUILD_TYPE=Release",
+        "BUILD_SHARED_LIBS=OFF",
+        "CMAKE_POSITION_INDEPENDENT_CODE=ON",
+        "GGML_VULKAN=ON",
+        "GGML_NATIVE=OFF",
+        "GGML_OPENMP=OFF",
+        "GGML_CCACHE=OFF",
+        "LLAMA_BUILD_MTMD=ON",
+        "LLAMA_BUILD_COMMON=OFF",
+        "LLAMA_BUILD_TESTS=OFF",
+        "LLAMA_BUILD_TOOLS=OFF",
+        "LLAMA_BUILD_EXAMPLES=OFF",
+        "LLAMA_BUILD_SERVER=OFF",
+        "LLAMA_BUILD_APP=OFF",
+        "LLAMA_OPENSSL=OFF",
+        "LLAMA_CURL=OFF",
+        "LLAMA_SUBPROCESS=OFF",
+        "MTMD_VIDEO=OFF",
+    ] {
+        cfg.arg(format!("-D{d}"));
+    }
+    cfg.arg(format!("-DCMAKE_PREFIX_PATH={}", spirv_prefix.display()));
+    // ggml-vulkan finds the package but includes <spirv/unified1/...>
+    // without its target: the headers' folder goes on the include path.
+    let inc = format!("-I{}", spirv_prefix.join("include").display());
+    cfg.arg(format!("-DCMAKE_CXX_FLAGS={inc}")).arg(format!("-DCMAKE_C_FLAGS={inc}"));
+    cfg.stdout(std::process::Stdio::null());
+    run(&mut cfg);
+    run(std::process::Command::new("cmake").arg("--build").arg(&build).args(["--config", "Release", "-j", &jobs, "--target", "mtmd", "llama"]).stdout(std::process::Stdio::null()));
+
+    // The shim, against the headers of the same tree.
+    let mut shim = cc::Build::new();
+    shim.cpp(true)
+        .std("c++17")
+        .file("native/judge_shim.cpp")
+        .include(llama.join("include"))
+        .include(llama.join("ggml/include"))
+        .include(llama.join("tools/mtmd"))
+        .opt_level(2)
+        .debug(false)
+        .warnings(false);
+    shim.compile("judgeshim");
+
+    // The archives, the ones that use others first.
+    let mut archives: Vec<std::path::PathBuf> = Vec::new();
+    fn walk(dir: &Path, found: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                walk(&p, found);
+            } else if p.extension().is_some_and(|x| x == "a") {
+                found.push(p);
+            }
+        }
+    }
+    walk(&build, &mut archives);
+    let order = ["mtmd", "llama", "ggml", "ggml-vulkan", "ggml-cpu", "ggml-base"];
+    let name_of = |p: &Path| p.file_stem().and_then(|s| s.to_str()).and_then(|s| s.strip_prefix("lib")).map(str::to_string);
+    let mut names: Vec<(usize, String, std::path::PathBuf)> = archives
+        .iter()
+        .filter_map(|p| {
+            let n = name_of(p)?;
+            // vendor helpers (hashing, image decoding) go between mtmd and llama.
+            let rank = order.iter().position(|o| *o == n).map(|i| if i == 0 { 0 } else { i + 1 }).unwrap_or(1);
+            Some((rank, n, p.parent()?.to_path_buf()))
+        })
+        .collect();
+    names.sort();
+    for (_, n, dir) in &names {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+        println!("cargo:rustc-link-lib=static={n}");
+    }
+    for needed in order {
+        if !names.iter().any(|(_, n, _)| n == needed) {
+            panic!("llama.cpp's build made no lib{needed}.a (found: {:?})", names.iter().map(|(_, n, _)| n).collect::<Vec<_>>());
+        }
+    }
+    println!("cargo:rustc-link-lib=vulkan");
 }

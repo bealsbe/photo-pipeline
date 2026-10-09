@@ -133,7 +133,9 @@ pub enum BgEvent {
     /// `suggestions` or `find_more`), as they land, nearest first: the
     /// entries new since the last event (one per burst, as `Suggestions`)
     /// it offers, and those it left out; `done` of `total` close calls.
-    /// The last has `done == total`.  Fursuits only.
+    /// The first follows the request's `Suggestions` at once (with the
+    /// verdicts already kept); the last has `done == total`.  Fursuits
+    /// only.
     Judged {
         seq: u64,
         group: crate::model::subjects::GroupId,
