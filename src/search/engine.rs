@@ -81,18 +81,13 @@ enum Cmd {
     StopHeads,
     FindMore { seq: u64, group: GroupId },
     // Fursuit matching v2.
-    #[allow(dead_code)] // Sent by `catch_up_head_vectors`, which the pages call.
     CatchUpHeadVectors,
     /// Tests: whiten with fewer heads than a library needs.
     #[cfg(test)]
     MinFit(usize),
-    #[allow(dead_code)] // The judge API's, which the pages call.
     SetJudge(JudgeChoice),
-    #[allow(dead_code)]
     DownloadJudge(JudgeChoice),
-    #[allow(dead_code)]
     DeleteJudge(JudgeChoice),
-    #[allow(dead_code)]
     StopJudging,
     /// From the judge's runner thread.
     JudgeEvent(judging::Event),
@@ -461,7 +456,6 @@ impl Engine {
     /// again on the chosen device (`HeadsStatus::vectors_missing`, the
     /// cost from `estimate::head_vector_seconds`).  Only ever started by
     /// this command, never on its own.
-    #[allow(dead_code)] // Called by the pages (fursuit matching v2's UI branch).
     pub fn catch_up_head_vectors(&self) {
         self.send(Cmd::CatchUpHeadVectors);
     }
@@ -492,7 +486,6 @@ impl Engine {
 /// nothing is named, merged or marked by it.  Card only: with the
 /// processor chosen, or the judge failed, close calls use the vector
 /// cut-offs as with *Off*.
-#[allow(dead_code)] // Called by the pages (fursuit matching v2's UI branch).
 impl Engine {
     /// The choice (*Off* or a judge).  Its model is downloaded by
     /// [`Engine::download_judge`], never by this.

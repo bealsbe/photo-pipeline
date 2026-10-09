@@ -146,7 +146,6 @@ pub const HEAD_VECTOR_SECONDS_PER_PHOTO_GPU: f64 = 0.015;
 pub const HEAD_VECTOR_SECONDS_PER_PHOTO_CPU: f64 = 0.25;
 
 /// Seconds for the v2 catch-up over `photos` photos with heads.
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub fn head_vector_seconds(photos: usize, device: Device) -> f64 {
     let read = photos as f64 * SECONDS_PER_SHOT_GPU;
     let work = photos as f64
@@ -161,7 +160,6 @@ pub fn head_vector_seconds(photos: usize, device: Device) -> f64 {
 }
 
 /// Bytes read from the library by the v2 catch-up (each preview again).
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub fn head_vector_bytes_read(photos: usize) -> u64 {
     bytes_read(photos)
 }
@@ -171,9 +169,7 @@ pub fn head_vector_bytes_read(photos: usize) -> u64 {
 /// (2026-10-09): 2.06–2.12 s a pair (the research's server: 2.30), the
 /// load 2.3–5.8 s with the files in the page cache (a cold disk reads
 /// 18 GB first).
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.1;
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub const JUDGE_LOAD_SECONDS: f64 = 6.0;
 /// Qwen3-VL-Reranker (Q8_0, 280 image tokens), **measured through the
 /// helper** on the RX 7900 XTX (2026-10-09): 0.77–0.79 s a pair, both
@@ -183,7 +179,6 @@ pub const QWEN_SECONDS_PER_PAIR: f64 = 0.8;
 pub const QWEN_LOAD_SECONDS: f64 = 3.0;
 
 /// Seconds a close call (a pair, both orders) with `choice`.
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub fn judge_seconds_per_pair(choice: crate::ml::judge::JudgeChoice) -> f64 {
     match choice {
         crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_SECONDS_PER_PAIR,
@@ -193,7 +188,6 @@ pub fn judge_seconds_per_pair(choice: crate::ml::judge::JudgeChoice) -> f64 {
 }
 
 /// Seconds to load `choice` onto the card (files cached).
-#[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
 pub fn judge_load_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
     match choice {
         crate::ml::judge::JudgeChoice::Qwen3VlReranker => QWEN_LOAD_SECONDS,
