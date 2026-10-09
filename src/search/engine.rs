@@ -1297,7 +1297,7 @@ impl Worker {
         let valid = matches!(&self.verdicts, Some((c, d, _)) if *c == self.judge_choice && *d == dir);
         if !valid {
             let cache = match &dir {
-                Some(d) => PairCache::load(d, self.judge_choice),
+                Some(d) => PairCache::open(d, self.judge_choice),
                 None => PairCache::none(),
             };
             self.verdicts = Some((self.judge_choice, dir, cache));
