@@ -218,8 +218,9 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
     Some(match &j.state {
         JudgeState::WaitingForCard => (t::PHOTO_INK3, format!("{} wait for the graphics card", super::search_setup::capital(&calls)), format!("They're checked as soon as it's free: {}.", card_holder(app))),
         JudgeState::Loading => {
-            let secs = crate::search::estimate::describe_seconds(super::fursuits::JUDGE_LOAD_SECONDS);
-            (t::PHOTO_INK3, format!("Getting the close-call judge ready for {calls}"), format!("Putting it on the graphics card takes {secs} the first time."))
+            // Seconds, not minutes: say them ("about 6 seconds").
+            let secs = super::fursuits::call_seconds_words(super::fursuits::JUDGE_LOAD_SECONDS);
+            (t::PHOTO_INK3, format!("Getting the close-call judge ready for {calls}"), format!("Putting it on the graphics card takes {secs}."))
         }
         JudgeState::Judging { done, total, .. } => (
             t::PHOTO_INK2,
