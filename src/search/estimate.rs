@@ -137,13 +137,13 @@ pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
 
 /// Seconds per photo for the v2 catch-up (the search model's vectors
 /// of heads already found: the preview read again, each head cropped
-/// and through the image tower; no detector).  *Provisional*: the
-/// research measured 7.2 ms a crop on the card, so reading dominates
-/// there; on the processor the tower is about 0.25 s a crop and a photo
-/// holds about 1.6 heads.  Replaced by the measured figures in "As
-/// built — v2".
-pub const HEAD_VECTOR_SECONDS_PER_PHOTO_GPU: f64 = 0.05;
-pub const HEAD_VECTOR_SECONDS_PER_PHOTO_CPU: f64 = 0.4;
+/// and through the image tower; no detector), **measured through the
+/// helper** on the research's 7 033 photos (10 826 heads, 2026-10-09,
+/// `heads::store_tests::fursuit_v2_vectors_of_the_research_heads`):
+/// 0.015 s a photo on the card with the previews in the page cache, and
+/// 0.25 s a photo on the processor (300 photos).
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_GPU: f64 = 0.015;
+pub const HEAD_VECTOR_SECONDS_PER_PHOTO_CPU: f64 = 0.25;
 
 /// Seconds for the v2 catch-up over `photos` photos with heads.
 #[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
@@ -166,14 +166,15 @@ pub fn head_vector_bytes_read(photos: usize) -> u64 {
     bytes_read(photos)
 }
 
-/// The close-call judge (v2): seconds a pair, both orders (the
-/// research's server: 2.30 s at 560 image tokens), and the load onto
-/// the card (about 10 s warm).  *Provisional* until the helper's own
-/// figures are measured ("As built — v2").
+/// The close-call judge (v2): seconds a pair, both orders, and the load
+/// onto the card, **measured through the helper** on the RX 7900 XTX
+/// (2026-10-09): 2.06–2.12 s a pair (the research's server: 2.30), the
+/// load 2.3–5.8 s with the files in the page cache (a cold disk reads
+/// 18 GB first).
 #[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
-pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.3;
+pub const JUDGE_SECONDS_PER_PAIR: f64 = 2.1;
 #[allow(dead_code)] // The pages quote it (fursuit matching v2's UI branch).
-pub const JUDGE_LOAD_SECONDS: f64 = 10.0;
+pub const JUDGE_LOAD_SECONDS: f64 = 6.0;
 
 /// A duration in the invitation's words: "about 7 minutes", "about an
 /// hour", "about 1.4 hours", "under a minute".

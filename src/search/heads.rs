@@ -2342,7 +2342,12 @@ mod store_tests {
             let file_type = if rel.to_lowercase().ends_with(".jpg") { FileType::Jpg } else { FileType::Raw };
             jobs.push((KnownHeads { path: root.join(rel), file_type, key, boxes: rows.iter().map(|r| r.1).collect() }, rows.iter().map(|r| r.0).collect()));
         }
-        let client = Client::start(Spec::images(Device::Gpu, None)).ok().expect("the search helper on the card");
+        // `PP_HEADS_DEVICE=cpu` measures the processor; `PP_LIMIT` takes the first photos only.
+        let device = if std::env::var("PP_HEADS_DEVICE").as_deref() == Ok("cpu") { Device::Cpu } else { Device::Gpu };
+        if let Some(n) = std::env::var("PP_LIMIT").ok().and_then(|s| s.parse().ok()) {
+            jobs.truncate(n);
+        }
+        let client = Client::start(Spec::images(device, None)).ok().expect("the search helper");
         let mut vectors = vec![0f32; n_rows * crate::ml::heads::DIM];
         let (mut done, mut failed) = (0usize, 0usize);
         let t = Instant::now();
@@ -2369,7 +2374,7 @@ mod store_tests {
         let secs = t.elapsed().as_secs_f64();
         let bytes: Vec<u8> = vectors.iter().flat_map(|x| x.to_le_bytes()).collect();
         fs::write(&out, bytes).unwrap();
-        eprintln!("{done} photos ({failed} failed), {n_rows} rows, in {secs:.0} s: {:.3} s a photo on the card; wrote {}", secs / jobs.len().max(1) as f64, out.display());
+        eprintln!("{done} photos ({failed} failed), {n_rows} rows, in {secs:.0} s: {:.3} s a photo on {device:?}; wrote {}", secs / jobs.len().max(1) as f64, out.display());
         client.shutdown();
     }
 
