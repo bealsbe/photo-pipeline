@@ -552,7 +552,9 @@ never shown, merged, suggested or completed together with people or pets.
   merged or marked for you.  Fursuits only, never people.  A failing card
   stops it and says so as an error, with *Try the card again* and
   *Preferences*; it never moves to the processor, and what is already on
-  the list is kept.
+  the list is kept.  Whenever the judge can't run (off, not downloaded,
+  the processor chosen, stopped), *Find more* and the review match by
+  look alone, as before.
 - **The head step.**  On the graphics card it runs on its own: after the
   first index (the download dialog's *Find fursuit heads*, ticked unless
   the processor is chosen) and on each export's new fursuit photos, with

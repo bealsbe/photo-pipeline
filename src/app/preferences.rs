@@ -782,7 +782,7 @@ fn choose_judge(app: &mut App, c: JudgeChoice) -> Task<Message> {
     app.settings.save_in_background();
     app.search.link.set_judge(c);
     match c {
-        JudgeChoice::Off => app.show_status("The close-call judge is off: close calls are left out. Its model stays downloaded until deleted in Storage.", 6000),
+        JudgeChoice::Off => app.show_status("The close-call judge is off: close calls are matched by look alone. Its model stays downloaded until deleted in Storage.", 6000),
         _ => app.show_status(format!("{} checks close calls from now on, in Find more and the \u{201c}Same fursuit?\u{201d} review.", c.label()), 6000),
     }
 }
@@ -1690,7 +1690,7 @@ fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
     match c.model().map(crate::ml::models::info) {
         None => {
             top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
-            lines = lines.push(text("Close calls are left out, as before: Find more and the review offer only photos close enough to be sure of.").size(t::T_SMALL).color(t::INK2));
+            lines = lines.push(text("Find more and the review offer photos by how alike the heads look, as before.").size(t::T_SMALL).color(t::INK2));
         }
         Some(mi) => {
             let coming = app.search.downloads.iter().find(|d| d.model == mi.id && !d.state.is_final());
@@ -1746,14 +1746,14 @@ fn judge_note(app: &App) -> Option<Element<'_, Message>> {
         crate::ml::judge::JudgeState::Broken(why) => line(Glyph::Warning, t::WARN, format!("The close-call judge couldn't run. {why}")).into(),
         _ if judge_downloading(app) => line(Glyph::Info, t::INK2, format!("{} is downloading; close calls are checked once it's in place.", c.label())).into(),
         _ if !j.downloaded.contains(&c) => row![
-            line(Glyph::Info, t::INK2, format!("{} isn't downloaded, so close calls are left out for now.", c.label())),
+            line(Glyph::Info, t::INK2, format!("{} isn't downloaded, so close calls are matched by look alone for now.", c.label())),
             focusable(p, Control::JudgeDownload, kit::btn("Download…", style::secondary(), Some(m(Msg::Press(Control::JudgeDownload))))),
         ]
         .spacing(t::S2)
         .align_y(Alignment::Center)
         .into(),
         _ if app.settings.search_device == Device::Cpu => {
-            line(Glyph::Info, t::INK2, "The processor is chosen in Search, and the judge runs on the graphics card only, so close calls are left out until the card is chosen again.".into()).into()
+            line(Glyph::Info, t::INK2, "The processor is chosen in Search, and the judge runs on the graphics card only, so close calls are matched by look alone until the card is chosen again.".into()).into()
         }
         _ if j.loaded => line(Glyph::GraphicsCard, t::INK3, format!("{} is on the graphics card now; it lets the card go after two quiet minutes.", c.label())).into(),
         _ => return None,
@@ -2077,7 +2077,7 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             (
                 "Delete the close-call judge?",
                 format!(
-                    "{} is freed, and the close-call judge turns off: close calls are left out again. The close calls it checked are remembered. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.",
+                    "{} is freed, and the close-call judge turns off: close calls are matched by look alone again. The close calls it checked are remembered. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.",
                     if bytes > 0 { util::fmt_bytes(bytes) } else { "Its space".to_string() }
                 ),
                 "Delete",

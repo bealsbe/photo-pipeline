@@ -2525,6 +2525,9 @@ close calls in *Find more* and the "Same fursuit?" review.
 
 - **Choosing a judge not downloaded** opens the dialog in the main window (Preferences closes, as *Find their heads…* does). The choice is made when *Download* is pressed. If the download stops or fails, the choice stays, and Preferences offers *Download…* again.
 - **Off is never an empty state.** With the judge off, the review and Find more are exactly as before: no line, no tile, no hint to turn it on.
+  - The same holds whenever the judge can't run: not downloaded, the processor chosen, or stopped. The engine answers with the plain cut-offs and sends no `Judged`.
+  - The page asks `JudgeStatus::active(device)` before waiting for verdicts.
+  - Preferences says "close calls are matched by look alone" for each case.
 - **Speed in words** comes from the measured time a close call takes (2.3 s a pair, both orders): "About 2 seconds a close call", and in the dialog "(about 4 minutes for 100)".
 - **A failing card** is said in the review's line as two lines in the warning tone, with *Try the card again* and *Preferences*, and in the status bar. The run it stopped is told as "Checked 6 of 81 close calls before the judge stopped". The processor is never offered (`failure_words`, tested).
 - **The fursuit download** is now the head finder alone; the copy names it from the registry (`fursuits::models_name`).

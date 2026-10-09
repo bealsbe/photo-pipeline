@@ -75,7 +75,9 @@ impl Run {
 /// A fursuit's close calls can be judged: a named fursuit, with a judge
 /// chosen and in place.
 pub fn judging(app: &App, group: &GroupId) -> bool {
-    app.search.status.judge.installed() && app.subjects.group(group).is_some_and(|g| g.kind == Kind::Fursuit && g.name.is_some())
+    // Off, not downloaded, the processor chosen, or stopped: the request is
+    // answered as with the judge off, and nothing waits for verdicts.
+    app.search.status.judge.active(app.search.status.device.chosen) && app.subjects.group(group).is_some_and(|g| g.kind == Kind::Fursuit && g.name.is_some())
 }
 
 /// The run for `group`, if one is under way or finished.

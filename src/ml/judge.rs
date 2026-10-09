@@ -13,7 +13,7 @@ use crate::model::subjects::GroupId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JudgeChoice {
-    /// Close calls are left out, as before the judge.
+    /// Close calls are matched by look alone, as before the judge.
     #[default]
     Off,
     /// Gemma 4 26B-A4B (unsloth's UD-Q4_K_M GGUF and its vision projector).
@@ -42,7 +42,7 @@ impl JudgeChoice {
     pub fn description(self) -> &'static str {
         match self {
             JudgeChoice::Off => "",
-            JudgeChoice::Gemma4 => "about 18 GB, about 2 s per close call",
+            JudgeChoice::Gemma4 => "About 18 GB to download; about 2 s a close call on the graphics card.",
         }
     }
 }
@@ -82,5 +82,13 @@ impl JudgeStatus {
     /// The chosen judge's files are in place.
     pub fn installed(&self) -> bool {
         self.choice != JudgeChoice::Off && self.downloaded.contains(&self.choice)
+    }
+
+    /// A request now would be judged: a judge chosen and in place, the
+    /// card chosen, and the judge not stopped.  Otherwise the request is
+    /// answered as with the judge off (the vector cut-offs), with no
+    /// `Judged` event.
+    pub fn active(&self, device: crate::ml::Device) -> bool {
+        self.installed() && device == crate::ml::Device::Gpu && !matches!(self.state, JudgeState::Failed(_) | JudgeState::Broken(_))
     }
 }

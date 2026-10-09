@@ -428,7 +428,7 @@ pub const ALL: &[ModelInfo] = &[
         what: "Looks at two fursuit heads side by side and says whether they are the same fursuit.",
         licence: "Apache-2.0",
         licence_plain: "free for any use",
-        publisher: "Google",
+        publisher: "Google, quantised by Unsloth",
         source_url: GEMMA4_BASE,
         required: false,
         files: GEMMA4_FILES,
