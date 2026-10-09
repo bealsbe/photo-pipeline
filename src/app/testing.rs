@@ -124,7 +124,9 @@
 //!                             # selfcheck, nocard, away [share],
 //!                             # restarted, waiting [n], mismatch, offline,
 //!                             # models (all in place, nothing indexed),
-//!                             # search-model (only search's in place)
+//!                             # search-model (only search's in place),
+//!                             # download-rate 38 (MB a second by the
+//!                             # clock; pause stalls the download)
 //! search wait 5000            # wait (up to 5 s) for the query in flight
 //! search dump                 # print the page's state
 //! search fake people          # the stand-in's people: people (two named),

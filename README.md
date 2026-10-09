@@ -77,6 +77,7 @@ src/app/               the application: state, update, views
   search_results.rs    results from hits (no I/O), burst stacks, the fursuits' list,
                        completions, recent searches
   search_setup.rs      the download dialog, indexing in the status bar, banners
+  download_speed.rs    a download's speed and time left, from its progress events
   search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
   quality.rs           the analysis as the app holds it (runs on request)
@@ -437,8 +438,13 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   read from the library, how long it takes, what is downloaded and kept)
   and offers *Index the library…*.  A dialog asks once: it lists each model
   with its size, its licence in plain words and its publisher, with the
-  sources and SHA-256 checksums a click away, then shows the download.  A
-  file that doesn't match its checksum is deleted and the dialog says so.
+  sources and SHA-256 checksums a click away, then shows the download.
+  Wherever a download's progress shows (the dialog, the status bar, the
+  search page, Preferences' judge), so does its speed ("4.2 of 9.9 GB ·
+  38 MB/s"), averaged over a few seconds, with the time left; it says
+  "starting…" until there is enough to go on, and "waiting for the
+  network" when no byte has come for a few seconds.  A file that doesn't
+  match its checksum is deleted and the dialog says so.
   *Find people's faces* is ticked there by default, with the face model to
   pick (see *People* below); untick it and only the search model is
   fetched.
@@ -1007,7 +1013,8 @@ These are deliberate:
   stand-in in the search engine's place: made-up hits from the library
   index (with the query's dates and `-word`s applied, and a share of an
   animal word's hits handed back as fursuits left out), made-up Things,
-  downloads and indexing on a timer, and every failure the page shows on
+  downloads and indexing on a timer (`search fake download-rate 38` for a
+  known speed, `pause` for a stall), and every failure the page shows on
   request (`search fake …`).  It downloads, reads and writes nothing.
   `search complete`, `search things` and `search fursuits show|hide`
   drive and print the completions, the start page's Things and the

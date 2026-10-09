@@ -630,7 +630,12 @@ struct FakeState {
     downloads: Vec<(ModelId, u64, u64, DownloadState)>,
     /// The next download ends this way (`search fake mismatch|offline`).
     fail_next: Option<DownloadState>,
-    /// Hold a running pass where it is (screenshots).
+    /// Bytes a second the downloads come at (`search fake download-rate`),
+    /// by the clock; else a twelfth of the model a tick.
+    download_rate: Option<u64>,
+    /// When the downloads last moved on (for `download_rate`).
+    stepped_at: Option<std::time::Instant>,
+    /// Hold a running pass where it is (screenshots); downloads stall.
     paused: bool,
     index: Option<Arc<LibraryIndex>>,
     /// Made-up Things, once something is indexed.
@@ -877,6 +882,8 @@ impl Fake {
             status,
             downloads: Vec::new(),
             fail_next: None,
+            download_rate: None,
+            stepped_at: None,
             paused: false,
             index: None,
             things: Arc::new(Vec::new()),
@@ -957,7 +964,7 @@ impl Fake {
 
     fn publish_downloads(&self, s: &FakeState) {
         for (model, done, total, state) in &s.downloads {
-            let _ = self.bus.unbounded_send(BgEvent::ModelDownload { model: *model, done: *done, total: *total, state: state.clone() });
+            let _ = self.bus.unbounded_send(BgEvent::ModelDownload { model: *model, done: *done, fetched: *done, total: *total, state: state.clone() });
         }
     }
 
@@ -1132,8 +1139,14 @@ impl Fake {
                     s.indexed_shots = s.library_shots.saturating_sub(n);
                     s.pass = Some(PassProgress { kind: PassKind::NewExports, done: 0, total: n, oldest_day: None });
                 }
-                "pause" => st.paused = true,
+                "pause" => {
+                    st.paused = true;
+                    st.stepped_at = None;
+                }
                 "resume" => st.paused = false,
+                // Downloads at this many MB a second (0: a twelfth of the
+                // model a tick, as before).
+                "download-rate" => st.download_rate = arg.trim().parse::<f64>().ok().filter(|&r| r > 0.0).map(|r| (r * 1e6) as u64),
                 "cardcrash" => s.stopped = Some(Stopped::Card(CardFailure::Crashed)),
                 "selfcheck" => {
                     s.device.self_check = SelfCheck::Failed { cosine: 0.42, max_diff: 0.9 };
@@ -1498,11 +1511,14 @@ fn unit(x: &impl Hash) -> f64 {
 /// One step of the stand-in's downloads, then its indexing.
 fn step(s: &mut FakeState) {
     let fail = s.fail_next.clone();
+    let now = std::time::Instant::now();
+    let by_clock = s.download_rate.map(|r| (r as f64 * s.stepped_at.map_or(TICK, |t| now - t).as_secs_f64()) as u64);
     if let Some(d) = s.downloads.iter_mut().find(|d| !d.3.is_final()) {
+        s.stepped_at = Some(now);
         match d.3 {
             DownloadState::Waiting => d.3 = DownloadState::Downloading,
             DownloadState::Downloading => {
-                d.1 = (d.1 + d.2 / 12).min(d.2);
+                d.1 = (d.1 + by_clock.unwrap_or(d.2 / 12)).min(d.2);
                 if d.1 >= d.2 {
                     d.3 = DownloadState::Checking;
                 }

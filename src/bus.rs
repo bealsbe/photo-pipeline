@@ -153,8 +153,10 @@ pub enum BgEvent {
     /// whenever the tags change (`crate::search::Engine::things` reads
     /// the latest at any time).
     SearchThings(Arc<Vec<crate::search::Thing>>),
-    /// A model download's progress (`crate::ml::download`).
-    ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
+    /// A model download's progress (`crate::ml::download`): `done` bytes of
+    /// `total`, of which `fetched` came over the network in this download
+    /// (files already in place count in `done` only).
+    ModelDownload { model: crate::ml::models::ModelId, done: u64, fetched: u64, total: u64, state: crate::ml::download::DownloadState },
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
