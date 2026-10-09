@@ -206,8 +206,16 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   **1** at 100 % on each frame's own AF point, `,` and `.` changing the
   outlined photo's frame, and Esc back to the burst.  Stepping past either
   end of a burst, or PgUp / PgDn, goes on to the photo or burst before or
-  after it.  **B** in the grid or quick look opens the viewer on
-  the selected photo's burst.  Preferences ▸ *Show a burst's frames first*
+  after it.  **Shift+→** (or Shift+D) skips a whole burst, on a frame or
+  on all of them: it goes to the first frame of the next burst, or the
+  next photo when that isn't in one.  **Shift+←** (or Shift+A) goes back
+  to the first frame of the burst you're in, and from there to the first
+  frame of the burst before (or the photo before).  Only the photo landed
+  on loads, it lands only on photos the viewer is showing (a filter's
+  hidden frames, and pruned ones when they're hidden, are passed over),
+  and at either end it stops.  Library photos have no bursts, so there
+  it steps one photo, as ← → do.  **B** in the grid or quick look opens
+  the viewer on the selected photo's burst.  Preferences ▸ *Show a burst's frames first*
   turns the arrival view off (the viewer then steps frame by frame, and B
   still shows them all).
 - **Analysing a folder.** Prune ▸ *Analyse this folder* (also on the side
@@ -265,9 +273,10 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   - If the folder stops answering part-way (a network share dropping), a
     banner says how many shots were checked and kept; *Analyse again*
     carries on from there once the folder is back.
-- **Viewer.** A filmstrip under the photo shows its neighbours with their
-  marks and crops; click to jump, T to hide it.  With *Advance after marking*
-  on (Ctrl+Shift+A, or the Auto-advance toggle), P or M marks the photo and
+- **Viewer.** ← → (or A D) step a photo at a time, and Shift+← →
+  (Shift+A D) skip a whole burst (see *Bursts*).  A filmstrip under the
+  photo shows its neighbours with their marks and crops; click to jump, T
+  to hide it.  With *Advance after marking* on (Ctrl+Shift+A, or the Auto-advance toggle), P or M marks the photo and
   moves on after a short beat; clearing a mark, or marking the last photo,
   stays put.  The viewer window reopens at the size and maximised state you
   left it in (and position, on X11 — Wayland doesn't tell apps where their

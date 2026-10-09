@@ -255,6 +255,8 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::ProblemsOnly => "view-filter",
         Cmd::KeepThisPruneRest => "dialog-ok-apply",
         Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies => "dialog-cancel",
+        Cmd::PrevBurst => "go-previous",
+        Cmd::NextBurst => "go-next",
     }
 }
 

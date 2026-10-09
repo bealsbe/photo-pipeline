@@ -293,6 +293,8 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "StackBurst" => Some(Cmd::StackBurst),
                 "StackBursts" => Some(Cmd::StackBursts),
                 "AdvanceAfterMark" => Some(Cmd::AdvanceAfterMark),
+                "PrevBurst" => Some(Cmd::PrevBurst),
+                "NextBurst" => Some(Cmd::NextBurst),
                 "Analyse" => Some(Cmd::Analyse),
                 "KeepThisPruneRest" => Some(Cmd::KeepThisPruneRest),
                 "PruneSoft" => Some(Cmd::PruneSoft),

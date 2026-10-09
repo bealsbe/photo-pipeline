@@ -14,7 +14,10 @@
 //!   frame and its neighbours when none are picked) in the compare view,
 //!   whose Esc comes back here;
 //! * stepping past either end, or PgUp / PgDn, leaves the burst: the photo
-//!   before or after it, or that burst's sheet.
+//!   before or after it, or that burst's sheet;
+//! * Shift+← / Shift+→ (Shift+A / D), here or on a frame, skip whole
+//!   bursts: back to this burst's first frame, then to the burst before;
+//!   on to the next burst's first frame (`burst_skip`).
 //!
 //! A burst here is a run of two or more consecutive photos in the viewer's
 //! order from one shutter press (`model::bursts`), so a filter that hides
@@ -165,6 +168,50 @@ pub fn sheet_move(run: &Range<usize>, len: usize, cols: usize, at: usize, mv: Mo
         Move::Back => back(),
         Move::Forward => forward(),
     }
+}
+
+/// Shift+← / Shift+→ from item `at` (bursts as [`run_at`] finds them in
+/// the viewer's order, so a filter's hidden frames are never landed on).
+/// Forward: the first frame of the next burst, else the next photo.  Back:
+/// the first frame of this burst when past it (as "previous" goes to the
+/// start of a line or a track first), else the first frame of the burst
+/// before, else the photo before.  `None` at either end.
+pub fn burst_skip(of: &[Option<BurstId>], at: usize, dir: i32) -> Option<usize> {
+    if at >= of.len() {
+        return None;
+    }
+    let here = run_at(of, at);
+    if dir > 0 {
+        let to = here.map_or(at + 1, |r| r.end);
+        return (to < of.len()).then_some(to);
+    }
+    let start = here.map_or(at, |r| r.start);
+    if at > start {
+        return Some(start);
+    }
+    let before = start.checked_sub(1)?;
+    Some(run_at(of, before).map_or(before, |r| r.start))
+}
+
+/// What to preload after a skip landed on `at` (going `dir`), `radius`
+/// photos' worth: the next one (→ steps into the burst landed on), where
+/// the next skip that way lands, then the rest ahead.  Never the frames
+/// just skipped, which plain stepping's ± radius would load.
+pub fn skip_preload(of: &[Option<BurstId>], at: usize, dir: i32, radius: usize) -> Vec<usize> {
+    let mut want = Vec::new();
+    let mut add = |i: usize| {
+        if i != at && i < of.len() && !want.contains(&i) {
+            want.push(i);
+        }
+    };
+    add(at + 1);
+    if let Some(t) = burst_skip(of, at, dir) {
+        add(t);
+    }
+    for i in at + 2..=at + radius {
+        add(i);
+    }
+    want
 }
 
 /// The frames to compare from the sheet: the picked ones (with the outlined
@@ -375,6 +422,27 @@ pub fn move_outline(app: &mut App, mv: Move) -> Task<Message> {
 /// PgUp / PgDn on a frame: out of its burst.
 pub fn leave(app: &mut App, dir: i32) -> Task<Message> {
     move_outline(app, if dir < 0 { Move::Back } else { Move::Forward })
+}
+
+/// Shift+← / Shift+→ (Shift+A / D): skip a burst ([`burst_skip`]).  Only
+/// the photo landed on loads, as with a plain step; on the sheet, back to
+/// the burst's own first frame just moves the outline.
+pub fn skip(app: &mut App, dir: i32) -> Task<Message> {
+    let Some(v) = app.viewer.as_ref() else { return Task::none() };
+    if v.crop_mode {
+        return Task::none();
+    }
+    let Some(to) = burst_skip(&v.burst_of, v.index, dir) else { return Task::none() };
+    let outline = on_sheet(v) && run(v).is_some_and(|r| r.contains(&to));
+    if let Some(v) = app.viewer.as_mut() {
+        v.skipping = Some(dir);
+    }
+    let task = if outline { set_outline(app, to) } else { viewer::navigate(app, to, dir) };
+    // Read by the move's preload; a move that didn't happen leaves it.
+    if let Some(v) = app.viewer.as_mut() {
+        v.skipping = None;
+    }
+    task
 }
 
 /// Zoom into item `at` of the sheet.
@@ -692,6 +760,99 @@ mod tests {
         assert_eq!(sheet_move(&(0..4), 4, 2, 0, Move::Left), Outcome::Stay);
         assert_eq!(sheet_move(&(0..4), 4, 2, 3, Move::Right), Outcome::Stay);
         assert_eq!(sheet_move(&(0..4), 4, 2, 2, Move::Forward), Outcome::Stay);
+    }
+
+    #[test]
+    fn shift_arrows_skip_whole_bursts() {
+        // 0: single, 1-4: burst, 5: single, 6-8: burst, 9-10: burst, 11: single.
+        let of = [None, Some(0), Some(0), Some(0), Some(0), None, Some(1), Some(1), Some(1), Some(2), Some(2), None];
+        let skip = |at, dir| burst_skip(&of, at, dir);
+        // The middle of a burst: on to the next photo after it; back to its
+        // first frame.
+        assert_eq!(skip(2, 1), Some(5));
+        assert_eq!(skip(3, -1), Some(1));
+        // Its first frame: on past it; back to the photo before.
+        assert_eq!(skip(1, 1), Some(5));
+        assert_eq!(skip(1, -1), Some(0));
+        // A single photo between bursts: on to the next burst's first
+        // frame; back to the first frame of the burst before.
+        assert_eq!(skip(5, 1), Some(6));
+        assert_eq!(skip(5, -1), Some(1));
+        // Burst after burst: the next one's first frame, either way.
+        assert_eq!(skip(7, 1), Some(9));
+        assert_eq!(skip(9, -1), Some(6));
+        assert_eq!(skip(10, -1), Some(9));
+        // A single photo before a single photo: one step, like an arrow.
+        assert_eq!(skip(0, 1), Some(1));
+        assert_eq!(skip(11, -1), Some(9));
+    }
+
+    #[test]
+    fn shift_arrows_stop_at_the_ends() {
+        let of = [Some(0), Some(0), Some(0), None, Some(1), Some(1)];
+        assert_eq!(burst_skip(&of, 0, -1), None, "the first photo");
+        assert_eq!(burst_skip(&of, 2, -1), Some(0), "the first burst's first frame first");
+        assert_eq!(burst_skip(&of, 4, 1), None, "the last burst has nothing after it");
+        assert_eq!(burst_skip(&of, 5, 1), None);
+        assert_eq!(burst_skip(&of, 5, -1), Some(4));
+        assert_eq!(burst_skip(&[None], 0, 1), None);
+        assert_eq!(burst_skip(&[None], 0, -1), None);
+        assert_eq!(burst_skip(&[], 0, 1), None);
+        assert_eq!(burst_skip(&of, 9, 1), None, "out of range");
+    }
+
+    #[test]
+    fn shift_arrows_only_land_on_photos_shown() {
+        // The viewer's items after a filter hid frames: burst 0 keeps three
+        // (still one run), burst 1 keeps one (a single photo now), and
+        // burst 2 shows in two halves around another photo (two runs, as
+        // the sheet and the filmstrip see it).
+        let of = [Some(0), Some(0), Some(0), Some(1), None, Some(2), Some(2), None, Some(2), Some(2)];
+        let skip = |at, dir| burst_skip(&of, at, dir);
+        assert_eq!(skip(1, 1), Some(3), "past the frames shown, onto the next photo shown");
+        assert_eq!(skip(3, 1), Some(4), "one frame left of a burst steps like a photo");
+        assert_eq!(skip(3, -1), Some(0));
+        assert_eq!(skip(4, -1), Some(3));
+        assert_eq!(skip(4, 1), Some(5));
+        assert_eq!(skip(6, 1), Some(7));
+        assert_eq!(skip(9, -1), Some(8));
+        assert_eq!(skip(8, -1), Some(7));
+        // Every landing is an index into what the viewer steps through.
+        for at in 0..of.len() {
+            for dir in [-1, 1] {
+                if let Some(to) = skip(at, dir) {
+                    assert!(to < of.len() && to != at);
+                    assert_eq!(to > at, dir > 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_skip_preloads_what_comes_next_not_what_it_skipped() {
+        // 0-3: burst, 4-6: burst, 7: single, 8-9: burst.
+        let of = [Some(0), Some(0), Some(0), Some(0), Some(1), Some(1), Some(1), None, Some(2), Some(2)];
+        // Shift+→ landed on 4: its next frame, the next skip's landing (7),
+        // then the rest ahead; never 2 or 3, the frames passed over.
+        assert_eq!(skip_preload(&of, 4, 1, 2), vec![5, 7, 6]);
+        // Landed on the single 7: the next burst is both.
+        assert_eq!(skip_preload(&of, 7, 1, 2), vec![8, 9]);
+        // Shift+← landed on 4: on into its frames, and the burst before.
+        assert_eq!(skip_preload(&of, 4, -1, 2), vec![5, 0, 6]);
+        // At the end: nothing past it.
+        assert_eq!(skip_preload(&of, 8, 1, 2), vec![9]);
+        assert_eq!(skip_preload(&of, 9, 1, 2), Vec::<usize>::new());
+        // A tight budget: one ahead and the next landing.
+        assert_eq!(skip_preload(&of, 0, 1, 1), vec![1, 4]);
+    }
+
+    #[test]
+    fn without_bursts_shift_arrows_step_like_arrows() {
+        // Library and search results have no bursts in the viewer.
+        let of = [None; 4];
+        assert_eq!(burst_skip(&of, 1, 1), Some(2));
+        assert_eq!(burst_skip(&of, 1, -1), Some(0));
+        assert_eq!(burst_skip(&of, 3, 1), None);
     }
 
     #[test]

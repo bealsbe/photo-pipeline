@@ -52,6 +52,12 @@ pub enum Cmd {
     PruneCopies,
     /// The hints filter on "Possible problems", or off.
     ProblemsOnly,
+    /// Shift+← in the viewer: back to this burst's first frame, else the
+    /// burst (or photo) before.  Viewer only.
+    PrevBurst,
+    /// Shift+→ in the viewer: on to the next burst's first frame, else
+    /// the next photo.  Viewer only.
+    NextBurst,
 }
 
 impl Cmd {
@@ -91,6 +97,8 @@ impl Cmd {
             Cmd::PruneAccidental => "Prune accidental frames…",
             Cmd::PruneCopies => "Prune duplicate copies…",
             Cmd::ProblemsOnly => "Show only possible problems",
+            Cmd::PrevBurst => "Previous burst",
+            Cmd::NextBurst => "Next burst",
         }
     }
 
@@ -129,6 +137,8 @@ impl Cmd {
             Cmd::AdvanceAfterMark => "Ctrl+Shift+A",
             Cmd::Preferences => "Ctrl+,",
             Cmd::Analyse | Cmd::KeepThisPruneRest | Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly => "",
+            Cmd::PrevBurst => "Shift+←",
+            Cmd::NextBurst => "Shift+→",
         }
     }
 
@@ -163,6 +173,8 @@ impl Cmd {
             Cmd::PruneAccidental => "Prune every photo shown that looks accidental (asks first)",
             Cmd::PruneCopies => "Prune the copies of files that are in the folder twice (asks first)",
             Cmd::ProblemsOnly => "Show only photos that look out of focus or accidental, and copies",
+            Cmd::PrevBurst => "In the viewer, back to the first frame of this burst, or of the burst before",
+            Cmd::NextBurst => "In the viewer, on to the first frame of the next burst",
             _ => "",
         }
     }
@@ -191,6 +203,13 @@ impl Cmd {
             Cmd::Analyse => Glyph::Analyse,
             _ => return None,
         })
+    }
+
+    /// Commands that act in the viewer window only: the main window lets
+    /// their keys through to its own use of them (Shift+arrows extend the
+    /// grid's selection).
+    pub fn viewer_only(self) -> bool {
+        matches!(self, Cmd::PrevBurst | Cmd::NextBurst)
     }
 
     /// Match a key press against the command shortcuts.
@@ -228,12 +247,16 @@ impl Cmd {
                     (false, false, "b") => Some(Cmd::ReviewBurst),
                     (false, false, "g") => Some(Cmd::StackBurst),
                     (false, true, "g") => Some(Cmd::StackBursts),
+                    (false, true, "a") => Some(Cmd::PrevBurst),
+                    (false, true, "d") => Some(Cmd::NextBurst),
                     (false, _, "?") => Some(Cmd::Shortcuts),
                     _ => None,
                 }
             }
             Key::Named(Named::F1) if !ctrl => Some(Cmd::Shortcuts),
             Key::Named(Named::Space) if !ctrl => Some(Cmd::QuickLook),
+            Key::Named(Named::ArrowLeft) if shift && !ctrl => Some(Cmd::PrevBurst),
+            Key::Named(Named::ArrowRight) if shift && !ctrl => Some(Cmd::NextBurst),
             _ => None,
         }
     }
@@ -310,3 +333,53 @@ pub const SIDE: &[Option<Cmd>] = &[
 
 /// Pinned to the bottom of the side menu.
 pub const SIDE_BOTTOM: &[Option<Cmd>] = &[Some(Cmd::Preferences)];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(name: Named) -> Key {
+        Key::Named(name)
+    }
+
+    fn ch(c: &str) -> Key {
+        Key::Character(c.into())
+    }
+
+    #[test]
+    fn shift_arrows_and_shift_a_d_skip_bursts() {
+        let shift = Modifiers::SHIFT;
+        assert_eq!(Cmd::from_key(&key(Named::ArrowLeft), shift), Some(Cmd::PrevBurst));
+        assert_eq!(Cmd::from_key(&key(Named::ArrowRight), shift), Some(Cmd::NextBurst));
+        // The layout sends the capital with Shift held.
+        assert_eq!(Cmd::from_key(&ch("A"), shift), Some(Cmd::PrevBurst));
+        assert_eq!(Cmd::from_key(&ch("D"), shift), Some(Cmd::NextBurst));
+        assert!(Cmd::PrevBurst.viewer_only() && Cmd::NextBurst.viewer_only());
+        assert!(!Cmd::StackBursts.viewer_only());
+    }
+
+    #[test]
+    fn the_burst_keys_take_nothing_else() {
+        let none = Modifiers::empty();
+        // Plain arrows and A / D stay the viewer's own steps.
+        for k in [key(Named::ArrowLeft), key(Named::ArrowRight), ch("a"), ch("d")] {
+            assert_eq!(Cmd::from_key(&k, none), None);
+        }
+        // Ctrl+Shift+A is still advance after marking; Ctrl or Alt with an
+        // arrow is nothing.
+        assert_eq!(Cmd::from_key(&ch("A"), Modifiers::CTRL | Modifiers::SHIFT), Some(Cmd::AdvanceAfterMark));
+        assert_eq!(Cmd::from_key(&key(Named::ArrowRight), Modifiers::CTRL | Modifiers::SHIFT), None);
+        assert_eq!(Cmd::from_key(&key(Named::ArrowRight), Modifiers::ALT | Modifiers::SHIFT), None);
+        assert_eq!(Cmd::from_key(&ch("G"), Modifiers::SHIFT), Some(Cmd::StackBursts));
+    }
+
+    #[test]
+    fn the_burst_commands_are_named_in_sentence_case() {
+        assert_eq!(Cmd::PrevBurst.label(), "Previous burst");
+        assert_eq!(Cmd::NextBurst.label(), "Next burst");
+        assert_eq!(Cmd::PrevBurst.shortcut(), "Shift+←");
+        assert_eq!(Cmd::NextBurst.shortcut(), "Shift+→");
+        // Not in the main window's menus: the viewer has none.
+        assert!(MENUS.iter().all(|(_, _, items)| !items.contains(&Some(Cmd::PrevBurst)) && !items.contains(&Some(Cmd::NextBurst))));
+    }
+}
