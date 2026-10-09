@@ -40,6 +40,19 @@ use crate::model::subjects::{FaceRef, private_dir, private_file};
 pub const SURE_YES: f32 = 0.639;
 /// Beyond this a candidate is not considered at all.
 pub const SURE_NO: f32 = 0.786;
+/// The same band in raw distance (a library not yet whitened,
+/// `whiten::MIN_HEADS`): 97 % precision on even days for sure-yes, and
+/// the share of same pairs the whitened sure-no keeps (92.5 %).
+pub const RAW_SURE_YES: f32 = 0.082;
+pub const RAW_SURE_NO: f32 = 0.124;
+/// A sure match is still shown to the judge when either head is less
+/// clear than this (`HeadDetection::clarity`): the confirmation round
+/// found the vectors pulling bad heads together (dark stage-lit
+/// silhouettes, backs of heads, cut-off or blurred heads): 41 of its 54
+/// pairs with a bad head fell under sure-yes, and this rule leaves 13 of
+/// them offered with Gemma, losing no answered pair.  About 12 % of the
+/// library's heads are under it.  Counted like any close call.
+pub const CLARITY_MIN: f32 = 0.2;
 /// Close calls judged for one request at most, the nearest ones (about
 /// two and a half minutes at 2.3 s a pair); the rest wait for the next
 /// request (the review again, *Find more*), when those judged meanwhile

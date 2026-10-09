@@ -650,33 +650,78 @@ user's choice:
 | SFace, 2021 December (OpenCV) | face recognition, 128-d | 39 MB | Apache-2.0 | OpenCV Zoo `face_recognition_sface_2021dec.onnx` |
 | InsightFace `buffalo_l` recognition (`w600k_r50.onnx`) | face recognition, 512-d | 289 MB downloaded, 174 MB kept | non-commercial research only | InsightFace's own v0.7 release, `buffalo_l.zip`; the archive's digest and the file's are both checked, and the rest of the archive is deleted |
 | OWLv2 B/16 ensemble (Google), *Fursuits* | model (fp32), tokenizer | 616 MB | Apache-2.0 | Hugging Face `Xenova/owlv2-base-patch16-ensemble`, the transformers.js export of `google/owlv2-base-patch16-ensemble` |
-| DINOv2 base (Meta), *Fursuits* | model (fp32) | 347 MB | Apache-2.0 | Hugging Face `onnx-community/dinov2-base` |
+| Gemma 4 26B-A4B-it (Google, quantised by Unsloth), *Close-call judge*, off by default | weights (UD-Q4_K_M GGUF), vision projector (F16 GGUF) | 18.1 GB | Apache-2.0 | Hugging Face `unsloth/gemma-4-26B-A4B-it-GGUF` |
+
+Fursuits are told apart by the **search model itself** (fursuit matching
+v2): each head's crop (its box widened by 12 % each side, square) goes
+through SigLIP 2's image tower, and the 768-wide vectors are **whitened
+over the library's own heads** (`src/search/whiten.rs`: the mean, the top
+256 directions of their covariance, each scaled by λ^−¼), so the
+directions that tell one suit from another weigh as much as what every
+fursuit photo shares.  On the user's 791 labelled pairs this beat phase
+4's DINOv2 in every time tier (AUC 0.97/0.97/0.96/0.92 against
+0.82/0.85/0.87/0.87).  The whitening is maths on the processor (about
+2.5 s, at any library size), fitted on a worker once 8 000 heads have
+vectors, kept beside the index and refitted when a head scan ends or the
+heads grow by a fifth.  A smaller library groups the raw vectors with
+cut-offs of their own (0.094 / 0.097 / 0.0885, from the same labels): a
+whitening fitted on a few days' heads ranks pairs well, but its distances
+drift from the cut-offs, which raw vectors don't.  Names and answers
+point at heads, not rows, so a refit loses nothing.
 
 Fursuit groups are **tight by design**: a head joins a group only when it
-is close to the group's members on average (average linkage at 0.17 on
-DINOv2's cosine distance), and groups are never merged afterwards; so a
-group is one suit at one event, and *Find more* (strict, 0.14) and the
-"Same fursuit?" review (0.17), nearest first, are how a suit is gathered
-across days and years.  Both numbers come from the user's 791 pairwise
-answers over the library (`docs/library-search-plan.md`, phase 4 as
-built): under 0.14 two heads are the same suit 82–97 % of the time
-whatever the time between them; the nearest-centroid grouping people use
-chained the library's fursuit heads into one group and is not used for
-this kind.
+is close to the group's members on average (average linkage at 0.69 in
+whitened cosine distance), and groups are never merged afterwards; so a
+group is one suit at one event, and *Find more* (strict, 0.671: 95 %
+precision on the labels) and the "Same fursuit?" review (0.711: 90 %),
+nearest first, are how a suit is gathered across days and years.  The
+cut-offs were chosen on even days of the labels and held on the odd ones
+(`docs/library-search-plan.md`, "As built — fursuit matching v2"); the
+nearest-centroid grouping people use chained the library's fursuit heads
+into one group and is not used for this kind.
 
-The *Fursuits* pair (phase 4) is downloaded only when fursuit heads are
-asked for.  OWLv2 finds heads in the photos the index tags as fursuits;
-DINOv2 turns each head into a 1 536-wide vector (its CLS and mean patch
-token) that tells one suit from another.  The head cache lives beside the
-index (`heads.bin`, `headvecs-dinov2-base.bin`, `headtiles.bin`, readable
-by the user alone, vectors stored as f16); for grouping and the Fursuits
-tab the vectors are held in memory as f32: **measured 405 MB for the
-~68 000 heads a library of 56 000 shots is expected to hold** (and about
-400 MB more for the few seconds a regroup's copy lives on its worker),
-built only when that work needs it, never at start-up, and let go again
-once fursuit work has been quiet for two minutes (the next request reads
-them back in 0.3 s): the user's decision, 2026-10-03, full size, freed
-after use, not the 768-wide CLS half that measured as well.
+**The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*:
+*Off*, the default, or *Gemma 4*) looks at the candidates the vectors
+can't settle: for a named fursuit, a head nearer than 0.639 is offered
+at once, one beyond 0.786 is not considered, and one in between is shown
+to Gemma 4 beside the fursuit's nearest confirmed head, both ways round
+(so is a sure match when either head is unclear, clarity under 0.2: the
+vectors pull dark, cut-off and turned-away heads together),
+and offered only when the mean P(yes) of the first answer token is at
+least 0.6 (left out, and counted, otherwise).  The research's pick, on
+the same labels: recall at 95 % precision 106/110, 81/84, 102/102, 63/63.
+It only reorders and filters suggestions: nothing is named, merged or
+marked by it, people and pets never go near it, and verdicts are kept
+beside the index (`judged-<model>.bin`, 0600) so asking again is free.
+At most 60 close calls are judged a request, nearest first (about two
+and a half minutes); the review or *Find more* asks for the next.
+
+It runs in a helper process of its own (`photo-pipeline --judge-worker`)
+through llama.cpp and libmtmd, vendored as submodules at the commit the
+research measured (`vendor/llama.cpp`, with `vendor/SPIRV-Headers` for
+the Vulkan build) and built by `build.rs` with Vulkan.  **On the card
+only:** every layer goes on the card the search helper would use, or it
+doesn't run and says so; the processor is never used for it (with
+*Processor* chosen, close calls use the vector cut-offs as with *Off*).
+It loads when a close call needs it, never while indexing or a head scan
+holds the card (it waits, "waiting for the card"), and leaves after two
+idle minutes, giving the card's memory back.
+
+The head cache lives beside the index (`heads.bin`,
+`headvecs-siglip2-b16-256.bin`, `headwhiten-siglip2-b16-256.bin`,
+`headtiles.bin`, readable by the user alone, vectors stored as f16).  For
+grouping and the Fursuits tab the whitened vectors are held in memory as
+f32 (about 70 MB for the ~68 000 heads a library of 56 000 shots is
+expected to hold), built only when that work needs it and let go again
+once fursuit work has been quiet for two minutes.  **A library from
+before v2** keeps its heads (names and answers too) but has no vectors
+of the search model for them: *Update N photos' heads* reads those photos
+again on the chosen device (asked for, never automatic), and until then
+those heads aren't grouped or suggested.  Phase 4's
+`headvecs-dinov2-base.bin` is never read; it is counted in the cache's
+size and removed by *Clear*, *Rebuild* and *Forget all fursuits*, and
+the `dinov2-base` model folder is counted under *Downloaded models* until
+*Delete* removes it (the judge's model has a row of its own).
 
 The image tower is the fp32 file on purpose: the fp16 export gives wrong
 answers on WebGPU (the self-check refuses it) and is ten times slower on the

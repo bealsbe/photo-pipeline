@@ -269,6 +269,13 @@ pub const GATE_WORD: &str = "fursuit";
 /// no joining step.  Provisional until the confirmation round is scored.
 pub const CUTOFFS: Cutoffs = Cutoffs { group: 0.69, suggest: 0.711, strict: 0.671 };
 
+/// The cut-offs on the raw vectors (cosine distance), for a library with
+/// too few heads to whiten ([`whiten::MIN_HEADS`]): chosen on even days
+/// of the same labels at the whitened cut-offs' precisions (strict 95 %,
+/// group 92.5 %, suggest 90 %) and held on odd days at 91 %, 89 % and
+/// 89 %.
+pub const RAW_CUTOFFS: Cutoffs = Cutoffs { group: 0.094, suggest: 0.097, strict: 0.0885 };
+
 /// A head as the detector found it, kept per photo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadDetection {
@@ -486,12 +493,14 @@ impl HeadStore {
 
     /// The vectors, read from the file and whitened the first time they
     /// are asked for (the memory is built only when the fursuit work
-    /// needs it); empty while there is no whitening.
+    /// needs it); raw while there is no whitening.
     pub fn vectors(&mut self) -> &HeadVectors {
         if self.vectors.is_none() {
             self.vectors = Some(match &self.whitening {
                 Some(w) => whitened(Self::read_raw(&self.dir), w),
-                None => HeadVectors::default(),
+                // Too few heads to whiten yet: the raw vectors, with
+                // their own cut-offs.
+                None => Self::read_raw(&self.dir),
             });
         }
         self.vectors.as_ref().expect("just loaded")
@@ -520,6 +529,12 @@ impl HeadStore {
             return None;
         }
         Whitening::fit(&raw.data, raw.dim, whiten::K)
+    }
+
+    /// The judge's band (sure-yes, sure-no) in the rows' distance:
+    /// whitened, or raw before there are enough heads to whiten.
+    pub fn band(&self) -> (f32, f32) {
+        if self.whitening.is_some() { (super::judging::SURE_YES, super::judging::SURE_NO) } else { (super::judging::RAW_SURE_YES, super::judging::RAW_SURE_NO) }
     }
 
     /// The index folder this cache lives in.
@@ -738,9 +753,16 @@ impl HeadStore {
         let dim = rows[0].1.len();
         Self::append(&Self::vectors_file(&self.dir), &Self::vectors_header(dim), &HeadVectors::block(&rows))?;
         self.with_vectors.extend(rows.iter().map(|(r, _)| *r));
-        if let (Some(v), Some(w)) = (&mut self.vectors, &self.whitening) {
-            let white: Vec<(FaceRef, Vec<f32>)> = rows.iter().map(|(r, x)| (*r, w.apply(x))).filter(|(_, z)| !z.is_empty()).collect();
-            v.push(&white);
+        if let Some(v) = &mut self.vectors {
+            match &self.whitening {
+                Some(w) => {
+                    let white: Vec<(FaceRef, Vec<f32>)> = rows.iter().map(|(r, x)| (*r, w.apply(x))).filter(|(_, z)| !z.is_empty()).collect();
+                    v.push(&white);
+                }
+                None => {
+                    v.push(&rows);
+                }
+            }
         }
         Ok(())
     }
@@ -920,7 +942,7 @@ impl KindStep for HeadStore {
     }
 
     fn cutoffs(&self) -> Cutoffs {
-        CUTOFFS
+        if self.whitening.is_some() { CUTOFFS } else { RAW_CUTOFFS }
     }
 
     /// Tight groups, no joining step (the user's choice, 2026-10-08,
@@ -1114,6 +1136,9 @@ pub struct CloseCall {
     pub distance: f32,
     pub candidate: FaceRef,
     pub member: FaceRef,
+    /// Offered without the judge: under sure-yes, and both heads clear
+    /// enough to trust the vectors (`judging::CLARITY_MIN`).
+    pub sure: bool,
 }
 
 /// Rows of `pool` within `cutoff` of any of `members`: (row, distance,
@@ -1563,7 +1588,8 @@ impl Fursuits {
         let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
         let confirmed = file.confirmed(Kind::Fursuit);
         let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
-        let near = nearest_members(&rows, &members, &pool, super::judging::SURE_NO);
+        let (sure_yes, sure_no) = store.band();
+        let near = nearest_members(&rows, &members, &pool, sure_no);
         let items: Vec<((Face, f32, FaceRef), Option<u64>)> = near
             .into_iter()
             .filter_map(|(i, d, m)| {
@@ -1578,7 +1604,8 @@ impl Fursuits {
                 .filter_map(|frames| {
                     let (_, d, member) = frames.first()?.clone();
                     let rep = frames[0].0.face;
-                    Some(CloseCall { faces: frames.into_iter().map(|(f, _, _)| f).collect(), distance: d, candidate: rep, member })
+                    let clear = store.clarity(&rep).min(store.clarity(&member)) >= super::judging::CLARITY_MIN;
+                    Some(CloseCall { faces: frames.into_iter().map(|(f, _, _)| f).collect(), distance: d, candidate: rep, member, sure: d < sure_yes && clear })
                 })
                 .collect(),
         )
@@ -1680,7 +1707,7 @@ mod store_tests {
         let d = scratch("store");
         let mut s = HeadStore::load(&d);
         assert_eq!((s.looked_at(), s.found()), (0, 0));
-        assert_eq!(s.vectors().len(), 0, "no whitening yet: nothing to group");
+        assert_eq!(s.vectors().len(), 0, "nothing yet");
         s.release_vectors();
         s.set_whitening(Whitening::identity(2)).unwrap();
         s.add(key(1), &[head(0.1, 300, &[1.0, 0.0]), head(0.5, 120, &[0.0, 1.0])]).unwrap();
@@ -2393,6 +2420,29 @@ mod store_tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// A library with too few heads to whiten (one event day of a few
+    /// hundred) still has fursuit groups: the raw vectors, at their own
+    /// cut-offs; no whitening is fitted until there are enough heads.
+    #[test]
+    fn a_library_too_small_to_whiten_groups_its_raw_vectors() {
+        let d = scratch("raw");
+        let mut f = Fursuits::default();
+        f.open(&d);
+        for (n, a) in [(1u8, 0.0f32), (2, 0.1), (3, 1.5), (4, 1.6)] {
+            f.store.as_mut().unwrap().add(key(n), &[head(0.1, 300, &[a.cos(), a.sin()])]).unwrap();
+        }
+        f.refresh();
+        assert!(!f.status.whitened && f.status.vectors == 4);
+        assert!(!f.fit_wanted(true), "four heads are far too few to whiten");
+        let file = SubjectsFile::default();
+        let job = f.regroup_job(&file).expect("raw rows to group");
+        assert_eq!((job.dim, job.cutoffs), (2, RAW_CUTOFFS));
+        let r = step::regroup(&job);
+        assert!(f.apply_regroup(r, &file));
+        assert_eq!(f.clusters().len(), 2, "two suits of two heads");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn a_face_file_is_not_a_head_file() {
         // The face cache's files have other names and magics: a head
@@ -2535,10 +2585,16 @@ mod store_tests {
         let mut live = subjects::cluster_with(&rows, &order[..2], 0.17, Linkage::Average);
         subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average);
         assert_eq!(live.len(), 2, "{live:?}");
-        let store = HeadStore::load(&scratch("linkage"));
+        let mut store = HeadStore::load(&scratch("linkage"));
         assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
+        // Too few heads to whiten: the raw vectors' own cut-offs and band;
+        // whitened, the research's.
+        assert_eq!(store.cutoffs(), RAW_CUTOFFS);
+        assert_eq!(store.band(), (crate::search::judging::RAW_SURE_YES, crate::search::judging::RAW_SURE_NO));
+        store.set_whitening(Whitening::identity(2)).unwrap();
         assert_eq!(store.cutoffs(), CUTOFFS);
         assert_eq!((store.cutoffs().group, store.cutoffs().suggest, store.cutoffs().strict), (0.69, 0.711, 0.671));
+        assert_eq!(store.band(), (0.639, 0.786));
     }
 
     /// Kinds never mix in the fursuit grouping: the step is Kind::Fursuit,

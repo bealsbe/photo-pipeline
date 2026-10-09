@@ -1332,7 +1332,7 @@ impl Worker {
         let (mut offered, mut left_out, mut pending) = (Vec::new(), Vec::new(), Vec::new());
         let (mut done, mut total) = (0, 0);
         for (i, c) in calls.iter().enumerate() {
-            if c.distance < judging::SURE_YES {
+            if c.sure {
                 offered.push(c.faces.clone());
                 continue;
             }
@@ -3111,7 +3111,9 @@ mod tests {
                     let stem = crate::util::stem(p);
                     let a = Suits::angle(&stem).to_radians();
                     let key = Key::of(1, p.as_os_str().as_encoded_bytes());
-                    let heads = vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score: 0.5, size: 300, sharpness: 0.2, vector: vec![a.cos(), a.sin()], tile: Vec::new() }];
+                    // `-dim-` in the name: a small, soft, doubtful head (clarity 0).
+                    let (size, sharpness, score) = if stem.contains("-dim-") { (100, 0.0, 0.3) } else { (300, 0.2, 0.5) };
+                    let heads = vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score, size, sharpness, vector: vec![a.cos(), a.sin()], tile: Vec::new() }];
                     crate::ml::heads::HeadsResult { path: p.clone(), result: Ok(crate::ml::heads::PhotoHeads { key, heads }) }
                 })
                 .collect())
@@ -3159,10 +3161,12 @@ mod tests {
     /// next review falls back to the vector cut-offs.
     #[test]
     fn the_judge_filters_a_fursuit_subjects_close_calls_and_never_names() {
-        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}{}", if n == 7 { "dim-" } else { "" }, if a < 0 { "m" } else { "p" }, a.abs());
         // The member at 0; one that groups with it (0.3); a sure match
-        // (0.6); two close calls (0.70, 0.75); one beyond the band (0.9).
-        let specs = [(1, 0), (2, Suits::at(0.3)), (3, -Suits::at(0.6)), (4, -Suits::at(0.70)), (5, -Suits::at(0.75)), (6, -Suits::at(0.9))];
+        // (0.6) and a doubtful one under sure-yes too (0.55, a dim head:
+        // the judge sees it); two close calls (0.70, 0.75); one beyond the
+        // band (0.9).
+        let specs = [(1, 0), (2, Suits::at(0.3)), (3, -Suits::at(0.6)), (4, -Suits::at(0.70)), (5, -Suits::at(0.75)), (6, -Suits::at(0.9)), (7, -Suits::at(0.55))];
         let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
         let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
         let (lib, d) = library_of("judge", &refs);
@@ -3175,9 +3179,9 @@ mod tests {
         let f2 = fake.clone();
         e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
         e.on_library(lib);
-        wait_for(&e, "the library", |s| s.library_shots == 6);
+        wait_for(&e, "the library", |s| s.library_shots == 7);
         e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
-        wait_for(&e, "the heads", |s| s.heads.found == 6 && s.heads.step == heads::Step::Idle);
+        wait_for(&e, "the heads", |s| s.heads.found == 7 && s.heads.step == heads::Step::Idle);
         e.set_whitening(super::super::whiten::Whitening::identity(2));
         wait_for(&e, "the whitening", |s| s.heads.whitened);
         // The member's group (with the 0.3 head) named as a fursuit.
@@ -3201,24 +3205,26 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         let keys = |l: &[Vec<Face>]| -> Vec<Key> { l.iter().map(|b| b[0].face.key).collect() };
-        // Off: the vector cut-offs (0.711): the sure match and the 0.70 one.
+        // Off: the vector cut-offs (0.711), as before: the dim head, the
+        // sure match and the 0.70 one, nearest first.
         e.suggestions(1, suit.clone());
         let (list, judged) = review(&mut ev, 1, Duration::from_millis(800));
-        assert_eq!(keys(&list.expect("suggestions")), [key_of(3), key_of(4)]);
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)]);
         assert!(judged.is_empty(), "no judge: no verdicts");
-        // The judge on: the sure match at once, the two close calls judged.
+        // The judge on: the clear sure match at once; the dim head under
+        // sure-yes and the two close calls judged, nearest first.
         e.set_judge(JudgeChoice::Gemma4);
         wait_for(&e, "the choice", |s| s.judge.choice == JudgeChoice::Gemma4 && s.judge.active(Device::Gpu));
         e.suggestions(2, suit.clone());
         let (list, judged) = review(&mut ev, 2, Duration::from_secs(5));
-        assert_eq!(keys(&list.expect("suggestions")), [key_of(3)], "only the sure match before the judge");
-        assert_eq!((judged[0].2, judged[0].3), (0, 2), "the first Judged: nothing judged yet, two close calls");
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(3)], "only the clear sure match before the judge");
+        assert_eq!((judged[0].2, judged[0].3), (0, 3), "the first Judged: nothing judged yet; the dim head counts as a close call");
         let offered: Vec<Key> = judged.iter().flat_map(|j| keys(&j.0)).collect();
         let left: Vec<Key> = judged.iter().flat_map(|j| keys(&j.1)).collect();
-        assert_eq!((offered, left), (vec![key_of(4)], vec![key_of(5)]), "nearest first: yes, then no");
+        assert_eq!((offered, left), (vec![key_of(7), key_of(5)], vec![key_of(4)]), "nearest first: yes, no, yes");
         {
             let asked = fake.pairs.lock();
-            assert_eq!(asked.len(), 2, "the head beyond the band is never asked about");
+            assert_eq!(asked.len(), 3, "the head beyond the band is never asked about");
             for p in asked.iter() {
                 assert!(matches!(&p.b, crate::ml::judge::Crop::Head { key, .. } if *key == key_of(1)), "against the nearest member");
             }
@@ -3226,10 +3232,10 @@ mod tests {
         // Asked again: the verdicts kept answer at once.
         e.suggestions(3, suit.clone());
         let (list, judged) = review(&mut ev, 3, Duration::from_secs(2));
-        assert_eq!(keys(&list.expect("suggestions")), [key_of(3), key_of(4)]);
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(5)]);
         assert_eq!(judged.len(), 1);
-        assert_eq!((keys(&judged[0].1), judged[0].2, judged[0].3), (vec![key_of(5)], 2, 2));
-        assert_eq!(fake.pairs.lock().len(), 2, "nothing judged twice");
+        assert_eq!((keys(&judged[0].1), judged[0].2, judged[0].3), (vec![key_of(4)], 3, 3));
+        assert_eq!(fake.pairs.lock().len(), 3, "nothing judged twice");
         // Nothing named or merged by the judge: the suit is as named.
         let g = e.subjects().groups.iter().find(|g| g.id == suit).cloned().unwrap();
         assert_eq!(g.photos, 2);
@@ -3238,7 +3244,7 @@ mod tests {
         wait_for(&e, "the processor", |s| s.device.chosen == Device::Cpu);
         e.suggestions(4, suit.clone());
         let (list, judged) = review(&mut ev, 4, Duration::from_millis(800));
-        assert_eq!(keys(&list.expect("suggestions")), [key_of(3), key_of(4)]);
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)]);
         assert!(judged.is_empty(), "card only: no judging on the processor");
         // A failing card: reported, judging stops; the next review uses
         // the vector cut-offs.
@@ -3253,7 +3259,7 @@ mod tests {
         assert!(!e.status().judge.active(Device::Gpu));
         e.suggestions(6, suit.clone());
         let (list, judged) = review(&mut ev, 6, Duration::from_millis(800));
-        assert_eq!(keys(&list.expect("suggestions")), [key_of(3), key_of(4)], "the vector cut-offs");
+        assert_eq!(keys(&list.expect("suggestions")), [key_of(7), key_of(3), key_of(4)], "the vector cut-offs");
         assert!(judged.is_empty());
         e.try_card_again();
         wait_for(&e, "tried again", |s| matches!(s.judge.state, crate::ml::judge::JudgeState::Idle));
