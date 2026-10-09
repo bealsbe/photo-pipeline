@@ -1308,6 +1308,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Merging fursuit groups (a drop, or S and M): an unnamed group merged
+    /// into a named one keeps the name, whichever way round; of two named
+    /// ones the kept one's name stays and the other's goes; each merge is
+    /// one undo step that brings both back as they were.
+    #[test]
+    fn fursuit_merges_keep_the_name_and_undo_in_one_step() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)]), (8, vec![face(3)])]);
+        let named = GroupId::Subject(p.file.create(Kind::Fursuit, Some("Suit".into()), vec![face(4)]));
+        // The cluster into the named one.
+        let into = p.merge(&named, &[GroupId::Cluster(7)]).unwrap();
+        let s = p.file.get(&into).unwrap();
+        assert_eq!((s.name.as_deref(), s.members.len()), (Some("Suit"), 3));
+        assert_eq!(p.undo().as_deref(), Some("Merged 2 groups into Suit"));
+        assert_eq!(p.file.subjects.len(), 1);
+        assert_eq!(p.file.get(&into).unwrap().members, [face(4)], "the undo brings it back as it was");
+        // The named one into the cluster (dropped the other way): the name
+        // still stays.
+        let into = p.merge(&GroupId::Cluster(8), std::slice::from_ref(&named)).unwrap();
+        let s = p.file.get(&into).unwrap();
+        assert_eq!((s.kind, s.name.as_deref(), s.members.len()), (Kind::Fursuit, Some("Suit"), 2));
+        assert_eq!(p.file.subjects.len(), 1, "one fursuit");
+        assert!(p.undo().is_some());
+        // Two named: the one kept keeps its name; one step undoes it.
+        let other = GroupId::Subject(p.file.create(Kind::Fursuit, Some("Other".into()), vec![face(5)]));
+        let before = p.file.clone();
+        let kept = p.merge(&other, std::slice::from_ref(&named)).unwrap();
+        assert_eq!(p.file.get(&kept).unwrap().name.as_deref(), Some("Other"));
+        assert_eq!(p.file.named_count(Kind::Fursuit), 1, "the other name goes");
+        assert_eq!(p.undo().as_deref(), Some("Merged 2 groups into Other"));
+        assert_eq!(p.file, before);
+    }
+
     #[test]
     fn people_fursuits_and_pets_never_merge() {
         let mut p = People::load(None);

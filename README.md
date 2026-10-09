@@ -91,6 +91,7 @@ src/ui/                custom widgets: grid, image stage, burst sheet,
                        plates (the analysis' marks on photos)
   theme.rs             the design tokens: colours, type, spacing, motion
   motion.rs, tags.rs   entrance animation, activity bar, file-type tags
+  drag.rs              dragging a group's tile onto another (to merge)
 src/model/             records, collection & pairing, filters, crops,
                        sidecars, library index and its saved tree
 src/ops/               file operations: export, sort, trash, edit copy,
@@ -483,10 +484,17 @@ for you.
   stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
   move between groups, Enter opens one, F2 names it.
 - **Picking several:** *Select* (S), or Ctrl+click, picks groups; a strip
-  says how many with *Merge…* and *Hide*.  Merging asks which name to
-  keep (the named one by default).  Ctrl+Z takes back the last change to
-  people (a name, a merge, a move, an answer), and the status bar says
-  what it undid.
+  says how many with *Merge…* (M) and *Hide*.  Merging asks once, in one
+  dialog: a named group keeps its name whichever way round, and when more
+  than one is named it asks which name to keep (the first named, or the
+  one dropped onto, to start).  Ctrl+Z takes back the last change to
+  people (a name, a merge, a move, an answer), one step per merge, and
+  the status bar says what it undid.
+- **Dragging** a group's tile onto another merges the two: the dragged
+  tile's crop follows the pointer, the tile under it says *Merge here*,
+  and letting go opens the same dialog with both groups side by side,
+  large, to check.  A press that barely moves stays a click; Esc while
+  dragging cancels.
 - **A person's page is a search for them.**  Their chip sits in the
   field, so words typed beside it rank their photos best first; with no
   words, their photos come clearest first, in the results grid with dates
@@ -538,7 +546,10 @@ never shown, merged, suggested or completed together with people or pets.
 
 - **The tab** lists named fursuits, then *Groups to name*, largest first,
   as rounded-square head crops (people are round), with *Smaller groups*,
-  *Hidden*, picking, merging and hiding as on People.  A fursuit's page,
+  *Hidden*, picking, merging (S then M, or a tile dragged onto another)
+  and hiding as on People.  Groups are tight by design (below), so one
+  suit often sits in several groups: merging them is the quick way to
+  join them.  A fursuit's page,
   its *Heads* (to split a group), naming and "Same fursuit?" (the review,
   Y and N in the keep and prune colours, one answer per burst, Ctrl+Z to
   take an answer back) are the same pages as a person's.

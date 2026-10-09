@@ -162,6 +162,8 @@
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
 //! subjects select             # S: pick several
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
+//! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
+//!                             # (and let go; dragto holds it there)
 //! subjects hide|unhide 0      # hide the picked; show a hidden one again
 //! subjects undo               # Ctrl+Z on the page
 //! subjects forgetgo|forgetcancel
@@ -1246,6 +1248,28 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "merge" => app.update(s(Msg::MergeAsk)),
         "mergego" => app.update(s(Msg::MergeGo)),
         "mergecancel" => app.update(s(Msg::MergeCancel)),
+        // A drag as the tiles report it: `drag 3 0` drags the 4th tile onto
+        // the 1st and lets go; `dragto 3 0` holds it there (a screenshot);
+        // `dragdrop` lets go.
+        "drag" | "dragto" => {
+            let ids = order(app);
+            let mut nums = rest.split_whitespace().filter_map(|x| x.parse::<usize>().ok());
+            let (a, b) = (nums.next().and_then(|i| ids.get(i).cloned()), nums.next().and_then(|i| ids.get(i).cloned()));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let mut t = vec![app.update(s(Msg::DragStart(a.clone()))), app.update(s(Msg::DragEnter(a.clone()))), app.update(s(Msg::DragLeave(a))), app.update(s(Msg::DragEnter(b)))];
+                    if what == "drag" {
+                        t.push(app.update(s(Msg::DragDrop)));
+                    }
+                    Task::batch(t)
+                }
+                _ => {
+                    println!("subjects drag: no such tiles ({rest})");
+                    Task::none()
+                }
+            }
+        }
+        "dragdrop" => app.update(s(Msg::DragDrop)),
         "keep" => match app.subjects.merge.as_ref().and_then(|mg| mg.groups.get(n).cloned()) {
             Some(id) => app.update(s(Msg::MergeKeep(id))),
             None => Task::none(),
