@@ -629,7 +629,7 @@ fn find_heads(app: &mut App) -> Task<Message> {
 pub fn debug_state(app: &App) -> String {
     let h = &app.search.status.heads;
     format!(
-        "fursuits=[state={:?} on={} installed={} tagged={} scanned={} skipped={} found={} named={} step={:?} strip={} vectors_missing={}]",
+        "fursuits=[state={:?} on={} installed={} tagged={} scanned={} skipped={} found={} named={} step={:?} strip={} vectors_missing={} vectors={} whitened={}]",
         state(app),
         h.on,
         h.models_installed,
@@ -641,6 +641,8 @@ pub fn debug_state(app: &App) -> String {
         h.step,
         ask_strip(app).is_some(),
         h.vectors_missing,
+        h.vectors,
+        h.whitened,
     )
 }
 

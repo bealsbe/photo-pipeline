@@ -214,7 +214,12 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
         JudgeState::Judging { done, total, .. } => (
             t::PHOTO_INK2,
             format!("Checking {}…", util::plural(*total as u64, "close call")),
-            format!("{} of {total}. Those the judge thinks are this fursuit join the end of the list.", util::thousands(*done as u64)),
+            format!(
+                "{} of {}, {} left. Those the judge thinks are this fursuit join the end of the list.",
+                util::thousands(*done as u64),
+                util::thousands(*total as u64),
+                crate::search::estimate::describe_seconds(total.saturating_sub(*done) as f64 * super::fursuits::JUDGE_SECONDS_PER_CALL)
+            ),
         ),
         JudgeState::Failed(f) => {
             let (title, detail) = failure_words(f);
