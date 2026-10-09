@@ -699,7 +699,7 @@ fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
     let choice = dl.judge.unwrap_or_default();
     let secs = super::fursuits::call_seconds_words(super::fursuits::judge_call_seconds(choice));
     let facts = vec![
-        fact("Downloads", format!("{}, once", capital(&super::fursuit_judge::model_size(mi.bytes()))), None),
+        fact("Downloads", format!("{}, once", size(mi.bytes())), None),
         fact("Runs on", card, Some("Never the processor. If it doesn't fit on the card, or the card fails, checking stops and says why.")),
         fact(
             "Takes",
