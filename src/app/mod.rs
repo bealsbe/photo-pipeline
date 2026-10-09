@@ -2204,6 +2204,8 @@ impl App {
                 BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
+                // The judge's verdicts: the pages take them in on the UI branch.
+                BgEvent::Judged { .. } => {}
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }

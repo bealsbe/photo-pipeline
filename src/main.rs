@@ -33,6 +33,11 @@ fn main() -> iced::Result {
     if args.get(1).is_some_and(|a| a == ml::worker::FLAG) {
         std::process::exit(ml::worker::main(&args[2..]));
     }
+    // The close-call judge's helper (fursuit matching v2): another flag,
+    // another process, on the card alone.
+    if args.get(1).is_some_and(|a| a == ml::judge_worker::FLAG) {
+        std::process::exit(ml::judge_worker::main(&args[2..]));
+    }
     profile::init();
     #[cfg(feature = "profiler")]
     let sampler = profile::sampler();

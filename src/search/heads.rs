@@ -137,6 +137,11 @@ pub struct HeadsStatus {
     /// before fursuit matching v2): the catch-up offers them, with its
     /// cost.  Their heads aren't grouped or suggested until then.
     pub vectors_missing: usize,
+    /// Heads with search-model vectors (of photos still looked at).
+    pub vectors: usize,
+    /// A whitening is fitted: fursuits can be grouped and suggested.
+    /// None until [`whiten::MIN_HEADS`] heads have vectors.
+    pub whitened: bool,
 }
 
 impl HeadsStatus {
@@ -1100,6 +1105,36 @@ pub fn execute(root: &Path, jobs: &[HeadJob], embedder: &dyn Embedder, cancel: &
 
 // ---- the step's state -------------------------------------------------
 
+/// One entry of a fursuit subject's suggestions as the judge sees it
+/// (v2): a burst's frames, the nearest one's whitened distance to the
+/// subject, that frame and its nearest confirmed member.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CloseCall {
+    pub faces: Vec<Face>,
+    pub distance: f32,
+    pub candidate: FaceRef,
+    pub member: FaceRef,
+}
+
+/// Rows of `pool` within `cutoff` of any of `members`: (row, distance,
+/// the nearest member), nearest first.
+fn nearest_members(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f32) -> Vec<(usize, f32, usize)> {
+    use rayon::prelude::*;
+    let mut out: Vec<(usize, f32, usize)> = pool
+        .par_iter()
+        .filter_map(|&i| {
+            if i >= rows.len() {
+                return None;
+            }
+            let v = rows.row_vec(i);
+            let (m, d) = members.iter().filter(|&&m| m < rows.len()).map(|&m| (m, 1.0 - rows.dot(m, &v))).min_by(|a, b| a.1.total_cmp(&b.1))?;
+            (d <= cutoff).then_some((i, d, m))
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+    out
+}
+
 /// What [`Fursuits::consider`] decided about photos that want a scan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -1503,6 +1538,50 @@ impl Fursuits {
         self.status.scanned = scanned;
         self.status.found = found;
         self.status.vectors_missing = self.store.as_ref().map_or(0, |s| s.missing_vectors().len());
+        self.status.vectors = self.store.as_ref().map_or(0, HeadStore::vector_count);
+        self.status.whitened = self.store.as_ref().is_some_and(|s| s.whitening().is_some());
+    }
+
+    /// A fursuit subject's close calls and sure matches, for the judge
+    /// (v2): the heads confirmed nowhere and not rejected for it within
+    /// [`super::judging::SURE_NO`] of its confirmed members, one entry
+    /// per burst, nearest first; each with its nearest frame's distance,
+    /// that frame and the member it is nearest to (the pair the judge is
+    /// shown).  `None` for anything but a fursuit subject (a cluster's
+    /// review checks its own members; people never come here).  The
+    /// vectors must be in memory ([`Fursuits::step`]).
+    pub fn close_calls(&self, file: &SubjectsFile, id: &GroupId, resolve: &dyn Fn(&FaceRef) -> Option<Face>) -> Option<Vec<CloseCall>> {
+        let GroupId::Subject(sid) = id else { return None };
+        let s = file.get(sid)?;
+        if s.kind != Kind::Fursuit {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let refs = store.refs();
+        let rows = store.rows();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
+        let confirmed = file.confirmed(Kind::Fursuit);
+        let pool: Vec<usize> = (0..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !s.rejected.contains(&refs[i])).collect();
+        let near = nearest_members(&rows, &members, &pool, super::judging::SURE_NO);
+        let items: Vec<((Face, f32, FaceRef), Option<u64>)> = near
+            .into_iter()
+            .filter_map(|(i, d, m)| {
+                let f = resolve(refs.get(i)?)?;
+                let b = f.burst;
+                Some(((f, d, refs[m]), b))
+            })
+            .collect();
+        Some(
+            subjects::per_burst(items)
+                .into_iter()
+                .filter_map(|frames| {
+                    let (_, d, member) = frames.first()?.clone();
+                    let rep = frames[0].0.face;
+                    Some(CloseCall { faces: frames.into_iter().map(|(f, _, _)| f).collect(), distance: d, candidate: rep, member })
+                })
+                .collect(),
+        )
     }
 
     // ---- v2: the whitening and the catch-up ----
