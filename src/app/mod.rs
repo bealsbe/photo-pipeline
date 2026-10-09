@@ -2208,7 +2208,7 @@ impl App {
                 BgEvent::SubjectsUndone(what) => tasks.push(subjects::on_undone(self, what)),
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
-                BgEvent::Judged { seq, group, offered, left_out, done, total } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total)),
+                BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }

@@ -143,6 +143,10 @@ pub enum BgEvent {
         left_out: Arc<Vec<Vec<crate::model::subjects::Face>>>,
         done: usize,
         total: usize,
+        /// Close calls past the cap (`search::judging::MAX_CLOSE_CALLS`)
+        /// this request won't judge: the next request (the review again,
+        /// *Find more*) judges them.  The same on every event of a request.
+        beyond: usize,
     },
     /// *Things in your photos*: the hidden tags' objects and scenes with
     /// their photo counts, most first; sent when the index loads and

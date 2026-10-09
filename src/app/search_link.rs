@@ -665,6 +665,7 @@ struct JudgeRun {
     todo: Vec<Vec<Face>>,
     done: usize,
     total: usize,
+    beyond: usize,
 }
 
 /// A judged event waiting to be sent.
@@ -675,6 +676,7 @@ struct JudgeEvent {
     left_out: Vec<Vec<Face>>,
     done: usize,
     total: usize,
+    beyond: usize,
 }
 
 impl FakeState {
@@ -721,8 +723,8 @@ impl FakeState {
         }
         let run = self.judge_run.as_mut()?;
         let entry = (!run.todo.is_empty()).then(|| run.todo.remove(0));
-        let (seq, group, total) = (run.seq, run.group.clone(), run.total);
-        let mut ev = JudgeEvent { seq, group: group.clone(), offered: Vec::new(), left_out: Vec::new(), done: 0, total };
+        let (seq, group, total, beyond) = (run.seq, run.group.clone(), run.total, run.beyond);
+        let mut ev = JudgeEvent { seq, group: group.clone(), offered: Vec::new(), left_out: Vec::new(), done: 0, total, beyond };
         if let Some(e) = entry {
             if self.fursuits.judge(&group, &e) {
                 ev.offered.push(e);
@@ -813,7 +815,7 @@ impl FakeState {
 
 impl Fake {
     fn send_judged(&self, e: JudgeEvent) {
-        let _ = self.bus.unbounded_send(BgEvent::Judged { seq: e.seq, group: e.group, offered: Arc::new(e.offered), left_out: Arc::new(e.left_out), done: e.done, total: e.total });
+        let _ = self.bus.unbounded_send(BgEvent::Judged { seq: e.seq, group: e.group, offered: Arc::new(e.offered), left_out: Arc::new(e.left_out), done: e.done, total: e.total, beyond: e.beyond });
     }
 
     /// A fursuit's suggestions were asked for with a judge on: judge its
@@ -826,9 +828,13 @@ impl Fake {
             if !s.fursuits.owns(id) || !super::fursuit_judge::active(&s.status) || s.subjects.group(id).is_none_or(|g| g.name.is_none()) {
                 return;
             }
-            let (left_out, todo) = s.fursuits.close_calls(id);
+            let (left_out, mut todo) = s.fursuits.close_calls(id);
+            // As the engine: the nearest close calls only, the rest left
+            // for the next request.
+            let beyond = todo.len().saturating_sub(crate::search::judging::MAX_CLOSE_CALLS);
+            todo.truncate(crate::search::judging::MAX_CLOSE_CALLS);
             let total = todo.len();
-            s.judge_run = (total > 0).then(|| JudgeRun { seq, group: id.clone(), todo, done: 0, total });
+            s.judge_run = (total > 0).then(|| JudgeRun { seq, group: id.clone(), todo, done: 0, total, beyond });
             if total > 0 {
                 s.status.judge.state = if s.card_in_use() {
                     JudgeState::WaitingForCard
@@ -838,7 +844,7 @@ impl Fake {
                     JudgeState::Loading
                 };
             }
-            JudgeEvent { seq, group: id.clone(), offered: Vec::new(), left_out, done: 0, total }
+            JudgeEvent { seq, group: id.clone(), offered: Vec::new(), left_out, done: 0, total, beyond }
         };
         self.send_judged(first);
         self.change(|_| {});

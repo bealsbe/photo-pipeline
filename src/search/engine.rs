@@ -736,6 +736,8 @@ struct Judging {
     pending: Vec<usize>,
     done: usize,
     total: usize,
+    /// Close calls past the cap, left for the next request.
+    beyond: usize,
 }
 
 /// A running head scan.
@@ -1348,11 +1350,11 @@ impl Worker {
         pending.truncate(judging::MAX_CLOSE_CALLS);
         total -= later;
         let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group: group.clone(), list: Arc::new(offered) });
-        let _ = self.bus.unbounded_send(BgEvent::Judged { seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total });
+        let _ = self.bus.unbounded_send(BgEvent::Judged { seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total, beyond: later });
         self.judge_token += 1;
         let token = self.judge_token;
         let empty = pending.is_empty();
-        self.judging = Some(Judging { seq, group, token, calls, pending, done, total });
+        self.judging = Some(Judging { seq, group, token, calls, pending, done, total, beyond: later });
         if empty {
             self.judge_state = JudgeState::Idle;
             self.publish_judge();
@@ -1393,7 +1395,7 @@ impl Worker {
         j.done += unshowable.len();
         let (group, done, total) = (j.group.clone(), j.done, j.total);
         if !unshowable.is_empty() {
-            let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(Vec::new()), done, total });
+            let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: group.clone(), offered: Arc::new(Vec::new()), left_out: Arc::new(Vec::new()), done, total, beyond: j.beyond });
         }
         if tasks.is_empty() {
             self.judge_state = JudgeState::Idle;
@@ -1470,7 +1472,7 @@ impl Worker {
                     Ok(_) => left_out.push(j.calls[i].faces.clone()),
                     Err(why) => eprintln!("judge: a close call couldn't be judged: {why}"),
                 }
-                let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: j.group.clone(), offered: Arc::new(offered), left_out: Arc::new(left_out), done: j.done, total: j.total });
+                let _ = self.bus.unbounded_send(BgEvent::Judged { seq: j.seq, group: j.group.clone(), offered: Arc::new(offered), left_out: Arc::new(left_out), done: j.done, total: j.total, beyond: j.beyond });
                 self.judge_state = if j.pending.is_empty() { JudgeState::Idle } else { JudgeState::Judging { group: j.group.clone(), done: j.done, total: j.total } };
             }
             judging::Event::Idle => {

@@ -45,6 +45,8 @@ pub enum Msg {
     Stop,
     /// Show the close calls the judge left out, at the end of the review.
     ShowLeftOut,
+    /// Check the next close calls past the cap (the review's Find more).
+    CheckMore,
     TryCard,
     OpenPrefs,
 }
@@ -64,6 +66,8 @@ pub struct Run {
     pub stopped: bool,
     /// The judge failed during it.
     pub dropped: bool,
+    /// Close calls past this request's cap, left for the next one.
+    pub beyond: usize,
 }
 
 impl Run {
@@ -98,7 +102,8 @@ pub fn run_for<'a>(app: &'a App, group: &GroupId) -> Option<&'a Run> {
 /// The judge's verdicts on a request's close calls: the review takes the
 /// offered ones at the end of its list (and the left-out ones too, once
 /// shown); the run counts them; the end is said once.
-pub fn on_judged(app: &mut App, seq: u64, group: GroupId, offered: Arc<Vec<Vec<Face>>>, left_out: Arc<Vec<Vec<Face>>>, done: usize, total: usize) -> Task<Message> {
+#[allow(clippy::too_many_arguments)]
+pub fn on_judged(app: &mut App, seq: u64, group: GroupId, offered: Arc<Vec<Vec<Face>>>, left_out: Arc<Vec<Vec<Face>>>, done: usize, total: usize, beyond: usize) -> Task<Message> {
     // Fursuits only: a verdict about anything else is ignored.
     if app.subjects.group(&group).is_some_and(|g| g.kind != Kind::Fursuit) {
         return Task::none();
@@ -114,6 +119,7 @@ pub fn on_judged(app: &mut App, seq: u64, group: GroupId, offered: Arc<Vec<Vec<F
     run.left_out.extend(left_out.iter().cloned());
     run.done = done.max(run.done);
     run.total = total;
+    run.beyond = beyond;
     let finished = run.done >= run.total;
     let (n_offered, n_left, n_total) = (run.offered, run.left_out.len(), run.total);
 
@@ -127,7 +133,7 @@ pub fn on_judged(app: &mut App, seq: u64, group: GroupId, offered: Arc<Vec<Vec<F
         r.judge_done = finished;
         // Nothing sure and nothing offered, and the judge is done: there
         // is nothing to check.
-        if finished && r.len() == 0 && n_left == 0 {
+        if finished && r.len() == 0 && n_left == 0 && beyond == 0 {
             app.subjects.review = None;
             let name = subj::label(&app.subjects, &group);
             return app.show_status(format!("No photos wait to be checked against {name} now."), 5000);
@@ -139,12 +145,15 @@ pub fn on_judged(app: &mut App, seq: u64, group: GroupId, offered: Arc<Vec<Vec<F
     }
     // Asked from the fursuit's page (Find more): say what it came to.
     let name = subj::label(&app.subjects, &group);
-    let text = format!(
+    let mut text = format!(
         "Checked {} for {name}: {} may show {name}, {} left out.",
         util::plural(n_total as u64, "close call"),
         util::thousands(n_offered as u64),
         util::thousands(n_left as u64)
     );
+    if beyond > 0 {
+        text.push_str(&format!(" {} more can be checked with Find more.", util::thousands(beyond as u64)));
+    }
     Task::batch([crops, app.show_status(text, 7000)])
 }
 
@@ -173,6 +182,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             subj::refresh_crops(app)
         }
+        Msg::CheckMore => super::subjects_review::update(app, super::subjects_review::Msg::FindMore),
         Msg::TryCard => {
             app.search.link.try_card_again();
             Task::none()
@@ -334,6 +344,15 @@ pub fn review_line<'a>(app: &'a App, group: &GroupId, seq: u64, left_out_shown: 
                 "Close calls were checked before.".to_string()
             };
             r = r.push(text(checked).size(t::T_SMALL).color(t::PHOTO_INK2));
+            // Past the cap: the next ones, asked for.
+            if run.beyond > 0 && !run.dropped {
+                r = r.push(text(format!("{} more can be checked.", util::thousands(run.beyond as u64))).size(t::T_SMALL).color(t::PHOTO_INK3));
+                r = r.push(tip(
+                    link_btn(format!("Check the next {}", run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS)), m(Msg::CheckMore)),
+                    format!("About {} with the graphics card. Those the judge offers join the end of this list.", crate::search::estimate::describe_seconds(run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS) as f64 * super::fursuits::JUDGE_SECONDS_PER_CALL).trim_start_matches("about ")),
+                    false,
+                ));
+            }
         }
     }
     // The quiet count, and the way to see them.

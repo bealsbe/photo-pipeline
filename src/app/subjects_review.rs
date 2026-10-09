@@ -102,23 +102,28 @@ impl Review {
     /// Entries the judge sent join the end of the list (nothing on screen
     /// moves), each once; `left_out` marks those it judged different.
     pub fn take(&mut self, entries: &[Vec<Face>], left_out: bool) {
-        let have = super::fursuit_judge::firsts(self.list.as_deref().map_or(&[][..], |l| &l[..]));
-        let new: Vec<Vec<Face>> = entries.iter().filter(|e| e.first().is_some_and(|f| !have.contains(&f.face))).cloned().collect();
-        if new.is_empty() && self.list.is_some() {
-            return;
-        }
-        for e in &new {
-            let f = e[0].face;
+        for f in self.append(entries) {
             if left_out {
                 self.left_out_faces.insert(f);
             } else {
                 self.judged_faces.insert(f);
             }
         }
+    }
+
+    /// Entries not listed yet join the end, each once; their first heads.
+    pub fn append(&mut self, entries: &[Vec<Face>]) -> Vec<FaceRef> {
+        let have = super::fursuit_judge::firsts(self.list.as_deref().map_or(&[][..], |l| &l[..]));
+        let new: Vec<Vec<Face>> = entries.iter().filter(|e| e.first().is_some_and(|f| !have.contains(&f.face))).cloned().collect();
+        if new.is_empty() && self.list.is_some() {
+            return Vec::new();
+        }
+        let firsts = new.iter().map(|e| e[0].face).collect();
         let mut list: Vec<Vec<Face>> = self.list.as_deref().cloned().unwrap_or_default();
         list.extend(new);
         self.answers.resize(list.len(), None);
         self.list = Some(Arc::new(list));
+        firsts
     }
 
     /// Answered Yes (photos added) and No (taken out, not suggested again),
@@ -208,6 +213,13 @@ pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
     if r.seq != seq || r.group != group {
         return Task::none();
+    }
+    // With the judge on, a list already shown keeps its place: a new ask
+    // (Find more, the next close calls) adds what is new at the end.
+    if judging && !r.checking && r.list.as_ref().is_some_and(|l| !l.is_empty()) {
+        r.judge_done = false;
+        r.append(&list);
+        return subj::refresh_crops(app);
     }
     // With the judge on, an empty first answer isn't the end: its close
     // calls come next (and its first verdicts say if there are none).
