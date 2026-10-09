@@ -293,7 +293,7 @@ pub fn update(app: &mut App, msg: LMsg) -> Task<Message> {
             ui.note = Some(format!("Added a {}{}.", box_noun(kind), name_words(&all, &name)));
             ui.draft = None;
             ui.name.clear();
-            ui.picked = Some((face, kind));
+            ui.picked = None;
             send(app, LabelEdit::Add { face, kind, name });
             return unfocus();
         }
@@ -496,13 +496,15 @@ pub fn view<'a>(app: &'a App, ui: &'a LabelsUi) -> Element<'a, Message> {
     if let Some(b) = ui.picked_box() {
         return bar(picked_row(all, ui, b));
     }
-    let hint = match (&ui.note, labels.pending) {
-        (Some(n), _) => n.clone(),
-        (None, Some(why)) => pending_words(why).to_string(),
-        (None, None) => format!("{}.  Click a box to name it, or drag on the photo to add one the finder missed.", counts(&labels.boxes)),
+    // What happened last (or how to start), then why drawn boxes wait.
+    let hint = match &ui.note {
+        Some(n) => n.clone(),
+        None => format!("{}.  Click a box to name it, or drag on the photo to add one the finder missed.", counts(&labels.boxes)),
     };
     let mut r = row![lead, kit::secondary(hint)].spacing(t::S2).align_y(Alignment::Center);
-    if ui.note.is_some() || labels.pending.is_some() {
+    if let Some(why) = labels.pending {
+        r = r.push(icons::view(Glyph::Clock, 14.0, t::INK3)).push(kit::caption(pending_words(why)));
+    } else if ui.note.is_some() {
         r = r.push(kit::caption(counts(&labels.boxes)));
     }
     bar(r.push(Space::new().width(Length::Fill)).push(done).into())
@@ -549,7 +551,7 @@ fn name_chip<'a>(name: &'a str, msg: Message) -> Element<'a, Message> {
     button(container(text(name).size(t::T_SMALL).font(paint::MEDIUM)).center_y(Length::Fill))
         .height(t::CONTROL_SM)
         .padding(Padding::from([0.0, t::S2]))
-        .style(style::ghost().style())
+        .style(style::secondary().radius(t::CONTROL_SM / 2.0).style())
         .on_press(msg)
         .into()
 }
@@ -567,7 +569,8 @@ fn picked_row<'a>(all: &'a Subjects, ui: &'a LabelsUi, b: &'a LabelBox) -> Eleme
     }
     r = r.push(Space::new().width(Length::Fill));
     if b.pending {
-        r = r.push(kit::tip(icons::view(Glyph::Clock, 16.0, t::INK3), "Drawn, and not matched yet: it is kept, and matched on the graphics card when it is available", true));
+        let waiting = row![icons::view(Glyph::Clock, 14.0, t::INK3), kit::caption("Not matched yet")].spacing(t::S1).align_y(Alignment::Center);
+        r = r.push(kit::tip(waiting, "Drawn, and not matched yet: it is kept, and matched on the graphics card when it is available", true));
     }
     if b.name.is_some() {
         r = r.push(kit::tip(kit::btn("Unnamed", style::ghost(), Some(lmsg(LMsg::Unnamed))), format!("Take this {} out of {who}; it won't be suggested for them again", box_noun(b.kind)), true));
@@ -604,6 +607,43 @@ fn draft_row<'a>(all: &'a Subjects, ui: &'a LabelsUi) -> Element<'a, Message> {
     r = r.push(kit::tip(kit::btn("Cancel", style::secondary(), Some(lmsg(LMsg::Cancel))), "Forget this box  (Esc)", true));
     r = r.push(kit::tip(kit::btn("Add", style::primary(), Some(lmsg(LMsg::Add))), "Keep this box  (Enter)", true));
     r.into()
+}
+
+// ── the test driver ─────────────────────────────────────────────────────────
+
+/// The `n`th name offered under the field (the test driver's `take`).
+pub fn offered_at(app: &App, n: usize) -> Option<SubjectId> {
+    let ui = &app.viewer.as_ref()?.labels;
+    let kind = match (ui.draft, ui.picked_box()) {
+        (Some(_), _) => ui.draft_kind,
+        (None, Some(b)) => b.kind,
+        _ => return None,
+    };
+    let own = ui.picked_box().and_then(|b| b.subject.as_ref());
+    offered(&app.subjects.all, kind, &ui.name, own).get(n).map(|x| x.0.clone())
+}
+
+/// The overlay's state, for the test driver's dumps.
+pub fn debug_state(app: &App) -> String {
+    let Some(v) = app.viewer.as_ref() else { return "no viewer".into() };
+    let ui = &v.labels;
+    let boxes: Vec<String> = ui
+        .boxes()
+        .iter()
+        .map(|b| format!("{}:{}{}{} [{:.3} {:.3} {:.3} {:.3}]", b.kind.noun(), b.name.as_deref().unwrap_or("Unnamed"), if b.drawn { " drawn" } else { "" }, if b.pending { " pending" } else { "" }, b.face.bbox[0], b.face.bbox[1], b.face.bbox[2], b.face.bbox[3]))
+        .collect();
+    format!(
+        "on={} key={} boxes=[{}] picked={:?} draft={:?} kind={} name={:?} note={:?} pending={:?}",
+        ui.on,
+        ui.labels.as_ref().map_or("waiting".to_string(), |l| l.key.map_or("none".into(), |k| k.to_string()[..8].to_string())),
+        boxes.join(", "),
+        ui.picked_index(),
+        ui.draft,
+        ui.draft_kind.noun(),
+        ui.name,
+        ui.note,
+        ui.labels.as_ref().and_then(|l| l.pending),
+    )
 }
 
 // ── the stand-in ────────────────────────────────────────────────────────────
@@ -682,8 +722,12 @@ impl FakeLabels {
                     Some(t) => name_of(*kind, t)?,
                     None => (None, None),
                 };
+                let what = match &n {
+                    Some(n) => format!("Added a {} for {n}", box_noun(*kind)),
+                    None => format!("Added a {}", box_noun(*kind)),
+                };
                 boxes.push(LabelBox { face: *face, kind: *kind, subject, name: n, drawn: true, pending });
-                format!("Added a {}", box_noun(*kind))
+                what
             }
             LabelEdit::Remove { face, kind } => {
                 let i = find(&boxes, face, *kind).ok_or("no such box")?;
