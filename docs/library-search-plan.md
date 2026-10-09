@@ -2747,6 +2747,17 @@ All of this ran in a throwaway home: a copy of the relabel's v1 index (14,517 sh
   - Preferences said "Gemma 4 is on the graphics card now".
 - `PP_PROFILE=1`: the only slow updates are the test driver's (`update:Script`). `bg:Judged` and `update:Subjects` take well under a frame.
 
+### Two judges (the user, 2026-10-09)
+
+*Qwen3-VL-Reranker* joined as a second choice, listed first: *Off / Qwen3-VL-Reranker / Gemma 4*, with Off still the default.
+- **One list, built from data.** The rows come from `JudgeChoice::ALL` and the registry. The speed and load time are per judge (`estimate::judge_seconds_per_pair(choice)`, `judge_load_seconds(choice)`), and sizes are said in whole gigabytes ("About 10 GB", `fursuit_judge::model_size`).
+- **Switching.** Choosing a downloaded judge switches at once; the engine lets the loaded one go first, so only one is ever on the card. Choosing one not downloaded asks in its own download dialog. A judge not chosen keeps its files, and the list says so ("Qwen3-VL-Reranker stays downloaded (9.2 GB) and isn't loaded; Storage deletes it").
+- **Storage**:
+  - one row per judge (`Storage.judges`), each with *Open* and *Delete…*;
+  - deleting the chosen judge turns the judge off;
+  - deleting the other changes nothing else, and its confirmation says so.
+- The review's loading line names the judge ("Getting Qwen3-VL-Reranker ready for 60 close calls").
+
 ### The stand-in
 
 `FakeFursuits` judges a named fursuit's close calls:

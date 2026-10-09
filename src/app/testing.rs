@@ -147,7 +147,7 @@
 //! prefs judge-off|judge-qwen|judge-gemma4|judge-download|update-heads
 //! prefs judge-open|judge-delete|show-judge-storage [qwen|gemma4]
 //!                             # Preferences ▸ Fursuits' judge, Storage's row
-//! search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|
+//! search fake judge-on [qwen|gemma|both]|judge-off|judge-notinstalled|judge-wait|judge-free|
 //!             judge-cardcrash|judge-broken|judge-nosure|heads-vectors [n|all]
 //!                             # the stand-in's judge and heads to update
 //! search dlg fursuits         # the dialog's Find fursuit heads box

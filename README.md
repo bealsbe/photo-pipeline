@@ -537,7 +537,7 @@ never shown, merged, suggested or completed together with people or pets.
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
 - **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*,
-  off by default).  With a judge chosen, *Find more* and the "Same
+  off by default: *Qwen3-VL-Reranker* or *Gemma 4*).  With a judge chosen, *Find more* and the "Same
   fursuit?" review offer the clear matches at once, and the judge looks
   at the close calls, two heads side by side, nearest first.  A calm line
   over the review's strip says how far it has got ("Checking 23 close
@@ -586,16 +586,18 @@ never shown, merged, suggested or completed together with people or pets.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
   heads…*, heads to update with *Update them*, *Close-call judge* (a
-  choice list: *Off*, the default, or *Gemma 4*, about 18 GB and about
-  2 seconds a close call, on the graphics card only; choosing one not
-  downloaded opens the download dialog with its row, and a line under
-  the list says where it stands), and *Forget all…*, which forgets the
+  choice list: *Off*, the default; *Qwen3-VL-Reranker*, about 10 GB and
+  about 1 second a close call; or *Gemma 4*, about 18 GB and about
+  2 seconds; each on the graphics card only, one loaded at a time;
+  choosing one not downloaded opens the download dialog with its row, a
+  line under the list says where it stands, and a judge not chosen keeps
+  its files until deleted), and *Forget all…*, which forgets the
   heads found and the fursuit names given and leaves people alone
   (Preferences ▸ People's *Forget all…* likewise leaves fursuits alone).
   Preferences ▸ Storage shows the heads' size (with the close calls the
-  judge checked) and the judge's model on a row of its own, with
-  *Delete…* (the judge turns off; choosing it again downloads it again,
-  after asking).
+  judge checked) and each judge's model on a row of its own, with
+  *Delete…* (deleting the chosen one turns the judge off; another's goes
+  alone; choosing it again downloads it again, after asking).
 - **Look:** the tab's glyph is a furry head (full ears, cheek ruffs, a
   muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
   cartoon heads, never a photo.
