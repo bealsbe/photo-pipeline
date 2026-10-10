@@ -208,6 +208,11 @@ pub enum Act {
     /// `groups` as they were (each target once), the `heads` removed (at
     /// most [`MOVED_HEADS`]) and how many.
     RemoveMany { groups: Vec<Side>, heads: Vec<Head>, removed: usize },
+    /// The group editor's *Apply* (one undo step): `groups` as they were
+    /// (each group heads left or went to, once), and where heads went,
+    /// one [`Out`] per group they left and where they went, so each reads
+    /// as a `move` / `split` / `remove_many` does.
+    Edit { groups: Vec<Side>, out: Vec<Out> },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -227,9 +232,40 @@ impl Act {
             Act::Draw { .. } => "draw",
             Act::Remove { .. } => "remove",
             Act::RemoveMany { .. } => "remove_many",
+            Act::Edit { .. } => "edit",
             Act::Undo { .. } => "undo",
         }
     }
+}
+
+/// Heads that went one way in an edit: from `groups[from]` (absent: in
+/// no group) to `to`; the heads (at most [`MOVED_HEADS`]) and how many.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Out {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<usize>,
+    pub to: To,
+    pub heads: Vec<Head>,
+    pub moved: usize,
+}
+
+/// Where heads went in an edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "is", rename_all = "snake_case")]
+pub enum To {
+    /// An existing group: `groups[group]`.
+    Group { group: usize },
+    /// A new group the edit made (`new`: its number among them).
+    New {
+        new: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// "Not fursuit heads" / "Not faces".
+    Removed,
+    /// "Take out of this group" / "Not this person": not the group they
+    /// left (`from`), every pair against its heads labelled different.
+    TakenOut,
 }
 
 /// Where in the app a decision was made.
@@ -259,6 +295,8 @@ pub enum At {
     Similar,
     /// The "Same person?" / "Same fursuit?" review.
     Review,
+    /// The group editor (Edit group, and what opens it).
+    Editor,
 }
 
 /// How a decision came to be offered, as the page knows it; the engine
@@ -276,12 +314,9 @@ pub enum Via {
     /// judge and shown on request (`Some(false)`); `check`: an unnamed
     /// group's own heads ("Check this group").
     Review { judge: Option<bool>, check: bool },
-    /// The split proposed around two heads seen in one photo, confirmed
-    /// after `edited` heads were moved between its sides by hand.
-    Proposal { edited: u32 },
-    /// Picked heads split off after arranging the group in two columns,
-    /// `edited` heads moved between the sides by hand first.
-    Arranged { edited: u32 },
+    /// The group editor's *Apply*: opened from a proposed split
+    /// (`proposal`) or not, `edited` heads moved by hand in it.
+    Editor { proposal: bool, edited: u32 },
     #[default]
     Unknown,
 }
@@ -346,8 +381,8 @@ impl How {
         match via {
             Via::Hand(at) => How::hand(at),
             Via::Unknown => How { by: "hand".into(), ..How::default() },
-            Via::Proposal { edited } => How { by: "proposal".into(), at: Some(At::Heads), edited: Some(edited), ..How::default() },
-            Via::Arranged { edited } => How { edited: Some(edited), ..How::hand(At::Heads) },
+            Via::Editor { proposal: true, edited } => How { by: "proposal".into(), at: Some(At::Editor), edited: Some(edited), ..How::default() },
+            Via::Editor { proposal: false, edited } => How { edited: Some(edited), ..How::hand(At::Editor) },
             Via::Pair { at, distance, sure, verdict: Some(v) } => {
                 How { by: "judge".into(), at: Some(at), d: Some(round4(distance)), sure: Some(sure), judge: name, judge_cut: cut, yes: Some(v.yes), no: Some(v.no), unseen: Some(v.unjudged), ..How::default() }
             }
@@ -524,66 +559,86 @@ pub struct Pair {
 /// different from the one left.  Later decisions win over earlier ones
 /// for the same pair.
 pub fn pairs(entries: &[Entry]) -> Vec<Pair> {
-    let mut out: Vec<Pair> = Vec::new();
-    let mut at: HashMap<(FaceRef, FaceRef), usize> = HashMap::new();
-    let mut put = |kind: Kind, a: FaceRef, b: FaceRef, same: bool, id: &str| {
+    let mut set = PairSet::default();
+    put_pairs(entries, &mut set);
+    set.into_pairs()
+}
+
+/// Labelled pairs, each pair of heads once: a later label for a pair
+/// replaces an earlier one.
+#[derive(Default)]
+pub struct PairSet {
+    out: Vec<Pair>,
+    at: HashMap<(FaceRef, FaceRef), usize>,
+}
+
+impl PairSet {
+    pub fn put(&mut self, kind: Kind, a: FaceRef, b: FaceRef, same: bool, id: &str) {
         if a == b {
             return;
         }
         let key = if (a.key.0, a.thousandths()) <= (b.key.0, b.thousandths()) { (a, b) } else { (b, a) };
         let p = Pair { kind, a: key.0, b: key.1, same, id: id.to_string() };
-        match at.get(&key) {
-            Some(&i) => out[i] = p,
+        match self.at.get(&key) {
+            Some(&i) => self.out[i] = p,
             None => {
-                at.insert(key, out.len());
-                out.push(p);
+                self.at.insert(key, self.out.len());
+                self.out.push(p);
             }
         }
-    };
-    let cross = |a: &[Head], b: &[Head], same: bool, kind: Kind, id: &str, put: &mut dyn FnMut(Kind, FaceRef, FaceRef, bool, &str)| {
+    }
+
+    pub fn into_pairs(self) -> Vec<Pair> {
+        self.out
+    }
+}
+
+/// The record's pairs ([`pairs`]) into `set`.
+pub fn put_pairs(entries: &[Entry], set: &mut PairSet) {
+    let cross = |a: &[Head], b: &[Head], same: bool, kind: Kind, id: &str, set: &mut PairSet| {
         for x in a {
             for y in b {
-                put(kind, x.0, y.0, same, id);
+                set.put(kind, x.0, y.0, same, id);
             }
         }
     };
+    let put = set;
     for e in effective(entries) {
         let (k, id) = (e.kind, e.id.as_str());
         match &e.act {
             Act::Merge { groups } => {
                 for i in 0..groups.len() {
                     for j in i + 1..groups.len() {
-                        cross(&groups[i].heads, &groups[j].heads, true, k, id, &mut put);
+                        cross(&groups[i].heads, &groups[j].heads, true, k, id, put);
                     }
                 }
             }
             Act::NotSame { groups } => {
                 if let [a, b] = &groups[..] {
-                    cross(&a.heads, &b.heads, false, k, id, &mut put);
+                    cross(&a.heads, &b.heads, false, k, id, put);
                 }
             }
             Act::Split { from, heads, .. } => {
                 let rest: Vec<Head> = from.heads.iter().filter(|h| !heads.contains(h)).copied().collect();
-                cross(heads, &rest, false, k, id, &mut put);
+                cross(heads, &rest, false, k, id, put);
             }
             Act::Move { from, to, heads, .. } => {
                 let rest: Vec<Head> = from.heads.iter().filter(|h| !heads.contains(h)).copied().collect();
-                cross(heads, &rest, false, k, id, &mut put);
-                cross(heads, &to.heads, true, k, id, &mut put);
+                cross(heads, &rest, false, k, id, put);
+                cross(heads, &to.heads, true, k, id, put);
             }
-            Act::Answer { yes, group, heads } => cross(heads, &group.heads, *yes, k, id, &mut put),
+            Act::Answer { yes, group, heads } => cross(heads, &group.heads, *yes, k, id, put),
             Act::Name { head: Some(h), name, group, from } => {
                 if let (Some(_), Some(g)) = (name, group) {
-                    cross(std::slice::from_ref(h), &g.heads, true, k, id, &mut put);
+                    cross(std::slice::from_ref(h), &g.heads, true, k, id, put);
                 }
                 if let (None, Some(f)) = (name, from) {
-                    cross(std::slice::from_ref(h), &f.heads, false, k, id, &mut put);
+                    cross(std::slice::from_ref(h), &f.heads, false, k, id, put);
                 }
             }
             _ => {}
         }
     }
-    out
 }
 
 /// Bytes and entries (lines) of a record, for Preferences (on a worker).
@@ -658,17 +713,20 @@ fn rewrite(path: &Path, keep: impl Fn(&Entry) -> bool) -> io::Result<usize> {
     Ok(gone.len())
 }
 
-/// Copy the record and a README of its format into a new folder in
-/// `into` (`photo-pipeline-corrections-<date>`, numbered if taken; never
-/// overwriting).  Reads nothing else and writes nowhere else.
-fn export(path: &Path, into: &Path) -> io::Result<(PathBuf, usize)> {
+/// Copy the record, the named groups as they are (`groups`, when given)
+/// and a README of their format into a new folder in `into`
+/// (`photo-pipeline-corrections-<date>`, numbered if taken; never
+/// overwriting), names replaced by codes.  Reads nothing else and writes
+/// nowhere else.  The entries copied.
+fn export(path: &Path, into: &Path, groups: Option<&super::group_export::Snapshot>) -> io::Result<(PathBuf, usize)> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
-    if bytes.is_empty() {
-        return Err(io::Error::new(io::ErrorKind::NotFound, "the record is empty"));
+    let labels = groups.is_some_and(|g| !g.named.is_empty() || !g.added.is_empty() || !g.removed.is_empty() || !g.not_same.is_empty());
+    if bytes.is_empty() && !labels {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "nothing is recorded and no group is named"));
     }
     let date = chrono::Local::now().format("%Y-%m-%d");
     let mut dir = into.join(format!("photo-pipeline-corrections-{date}"));
@@ -684,65 +742,88 @@ fn export(path: &Path, into: &Path) -> io::Result<(PathBuf, usize)> {
         }
     }
     private_dir(&dir);
-    let (entries, _) = parse(&String::from_utf8_lossy(&bytes));
-    let text: String = without_names(entries.clone()).iter().map(Entry::line).collect();
-    let copy = dir.join(FILE_NAME);
-    crate::ops::fsutil::atomic_write(&copy, text.as_bytes(), false)?;
-    private_file(&copy);
+    let (mut entries, _) = parse(&String::from_utf8_lossy(&bytes));
+    let mut codes = Codes::default();
+    code_entries(&mut entries, &mut codes);
+    if !entries.is_empty() {
+        let text: String = entries.iter().map(Entry::line).collect();
+        let copy = dir.join(FILE_NAME);
+        crate::ops::fsutil::atomic_write(&copy, text.as_bytes(), false)?;
+        private_file(&copy);
+    }
+    if let Some(g) = groups.filter(|_| labels) {
+        // After the log, so a subject keeps the code the log gave it.
+        let file = super::group_export::export(g, &mut codes);
+        let text = serde_json::to_string(&file).map_err(io::Error::other)?;
+        let out = dir.join(super::group_export::FILE_NAME);
+        crate::ops::fsutil::atomic_write(&out, text.as_bytes(), false)?;
+        private_file(&out);
+    }
     crate::ops::fsutil::atomic_write(&dir.join("README.md"), README.as_bytes(), false)?;
     Ok((dir, entries.len()))
 }
 
-/// The entries with every name and subject id replaced by a stable code
-/// (`fursuit-12`, `person-7`): one code per subject throughout, whether
-/// an entry names it by id, by name or both.  An export carries no names
+/// Codes for subjects (`fursuit-12`), one per subject, known by its id,
+/// its name (any case) or both; shared by an export's two files.
+#[derive(Default)]
+pub struct Codes {
+    by_sid: HashMap<String, String>,
+    by_name: HashMap<(Kind, String), String>,
+    next: HashMap<Kind, usize>,
+}
+
+impl Codes {
+    fn fresh(&mut self, kind: Kind) -> String {
+        let n = self.next.entry(kind).or_insert(0);
+        *n += 1;
+        format!("{}-{n}", kind.noun().replace(' ', "-"))
+    }
+    /// The code of a subject known by `sid`, `name` or both.
+    pub fn code(&mut self, kind: Kind, sid: Option<&str>, name: Option<&str>) -> Option<String> {
+        let name_key = name.map(|n| (kind, n.to_lowercase()));
+        let known = sid.and_then(|s| self.by_sid.get(s)).or_else(|| name_key.as_ref().and_then(|k| self.by_name.get(k))).cloned();
+        if sid.is_none() && name.is_none() {
+            return None;
+        }
+        let code = known.unwrap_or_else(|| self.fresh(kind));
+        if let Some(s) = sid {
+            self.by_sid.insert(s.to_string(), code.clone());
+        }
+        if let Some(k) = name_key {
+            self.by_name.insert(k, code.clone());
+        }
+        Some(code)
+    }
+    fn side(&mut self, kind: Kind, side: &mut Side) {
+        let code = self.code(kind, side.sid.as_deref(), side.name.as_deref());
+        side.name = code.clone();
+        side.sid = code;
+    }
+    fn name(&mut self, kind: Kind, name: &mut Option<String>) {
+        if let Some(n) = name.take() {
+            *name = self.code(kind, None, Some(&n));
+        }
+    }
+}
+
+/// Replace the names and subject ids of `entries` by `c`'s codes
+/// (`fursuit-12`, `person-7`): one code per subject throughout, whether an
+/// entry names it by id, by name or both.  An export carries no names
 /// (the user's choice); the record on this computer keeps them.
-pub fn without_names(mut entries: Vec<Entry>) -> Vec<Entry> {
-    #[derive(Default)]
-    struct Codes {
-        by_sid: HashMap<String, String>,
-        by_name: HashMap<(Kind, String), String>,
-        next: HashMap<Kind, usize>,
-    }
-    impl Codes {
-        fn fresh(&mut self, kind: Kind) -> String {
-            let n = self.next.entry(kind).or_insert(0);
-            *n += 1;
-            format!("{}-{n}", kind.noun().replace(' ', "-"))
-        }
-        /// The code of a subject known by `sid`, `name` or both.
-        fn code(&mut self, kind: Kind, sid: Option<&str>, name: Option<&str>) -> Option<String> {
-            let name_key = name.map(|n| (kind, n.to_lowercase()));
-            let known = sid.and_then(|s| self.by_sid.get(s)).or_else(|| name_key.as_ref().and_then(|k| self.by_name.get(k))).cloned();
-            if sid.is_none() && name.is_none() {
-                return None;
-            }
-            let code = known.unwrap_or_else(|| self.fresh(kind));
-            if let Some(s) = sid {
-                self.by_sid.insert(s.to_string(), code.clone());
-            }
-            if let Some(k) = name_key {
-                self.by_name.insert(k, code.clone());
-            }
-            Some(code)
-        }
-        fn side(&mut self, kind: Kind, side: &mut Side) {
-            let code = self.code(kind, side.sid.as_deref(), side.name.as_deref());
-            side.name = code.clone();
-            side.sid = code;
-        }
-        fn name(&mut self, kind: Kind, name: &mut Option<String>) {
-            if let Some(n) = name.take() {
-                *name = self.code(kind, None, Some(&n));
-            }
-        }
-    }
-    let mut c = Codes::default();
-    for e in &mut entries {
+pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
+    for e in entries.iter_mut() {
         let k = e.kind;
         match &mut e.act {
             Act::Merge { groups } | Act::NotSame { groups } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Split { from, .. } => c.side(k, from),
+            Act::Edit { groups, out } => {
+                groups.iter_mut().for_each(|g| c.side(k, g));
+                for o in out {
+                    if let To::New { name, .. } = &mut o.to {
+                        c.name(k, name);
+                    }
+                }
+            }
             Act::Move { from, to, .. } => {
                 c.side(k, from);
                 c.side(k, to);
@@ -775,14 +856,13 @@ pub fn without_names(mut entries: Vec<Entry>) -> Vec<Entry> {
             Act::Remove { .. } | Act::Undo { .. } => {}
         }
     }
-    entries
 }
 
 enum Job {
     Append(String),
     ForgetKind(Kind),
     DeleteAll,
-    Export(PathBuf, Sender<io::Result<(PathBuf, usize)>>),
+    Export(PathBuf, Option<Box<super::group_export::Snapshot>>, Sender<io::Result<(PathBuf, usize)>>),
     Flush(Sender<()>),
 }
 
@@ -882,13 +962,21 @@ impl Recorder {
         }
     }
 
-    /// Copy the record and its README into a new folder in `into`; the
-    /// folder made and the entries copied.  **Blocks**: call it on a
-    /// worker.
-    pub fn export(&self, into: &Path) -> io::Result<(PathBuf, usize)> {
+    /// Copy the record, the named groups (`groups`) and the README into
+    /// a new folder in `into`; the folder made and the entries copied.
+    /// **Blocks**: call it on a worker.
+    pub fn export(&self, into: &Path, groups: Option<super::group_export::Snapshot>) -> io::Result<(PathBuf, usize)> {
         let (tx, rx) = crossbeam_channel::bounded(1);
-        self.tx.send(Job::Export(into.to_path_buf(), tx)).map_err(|_| io::Error::other("the record's writer stopped"))?;
+        self.export_to(into, groups, tx);
         rx.recv().map_err(|_| io::Error::other("the record's writer stopped"))?
+    }
+
+    /// [`Recorder::export`] without waiting: the answer goes to `reply`
+    /// (the engine hands the groups over and carries on).
+    pub fn export_to(&self, into: &Path, groups: Option<super::group_export::Snapshot>, reply: Sender<io::Result<(PathBuf, usize)>>) {
+        if let Err(crossbeam_channel::SendError(Job::Export(_, _, reply))) = self.tx.send(Job::Export(into.to_path_buf(), groups.map(Box::new), reply)) {
+            let _ = reply.send(Err(io::Error::other("the record's writer stopped")));
+        }
     }
 
     /// The record's entries as written (after a flush).  **Blocks** on
@@ -969,9 +1057,9 @@ fn run(rx: Receiver<Job>, path: Option<PathBuf>, memory: Arc<Mutex<Vec<String>>>
                     }
                 }
             }
-            Job::Export(into, reply) => {
+            Job::Export(into, groups, reply) => {
                 let r = match &path {
-                    Some(p) => export(p, &into),
+                    Some(p) => export(p, &into, groups.as_deref()),
                     None => Err(io::Error::other("the record is kept in memory only")),
                 };
                 let _ = reply.send(r);
@@ -998,6 +1086,9 @@ private.
 code, `person-7` or `fursuit-12`: the same code for the same person or
 fursuit throughout the file, whether an entry named it or gave its id.
 The record on the user's computer keeps the names.
+
+`groups.json` (when any group is named) is the named groups as they were
+at the export, by the same codes (below).
 
 ## Reading it
 
@@ -1055,6 +1146,46 @@ The record on the user's computer keeps the names.
   `offered` (`false`: the judge left it out and the user asked to see it).
 - `at`: `drag`, `pick`, `menu`, `name`, `heads`, `side-by-side`,
   `faces`, `viewer`, `merge-review`, `similar`, `review`.
+
+## groups.json: the named groups now
+
+The log says how the groups came to be; `groups.json` is what they are at
+the export, the user's curated ground truth.  Unnamed automatic groups are
+left out (nobody checked them).
+
+```
+{"v": 1, "t": exported (UTC), "app": version,
+ "kinds": [{"kind", "heads", "white", "model", "grouping", "cuts"}],
+ "groups": [{"code", "kind", "photos", "bursts", "days",
+             "heads": [heads], "rejected": [heads]}],
+ "added": [{"kind", "head"}], "removed": [{"kind", "head"}],
+ "not_same": [{"kind", "a": [heads], "b": [heads]}]}
+```
+
+- `kinds`: each kind's state as for the log's `lib`: head count, whether
+  whitened, the vectors' model, the grouping choice and the cut-offs in
+  force at the export.
+- `groups`: each named person or fursuit by its code (the log's code for
+  the same subject), its counts as the app showed them, its member heads
+  (confirmed: named, moved or merged into it, answered Yes) and its
+  `rejected` heads (answered No for it).
+- `added`: boxes drawn in the viewer; `removed`: boxes the user said are
+  not a face or not a fursuit head (never a match for anything).
+- `not_same`: groups the user said are different, by their heads.
+
+### Labelled pairs from groups.json
+
+- Within a group: every two heads are the same.
+- Across two named groups of one kind: different.  (This grows with the
+  square of the named heads; sample it if it is large.)
+- A rejected head and each member of its group: different.
+- `not_same`: every head of `a` and of `b`: different.
+- Never across kinds.
+
+Built after the log's pairs, these win for a pair both hold: the groups
+are the state after every decision.  The log adds what the groups can't
+say: how each decision was offered (distance, judge), what was taken back,
+and decisions about groups never named.
 "#;
 
 #[cfg(test)]
@@ -1106,15 +1237,19 @@ mod tests {
     /// *Heads*; other decisions carry no such field.
     #[test]
     fn an_arranged_split_records_the_heads_moved_by_hand() {
-        let how = How::of(Via::Proposal { edited: 3 }, None);
-        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Heads), Some(3)));
+        let how = How::of(Via::Editor { proposal: true, edited: 3 }, None);
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(3)));
         let line = serde_json::to_string(&how).unwrap();
-        assert!(line.contains(r#""edited":3"#), "{line}");
+        assert!(line.contains(r#""edited":3"#) && line.contains(r#""at":"editor""#), "{line}");
         assert_eq!(serde_json::from_str::<How>(&line).unwrap(), how);
-        let as_offered = How::of(Via::Proposal { edited: 0 }, None);
+        let as_offered = How::of(Via::Editor { proposal: true, edited: 0 }, None);
         assert!(serde_json::to_string(&as_offered).unwrap().contains(r#""edited":0"#), "0 is kept: confirmed as offered");
-        let picked = How::of(Via::Arranged { edited: 2 }, None);
-        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Heads), Some(2)));
+        let picked = How::of(Via::Editor { proposal: false, edited: 2 }, None);
+        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Editor), Some(2)));
+        // An entry written before the editor (a proposal confirmed in the
+        // old dialog) still reads.
+        let old: How = serde_json::from_str(r#"{"by":"proposal","at":"heads","edited":1}"#).unwrap();
+        assert_eq!((old.by.as_str(), old.at, old.edited), ("proposal", Some(At::Heads), Some(1)));
         assert!(!serde_json::to_string(&How::of(Via::Hand(At::Heads), None)).unwrap().contains("edited"));
     }
 
@@ -1133,6 +1268,16 @@ mod tests {
             Act::Remove { head: Head(head(7, 0)) },
             Act::RemoveMany { groups: vec![side(8, 2)], heads: heads([head(8, 0), head(8, 10)]), removed: 2 },
             Act::Undo { undoes: "0123456789abcdef".into(), of: "merge".into() },
+            Act::Edit {
+                groups: vec![side(1, 5), side(2, 3)],
+                out: vec![
+                    Out { from: Some(0), to: To::Group { group: 1 }, heads: heads([head(1, 0)]), moved: 1 },
+                    Out { from: Some(0), to: To::New { new: 0, name: Some("Someone".into()) }, heads: heads([head(1, 10)]), moved: 1 },
+                    Out { from: Some(0), to: To::Removed, heads: heads([head(1, 20)]), moved: 1 },
+                    Out { from: Some(0), to: To::TakenOut, heads: heads([head(1, 30)]), moved: 1 },
+                    Out { from: None, to: To::New { new: 1, name: None }, heads: heads([head(9, 0)]), moved: 1 },
+                ],
+            },
         ];
         for act in acts {
             let e = Entry::new(Kind::Fursuit, act, Some(How::hand(At::Drag)), Some(lib()));
@@ -1242,11 +1387,11 @@ mod tests {
         // Exported: a new folder with the record and the README.
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
-        let (dir, n) = r.export(&out).unwrap();
+        let (dir, n) = r.export(&out, None).unwrap();
         assert_eq!(n, 1);
         assert_eq!(fs::read(dir.join(FILE_NAME)).unwrap(), fs::read(&p).unwrap(), "nothing named: copied as is");
         assert!(fs::read_to_string(dir.join("README.md")).unwrap().contains("not_same"));
-        let (dir2, _) = r.export(&out).unwrap();
+        let (dir2, _) = r.export(&out, None).unwrap();
         assert_ne!(dir, dir2, "never over an earlier export");
         r.forget_kind(Kind::Person);
         r.flush();
@@ -1275,7 +1420,7 @@ mod tests {
         }
         let out = d.join("out");
         fs::create_dir_all(&out).unwrap();
-        let (dir, n) = r.export(&out).unwrap();
+        let (dir, n) = r.export(&out, None).unwrap();
         assert_eq!(n, 5);
         let text = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
         for secret in ["Sparky", "Mossy", "mossy", "Jane", "aaaa", "bbbb", "cccc"] {

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use super::Worker;
 use crate::model::decisions::{self, Act, Cuts, Entry, How, Lib, Side, Via, round4};
-use crate::model::subjects::{FaceRef, GroupId, Kind, LabelEdit, NameTo};
+use crate::model::subjects::{EditPlan, FaceRef, GroupId, Kind, LabelEdit, NameTo, PlanDest};
 use crate::search::heads;
 use crate::search::merging;
 use crate::search::step::KindStep;
@@ -215,22 +215,44 @@ impl Worker {
         Some(Before { kind, act: Act::NotSame { groups: vec![sa, sb] }, answered: None })
     }
 
-    /// A move or a split: where the heads were, where they go.
-    pub(super) fn before_move(&mut self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) -> Option<Before> {
+
+    /// The group editor's *Apply*: every group heads left or went to, as
+    /// it was, and the heads by (from, to).
+    pub(super) fn before_edit(&mut self, plan: &EditPlan) -> Option<Before> {
         if !self.decisions.is_on() {
             return None;
         }
-        let (kind, from_side, _) = self.record_side(from, &[])?;
-        let moved = faces.len();
-        let heads = decisions::heads(faces.iter().take(decisions::MOVED_HEADS).copied());
-        let act = match to {
-            None => Act::Split { from: from_side, heads, moved },
-            Some(t) => {
-                let (_, to_side, _) = self.record_side(t, &[])?;
-                Act::Move { from: from_side, to: to_side, heads, moved }
+        let mut ids: Vec<GroupId> = Vec::new();
+        let index = |g: &GroupId, ids: &mut Vec<GroupId>| -> usize {
+            match ids.iter().position(|x| x == g) {
+                Some(i) => i,
+                None => {
+                    ids.push(g.clone());
+                    ids.len() - 1
+                }
             }
         };
-        Some(Before { kind, act, answered: None })
+        let mut out: Vec<(Option<usize>, decisions::To, Vec<FaceRef>)> = Vec::new();
+        for (head, from, to) in &plan.moves {
+            let from = from.as_ref().map(|g| index(g, &mut ids));
+            let to = match to {
+                PlanDest::Group(g) => decisions::To::Group { group: index(g, &mut ids) },
+                PlanDest::New(i) => decisions::To::New { new: *i, name: plan.new_names.get(*i).cloned().flatten() },
+                PlanDest::Removed => decisions::To::Removed,
+                PlanDest::TakenOut => decisions::To::TakenOut,
+            };
+            match out.iter_mut().find(|(f, t, _)| *f == from && *t == to) {
+                Some((_, _, v)) => v.push(*head),
+                None => out.push((from, to, vec![*head])),
+            }
+        }
+        let mut groups = Vec::with_capacity(ids.len());
+        for g in &ids {
+            let (_, side, _) = self.record_side(g, &[])?;
+            groups.push(side);
+        }
+        let out = out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect();
+        Some(Before { kind: plan.kind, act: Act::Edit { groups, out }, answered: None })
     }
 
     /// A review answer (Yes or No): the group as it was, the heads.
@@ -284,6 +306,16 @@ impl Worker {
             *n = removed.len();
         }
         Some(b)
+    }
+
+    /// *Export…*: the named groups as they are now go to the record's
+    /// thread with the export, which answers `reply` (nothing here waits).
+    pub(super) fn export_record(&mut self, into: &std::path::Path, reply: crossbeam_channel::Sender<std::io::Result<(std::path::PathBuf, usize)>>) {
+        let snapshot = self.shared.subjects.lock().clone();
+        let counts = |sid: &str| snapshot.group(&GroupId::Subject(crate::model::subjects::SubjectId(sid.to_string()))).map(|g| (g.photos, g.bursts, g.days));
+        let libs = [Kind::Person, Kind::Fursuit].into_iter().filter_map(|k| self.record_lib(k).map(|l| (k, l))).collect();
+        let groups = crate::model::group_export::Snapshot::of(&self.people.file, counts, libs);
+        self.decisions.export_to(into, Some(groups), reply);
     }
 
     /// Naming a group (the tab, a group's page).

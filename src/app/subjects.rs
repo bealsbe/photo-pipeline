@@ -81,8 +81,8 @@ pub enum Page {
     Review,
     /// "Same fursuit?" for pairs of groups: merge suggestions.
     Merges,
-    /// Two groups side by side, to move faces between them.
-    Pair,
+    /// The group editor: a group's faces sorted into columns and groups.
+    Editor,
 }
 
 /// Merging picked groups: which name to keep.
@@ -150,8 +150,8 @@ pub struct Subjects {
     /// and a group page's lists, and their review.
     pub lists: super::subjects_merge::Lists,
     pub merges: Option<super::subjects_merge::MergeReview>,
-    /// Two groups side by side.
-    pub pair: Option<super::subjects_pair::PairView>,
+    /// The group editor, open.
+    pub editor: Option<super::subjects_editor::Editor>,
     pub crops: Crops,
     pub(super) seq: u64,
 }
@@ -175,15 +175,15 @@ impl Subjects {
             judge: None,
             lists: Default::default(),
             merges: None,
-            pair: None,
+            editor: None,
             crops: Crops::new(CROP_CACHE_MIN),
             seq: 0,
         }
     }
 
     pub fn page(&self) -> Page {
-        if self.pair.is_some() {
-            Page::Pair
+        if self.editor.is_some() {
+            Page::Editor
         } else if self.merges.is_some() {
             Page::Merges
         } else if self.review.is_some() {
@@ -522,7 +522,7 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         }
         Page::Review => review::wanted(app),
         Page::Merges => super::subjects_merge::wanted(app),
-        Page::Pair => super::subjects_pair::wanted(app),
+        Page::Editor => super::subjects_editor::wanted(app),
     };
     // The merge dialog, over any page.
     let mut v = v;
@@ -581,7 +581,7 @@ pub enum Msg {
     Person(person::Msg),
     Review(review::Msg),
     Merges(super::subjects_merge::Msg),
-    Pair(super::subjects_pair::Msg),
+    Editor(super::subjects_editor::Msg),
     Split(super::subjects_split::Msg),
     /// "Not fursuit heads" / "Not faces" on groups or picked heads.
     Remove(super::subjects_remove::Msg),
@@ -646,7 +646,7 @@ pub fn on_undone(app: &mut App, what: String) -> Task<Message> {
 /// A group's faces arrived: the review's reference faces, or a subject's
 /// page's split view.
 pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) -> Task<Message> {
-    if super::subjects_pair::on_faces(app, seq, &faces) {
+    if super::subjects_editor::on_faces(app, seq, &faces) {
         return refresh_crops(app);
     }
     if super::subjects_remove::on_faces(app, seq, &faces) {
@@ -705,7 +705,7 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     }
     let t = person::on_subjects(app);
     super::subjects_merge::on_subjects(app);
-    super::subjects_pair::on_subjects(app);
+    super::subjects_editor::on_subjects(app);
     let split = super::subjects_split::on_subjects(app);
     Task::batch([t, split, refresh_crops(app)])
 }
@@ -888,7 +888,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Person(msg) => person::update(app, msg),
         Msg::Review(msg) => review::update(app, msg),
         Msg::Merges(msg) => super::subjects_merge::update(app, msg),
-        Msg::Pair(msg) => super::subjects_pair::update(app, msg),
+        Msg::Editor(msg) => super::subjects_editor::update(app, msg),
         Msg::Split(msg) => super::subjects_split::update(app, msg),
         Msg::Remove(msg) => super::subjects_remove::update(app, msg),
     }
@@ -922,7 +922,7 @@ pub fn select_mode(app: &mut App) {
 
 /// Ctrl+Z on the page: the last change to people.
 pub fn undo(app: &mut App) -> Task<Message> {
-    if let Some(t) = super::subjects_split::take_back(app) {
+    if let Some(t) = super::subjects_editor::take_back(app) {
         return t;
     }
     if app.subjects.page() == Page::Review {
@@ -980,7 +980,7 @@ pub fn escape(app: &mut App) -> Task<Message> {
     match s.page() {
         Page::Review => review::update(app, review::Msg::Done),
         Page::Merges => super::subjects_merge::update(app, super::subjects_merge::Msg::Done),
-        Page::Pair => super::subjects_pair::escape(app),
+        Page::Editor => super::subjects_editor::escape(app),
         Page::Person => person::escape(app),
         Page::Overview => {
             if !s.picked.is_empty() || s.select_mode {
@@ -1015,7 +1015,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     match app.subjects.page() {
         Page::Review => review::on_key(app, key, mods),
         Page::Merges => super::subjects_merge::on_key(app, key, mods),
-        Page::Pair => super::subjects_pair::on_key(app, key, mods),
+        Page::Editor => super::subjects_editor::on_key(app, key, mods),
         Page::Person => person::on_key(app, key, mods),
         Page::Overview => overview_key(app, key, mods),
     }
@@ -1062,6 +1062,8 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
             }
             Task::none()
         }
+        // E: edit the picked (or focused) group.
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("e") && !mods.shift() => super::subjects_editor::edit_key(app),
         // Y on the Fursuits tab: review the pairs that may be one suit.
         Key::Character(c) if c.as_str().eq_ignore_ascii_case("y") && !mods.shift() && s.tab == Kind::Fursuit && !s.select_mode => super::subjects_merge::tab_key(app).unwrap_or_else(Task::none),
         Key::Named(Named::Space) if s.select_mode => {
@@ -1080,7 +1082,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     match app.subjects.page() {
         Page::Review => review::view(app),
         Page::Merges => super::subjects_merge::view(app),
-        Page::Pair => super::subjects_pair::view(app),
+        Page::Editor => super::subjects_editor::view(app),
         Page::Person => person::view(app, keyboard_ok),
         Page::Overview => overview(app),
     }
@@ -1576,8 +1578,12 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
         format!("None of the picked groups are {what}: remove every one of their {what}, so they are never grouped, suggested or found again (asks first)"),
         true,
     );
-    // Two picked: side by side, to move faces between them.
-    let side = (n == 2).then(|| tip(kit::icon_text_btn(Glyph::Compare, "Side by side", t::INK, style::secondary(), Some(super::subjects_pair::m(super::subjects_pair::Msg::Open(s.picked[0].clone(), s.picked[1].clone())))), "The two groups side by side, to drag faces between them  (C)", true));
+    // One picked: edit it; two: side by side in the editor.
+    let side = match n {
+        1 => Some(tip(kit::icon_text_btn(Glyph::Pencil, "Edit group", t::INK, style::secondary(), Some(super::subjects_editor::m(super::subjects_editor::Msg::Open(s.picked[0].clone(), super::subjects_editor::Preset::Plain)))), "Sort its faces into groups  (E)", true)),
+        2 => Some(tip(kit::icon_text_btn(Glyph::Compare, "Side by side", t::INK, style::secondary(), Some(super::subjects_editor::m(super::subjects_editor::Msg::Open(s.picked[0].clone(), super::subjects_editor::Preset::With(s.picked[1].clone()))))), "The two groups side by side in the editor, to move faces between them  (C)", true)),
+        _ => None,
+    };
     let close = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::ClearPicks))), "Stop picking  (Esc)", true);
     let words = if n == 0 { "Click groups to pick them".to_string() } else { format!("{n} picked") };
     let mut r = row![icons::view(Glyph::Select, 16.0, t::SIGNAL), text(words).size(t::T_BODY).color(t::INK).width(Length::Fill)];
@@ -1786,7 +1792,7 @@ pub fn debug_state(app: &App) -> String {
         s.crops.bytes() / 1024,
         s.crops.cap() / 1024,
         person::debug_state(app),
-        review::debug_state(app) + " " + &super::subjects_pair::debug_state(app),
+        review::debug_state(app) + " " + &super::subjects_editor::debug_state(app),
     ) + " " + &super::subjects_merge::debug_state(app)
 }
 

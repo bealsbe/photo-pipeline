@@ -3472,10 +3472,11 @@ average-linkage distance to the entry's first group (the step's space;
 | `draw` | `head`, `name` | none |
 | `remove` | `head` | none |
 | `remove_many` | `groups` (as they were), `heads`, `removed` | none: "Not fursuit heads" / "Not faces" on whole groups or picked heads, one entry |
+| `edit` | `groups` (as they were: each group heads left or went to), `out`: `[{from, to, heads, moved}]`, one per (group left, destination); `to` is `{is: "group", group}` (an index into `groups`), `{is: "new", new, name}`, `{is: "removed"}` or `{is: "taken_out"}` | per `out`: to a group: × it same, × rest of `from` different; new: × rest of `from` different; taken out: × rest of `from` different; removed: none.  The group editor's *Apply*, one entry |
 | `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
 
 `how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,
-`side-by-side`, `faces`, `viewer`, `merge-review`, `similar`),
+`side-by-side`, `faces`, `viewer`, `merge-review`, `similar`, `editor`),
 `distance` (a pair: its
 average linkage `d` and `sure`; a review answer: the nearest confirmed
 member's distance `d` and that head `pair`), `judge` (`judge`, the
@@ -3486,7 +3487,11 @@ the user asked to see it), `proposal` (the split around two heads of one
 photo), `check` (an unnamed group's own heads).  A split arranged in two
 columns before it was confirmed (a proposal, `proposal`; picked heads,
 `hand` at `heads`) carries `edited`: how many heads the user moved
-between the sides (0: confirmed as offered).
+between the sides (0: confirmed as offered).  Since the group editor,
+every split, move, take-out and removal made there is one `edit` entry,
+`at: "editor"`, `by: "proposal"` when it opened from *Propose a split…*
+(else `hand`), with `edited`: heads the user put elsewhere than the
+editor first laid them out.  Older `split` / `move` entries still read.
 
 **Why 16 heads a side is enough.**  A merge of two full sides gives
 16 × 16 = 256 labelled same pairs, and "not the same" as many different
@@ -3524,6 +3529,45 @@ being the same subject (`decisions::without_names`,
 `an_export_has_codes_for_names`).  The record on the computer keeps the
 names.  It reads nothing else and writes nowhere else.  The script
 driver: `prefs export-to <dir>`, `decisions print|pairs`.
+
+### The named groups in the export (`groups.json`, 2026-10-10)
+
+The user curates a few solid groups and hands the data back for a second
+round of matching work: the groups are the strongest ground truth, so
+*Export…* writes them beside the log.
+
+- **Taken on the engine's thread** (`Engine::export_record` →
+  `Worker::export_record`): every named subject of each kind from the
+  user's file, with its members (confirmed heads), its rejected heads
+  ("not this one"), and the counts the tab shows (photos, bursts, days,
+  from the snapshot); the viewer's `added` and `removed` boxes; the "not
+  the same" answers; and each kind's state as the log's `lib` has it
+  (head count, whitened, model, grouping choice, cut-offs).  The record's
+  thread writes it with the log (`model::group_export`); nothing else is
+  read or written.  Unnamed automatic groups are left out (not curated).
+- **Codes, no names.**  The log is coded first, then the groups with the
+  same `Codes`, so a subject has one code in both files; a subject named
+  but never in the log gets the next free code.  Tested through the
+  engine and on its own (`the_groups_go_out_beside_the_log_with_its_codes_and_no_names`).
+- **The format** (`groups.json`, `v` 1):
+
+  ```
+  {"v", "t", "app",
+   "kinds": [{"kind", "heads", "white", "model", "grouping", "cuts"}],
+   "groups": [{"code", "kind", "photos", "bursts", "days", "heads", "rejected"}],
+   "added": [{"kind", "head"}], "removed": [{"kind", "head"}],
+   "not_same": [{"kind", "a", "b"}]}
+  ```
+
+- **Pairs** (`group_export::pairs_with_groups`): within a group the same;
+  across named groups of one kind different (the square of the named
+  heads; `across: false` leaves it out); a rejected head different from
+  its group; `not_same` different; never across kinds.  The log's pairs
+  first, the groups' after, winning where both hold a pair (the groups
+  are the later state).  `decisions export-pairs <dir>` in a script
+  prints them for an export's folder.
+- An empty log with named groups still exports (the groups alone);
+  nothing at all is refused.
 
 ### Checked
 
@@ -3569,3 +3613,49 @@ driver: `prefs export-to <dir>`, `decisions print|pairs`.
   through its label edits (`remove`, `name`).
 - Moves between two groups side by side (`subjects_pair`) are `move`
   entries with `at: "side-by-side"`.
+
+## As built — the group editor (2026-10-10)
+
+The user: "a dedicated tool to split up a group … split off into
+multiple groups, easily drag fursuits around, or drag a fursuit into an
+existing named group … consolidate everything into an easy to use
+interface", and "I should be able to just remove a fursuit head from a
+group, sometimes in bulk".  Decided: changes apply on *Apply* only, one
+undo step; today's tools fold into the editor; people and fursuits alike.
+
+- **The page** (`app/subjects_editor.rs`, on `app/columns.rs`): columns
+  (*Stays*, groups opened beside it, any number of new groups), the panel
+  (named groups nearest first by average linkage, `Engine::near_groups`;
+  a name filter; the largest unnamed; *Take out of this group* / *Not
+  this person*; *Not fursuit heads* / *Not faces*), keys ← → N R Delete,
+  Ctrl+Z inside, Enter applies, Esc cancels.  Each column's order is
+  `Engine::heads_order` (any kind, `KindStep`).  Two heads of one photo
+  never share a column or a group: checked against the columns, what was
+  sent to a panel group, and that group's own heads (read when the panel
+  opens, or when a drag first goes over it; a key-sent move waits for
+  them).
+- **Apply is by head** (`model::subjects::GroupEdit`): targets are a
+  subject id, or an automatic group known by a few of its heads
+  (`EditTarget::ClusterOf`); each head's group is found when it applies
+  (`People::plan_edit`, then `apply_edit`: one checkpoint, all or
+  nothing).  A regroup while the editor is open (a scan, a grouping
+  choice, the space whitening) changes nothing the user arranged; an
+  automatic target that is gone becomes a group of its own; a named one
+  that is gone is refused with nothing changed, and the editor offers to
+  send its heads to a new group.  Tested raw and whitened through the
+  engine (`an_edit_applies_after_a_regroup_and_undoes_in_one_step`).
+- **Take out** (`EditDest::TakenOut`): the heads leave the group they are
+  in and are rejected for it (an automatic group becomes a subject to
+  keep the rejection), free for other groups, never back in this one
+  (`a_taken_out_head_never_rejoins_its_group_after_a_regroup`).  On
+  *Heads* / *Faces* the pick strip's *Take out of group* / *Not Person A*
+  does it at once, as the review's No (one undo step).
+- **What opens it:** E (a group's page, a picked or focused tile); *Propose
+  a split…* (the smaller side in a new column, the photo pair split);
+  side by side (C with two picked, a similar group, a pair in "Same
+  fursuit?"); *Split into a new group* (the picked in a new column);
+  *Move to…* (the picked picked).  Gone: the side-by-side page, the split
+  dialog, the drag tray on *Heads*, ⋯ ▸ *Side by side with…* and the
+  *Move to…* menu.
+- **The record:** one `edit` entry per *Apply* (above).
+

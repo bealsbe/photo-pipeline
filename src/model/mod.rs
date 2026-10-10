@@ -7,6 +7,7 @@ pub mod crop_math;
 pub mod decisions;
 pub mod duplicates;
 pub mod filter;
+pub mod group_export;
 pub mod hints;
 pub mod library_cache;
 pub mod library_index;

@@ -114,6 +114,8 @@
 //! prefs export-to /path       # as if Export…'s folder picker returned /path
 //! decisions print|pairs       # print the record of corrections (waits for
 //!                             # its writer), or the labelled pairs in it
+//! decisions export-pairs /dir # the labelled pairs of an export's folder
+//!                             # (its decisions.jsonl and groups.json)
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
@@ -198,19 +200,16 @@
 //! merges y|n|x 1|x 2|x|xcancel|next|prev|at 3|undo|done|showleftout|checkmore
 //! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
 //! merges dump                 # print the lists and the review
-//! pair open 0 3               # two groups (the tab's 1st and 4th) side by side
-//! pair pick 0 2|shiftpick 1 5 # pick a face of the left (0) / right (1) side
-//! pair move left|right|new    # the picked faces to that side / a new group
-//! pair drag 0 2 right|dragto 0 2 new   # drag a face (the picked with it)
-//! pair close|dump
+//! editor open 2|with 0 3      # the group editor on the tab's 3rd group / the 1st and 4th side by side
+//! editor pick 0 2|shiftpick 1 5   # pick a face of a column (0: Stays)
+//! editor send left|right|new|out|remove|group 0|col 2   # the picked faces there
+//! editor drag 0 2 col 1|drag 0 2 group 0|dragto 0 2 new  # drag a face (the picked with it)
+//! editor add|expand 0|collapse 1|name 1 Some name|mergename 1|search kib
+//! editor undo|apply|cancel|gonetonew|dump
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
-//! split propose|swap|go|cancel   # the proposed split (two heads in one photo)
-//! split arrange pick 0 2|shiftpick 1 5|move left|right|drag 0 2 right|dragto 0 2 right|pinned 0|undo
-//!                             # a split being arranged: pick / send / drag heads between the sides
-//! split drag 3 new|drag 3 group 0|dragto 3 group 0   # drag a head (the
-//!                             # picked ones with it) onto the tray
+//! split propose               # the proposed split (two heads in one photo): the editor
 //! split openflagged           # open a group flagged with two heads of one photo (unnamed first)
 //! split dump                  # print the order, the check, the picks
 //! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
@@ -224,9 +223,9 @@
 //! subjects words camera       # type beside the chip, then Enter
 //! subjects photos|faces       # Photos | Faces on a subject's page
 //! subjects facepick 3         # pick the 4th face
-//! subjects moveto new|2       # Move to… a new group / the 3rd group listed
-//! subjects notthis            # "Not Person A"
-//! subjects menu more|merge|move|close
+//! subjects edit               # Edit group (E): the group editor, the picked faces picked
+//! subjects notthis            # "Not Person A" / "Take out of group"
+//! subjects menu more|merge|close
 //! subjects mergeinto 0        # ⋯ ▸ Merge into… the 1st listed
 //! subjects hidethis|forget    # ⋯ ▸ Hide / Forget this person…
 //! subjects pclick 2|pactivate 2   # a photo tile on a subject's page
@@ -383,6 +382,20 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         "decisions" => {
             let r = app.search.link.decisions();
             match arg.as_str() {
+                a if a.starts_with("export-pairs ") => {
+                    // An export's folder: pairs from its log and its groups.
+                    let dir = std::path::Path::new(a.trim_start_matches("export-pairs ").trim());
+                    match crate::model::group_export::read_export(dir) {
+                        Ok((entries, groups)) => {
+                            let ps = crate::model::group_export::pairs_with_groups(&entries, groups.as_ref(), true);
+                            let same = ps.iter().filter(|p| p.same).count();
+                            let from_groups = ps.iter().filter(|p| p.id.starts_with("groups:")).count();
+                            let named = groups.as_ref().map_or(0, |g| g.groups.len());
+                            eprintln!("[decisions] export: {} entries, {named} named groups, {} labelled pairs ({from_groups} from the groups): {same} same, {} different", entries.len(), ps.len(), ps.len() - same);
+                        }
+                        Err(e) => eprintln!("[decisions] export unreadable: {e}"),
+                    }
+                }
                 "pairs" => {
                     let entries = r.entries();
                     let ps = crate::model::decisions::pairs(&entries);
@@ -476,73 +489,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                         }
                     }
                 }
-                // The split being arranged: `arrange pick 0 2`, `arrange
-                // shiftpick 1 5`, `arrange move left|right`, `arrange drag 0 2
-                // right` (`dragto` holds it), `arrange pinned 0` (drags the
-                // left side's pinned head right), `arrange undo`.
-                "arrange" => {
-                    use super::columns::{ColMsg as C, Target};
-                    let y = |c: C| x(X::Arrange(c));
-                    let (act, rest) = rest.split_once(' ').unwrap_or((rest, ""));
-                    let n: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
-                    let side = n.first().copied().unwrap_or(0).min(1);
-                    let target = if rest.contains("left") { Target::Side(0) } else { Target::Side(1) };
-                    let face = |app: &App, n: usize| app.subjects.person.as_ref().and_then(|p| p.proposal.as_ref()).and_then(|a| a.ordered(side).get(n).copied());
-                    match act {
-                        "pick" | "shiftpick" => {
-                            let Some(f) = face(app, n.get(1).copied().unwrap_or(0)) else { return Task::none() };
-                            if let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) {
-                                let order = a.ordered(side);
-                                a.cols.pick(side, f, act == "shiftpick", &order);
-                            }
-                            Task::none()
-                        }
-                        "move" => app.update(y(C::MoveTo(target))),
-                        "drag" | "dragto" | "pinned" => {
-                            let f = if act == "pinned" {
-                                app.subjects.person.as_ref().and_then(|p| p.proposal.as_ref()).and_then(|a| a.sides[side].iter().find(|f| a.cols.pinned.contains(f)).copied())
-                            } else {
-                                face(app, n.get(1).copied().unwrap_or(0))
-                            };
-                            let Some(f) = f else { return Task::none() };
-                            let to = if act == "pinned" { Target::Side(1 - side) } else { target };
-                            let mut t = vec![app.update(y(C::DragStart(side, f))), app.update(y(C::DragEnter(to)))];
-                            if act != "dragto" {
-                                t.push(app.update(y(C::DragDrop)));
-                            }
-                            Task::batch(t)
-                        }
-                        "undo" => super::subjects::undo(app),
-                        other => {
-                            eprintln!("[script] unknown arrange action {other}");
-                            Task::none()
-                        }
-                    }
-                }
                 "propose" => app.update(x(X::Propose)),
-                "swap" => app.update(x(X::ProposeSwap)),
-                "go" => app.update(x(X::ProposeGo)),
-                "cancel" => app.update(x(X::ProposeCancel)),
-                // `drag 3 new` / `drag 3 group 0` drags the 4th head shown onto
-                // A new group / the 1st group in the tray and lets go;
-                // `dragto` holds it there.
-                "drag" | "dragto" => {
-                    let Some(f) = head(app, nums.first().copied().unwrap_or(0)) else { return Task::none() };
-                    let mut t = vec![app.update(x(X::DragStart(f)))];
-                    let target = if rest.contains("new") {
-                        Some(None)
-                    } else {
-                        let k = nums.get(1).copied().unwrap_or(0);
-                        app.subjects.person.as_ref().and_then(|p| super::subjects_split::tray_ids(app, p).get(k).cloned()).map(Some)
-                    };
-                    if let Some(target) = target {
-                        t.push(app.update(x(X::DragEnter(target))));
-                    }
-                    if what == "drag" {
-                        t.push(app.update(x(X::DragDrop)));
-                    }
-                    Task::batch(t)
-                }
                 "dump" => {
                     eprintln!("[split] {}", app.subjects.person.as_ref().map(super::subjects_split::debug_state).unwrap_or_else(|| "no page".into()));
                     Task::none()
@@ -553,50 +500,101 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
             }
         }
-        "pair" => {
-            use super::columns::{ColMsg as Pc, Target};
-            use super::subjects_pair::Msg as Pm;
-            let x = |m: Pm| Message::Subjects(super::subjects::Msg::Pair(m));
+        "editor" => {
+            use super::columns::{ColMsg as C, Target};
+            use super::subjects_editor::{Msg as E, Preset};
+            let x = |m: E| Message::Subjects(super::subjects::Msg::Editor(m));
             let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
             let nums: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
-            let target = |rest: &str| if rest.contains("new") { Target::New } else if rest.contains("left") { Target::Side(0) } else { Target::Side(1) };
-            let face = |app: &App, side: usize, n: usize| app.subjects.pair.as_ref().and_then(|p| p.ordered(side).get(n).map(|f| f.face));
-            match what {
-                // `open 0 3`: the 1st and 4th groups in the tab's order.
-                "open" => {
-                    let st = &app.subjects;
-                    let order = super::subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open);
-                    match (order.get(nums.first().copied().unwrap_or(0)), order.get(nums.get(1).copied().unwrap_or(1))) {
-                        (Some(a), Some(b)) => app.update(x(Pm::Open(a.clone(), b.clone()))),
-                        _ => Task::none(),
-                    }
+            let tab = |app: &App, n: usize| {
+                let st = &app.subjects;
+                super::subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open).get(n).cloned()
+            };
+            let face = |app: &App, col: usize, n: usize| app.subjects.editor.as_ref().and_then(|e| e.ordered(col).get(n).copied());
+            // `col 2`, `new`, `group 0` (the panel's 1st), `out`, `remove`.
+            let target = |app: &App, words: &[&str]| -> Option<Target> {
+                let k = words.get(1).and_then(|w| w.parse::<usize>().ok()).unwrap_or(0);
+                match words.first().copied()? {
+                    "col" => Some(Target::Col(k)),
+                    "new" => Some(Target::New),
+                    "out" => Some(Target::TakenOut),
+                    "remove" => Some(Target::Removed),
+                    "group" => app.subjects.editor.as_ref().and_then(|e| super::subjects_editor::panel_ids(app, e).get(k).cloned()).map(Target::Group),
+                    _ => None,
                 }
-                // `pick 0 2` / `shiftpick 0 5`: the 3rd / 6th face of the left side.
+            };
+            match what {
+                // `open 2`: the tab's 3rd group; `with 0 3`: the 1st and 4th.
+                "open" => match tab(app, nums.first().copied().unwrap_or(0)) {
+                    Some(g) => app.update(x(E::Open(g, Preset::Plain))),
+                    None => Task::none(),
+                },
+                "with" => match (tab(app, nums.first().copied().unwrap_or(0)), tab(app, nums.get(1).copied().unwrap_or(1))) {
+                    (Some(a), Some(b)) => app.update(x(E::Open(a, Preset::With(b)))),
+                    _ => Task::none(),
+                },
+                // `pick 0 2` / `shiftpick 1 5`: the 3rd / 6th face of a column.
                 "pick" | "shiftpick" => {
-                    let side = nums.first().copied().unwrap_or(0).min(1);
-                    if let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) {
-                        super::subjects_pair::pick(app, side, f, what == "shiftpick");
+                    let col = nums.first().copied().unwrap_or(0);
+                    if let Some(f) = face(app, col, nums.get(1).copied().unwrap_or(0)) {
+                        if let Some(e) = app.subjects.editor.as_mut() {
+                            let order = e.ordered(col);
+                            e.ui.pick(col, f, what == "shiftpick", &order);
+                        }
                     }
                     Task::none()
                 }
-                "move" => app.update(x(Pm::Cols(Pc::MoveTo(target(rest))))),
-                // `drag 0 2 right`: drag the left side's 3rd face onto the right.
+                // `send left|right|new|out|remove|group 0|col 2`.
+                "send" => match rest.trim() {
+                    "left" => app.update(x(E::Cols(C::Step(false)))),
+                    "right" => app.update(x(E::Cols(C::Step(true)))),
+                    r => match target(app, &r.split_whitespace().collect::<Vec<_>>()) {
+                        Some(t) => app.update(x(E::Cols(C::MoveTo(t)))),
+                        None => Task::none(),
+                    },
+                },
+                // `drag 0 2 col 1` drags the 3rd face of column 0 (the picked
+                // with it) onto column 1 and lets go; `dragto` holds it.
                 "drag" | "dragto" => {
-                    let side = nums.first().copied().unwrap_or(0).min(1);
-                    let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) else { return Task::none() };
-                    let mut t = vec![app.update(x(Pm::Cols(Pc::DragStart(side, f)))), app.update(x(Pm::Cols(Pc::DragEnter(target(rest)))))];
+                    let words: Vec<&str> = rest.split_whitespace().collect();
+                    let (col, n) = (nums.first().copied().unwrap_or(0), nums.get(1).copied().unwrap_or(0));
+                    let (Some(f), Some(t)) = (face(app, col, n), target(app, words.get(2..).unwrap_or(&[]))) else { return Task::none() };
+                    let mut tasks = vec![app.update(x(E::Cols(C::DragStart(col, f)))), app.update(x(E::Cols(C::DragEnter(t))))];
                     if what == "drag" {
-                        t.push(app.update(x(Pm::Cols(Pc::DragDrop))));
+                        tasks.push(app.update(x(E::Cols(C::DragDrop))));
                     }
-                    Task::batch(t)
+                    Task::batch(tasks)
                 }
-                "close" => app.update(x(Pm::Close)),
+                "add" => app.update(x(E::AddColumn)),
+                "expand" => match app.subjects.editor.as_ref().and_then(|e| super::subjects_editor::panel_ids(app, e).get(nums.first().copied().unwrap_or(0)).cloned()) {
+                    Some(g) => app.update(x(E::Expand(g))),
+                    None => Task::none(),
+                },
+                "collapse" => app.update(x(E::Collapse(nums.first().copied().unwrap_or(1)))),
+                // `name 1 Some name`.
+                "name" => {
+                    let (i, name) = rest.split_once(' ').unwrap_or((rest, ""));
+                    app.update(x(E::Name(i.parse().unwrap_or(0), name.to_string())))
+                }
+                // Accept the taken name's offer in column `i`.
+                "mergename" => {
+                    let i = nums.first().copied().unwrap_or(0);
+                    match app.subjects.editor.as_ref().and_then(|e| super::subjects_editor::name_offer(app, e, i)) {
+                        Some(g) => app.update(x(E::MergeName(i, g))),
+                        None => Task::none(),
+                    }
+                }
+                "search" => app.update(x(E::Search(rest.to_string()))),
+                "gonetonew" => app.update(x(E::GoneToNew)),
+                "undo" => super::subjects::undo(app),
+                "apply" => app.update(x(E::Apply)),
+                "cancel" => app.update(x(E::Cancel)),
                 "dump" => {
-                    eprintln!("[pair] {}", super::subjects_pair::debug_state(app));
+                    eprintln!("[editor] {}", super::subjects_editor::debug_state(app));
                     Task::none()
                 }
                 other => {
-                    eprintln!("[script] unknown pair action {other}");
+                    eprintln!("[script] unknown editor action {other}");
                     Task::none()
                 }
             }
@@ -1660,17 +1658,12 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
                 None => Task::none(),
             }
         }
-        "moveto" if rest == "new" => app.update(p(P::MoveTo(None))),
-        "moveto" => match others(app).get(n).cloned() {
-            Some(id) => app.update(p(P::MoveTo(Some(id)))),
-            None => Task::none(),
-        },
+        "edit" => app.update(p(P::Edit)),
         "notthis" => app.update(p(P::NotThis)),
         "menu" => {
             let m = match rest {
                 "more" => Some(Menu::More),
                 "merge" => Some(Menu::MergeInto),
-                "move" => Some(Menu::MoveTo),
                 _ => None,
             };
             app.update(p(P::Menu(m)))
