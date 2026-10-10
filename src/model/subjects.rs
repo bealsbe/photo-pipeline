@@ -266,6 +266,10 @@ pub struct Group {
     pub hidden: bool,
     /// Photos (shots) it appears in.
     pub photos: usize,
+    /// The bursts those photos fall in, a photo on its own counting as
+    /// one ([`count_bursts`]): what the tabs sort and fold groups by, so
+    /// a long burst does not make a group look established.
+    pub bursts: usize,
     /// Days it appears on.
     pub days: usize,
     /// Its clearest face: what its tile shows.
@@ -1285,6 +1289,16 @@ pub fn per_burst<T>(items: Vec<(T, Option<u64>)>) -> Vec<Vec<T>> {
     out
 }
 
+/// How many separate moments `faces` come from: photos (a photo with two
+/// heads is one), with the frames of one burst gathered into one and a
+/// photo in no burst counting alone.  The same burst notion as
+/// [`per_burst`], so a group's count agrees with its reviews.
+pub fn count_bursts(faces: &[Face]) -> usize {
+    let mut seen: HashSet<Key> = HashSet::new();
+    let photos: Vec<((), Option<u64>)> = faces.iter().filter(|f| seen.insert(f.face.key)).map(|f| ((), f.burst)).collect();
+    per_burst(photos).len()
+}
+
 /// Whether the user said two groups are not the same: some answer in
 /// `index` ([`SubjectsFile::not_same_index`]) names a head of `a` on one
 /// side and a head of `b` on the other.  Groups are known by their
@@ -1314,6 +1328,30 @@ mod tests {
 
     fn face(n: u8, x: f32) -> FaceRef {
         FaceRef::new(Key([n; 16]), [x, 0.2, 0.1, 0.15])
+    }
+
+    fn shot(n: u8, x: f32, burst: Option<u64>) -> Face {
+        let day = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
+        Face { face: face(n, x), jpg: None, raw: None, day, capture: day.and_hms_opt(12, 0, 0).unwrap(), burst, clarity: 0.5, confirmed: false }
+    }
+
+    /// A group's size in moments: a burst is one, a photo on its own is
+    /// one, and a photo with two heads is still one photo.
+    #[test]
+    fn a_burst_counts_once_and_singles_count_each() {
+        assert_eq!(count_bursts(&[]), 0);
+        // Twenty frames of one burst.
+        let burst: Vec<Face> = (0..20).map(|n| shot(n, 0.3, Some(7))).collect();
+        assert_eq!(count_bursts(&burst), 1);
+        // Five photos on their own.
+        let singles: Vec<Face> = (0..5).map(|n| shot(n, 0.3, None)).collect();
+        assert_eq!(count_bursts(&singles), 5);
+        // Two bursts and three singles.
+        let mixed: Vec<Face> = [Some(1), Some(1), Some(2), Some(2), Some(2), None, None, None].iter().enumerate().map(|(n, b)| shot(n as u8, 0.3, *b)).collect();
+        assert_eq!(count_bursts(&mixed), 5);
+        // Two heads in one photo are one photo, and so one moment.
+        assert_eq!(count_bursts(&[shot(1, 0.2, None), shot(1, 0.7, None)]), 1);
+        assert_eq!(count_bursts(&[shot(1, 0.2, Some(3)), shot(1, 0.7, Some(3)), shot(2, 0.2, Some(3))]), 1);
     }
 
     #[test]

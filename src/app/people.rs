@@ -371,7 +371,7 @@ impl FakePeople {
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
             let suggestions = if g.name.is_some() { self.suggestions_of(g, usize::MAX).len() } else { 0 };
-            groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), days: days.len(), cover, suggestions });
+            groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
         }
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
         let faces_found = self.groups.iter().map(|g| g.members.len()).sum::<usize>()

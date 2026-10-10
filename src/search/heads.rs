@@ -1534,7 +1534,7 @@ impl Fursuits {
             let Some(cover) = heads.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)) else { continue };
             let photos = heads.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
             let days = heads.iter().map(|f| f.day).collect::<HashSet<_>>().len();
-            s.groups.push(subjects::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: None, hidden: false, photos, days, cover, suggestions: 0 });
+            s.groups.push(subjects::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: None, hidden: false, photos, bursts: subjects::count_bursts(&heads), days, cover, suggestions: 0 });
         }
         s.groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
     }

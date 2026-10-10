@@ -1182,7 +1182,7 @@ mod tests {
     fn g(id: u64, kind: Kind, name: Option<&str>, photos: usize) -> Group {
         let day = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
         let cover = Face { face: FaceRef { key: Key([id as u8; 16]), bbox: [0.0; 4] }, jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
-        Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden: false, photos, days: 1, cover, suggestions: 0 }
+        Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden: false, photos, bursts: photos, days: 1, cover, suggestions: 0 }
     }
 
     fn all() -> Subjects {

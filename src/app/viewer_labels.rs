@@ -791,7 +791,7 @@ mod tests {
         let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
         let cover = Face { face: FaceRef::new(ContentKey([9; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
         let suit = SubjectId("suit".into());
-        let all = Subjects { groups: vec![Group { id: GroupId::Subject(suit.clone()), kind: Kind::Fursuit, name: Some("Suit".into()), hidden: false, photos: 3, days: 1, cover, suggestions: 0 }], ..Subjects::default() };
+        let all = Subjects { groups: vec![Group { id: GroupId::Subject(suit.clone()), kind: Kind::Fursuit, name: Some("Suit".into()), hidden: false, photos: 3, bursts: 3, days: 1, cover, suggestions: 0 }], ..Subjects::default() };
         let key = ContentKey([1; 16]);
         let base = vec![bx(1, Kind::Person, None), bx(3, Kind::Fursuit, None)];
         let mut f = FakeLabels::default();
@@ -818,7 +818,7 @@ mod tests {
         use crate::model::subjects::{Face, Group};
         let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
         let cover = Face { face: FaceRef::new(ContentKey([9; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
-        let g = |id: &str, kind: Kind, name: &str, photos: usize| Group { id: GroupId::Subject(SubjectId(id.into())), kind, name: Some(name.into()), hidden: false, photos, days: 1, cover: cover.clone(), suggestions: 0 };
+        let g = |id: &str, kind: Kind, name: &str, photos: usize| Group { id: GroupId::Subject(SubjectId(id.into())), kind, name: Some(name.into()), hidden: false, photos, bursts: photos, days: 1, cover: cover.clone(), suggestions: 0 };
         let all = Subjects { groups: vec![g("a", Kind::Person, "Sam", 3), g("b", Kind::Person, "Alex", 9), g("c", Kind::Fursuit, "Sammy", 40)], ..Subjects::default() };
         let names = |typed: &str, own: Option<&SubjectId>| offered(&all, Kind::Person, typed, own).into_iter().map(|x| x.1).collect::<Vec<_>>();
         assert_eq!(names("", None), ["Alex", "Sam"], "most photos first, people only");
