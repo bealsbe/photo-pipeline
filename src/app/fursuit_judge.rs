@@ -161,6 +161,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Stop => {
             app.search.link.stop_judging();
+            super::subjects_merge::stopped(app);
             if let Some(r) = app.subjects.judge.as_mut() {
                 r.stopped = true;
             }
@@ -211,10 +212,11 @@ fn card_holder(app: &App) -> &'static str {
 }
 
 /// The judge's state in words for a line: (glyph tone, title, detail).
-fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, String)> {
+pub(super) fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, String)> {
     let j = &app.search.status.judge;
     let total = run.map_or(0, |r| r.total);
-    let calls = util::plural(total as u64, "close call");
+    let comparing = matches!(j.state, JudgeState::Comparing { .. }) || run.is_some_and(|r| r.group.is_none());
+    let calls = if comparing { util::plural(total as u64, "possible merge") } else { util::plural(total as u64, "close call") };
     Some(match &j.state {
         JudgeState::WaitingForCard => (t::PHOTO_INK3, format!("{} wait for the graphics card", super::search_setup::capital(&calls)), format!("They're checked as soon as it's free: {}.", card_holder(app))),
         JudgeState::Loading => {
@@ -230,6 +232,16 @@ fn state_words(app: &App, run: Option<&Run>) -> Option<(iced::Color, String, Str
                 util::thousands(*done as u64),
                 util::thousands(*total as u64),
                 crate::search::estimate::describe_seconds(total.saturating_sub(*done) as f64 * super::fursuits::judge_call_seconds(j.choice))
+            ),
+        ),
+        JudgeState::Comparing { done, total } => (
+            t::PHOTO_INK2,
+            format!("Comparing {}…", util::plural(*total as u64, "possible merge")),
+            format!(
+                "{} of {}, {} left. Pairs the judge thinks are one fursuit join the end of the list.",
+                util::thousands(*done as u64),
+                util::thousands(*total as u64),
+                crate::search::estimate::describe_seconds(total.saturating_sub(*done) as f64 * super::fursuits::judge_call_seconds(j.choice) * crate::search::merging::QUESTIONS as f64)
             ),
         ),
         JudgeState::Failed(f) => {
@@ -280,7 +292,7 @@ pub fn choice_words(c: crate::ml::judge::JudgeChoice) -> Option<String> {
 
 // ── the review's line ───────────────────────────────────────────────────────
 
-fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
+pub(super) fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
     progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
         .length(w)
         .girth(3)
@@ -288,7 +300,7 @@ fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
         .into()
 }
 
-fn stop_btn<'a>(ink: iced::Color) -> Element<'a, Message> {
+pub(super) fn stop_btn<'a>(ink: iced::Color) -> Element<'a, Message> {
     tip(
         button(container(icons::view(Glyph::Close, 11.0, ink)).center(Length::Fill)).width(20).height(20).padding(0).style(style::ghost().radius(4.0).style()).on_press(m(Msg::Stop)),
         "Stop checking close calls. Those checked are kept.",
@@ -296,7 +308,7 @@ fn stop_btn<'a>(ink: iced::Color) -> Element<'a, Message> {
     )
 }
 
-fn link_btn<'a>(label: impl Into<String>, msg: Message) -> Element<'a, Message> {
+pub(super) fn link_btn<'a>(label: impl Into<String>, msg: Message) -> Element<'a, Message> {
     button(text(label.into()).size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([1.0, 0.0])).style(style::link().style()).on_press(msg).into()
 }
 
@@ -311,7 +323,7 @@ pub fn review_line<'a>(app: &'a App, group: &GroupId, seq: u64, left_out_shown: 
     let j = &app.search.status.judge;
     let ours = match &j.state {
         JudgeState::Judging { group: g, .. } => g == group,
-        JudgeState::Idle => false,
+        JudgeState::Idle | JudgeState::Comparing { .. } => false,
         // Waiting, loading and failures are about the run in hand.
         JudgeState::Failed(_) | JudgeState::Broken(_) => live_shown(app, group, run),
         _ => run.is_some_and(|r| !r.finished()),
@@ -398,6 +410,7 @@ fn live_shown(app: &App, group: &GroupId, run: Option<&Run>) -> bool {
 /// The search status changed: a judge that failed drops the run in hand
 /// (the engine does), so it is said as stopped, not as finished.
 pub fn on_status(app: &mut App, _old: &crate::search::Status) -> Task<Message> {
+    super::subjects_merge::on_status(app);
     if matches!(app.search.status.judge.state, JudgeState::Failed(_) | JudgeState::Broken(_)) {
         if let Some(r) = app.subjects.judge.as_mut().filter(|r| !r.finished()) {
             r.stopped = true;
@@ -463,9 +476,22 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         .spacing(t::S2)
         .align_y(Alignment::Center)
         .into(),
+        JudgeState::Comparing { done, total } => row![
+            icons::view(Glyph::CloseCall, 13.0, t::INK3),
+            words("Comparing possible merges".into(), t::INK3),
+            text(format!("{} of {}", util::thousands(*done as u64), util::thousands(*total as u64))).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
+            status_bar(if *total == 0 { 0.0 } else { *done as f32 / *total as f32 }),
+            stop_btn(t::INK2),
+        ]
+        .spacing(t::S2)
+        .align_y(Alignment::Center)
+        .into(),
         JudgeState::WaitingForCard | JudgeState::Loading => {
-            run?;
-            let what = if j.state == JudgeState::Loading { format!("Getting {} ready", j.choice.label()) } else { "Close calls wait for the graphics card".to_string() };
+            if run.is_none() && !super::subjects_merge::comparing(app) {
+                return None;
+            }
+            let waiting = if run.is_none() { "Possible merges wait for the graphics card" } else { "Close calls wait for the graphics card" };
+            let what = if j.state == JudgeState::Loading { format!("Getting {} ready", j.choice.label()) } else { waiting.to_string() };
             row![icons::view(Glyph::CloseCall, 13.0, t::INK3), words(what.into(), t::INK3), stop_btn(t::INK2)].spacing(t::S2).align_y(Alignment::Center).into()
         }
         JudgeState::Failed(f) => tip(

@@ -34,8 +34,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::search::index::Key;
 
-/// The file's format version.
-pub const FILE_VERSION: u32 = 1;
+/// The file's format version as written when it holds one of the
+/// optional lists added after the first ([`SubjectsFile::not_same`]); a
+/// file without any is written as [`FILE_VERSION_PLAIN`], exactly as
+/// before, so an older app still reads it.
+pub const FILE_VERSION: u32 = 2;
+/// The first format: subjects only.
+pub const FILE_VERSION_PLAIN: u32 = 1;
+/// Heads kept per side of a "not the same" answer: the clearest of each
+/// group, enough to recognise it after a regroup.
+pub const NOT_SAME_HEADS: usize = 24;
 /// Undo steps the engine keeps for the subjects file.
 pub const UNDO_DEPTH: usize = 50;
 
@@ -327,17 +335,32 @@ pub struct Subject {
     pub rejected: Vec<FaceRef>,
 }
 
+/// "Not the same": the user's answer that two groups of one kind show
+/// different subjects (a merge suggestion turned down).  Kept by the
+/// groups' heads, never their numbers, so it holds through a regroup: a
+/// pair of groups is told apart while one holds a head of `a` and the
+/// other a head of `b`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NotSame {
+    pub kind: Kind,
+    pub a: Vec<FaceRef>,
+    pub b: Vec<FaceRef>,
+}
+
 /// The user's subjects file: everything that is theirs and not
 /// recomputable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubjectsFile {
     pub version: u32,
     pub subjects: Vec<Subject>,
+    /// Groups the user said are not the same (v2; absent in a v1 file).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub not_same: Vec<NotSame>,
 }
 
 impl Default for SubjectsFile {
     fn default() -> Self {
-        SubjectsFile { version: FILE_VERSION, subjects: Vec::new() }
+        SubjectsFile { version: FILE_VERSION_PLAIN, subjects: Vec::new(), not_same: Vec::new() }
     }
 }
 
@@ -370,10 +393,49 @@ impl SubjectsFile {
             std::fs::create_dir_all(dir)?;
             private_dir(dir);
         }
-        let text = serde_json::to_string_pretty(self).map_err(io::Error::other)?;
+        let mut out = self.clone();
+        out.version = self.written_version();
+        let text = serde_json::to_string_pretty(&out).map_err(io::Error::other)?;
         crate::ops::fsutil::atomic_write(path, text.as_bytes(), true)?;
         private_file(path);
         Ok(())
+    }
+
+    /// The version the file is written as: 2 only while it holds an
+    /// optional list, else 1 (a v1 file saves back unchanged).
+    pub fn written_version(&self) -> u32 {
+        if self.not_same.is_empty() { FILE_VERSION_PLAIN } else { FILE_VERSION }
+    }
+
+    /// Nothing of the user's is kept (the file can go).
+    pub fn is_empty(&self) -> bool {
+        self.subjects.is_empty() && self.not_same.is_empty()
+    }
+
+    /// "Not the same": two groups of `kind`, by their heads (clearest
+    /// first; the first [`NOT_SAME_HEADS`] of each are kept).
+    pub fn add_not_same(&mut self, kind: Kind, a: Vec<FaceRef>, b: Vec<FaceRef>) -> Result<(), Refused> {
+        let (a, b): (Vec<FaceRef>, Vec<FaceRef>) = (dedup(a).into_iter().take(NOT_SAME_HEADS).collect(), dedup(b).into_iter().take(NOT_SAME_HEADS).collect());
+        if a.is_empty() || b.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        self.not_same.push(NotSame { kind, a, b });
+        Ok(())
+    }
+
+    /// Where each head of `kind` stands in the "not the same" answers:
+    /// (answer, side 0 or 1) for every answer naming it.
+    pub fn not_same_index(&self, kind: Kind) -> HashMap<FaceRef, Vec<(usize, u8)>> {
+        let mut out: HashMap<FaceRef, Vec<(usize, u8)>> = HashMap::new();
+        for (i, ns) in self.not_same.iter().enumerate().filter(|(_, n)| n.kind == kind) {
+            for f in &ns.a {
+                out.entry(*f).or_default().push((i, 0));
+            }
+            for f in &ns.b {
+                out.entry(*f).or_default().push((i, 1));
+            }
+        }
+        out
     }
 
     pub fn get(&self, id: &SubjectId) -> Option<&Subject> {
@@ -936,6 +998,19 @@ pub fn per_burst<T>(items: Vec<(T, Option<u64>)>) -> Vec<Vec<T>> {
     out
 }
 
+/// Whether the user said two groups are not the same: some answer in
+/// `index` ([`SubjectsFile::not_same_index`]) names a head of `a` on one
+/// side and a head of `b` on the other.  Groups are known by their
+/// heads, so this holds through a regroup.
+pub fn told_apart(index: &HashMap<FaceRef, Vec<(usize, u8)>>, a: &[FaceRef], b: &[FaceRef]) -> bool {
+    if index.is_empty() {
+        return false;
+    }
+    let sides = |m: &[FaceRef]| -> HashSet<(usize, u8)> { m.iter().filter_map(|f| index.get(f)).flatten().copied().collect() };
+    let (sa, sb) = (sides(a), sides(b));
+    sa.iter().any(|&(i, side)| sb.contains(&(i, 1 - side)))
+}
+
 /// A stable id for a cluster: its clearest member's reference, hashed.
 pub fn cluster_id(cover: &FaceRef) -> u64 {
     let mut bytes = Vec::with_capacity(24);
@@ -991,7 +1066,7 @@ mod tests {
         assert_eq!(back, f);
         assert_eq!(back.subjects[0].name.as_deref(), Some("Some One"));
         assert_eq!(back.subjects[0].members, [face(1, 0.1), face(2, 0.1)], "deduplicated, in order");
-        assert_eq!(back.version, FILE_VERSION);
+        assert_eq!(back.version, FILE_VERSION_PLAIN, "no optional list: written as the first version");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1003,6 +1078,87 @@ mod tests {
         assert!(SubjectsFile::load(&path).subjects.is_empty());
         assert!(!path.exists() && d.join("data").join("subjects.json.unreadable").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A file from before "not the same" (v1) loads, and saves back
+    /// exactly as it was; one with answers is written as v2 and reads back
+    /// the same.  The answers are additive: nothing else changes shape.
+    #[test]
+    fn an_old_file_loads_and_saves_back_unchanged() {
+        let d = std::env::temp_dir().join(format!("pp-subjects-v1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("subjects.json");
+        std::fs::create_dir_all(&d).unwrap();
+        let v1 = concat!(
+            "{\n",
+            "  \"version\": 1,\n",
+            "  \"subjects\": [\n",
+            "    {\n",
+            "      \"id\": \"5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e\",\n",
+            "      \"name\": \"Suit\",\n",
+            "      \"kind\": \"fursuit\",\n",
+            "      \"hidden\": false,\n",
+            "      \"cover\": null,\n",
+            "      \"members\": [\n",
+            "        {\n",
+            "          \"key\": \"01010101010101010101010101010101\",\n",
+            "          \"box\": [\n",
+            "            0.1,\n",
+            "            0.2,\n",
+            "            0.1,\n",
+            "            0.15\n",
+            "          ]\n",
+            "        }\n",
+            "      ],\n",
+            "      \"rejected\": []\n",
+            "    }\n",
+            "  ]\n",
+            "}"
+        );
+        std::fs::write(&path, v1).unwrap();
+        let f = SubjectsFile::load(&path);
+        assert_eq!((f.version, f.subjects.len(), f.not_same.len()), (1, 1, 0));
+        f.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), v1, "saved back unchanged");
+        // With an answer: v2, and back the same.
+        let mut f = f;
+        f.add_not_same(Kind::Fursuit, vec![face(1, 0.1), face(2, 0.1)], vec![face(3, 0.1)]).unwrap();
+        f.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2") && text.contains("\"not_same\""), "{text}");
+        let back = SubjectsFile::load(&path);
+        assert_eq!((back.version, back.not_same.clone()), (2, f.not_same.clone()));
+        assert_eq!(back.subjects, f.subjects);
+        // Taken back (undo, forget): v1 again.
+        let mut back = back;
+        back.not_same.clear();
+        back.save(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), v1);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// "Not the same" is kept by heads, so it holds after a regroup gives
+    /// the groups new numbers and members: two groups are told apart while
+    /// one holds a head of one side and the other a head of the other.
+    /// Answers about another kind never count.
+    #[test]
+    fn not_the_same_holds_through_a_regroup_and_by_kind() {
+        let mut f = SubjectsFile::default();
+        let many: Vec<FaceRef> = (0..40).map(|i| face(100 + i, 0.1)).collect();
+        f.add_not_same(Kind::Fursuit, many.clone(), vec![face(3, 0.1), face(4, 0.1)]).unwrap();
+        assert_eq!(f.not_same[0].a.len(), NOT_SAME_HEADS, "the clearest heads are kept, not every one");
+        assert_eq!(f.add_not_same(Kind::Fursuit, vec![], vec![face(5, 0.1)]), Err(Refused::Nothing));
+        f.add_not_same(Kind::Person, vec![face(7, 0.1)], vec![face(8, 0.1)]).unwrap();
+        let ix = f.not_same_index(Kind::Fursuit);
+        // After a regroup: other members around the same heads.
+        let x = vec![face(9, 0.1), many[3]];
+        let y = vec![face(4, 0.1), face(11, 0.1)];
+        assert!(told_apart(&ix, &x, &y) && told_apart(&ix, &y, &x), "either way round");
+        assert!(!told_apart(&ix, &x, &[face(12, 0.1)]), "a group the answer doesn't name");
+        assert!(!told_apart(&ix, &x, &[many[5]]), "two groups of the same side are not told apart by it");
+        assert!(!told_apart(&f.not_same_index(Kind::Fursuit), &[face(7, 0.1)], &[face(8, 0.1)]), "a person's answer is no fursuit's");
+        assert!(told_apart(&f.not_same_index(Kind::Person), &[face(7, 0.1)], &[face(8, 0.1)]));
+        assert!(!f.is_empty() && f.written_version() == FILE_VERSION);
     }
 
     #[test]

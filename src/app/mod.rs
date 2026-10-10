@@ -28,6 +28,7 @@ pub mod preferences_storage;
 pub mod style;
 pub mod subjects;
 pub mod subjects_fursuits;
+pub mod subjects_merge;
 pub mod subjects_person;
 pub mod subjects_review;
 pub mod testing;
@@ -2213,6 +2214,8 @@ impl App {
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
+                BgEvent::MergeSuggestions { seq, focus, list, judging } => tasks.push(subjects_merge::on_merge_suggestions(self, seq, focus, list, judging)),
+                BgEvent::MergeJudged { seq, offered, left_out, done, total, beyond } => tasks.push(subjects_merge::on_merge_judged(self, seq, offered, left_out, done, total, beyond)),
                 BgEvent::ModelDownload { model, done, total, state } => tasks.push(search::on_download(self, model, done, total, state)),
             }
         }

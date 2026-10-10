@@ -69,6 +69,8 @@ pub enum Page {
     Person,
     /// "Same person?"
     Review,
+    /// "Same fursuit?" for pairs of groups: merge suggestions.
+    Merges,
 }
 
 /// Merging picked groups: which name to keep.
@@ -127,6 +129,10 @@ pub struct Subjects {
     pub review: Option<Review>,
     /// The close-call judge's latest run (fursuits).
     pub judge: Option<super::fursuit_judge::Run>,
+    /// Pairs of fursuit groups that may be one suit (stage 2): the tab's
+    /// and a group page's lists, and their review.
+    pub lists: super::subjects_merge::Lists,
+    pub merges: Option<super::subjects_merge::MergeReview>,
     pub crops: Crops,
     pub(super) seq: u64,
 }
@@ -147,13 +153,17 @@ impl Subjects {
             person: None,
             review: None,
             judge: None,
+            lists: Default::default(),
+            merges: None,
             crops: Crops::new(CROP_CACHE_BYTES),
             seq: 0,
         }
     }
 
     pub fn page(&self) -> Page {
-        if self.review.is_some() {
+        if self.merges.is_some() {
+            Page::Merges
+        } else if self.review.is_some() {
             Page::Review
         } else if self.person.is_some() {
             Page::Person
@@ -369,7 +379,7 @@ pub fn px(app: &App, logical: f32) -> u32 {
 /// The crops the page shows now.
 fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
-    match s.page() {
+    let v = match s.page() {
         Page::Overview => {
             let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
             let (big, small) = (px(app, tile::TILE_CROP), px(app, tile::SMALL_CROP));
@@ -380,15 +390,26 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             if s.hidden_open {
                 v.extend(a.hidden.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
             }
-            if let Some(mg) = &s.merge {
-                let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
-                v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
+            if s.tab == Kind::Fursuit {
+                v.extend(super::subjects_merge::wanted_tab(app));
             }
             v
         }
-        Page::Person => person::wanted(app),
+        Page::Person => {
+            let mut v = person::wanted(app);
+            v.extend(super::subjects_merge::wanted_similar(app));
+            v
+        }
         Page::Review => review::wanted(app),
+        Page::Merges => super::subjects_merge::wanted(app),
+    };
+    // The merge dialog, over any page.
+    let mut v = v;
+    if let Some(mg) = &s.merge {
+        let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
+        v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
     }
+    v
 }
 
 /// Fetch what the page shows now and isn't decoded.
@@ -433,6 +454,7 @@ pub enum Msg {
     ForgetGo,
     Person(person::Msg),
     Review(review::Msg),
+    Merges(super::subjects_merge::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -452,6 +474,7 @@ pub fn open(app: &mut App) -> Task<Message> {
 /// The view is switching to the page.
 pub fn arriving(app: &mut App) -> Task<Message> {
     app.calendar.want_index();
+    super::subjects_merge::ask_tab(app);
     let mut tasks = vec![refresh_crops(app)];
     // A person's page left for Open day comes back as it was; an empty one
     // asks again.
@@ -467,10 +490,12 @@ pub fn to_overview(app: &mut App) -> Task<Message> {
     let from = s.person.as_ref().map(|p| p.group.clone());
     s.review = None;
     s.person = None;
+    s.merges = None;
     if from.is_some() {
         s.focus = from;
     }
     app.quicklook = None;
+    super::subjects_merge::ask_tab(app);
     refresh_crops(app)
 }
 
@@ -543,6 +568,7 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
         d.over = None;
     }
     let t = person::on_subjects(app);
+    super::subjects_merge::on_subjects(app);
     Task::batch([t, refresh_crops(app)])
 }
 
@@ -649,6 +675,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::MergeCancel => {
             app.subjects.merge = None;
+            super::subjects_merge::dialog_cancelled(app);
             Task::none()
         }
         Msg::MergeGo => {
@@ -663,8 +690,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             s.picked.clear();
             s.select_mode = false;
             s.focus = Some(mg.keep.clone());
+            // A fursuit's page merged away follows the group kept.
+            if app.subjects.person.as_ref().is_some_and(|p| p.group != mg.keep && mg.groups.contains(&p.group)) {
+                person::follow(app, &mg.keep);
+            }
             app.search.link.merge(&mg.keep, &others);
-            app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo))
+            let review = super::subjects_merge::merged_by_dialog(app);
+            let said = app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo));
+            Task::batch([review, said])
         }
         Msg::HidePicked => {
             let s = &mut app.subjects;
@@ -708,6 +741,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Person(msg) => person::update(app, msg),
         Msg::Review(msg) => review::update(app, msg),
+        Msg::Merges(msg) => super::subjects_merge::update(app, msg),
     }
 }
 
@@ -741,6 +775,9 @@ pub fn select_mode(app: &mut App) {
 pub fn undo(app: &mut App) -> Task<Message> {
     if app.subjects.page() == Page::Review {
         return review::take_back(app);
+    }
+    if app.subjects.page() == Page::Merges {
+        return super::subjects_merge::take_back(app);
     }
     app.search.link.undo_subjects();
     Task::none()
@@ -776,11 +813,17 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.drag.take().is_some() || s.merge.take().is_some() || s.forget.take().is_some() {
+    if s.drag.take().is_some() || s.forget.take().is_some() {
         return Task::none();
     }
+    if s.merge.take().is_some() {
+        super::subjects_merge::dialog_cancelled(app);
+        return Task::none();
+    }
+    let s = &mut app.subjects;
     match s.page() {
         Page::Review => review::update(app, review::Msg::Done),
+        Page::Merges => super::subjects_merge::update(app, super::subjects_merge::Msg::Done),
         Page::Person => person::escape(app),
         Page::Overview => {
             if !s.picked.is_empty() || s.select_mode {
@@ -808,6 +851,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     }
     match app.subjects.page() {
         Page::Review => review::on_key(app, key, mods),
+        Page::Merges => super::subjects_merge::on_key(app, key, mods),
         Page::Person => person::on_key(app, key, mods),
         Page::Overview => overview_key(app, key, mods),
     }
@@ -854,6 +898,8 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
             }
             Task::none()
         }
+        // Y on the Fursuits tab: review the pairs that may be one suit.
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("y") && !mods.shift() && s.tab == Kind::Fursuit && !s.select_mode => super::subjects_merge::tab_key(app).unwrap_or_else(Task::none),
         Key::Named(Named::Space) if s.select_mode => {
             if let Some(id) = s.focus.clone() {
                 toggle_pick(&mut app.subjects, id);
@@ -869,6 +915,7 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
 pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     match app.subjects.page() {
         Page::Review => review::view(app),
+        Page::Merges => super::subjects_merge::view(app),
         Page::Person => person::view(app, keyboard_ok),
         Page::Overview => overview(app),
     }
@@ -1287,6 +1334,11 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     if let Some(p) = progress_strip(app, s.tab) {
         col = col.push(p);
     }
+    if s.tab == Kind::Fursuit {
+        if let Some(pairs) = super::subjects_merge::tab_section(app) {
+            col = col.push(pairs);
+        }
+    }
     if !a.named.is_empty() {
         col = col.push(heading("Named", util::thousands(a.named.len() as u64)));
         col = col.push(tiles(app, &a.named, false));
@@ -1535,7 +1587,7 @@ pub fn debug_state(app: &App) -> String {
         s.crops.bytes() / 1024,
         person::debug_state(app),
         review::debug_state(app),
-    )
+    ) + " " + &super::subjects_merge::debug_state(app)
 }
 
 #[cfg(test)]

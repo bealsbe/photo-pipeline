@@ -180,6 +180,18 @@ enum Placed {
     Wrong(usize),
 }
 
+/// Suits the stand-in splits into two groups (two "events"), as the
+/// tight real grouping splits a suit seen under different lights.
+fn split_suit(suit: usize) -> bool {
+    matches!(suit % SUITS, 0 | 2 | 3 | 5 | 7)
+}
+
+/// Which of its suit's groups a head falls in: 1 for about a third of the
+/// presses of a split suit, else 0.
+fn part_of(s: &Shot, suit: usize) -> u8 {
+    (split_suit(suit) && unit(&(press_seed(s), "part")) < 0.35) as u8
+}
+
 fn placed(face: &FaceRef, suit: usize) -> Placed {
     let u = unit(&(face, "placed"));
     if suit <= 3 && u < 0.3 {
@@ -201,6 +213,8 @@ struct FakeGroup {
     rejected: HashSet<FaceRef>,
     /// The suit most of it shows.
     suit: usize,
+    /// Which of the suit's groups (a split suit has two).
+    part: u8,
     /// *Find more* rounds asked so far.
     rounds: usize,
     /// The judge's verdicts on close calls, by the press's first head.
@@ -220,7 +234,10 @@ pub struct FakeFursuits {
     generation: u64,
     /// Tagged shots looked at for heads so far, newest first.
     pub scanned: usize,
-    undo: Vec<(Vec<FakeGroup>, String)>,
+    undo: Vec<(Vec<FakeGroup>, Vec<(Vec<FaceRef>, Vec<FaceRef>)>, String)>,
+    /// "Not the same" answers, by the heads of both groups (as the real
+    /// file keeps them).
+    told_apart: Vec<(Vec<FaceRef>, Vec<FaceRef>)>,
     /// Name the two largest suits once heads are found (a library already
     /// worked on, for screenshots).
     pub name_first: bool,
@@ -263,6 +280,7 @@ impl FakeFursuits {
     pub fn forget_all(&mut self) {
         self.groups.clear();
         self.undo.clear();
+        self.told_apart.clear();
         self.scanned = 0;
         self.generation += 1;
     }
@@ -271,21 +289,30 @@ impl FakeFursuits {
         self.tagged[..self.scanned].iter().flat_map(|&i| heads_of(&self.shots[i]))
     }
 
+    /// The scanned heads with the group part each falls in.
+    fn heads_parted(&self) -> impl Iterator<Item = (usize, u8, FaceRef)> + '_ {
+        self.tagged[..self.scanned].iter().flat_map(|&i| {
+            let s = &self.shots[i];
+            heads_of(s).into_iter().map(move |(suit, f)| (suit, part_of(s, suit), f))
+        })
+    }
+
     fn regroup(&mut self) {
-        let mut members: Vec<Vec<FaceRef>> = vec![Vec::new(); SUITS];
-        for (suit, f) in self.heads_scanned() {
+        let mut members: Vec<Vec<FaceRef>> = vec![Vec::new(); SUITS * 2];
+        for (suit, part, f) in self.heads_parted() {
             match placed(&f, suit) {
-                Placed::Own => members[suit].push(f),
-                Placed::Wrong(q) => members[q].push(f),
+                Placed::Own => members[suit * 2 + part as usize].push(f),
+                Placed::Wrong(q) => members[q * 2].push(f),
                 Placed::Held => {}
             }
         }
         let old = std::mem::take(&mut self.groups);
         // A head already in a group (merged, moved, answered) stays there.
         let claimed: HashSet<FaceRef> = old.iter().flat_map(|g| g.members.iter().copied()).collect();
-        for (suit, heads) in members.into_iter().enumerate() {
+        for (slot, heads) in members.into_iter().enumerate() {
+            let (suit, part) = (slot / 2, (slot % 2) as u8);
             let heads: Vec<FaceRef> = heads.into_iter().filter(|f| !claimed.contains(f)).collect();
-            if let Some(mut g) = old.iter().find(|g| g.suit == suit && !is_made(&g.id)).cloned() {
+            if let Some(mut g) = old.iter().find(|g| g.suit == suit && g.part == part && !is_made(&g.id)).cloned() {
                 for f in heads {
                     if !g.rejected.contains(&f) {
                         g.members.push(f);
@@ -297,10 +324,10 @@ impl FakeFursuits {
             if heads.is_empty() {
                 continue;
             }
-            let named = self.name_first && suit < NAMES.len();
-            let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 1000 * (self.generation + 1)) };
+            let named = self.name_first && suit < NAMES.len() && part == 0;
+            let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 100 * part as u64 + 1000 * (self.generation + 1)) };
             let confirmed = if named { heads.iter().copied().collect() } else { HashSet::new() };
-            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, rounds: 0, judged: HashMap::new() });
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, part, rounds: 0, judged: HashMap::new() });
         }
         // Groups the user made by moving heads out stay.
         for g in old {
@@ -497,7 +524,7 @@ impl FakeFursuits {
     }
 
     fn remember(&mut self, what: impl Into<String>) {
-        self.undo.push((self.groups.clone(), what.into()));
+        self.undo.push((self.groups.clone(), self.told_apart.clone(), what.into()));
         if self.undo.len() > 50 {
             self.undo.remove(0);
         }
@@ -510,8 +537,9 @@ impl FakeFursuits {
     }
 
     pub fn undo(&mut self) -> Option<String> {
-        let (groups, what) = self.undo.pop()?;
+        let (groups, told, what) = self.undo.pop()?;
         self.groups = groups;
+        self.told_apart = told;
         self.generation += 1;
         Some(what)
     }
@@ -607,7 +635,7 @@ impl FakeFursuits {
             g.hidden = false;
             g.rounds = 0;
             g.judged.clear();
-            g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 1000 * (generation + 1));
+            g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 100 * g.part as u64 + 1000 * (generation + 1));
         }
     }
 
@@ -642,7 +670,7 @@ impl FakeFursuits {
                 self.next_id += 1;
                 let id = GroupId::Cluster(made_id(self.next_id));
                 let s = faces.first().and_then(|f| self.look_of(f)).unwrap_or(suit);
-                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, rounds: 0, judged: HashMap::new() });
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, part: 0, rounds: 0, judged: HashMap::new() });
             }
         }
         Ok(())
@@ -683,6 +711,93 @@ impl FakeFursuits {
                     }
                 }
             }
+        }
+    }
+
+    // ── merge suggestions (stage 2) ──
+
+    /// The stand-in's distance between two groups, in the whitened scale:
+    /// the two groups of a split suit (or a suit and a group of its heads
+    /// moved out) lie 0.60–0.69 apart, under the suggest cut, a few under
+    /// sure-yes; a suit and its look-alike 0.70–0.78 (the judge's band);
+    /// anything else too far to ask about.
+    fn pair_distance(&self, a: &FakeGroup, b: &FakeGroup) -> Option<f32> {
+        let seed = (a.suit.min(b.suit), a.suit.max(b.suit), a.part.min(b.part), a.part.max(b.part));
+        let u = unit(&(seed, "pair")) as f32;
+        if a.suit == b.suit {
+            Some(0.60 + 0.09 * u)
+        } else if lookalike(a.suit) == b.suit {
+            Some(0.70 + 0.08 * u)
+        } else {
+            None
+        }
+    }
+
+    /// Pairs of groups that may be one suit, nearest first, as the engine
+    /// offers them: with `judge`, those under sure-yes (offered at once)
+    /// and the close ones up to sure-no (for the judge); without, those
+    /// under the suggest cut.  Small unnamed groups and hidden ones are
+    /// left out; pairs the user said are different never come back.
+    pub fn merge_pairs(&self, min_photos: usize, focus: Option<&GroupId>, judge: bool) -> (Vec<crate::search::merging::GroupPair>, Vec<crate::search::merging::GroupPair>) {
+        use crate::search::merging::GroupPair;
+        let shown: Vec<&FakeGroup> = self.groups.iter().filter(|g| !g.hidden && (g.name.is_some() || g.members.iter().map(|f| f.key).collect::<HashSet<_>>().len() >= min_photos)).collect();
+        let mut near: Vec<(f32, usize, usize)> = Vec::new();
+        for i in 0..shown.len() {
+            for j in i + 1..shown.len() {
+                let (a, b) = (shown[i], shown[j]);
+                if focus.is_some_and(|f| *f != a.id && *f != b.id) {
+                    continue;
+                }
+                let Some(d) = self.pair_distance(a, b) else { continue };
+                let cut = if judge { crate::search::judging::SURE_NO } else { crate::search::heads::CUTOFFS.suggest };
+                if d > cut || self.said_apart(&a.members, &b.members) {
+                    continue;
+                }
+                near.push((d, i, j));
+            }
+        }
+        near.sort_by(|x, y| x.0.total_cmp(&y.0));
+        let heads = |g: &FakeGroup| std::sync::Arc::new(self.faces(&g.id).into_iter().take(4).collect::<Vec<_>>());
+        let (mut sure, mut close) = (Vec::new(), Vec::new());
+        for (d, i, j) in near {
+            let is_sure = !judge || d < crate::search::judging::SURE_YES;
+            let p = GroupPair { a: shown[i].id.clone(), b: shown[j].id.clone(), distance: d, a_heads: heads(shown[i]), b_heads: heads(shown[j]), sure: is_sure, verdict: None };
+            if is_sure { sure.push(p) } else { close.push(p) }
+        }
+        (sure, close)
+    }
+
+    fn said_apart(&self, a: &[FaceRef], b: &[FaceRef]) -> bool {
+        self.told_apart.iter().any(|(x, y)| (a.iter().any(|f| x.contains(f)) && b.iter().any(|f| y.contains(f))) || (a.iter().any(|f| y.contains(f)) && b.iter().any(|f| x.contains(f))))
+    }
+
+    /// "Not the same": kept by both groups' heads; one undo step.
+    pub fn not_same(&mut self, a: &GroupId, b: &GroupId) -> Result<(), String> {
+        let (Some(x), Some(y)) = (self.group(a).map(|g| g.members.clone()), self.group(b).map(|g| g.members.clone())) else { return Err("That group changed: look again.".into()) };
+        if a == b {
+            return Err("The same group twice.".into());
+        }
+        self.remember("Said two groups are not the same");
+        self.told_apart.push((x, y));
+        Ok(())
+    }
+
+    /// The stand-in judge comparing two groups on three head pairs: the
+    /// same suit says yes (now and then one pair says no), a look-alike
+    /// no; now and then it is wrong.
+    pub fn judge_pair(&self, p: &crate::search::merging::GroupPair) -> crate::search::merging::GroupVerdict {
+        let same = match (self.group(&p.a), self.group(&p.b)) {
+            (Some(a), Some(b)) => a.suit == b.suit,
+            _ => false,
+        };
+        let u = unit(&(p.a_heads.first().map(|f| f.face), p.b_heads.first().map(|f| f.face), "judge-pair"));
+        let same = same != (u < 0.06);
+        let one_off = (u * 10.0).fract() < 0.3;
+        match (same, one_off) {
+            (true, false) => crate::search::merging::GroupVerdict { yes: 3, no: 0, unjudged: 0 },
+            (true, true) => crate::search::merging::GroupVerdict { yes: 2, no: 1, unjudged: 0 },
+            (false, false) => crate::search::merging::GroupVerdict { yes: 0, no: 3, unjudged: 0 },
+            (false, true) => crate::search::merging::GroupVerdict { yes: 1, no: 1, unjudged: 1 },
         }
     }
 
@@ -852,6 +967,39 @@ mod tests {
         assert!(!f.suggestions(&one).iter().any(|e| e[0].face == entry[0]), "No: not offered again");
         f.answer(&one, &entry, None);
         assert!(f.suggestions(&one).iter().any(|e| e[0].face == entry[0]), "taken back: offered again");
+    }
+
+    /// The stand-in's merge suggestions (stage 2): split suits come back
+    /// as pairs, nearest first; with the judge, the close ones are compared
+    /// and a look-alike is mostly left out; "not the same" keeps a pair out
+    /// through a regroup, and undo brings it back.
+    #[test]
+    fn the_stand_in_suggests_split_suits_and_remembers_not_the_same() {
+        let mut f = fursuits(false);
+        let (pairs, close) = f.merge_pairs(5, None, false);
+        assert!(close.is_empty(), "without the judge, distance alone");
+        assert!(pairs.len() >= 3, "{}", pairs.len());
+        assert!(pairs.windows(2).all(|w| w[0].distance <= w[1].distance), "nearest first");
+        let suit = |id: &GroupId| f.group(id).map(|g| g.suit);
+        assert!(pairs.iter().filter(|p| suit(&p.a) == suit(&p.b)).count() >= 3, "split suits are offered");
+        assert!(pairs.iter().all(|p| f.owns(&p.a) && f.owns(&p.b)), "fursuit groups only");
+        // With the judge: sure ones at once, the band compared.
+        let (sure, close) = f.merge_pairs(5, None, true);
+        assert!(!close.is_empty() && sure.iter().all(|p| p.distance < crate::search::judging::SURE_YES));
+        let same = close.iter().filter(|p| f.judge_pair(p).same()).count();
+        let alike = close.iter().filter(|p| suit(&p.a) != suit(&p.b)).count();
+        assert!(alike > 0 && same < close.len(), "look-alikes are compared and mostly left out");
+        // Not the same: kept out, through a regroup; undo brings it back.
+        let p = pairs[0].clone();
+        f.not_same(&p.a, &p.b).unwrap();
+        assert!(!f.merge_pairs(5, None, false).0.iter().any(|x| x.key() == p.key()));
+        let n = f.tagged.len();
+        f.scan(n);
+        assert!(!f.merge_pairs(5, None, false).0.iter().any(|x| x.key() == p.key()), "after a regroup too");
+        assert_eq!(f.undo().as_deref(), Some("Said two groups are not the same"));
+        assert!(f.merge_pairs(5, None, false).0.iter().any(|x| x.key() == p.key()));
+        // A group's own pairs.
+        assert!(f.merge_pairs(5, Some(&p.a), false).0.iter().all(|x| x.a == p.a || x.b == p.a));
     }
 
     #[test]

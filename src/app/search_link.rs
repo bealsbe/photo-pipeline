@@ -355,6 +355,26 @@ impl Link {
         }
     }
 
+    /// *Possibly the same fursuit*: pairs of fursuit groups to merge or
+    /// tell apart (`BgEvent::MergeSuggestions`, then with `judge` and a
+    /// judge that can run, `BgEvent::MergeJudged`).  `focus`: one group's
+    /// pairs (its page's *Similar groups*).
+    pub fn merge_suggestions(&self, seq: u64, focus: Option<&GroupId>, min_photos: usize, judge: bool) {
+        match self {
+            Link::Engine(e) => e.merge_suggestions(seq, focus.cloned(), min_photos, judge),
+            Link::Fake(f) => f.merge_suggestions(seq, focus, min_photos, judge),
+        }
+    }
+
+    /// "Not the same": the two groups are different fursuits; never
+    /// offered together again (one undo step).
+    pub fn not_same(&self, a: &GroupId, b: &GroupId, a_heads: &[FaceRef], b_heads: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.not_same(a.clone(), b.clone(), a_heads.to_vec(), b_heads.to_vec()),
+            Link::Fake(f) => f.edit(a, |_, _| Err("people have no merge suggestions here".into()), |z, _| z.not_same(a, b)),
+        }
+    }
+
     /// Take back the last edit to people (`BgEvent::SubjectsUndone`, then
     /// a fresh `Subjects`).
     pub fn undo_subjects(&self) {
@@ -515,6 +535,7 @@ impl Link {
                 s.fursuits.judge_on = s.status.judge.installed();
                 if !s.status.judge.installed() {
                     s.judge_run = None;
+                    s.merge_run = None;
                     s.status.judge.loaded = false;
                     s.status.judge.state = JudgeState::Idle;
                 }
@@ -541,6 +562,7 @@ impl Link {
             Link::Engine(e) => e.stop_judging(),
             Link::Fake(f) => f.change(|s| {
                 s.judge_run = None;
+                s.merge_run = None;
                 s.status.judge.state = JudgeState::Idle;
             }),
         }
@@ -555,6 +577,7 @@ impl Link {
                 if s.status.judge.choice == choice {
                     s.status.judge.choice = JudgeChoice::Off;
                     s.judge_run = None;
+                    s.merge_run = None;
                     s.status.judge.state = JudgeState::Idle;
                 }
                 s.status.judge.loaded = false;
@@ -652,6 +675,8 @@ struct FakeState {
     sent_people: Option<u64>,
     /// The stand-in judge's run over a fursuit's close calls.
     judge_run: Option<JudgeRun>,
+    /// ... and over pairs of groups that may be one suit.
+    merge_run: Option<MergeRun>,
     /// Ticks the judge has been loading (it is loaded after a few).
     loading: u32,
     /// Pretend another step holds the card (`judge-wait`).
@@ -663,6 +688,15 @@ struct JudgeRun {
     seq: u64,
     group: GroupId,
     todo: Vec<Vec<Face>>,
+    done: usize,
+    total: usize,
+    beyond: usize,
+}
+
+/// The stand-in judge comparing pairs of groups for one request.
+struct MergeRun {
+    seq: u64,
+    todo: Vec<crate::search::merging::GroupPair>,
     done: usize,
     total: usize,
     beyond: usize,
@@ -694,7 +728,7 @@ impl FakeState {
 
     fn busy(&self) -> bool {
         let heads = self.status.heads.scanning() && self.status.stopped.is_none();
-        let judging = self.judge_run.is_some();
+        let judging = self.judge_run.is_some() || self.merge_run.is_some();
         !self.paused && (self.downloads.iter().any(|d| !d.3.is_final()) || (self.status.pass.is_some() && self.status.stopped.is_none()) || heads || judging)
     }
 
@@ -741,6 +775,39 @@ impl FakeState {
             self.status.judge.state = JudgeState::Idle;
         }
         self.refresh_people();
+        Some(ev)
+    }
+
+    /// One tick of the judge comparing pairs of groups: wait for the card,
+    /// load, then compare one pair.  The verdict as it would be sent.
+    fn step_merge_judge(&mut self) -> Option<BgEvent> {
+        self.merge_run.as_ref()?;
+        if self.card_in_use() {
+            self.status.judge.state = JudgeState::WaitingForCard;
+            return None;
+        }
+        if !self.status.judge.loaded {
+            self.status.judge.state = JudgeState::Loading;
+            self.loading += 1;
+            if self.loading >= 4 {
+                self.status.judge.loaded = true;
+                self.loading = 0;
+            }
+            return None;
+        }
+        let run = self.merge_run.as_mut()?;
+        let mut pair = (!run.todo.is_empty()).then(|| run.todo.remove(0))?;
+        let v = self.fursuits.judge_pair(&pair);
+        pair.verdict = Some(v);
+        let run = self.merge_run.as_mut()?;
+        run.done = (run.done + 1).min(run.total);
+        let (offered, left_out) = if v.same() { (vec![pair], Vec::new()) } else { (Vec::new(), vec![pair]) };
+        let ev = BgEvent::MergeJudged { seq: run.seq, offered: Arc::new(offered), left_out: Arc::new(left_out), done: run.done, total: run.total, beyond: run.beyond };
+        self.status.judge.state = JudgeState::Comparing { done: run.done, total: run.total };
+        if run.done >= run.total {
+            self.merge_run = None;
+            self.status.judge.state = JudgeState::Idle;
+        }
         Some(ev)
     }
 
@@ -818,6 +885,44 @@ impl Fake {
         let _ = self.bus.unbounded_send(BgEvent::Judged { seq: e.seq, group: e.group, offered: Arc::new(e.offered), left_out: Arc::new(e.left_out), done: e.done, total: e.total, beyond: e.beyond });
     }
 
+    /// Merge suggestions, as the engine sends them: by distance alone, or
+    /// with an active judge, the sure ones at once and the close ones
+    /// compared a tick at a time (the cap in pairs of groups: three head
+    /// pairs each).
+    fn merge_suggestions(&self, seq: u64, focus: Option<&GroupId>, min_photos: usize, judge: bool) {
+        let (first, judged) = {
+            let mut s = self.state.lock();
+            let active = judge && super::fursuit_judge::active(&s.status);
+            let (sure, mut close) = s.fursuits.merge_pairs(min_photos, focus, active);
+            if !active {
+                (BgEvent::MergeSuggestions { seq, focus: focus.cloned(), list: Arc::new(sure), judging: false }, None)
+            } else {
+                let cap = crate::search::judging::MAX_CLOSE_CALLS / crate::search::merging::QUESTIONS;
+                let beyond = close.len().saturating_sub(cap);
+                close.truncate(cap);
+                let total = close.len();
+                s.judge_run = None;
+                s.merge_run = (total > 0).then(|| MergeRun { seq, todo: close, done: 0, total, beyond });
+                if total > 0 {
+                    s.status.judge.state = if s.card_in_use() {
+                        JudgeState::WaitingForCard
+                    } else if s.status.judge.loaded {
+                        JudgeState::Comparing { done: 0, total }
+                    } else {
+                        JudgeState::Loading
+                    };
+                }
+                let first = BgEvent::MergeJudged { seq, offered: Arc::new(Vec::new()), left_out: Arc::new(Vec::new()), done: 0, total, beyond };
+                (BgEvent::MergeSuggestions { seq, focus: focus.cloned(), list: Arc::new(sure), judging: true }, Some(first))
+            }
+        };
+        let _ = self.bus.unbounded_send(first);
+        if let Some(j) = judged {
+            let _ = self.bus.unbounded_send(j);
+        }
+        self.change(|_| {});
+    }
+
     /// A fursuit's suggestions were asked for with a judge on: judge its
     /// close calls, nearest first; those judged before count at once.
     fn start_judging(&self, seq: u64, id: &GroupId) {
@@ -828,6 +933,7 @@ impl Fake {
             if !s.fursuits.owns(id) || !super::fursuit_judge::active(&s.status) || s.subjects.group(id).is_none_or(|g| g.name.is_none()) {
                 return;
             }
+            s.merge_run = None;
             let (left_out, mut todo) = s.fursuits.close_calls(id);
             // As the engine: the nearest close calls only, the rest left
             // for the next request.
@@ -888,6 +994,7 @@ impl Fake {
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
             judge_run: None,
+            merge_run: None,
             loading: 0,
             card_held: false,
         };
@@ -1004,6 +1111,9 @@ impl Fake {
             step(&mut s);
             if let Some(e) = s.step_judge() {
                 self.send_judged(e);
+            }
+            if let Some(e) = s.step_merge_judge() {
+                let _ = self.bus.unbounded_send(e);
             }
             self.publish(&s);
             self.publish_downloads(&s);
@@ -1267,6 +1377,7 @@ impl Fake {
                     s.judge = JudgeStatus { choice, downloaded, loaded: false, state: JudgeState::Idle };
                     st.fursuits.judge_on = s.judge.installed();
                     st.judge_run = None;
+                    st.merge_run = None;
                     st.refresh_people();
                     st.sent_people = None;
                 }
@@ -1280,11 +1391,13 @@ impl Fake {
                 "judge-free" => st.card_held = false,
                 "judge-cardcrash" => {
                     st.judge_run = None;
+                    st.merge_run = None;
                     s.judge.loaded = false;
                     s.judge.state = JudgeState::Failed(CardFailure::Crashed);
                 }
                 "judge-broken" => {
                     st.judge_run = None;
+                    st.merge_run = None;
                     s.judge.loaded = false;
                     s.judge.state = JudgeState::Broken("The judge's model file is damaged. Delete it in Preferences ▸ Storage and download it again.".into());
                 }

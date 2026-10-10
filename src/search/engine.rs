@@ -25,6 +25,7 @@ use parking_lot::Mutex;
 use super::faces::{FaceStore, People};
 use super::heads::{self, CloseCall, Decision as HeadDecision, Fursuits, HeadStore, Why as HeadWhy};
 use super::judging::{self, PairCache, PairKey, Runner, Task};
+use super::step::KindStep;
 use crate::ml::judge::{JudgeChoice, JudgeState, JudgeStatus, PairAsk};
 use crate::ml::judge_client::{JudgeError, JudgeFactory};
 use super::index::{Index, Key, PathEntry, Record};
@@ -80,6 +81,9 @@ enum Cmd {
     AnswerHeads(bool),
     StopHeads,
     FindMore { seq: u64, group: GroupId },
+    // Fursuit merging, stage 2.
+    MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
+    NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
     // Fursuit matching v2.
     CatchUpHeadVectors,
     /// Tests: whiten with fewer heads than a library needs.
@@ -253,6 +257,7 @@ impl Engine {
                     verdicts: None,
                     judge_state: JudgeState::Idle,
                     judging: None,
+                    merge_judging: None,
                     judge_token: 0,
                 }
                 .run()
@@ -458,6 +463,27 @@ impl Engine {
     /// this command, never on its own.
     pub fn catch_up_head_vectors(&self) {
         self.send(Cmd::CatchUpHeadVectors);
+    }
+
+    /// *Possibly the same fursuit* (stage 2): pairs of fursuit groups
+    /// whose members are close on average, nearest first
+    /// (`BgEvent::MergeSuggestions`), in the step's own space and
+    /// cut-offs (raw or whitened).  Groups of fewer than `min_photos`
+    /// photos are left out unless named; hidden ones always; pairs the
+    /// user said are not the same never come back.  `focus`: only that
+    /// group's pairs (its page's *Similar groups*).  With `judge` and a
+    /// judge that can run, the judge compares the close pairs on the card
+    /// (`BgEvent::MergeJudged`); otherwise the suggest cut alone decides.
+    /// Suggestions only: nothing is merged.
+    pub fn merge_suggestions(&self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
+        self.send(Cmd::MergeSuggestions { seq, focus, min_photos, judge });
+    }
+
+    /// "Not the same": two fursuit groups a suggestion offered are
+    /// different suits; kept by their heads (`a_heads`, `b_heads`, as
+    /// shown) in the user's file, one undo step.
+    pub fn not_same(&self, a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>) {
+        self.send(Cmd::NotSame { a, b, a_heads, b_heads });
     }
 
     /// Tests: whiten with as few as `n` heads.
@@ -720,7 +746,30 @@ struct Worker {
     verdicts: Option<(JudgeChoice, Option<PathBuf>, PairCache)>,
     judge_state: JudgeState,
     judging: Option<Judging>,
+    /// The merge suggestions the judge is comparing (stage 2); never at
+    /// the same time as a review's close calls.
+    merge_judging: Option<MergeJudging>,
     judge_token: u64,
+}
+
+/// One pair of groups the judge compares: its head pairs and their
+/// answers so far (`Some(None)`: couldn't be judged, a no).
+struct MergeCall {
+    pair: super::merging::GroupPair,
+    questions: Vec<(FaceRef, FaceRef)>,
+    answers: Vec<Option<Option<bool>>>,
+}
+
+/// The merge suggestions being compared for request `seq`.
+struct MergeJudging {
+    seq: u64,
+    token: u64,
+    calls: Vec<MergeCall>,
+    /// Indices into `calls` still to settle, nearest first.
+    pending: Vec<usize>,
+    done: usize,
+    total: usize,
+    beyond: usize,
 }
 
 /// The close calls of the request being judged.
@@ -1038,6 +1087,11 @@ impl Worker {
                 }
                 Cmd::Suggestions { seq, group } => self.send_suggestions(seq, group, false),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
+                Cmd::MergeSuggestions { seq, focus, min_photos, judge } => self.send_merge_suggestions(seq, focus, min_photos, judge),
+                Cmd::NotSame { a, b, a_heads, b_heads } => {
+                    let r = self.people.not_same(&a, &b, a_heads, b_heads);
+                    self.after_edit(r);
+                }
                 Cmd::SetFindHeads(on) => {
                     self.find_heads = on;
                     self.fursuits.status.on = on;
@@ -1325,6 +1379,7 @@ impl Worker {
     /// unjudged; the helper stays loaded until it idles).
     fn forget_judging(&mut self) {
         self.judging = None;
+        self.merge_judging = None;
         if let Some(r) = &self.runner {
             r.keep(0);
         }
@@ -1368,6 +1423,235 @@ impl Worker {
         } else {
             self.judge_go();
         }
+    }
+
+    /// *Possibly the same fursuit*: pairs of fursuit groups close on
+    /// average, in the step's space (raw or whitened) and cut-offs.  With
+    /// the judge (`judge` asked and able to run) every pair up to sure-no
+    /// is in play: a sure pair (under sure-yes, both covers clear enough)
+    /// is offered at once, the rest are compared on up to three head pairs
+    /// each, nearest first, at most `MAX_CLOSE_CALLS` head pairs a
+    /// request; without it, the suggest cut alone.
+    fn send_merge_suggestions(&mut self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
+        use super::merging::{self, GroupPair};
+        self.ensure_resolver();
+        self.fursuits.step();
+        let empty = |me: &Self| {
+            let _ = me.bus.unbounded_send(BgEvent::MergeSuggestions { seq, focus: focus.clone(), list: Arc::new(Vec::new()), judging: false });
+        };
+        let Some((cutoffs, (sure_yes, sure_no))) = self.fursuits.cuts() else { return empty(self) };
+        let use_judge = judge && self.judge_status().active(self.device);
+        let groups = self.fursuits.merge_groups(&self.people.file);
+        // The groups as rows of the step, the cover first then clearest
+        // first; small unnamed groups (folded away on the tab) left out.
+        let mut cands: Vec<(merging::Candidate, Vec<Face>)> = Vec::new();
+        {
+            let Some(store) = self.fursuits.store.as_ref() else { return empty(self) };
+            let by_ref: HashMap<FaceRef, usize> = store.refs().iter().enumerate().map(|(i, r)| (*r, i)).collect();
+            for (id, members, named, cover) in groups {
+                let mut faces: Vec<Face> = members.iter().filter(|f| by_ref.contains_key(f)).filter_map(|f| self.resolve_face(f)).collect();
+                let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
+                if faces.is_empty() || (!named && photos < min_photos) {
+                    continue;
+                }
+                faces.sort_by(|a, b| b.clarity.total_cmp(&a.clarity));
+                if let Some(c) = cover.and_then(|c| faces.iter().position(|f| f.face == c)) {
+                    let f = faces.remove(c);
+                    faces.insert(0, f);
+                }
+                let rows: Vec<usize> = faces.iter().filter_map(|f| by_ref.get(&f.face).copied()).collect();
+                let heads: Vec<FaceRef> = faces.iter().map(|f| f.face).collect();
+                cands.push((merging::Candidate { id, rows, heads }, faces));
+            }
+        }
+        let Some(store) = self.fursuits.store.as_ref() else { return empty(self) };
+        let rows = store.rows();
+        let refs = store.refs();
+        let lists: Vec<&[usize]> = cands.iter().map(|(c, _)| c.rows.as_slice()).collect();
+        let means = merging::means(&rows, &lists);
+        let focus_ix = match &focus {
+            Some(f) => match cands.iter().position(|(c, _)| &c.id == f) {
+                Some(i) => Some(i),
+                None => return empty(self),
+            },
+            None => None,
+        };
+        let cut = if use_judge { sure_no } else { cutoffs.suggest };
+        let told = self.people.file.not_same_index(Kind::Fursuit);
+        let near: Vec<(usize, usize, f32)> = merging::pairs(&means, cut, focus_ix).into_iter().filter(|&(i, j, _)| !crate::model::subjects::told_apart(&told, &cands[i].0.heads, &cands[j].0.heads)).collect();
+        let shown = |faces: &[Face]| Arc::new(faces.iter().take(4).cloned().collect::<Vec<_>>());
+        let pair_of = |i: usize, j: usize, d: f32, sure: bool| GroupPair { a: cands[i].0.id.clone(), b: cands[j].0.id.clone(), distance: d, a_heads: shown(&cands[i].1), b_heads: shown(&cands[j].1), sure, verdict: None };
+        if !use_judge {
+            let list: Vec<GroupPair> = near.iter().map(|&(i, j, d)| pair_of(i, j, d, true)).collect();
+            let _ = self.bus.unbounded_send(BgEvent::MergeSuggestions { seq, focus, list: Arc::new(list), judging: false });
+            return;
+        }
+        // The judge compares the close pairs; sure and clear ones go at once.
+        let mut offered = Vec::new();
+        let mut calls: Vec<MergeCall> = Vec::new();
+        for &(i, j, d) in &near {
+            let (a, b) = (&cands[i].0, &cands[j].0);
+            let clear = store.clarity(&a.heads[0]).min(store.clarity(&b.heads[0])) >= judging::CLARITY_MIN;
+            if d < sure_yes && clear {
+                offered.push(pair_of(i, j, d, true));
+                continue;
+            }
+            let questions: Vec<(FaceRef, FaceRef)> = merging::questions(&rows, &a.rows, &b.rows, &means[i], &means[j]).into_iter().filter_map(|(x, y)| Some((*refs.get(x)?, *refs.get(y)?))).collect();
+            let n = questions.len();
+            calls.push(MergeCall { pair: pair_of(i, j, d, false), questions, answers: vec![None; n] });
+        }
+        // Verdicts kept answer at once; the rest wait for the judge, the
+        // nearest first, up to the cap in head pairs.
+        let (mut left_out, mut pending) = (Vec::new(), Vec::new());
+        let (mut done, mut total, mut asked, mut beyond) = (0, 0, 0usize, 0);
+        let choice = self.judge_choice;
+        for (ci, call) in calls.iter_mut().enumerate() {
+            for (qi, &(x, y)) in call.questions.iter().enumerate() {
+                if let Some(v) = self.verdicts().get(x, y) {
+                    call.answers[qi] = Some(Some(v.same(choice)));
+                }
+            }
+            if call.answers.iter().all(Option::is_some) {
+                total += 1;
+                done += 1;
+                let v = merging::verdict(&call.answers.iter().map(|a| a.flatten()).collect::<Vec<_>>());
+                call.pair.verdict = Some(v);
+                if v.same() { offered.push(call.pair.clone()) } else { left_out.push(call.pair.clone()) }
+                continue;
+            }
+            let need = call.answers.iter().filter(|a| a.is_none()).count();
+            if asked + need > judging::MAX_CLOSE_CALLS {
+                beyond += 1;
+                continue;
+            }
+            asked += need;
+            total += 1;
+            pending.push(ci);
+        }
+        let _ = self.bus.unbounded_send(BgEvent::MergeSuggestions { seq, focus, list: Arc::new(offered), judging: true });
+        let _ = self.bus.unbounded_send(BgEvent::MergeJudged { seq, offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total, beyond });
+        self.forget_judging();
+        self.judge_token += 1;
+        let token = self.judge_token;
+        let none = pending.is_empty();
+        self.merge_judging = Some(MergeJudging { seq, token, calls, pending, done, total, beyond });
+        if none {
+            self.judge_state = JudgeState::Idle;
+            self.publish_judge();
+        } else {
+            self.merge_judge_go();
+        }
+    }
+
+    /// Hand the head pairs of the merge suggestions still to settle to the
+    /// runner (as `judge_go` does for a review's close calls: never while
+    /// a pass or a head scan holds the card).
+    fn merge_judge_go(&mut self) {
+        self.ensure_resolver();
+        let Some(j) = &self.merge_judging else { return };
+        if j.pending.is_empty() {
+            return;
+        }
+        if self.pass.is_some() || self.scan.is_some() {
+            self.judge_state = JudgeState::WaitingForCard;
+            self.publish_judge();
+            return;
+        }
+        let token = j.token;
+        let mut wanted: Vec<(usize, usize, FaceRef, FaceRef)> = Vec::new();
+        for &ci in &j.pending {
+            for (qi, &(x, y)) in j.calls[ci].questions.iter().enumerate() {
+                if j.calls[ci].answers[qi].is_none() {
+                    wanted.push((ci, qi, x, y));
+                }
+            }
+        }
+        let mut tasks = Vec::new();
+        let mut seen = HashSet::new();
+        let mut unshowable = Vec::new();
+        for (ci, qi, x, y) in wanted {
+            let crops = (self.resolve_face(&x).and_then(|f| self.judge_crop(&f)), self.resolve_face(&y).and_then(|f| self.judge_crop(&f)));
+            match crops {
+                (Some(a), Some(b)) => {
+                    let key = PairKey::new(x, y);
+                    if seen.insert(key) {
+                        tasks.push(Task { token, key, ask: PairAsk { a, b } });
+                    }
+                }
+                // A photo no longer in the library: that head pair can't
+                // be judged, and counts as a no.
+                _ => unshowable.push((ci, qi)),
+            }
+        }
+        if let Some(j) = self.merge_judging.as_mut() {
+            for (ci, qi) in unshowable {
+                j.calls[ci].answers[qi] = Some(None);
+            }
+        }
+        self.settle_merges();
+        if tasks.is_empty() {
+            self.judge_state = JudgeState::Idle;
+            self.publish_judge();
+            return;
+        }
+        if self.device == Device::Gpu && !self.runner.as_ref().is_some_and(Runner::loaded) {
+            self.drop_embedder();
+        }
+        if self.runner.is_none() {
+            let me = self.me.clone();
+            self.runner = Some(Runner::start(self.judge_choice, &self.judge_factory, move |e| drop(me.send(Cmd::JudgeEvent(e)))));
+        }
+        let runner = self.runner.as_ref().expect("a runner");
+        runner.keep(token);
+        runner.ask(tasks);
+        let (done, total) = self.merge_judging.as_ref().map_or((0, 0), |j| (j.done, j.total));
+        self.judge_state = JudgeState::Comparing { done, total };
+        self.publish_judge();
+    }
+
+    /// A head pair of the merge suggestions judged (`None`: it couldn't
+    /// be): every pair of groups asking it takes the answer.
+    fn on_merge_verdict(&mut self, key: PairKey, same: Option<bool>) {
+        let Some(j) = self.merge_judging.as_mut() else { return };
+        for &ci in &j.pending {
+            let call = &mut j.calls[ci];
+            for qi in 0..call.questions.len() {
+                let (x, y) = call.questions[qi];
+                if call.answers[qi].is_none() && PairKey::new(x, y) == key {
+                    call.answers[qi] = Some(same);
+                }
+            }
+        }
+        self.settle_merges();
+    }
+
+    /// Pairs of groups whose head pairs are all answered: their verdict
+    /// (the majority; a head pair that couldn't be judged is a no), sent
+    /// as it lands.
+    fn settle_merges(&mut self) {
+        let Some(j) = self.merge_judging.as_mut() else { return };
+        let (mut offered, mut left_out) = (Vec::new(), Vec::new());
+        let calls = &mut j.calls;
+        j.pending.retain(|&ci| {
+            let call = &mut calls[ci];
+            if !call.answers.iter().all(Option::is_some) {
+                return true;
+            }
+            let v = super::merging::verdict(&call.answers.iter().map(|a| a.flatten()).collect::<Vec<_>>());
+            call.pair.verdict = Some(v);
+            if v.same() {
+                offered.push(call.pair.clone());
+            } else {
+                left_out.push(call.pair.clone());
+            }
+            false
+        });
+        if offered.is_empty() && left_out.is_empty() {
+            return;
+        }
+        j.done += offered.len() + left_out.len();
+        let _ = self.bus.unbounded_send(BgEvent::MergeJudged { seq: j.seq, offered: Arc::new(offered), left_out: Arc::new(left_out), done: j.done, total: j.total, beyond: j.beyond });
+        self.judge_state = if j.pending.is_empty() { JudgeState::Idle } else { JudgeState::Comparing { done: j.done, total: j.total } };
     }
 
     /// Hand the pending close calls to the runner: never while a pass or
@@ -1442,7 +1726,7 @@ impl Worker {
         if let Some(r) = &self.runner {
             r.unload();
         }
-        if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
+        if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) || self.merge_judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
             self.judge_state = JudgeState::WaitingForCard;
         }
         self.publish_judge();
@@ -1452,13 +1736,14 @@ impl Worker {
     fn judge_resume(&mut self) {
         if matches!(self.judge_state, JudgeState::WaitingForCard) && self.pass.is_none() && self.scan.is_none() {
             self.judge_go();
+            self.merge_judge_go();
         }
     }
 
     fn on_judge_event(&mut self, e: judging::Event) {
         match e {
             judging::Event::Loading => {
-                if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
+                if self.judging.as_ref().is_some_and(|j| !j.pending.is_empty()) || self.merge_judging.as_ref().is_some_and(|j| !j.pending.is_empty()) {
                     self.judge_state = JudgeState::Loading;
                 }
             }
@@ -1468,6 +1753,12 @@ impl Worker {
                     if let Err(err) = self.verdicts().add(&[(key, *v)], choice) {
                         eprintln!("judge: couldn't keep a verdict: {err}");
                     }
+                }
+                if self.merge_judging.as_ref().is_some_and(|m| m.token == token) {
+                    let same = result.as_ref().ok().map(|v| v.same(self.judge_choice));
+                    self.on_merge_verdict(key, same);
+                    self.publish_judge();
+                    return;
                 }
                 let Some(j) = self.judging.as_mut().filter(|j| j.token == token) else { return };
                 let Some(pos) = j.pending.iter().position(|&i| PairKey::new(j.calls[i].candidate, j.calls[i].member) == key) else { return };
@@ -1483,13 +1774,14 @@ impl Worker {
                 self.judge_state = if j.pending.is_empty() { JudgeState::Idle } else { JudgeState::Judging { group: j.group.clone(), done: j.done, total: j.total } };
             }
             judging::Event::Idle => {
-                if self.judging.as_ref().is_none_or(|j| j.pending.is_empty()) && !matches!(self.judge_state, JudgeState::WaitingForCard) {
+                if self.judging.as_ref().is_none_or(|j| j.pending.is_empty()) && self.merge_judging.as_ref().is_none_or(|j| j.pending.is_empty()) && !matches!(self.judge_state, JudgeState::WaitingForCard) {
                     self.judge_state = JudgeState::Idle;
                 }
             }
             judging::Event::Failed(err) => {
                 self.runner = None;
                 self.judging = None;
+                self.merge_judging = None;
                 self.judge_state = match err {
                     JudgeError::Card(f) => JudgeState::Failed(f),
                     JudgeError::Broken(m) => JudgeState::Broken(m),
@@ -3367,6 +3659,251 @@ mod tests {
         let last = judged.last().expect("verdicts after the pass");
         assert_eq!((last.2, last.3), (2, 2), "both close calls judged once the card was free");
         assert_eq!(fake.pairs.lock().len(), 2);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What request `seq` of merge suggestions brought: the first list,
+    /// then each `MergeJudged` (offered, left out, done, total), until one
+    /// has `done == total` (or none comes within `wait`).
+    #[allow(clippy::type_complexity)]
+    fn merges(ev: &mut Events, seq: u64, wait: Duration) -> (Option<Vec<super::super::merging::GroupPair>>, Vec<(Vec<super::super::merging::GroupPair>, Vec<super::super::merging::GroupPair>, usize, usize)>) {
+        let stream = &mut ev.stream;
+        ev.rt.block_on(async {
+            use iced::futures::StreamExt;
+            let deadline = Instant::now() + wait;
+            let (mut list, mut judged) = (None, Vec::new());
+            while Instant::now() < deadline {
+                let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await else { continue };
+                for e in batch {
+                    match e {
+                        BgEvent::MergeSuggestions { seq: s, list: l, judging, .. } if s == seq => {
+                            list = Some((*l).clone());
+                            if !judging {
+                                return (list, judged);
+                            }
+                        }
+                        BgEvent::MergeJudged { seq: s, offered, left_out, done, total, .. } if s == seq => {
+                            let last = done == total;
+                            judged.push(((*offered).clone(), (*left_out).clone(), done, total));
+                            if last {
+                                return (list, judged);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (list, judged)
+        })
+    }
+
+    /// The groups of a fursuit library by their cover's photo, once the
+    /// grouping has them all.
+    fn fursuit_groups(e: &Engine, n: usize) -> Vec<(GroupId, Key)> {
+        let started = Instant::now();
+        loop {
+            let g: Vec<(GroupId, Key)> = e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).map(|g| (g.id.clone(), g.cover.face.key)).collect();
+            if g.len() == n {
+                return g;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Merge suggestions through the engine (stage 2), whitened: the pair
+    /// of groups under the suggest cut by distance alone; with the judge,
+    /// every pair up to sure-no compared (one head pair each here: the
+    /// groups are single heads), offered or left out as it says, its
+    /// verdicts kept; "not the same" keeps a pair out, through a regroup,
+    /// and Ctrl+Z brings it back; a merge is the existing merge, one undo
+    /// step; nothing merges by itself.
+    #[test]
+    fn merge_suggestions_by_distance_by_the_judge_and_not_the_same() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0; B 0.699 from it (apart from A: over the group cut 0.69,
+        // under the suggest cut 0.711); C 0.758 from A (the judge's band);
+        // E far from all.
+        let specs = [(1, 0), (2, Suits::at(0.699)), (3, -Suits::at(0.758)), (4, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("merges", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Alternate));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let groups = fursuit_groups(&e, 4);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let (a, b, c) = (id(1), id(2), id(3));
+        let pair_keys = |l: &[super::super::merging::GroupPair]| -> Vec<(GroupId, GroupId)> { l.iter().map(|p| p.key()).collect() };
+        let k = |x: &GroupId, y: &GroupId| super::super::merging::order(x.clone(), y.clone());
+        // The judge off: the suggest cut alone.
+        e.merge_suggestions(1, None, 1, false);
+        let (list, judged) = merges(&mut ev, 1, Duration::from_secs(2));
+        let list = list.expect("suggestions");
+        assert_eq!(pair_keys(&list), [k(&a, &b)]);
+        assert!((list[0].distance - 0.699).abs() < 0.002, "average linkage in the step's space: {}", list[0].distance);
+        assert!(list[0].sure && judged.is_empty());
+        assert_eq!(list[0].a_heads[0].face.key, if list[0].a == a { key_of(1) } else { key_of(2) }, "each side shows its cover first");
+        // A group's own pairs; a group of fewer photos than asked is left out.
+        e.merge_suggestions(2, Some(c.clone()), 1, false);
+        assert!(merges(&mut ev, 2, Duration::from_secs(2)).0.unwrap().is_empty(), "C is in no pair under the suggest cut");
+        e.merge_suggestions(3, None, 2, false);
+        assert!(merges(&mut ev, 3, Duration::from_secs(2)).0.unwrap().is_empty(), "single-photo groups unnamed: folded away, not offered");
+        // The judge on: every pair up to sure-no is compared, nearest first.
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "the choice", |s| s.judge.active(Device::Gpu));
+        e.merge_suggestions(4, None, 1, true);
+        let (list, judged) = merges(&mut ev, 4, Duration::from_secs(5));
+        assert!(list.expect("suggestions").is_empty(), "nothing under sure-yes: all compared");
+        assert_eq!((judged[0].2, judged[0].3), (0, 2));
+        let offered: Vec<_> = judged.iter().flat_map(|j| pair_keys(&j.0)).collect();
+        let left: Vec<_> = judged.iter().flat_map(|j| pair_keys(&j.1)).collect();
+        assert_eq!((offered, left), (vec![k(&a, &b)], vec![k(&a, &c)]), "nearest first: yes, then no");
+        let v = judged.iter().flat_map(|j| j.0.iter()).next().unwrap().verdict.unwrap();
+        assert_eq!((v.yes, v.no, v.unjudged), (1, 0, 0), "single heads: one head pair asked");
+        assert_eq!(fake.pairs.lock().len(), 2);
+        assert!(matches!(&fake.pairs.lock()[1].a, crate::ml::judge::Crop::Head { .. }), "head crops");
+        // Asked again: the verdicts kept answer at once.
+        e.merge_suggestions(5, None, 1, true);
+        let (list, judged) = merges(&mut ev, 5, Duration::from_secs(2));
+        assert_eq!(pair_keys(&list.unwrap()), [k(&a, &b)]);
+        assert_eq!((pair_keys(&judged[0].1), judged[0].2, judged[0].3), (vec![k(&a, &c)], 2, 2));
+        assert_eq!(fake.pairs.lock().len(), 2, "nothing compared twice");
+        assert_eq!(e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count(), 4, "the judge merges nothing");
+        e.set_judge(JudgeChoice::Off);
+        // Not the same: kept out, through a regroup; Ctrl+Z brings it back.
+        e.not_same(a.clone(), b.clone(), vec![], vec![]);
+        e.merge_suggestions(6, None, 1, false);
+        assert!(merges(&mut ev, 6, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        let _ = fursuit_groups(&e, 4);
+        std::thread::sleep(Duration::from_millis(200));
+        e.merge_suggestions(7, None, 1, false);
+        assert!(merges(&mut ev, 7, Duration::from_secs(2)).0.unwrap().is_empty(), "not offered again after a regroup");
+        e.undo();
+        std::thread::sleep(Duration::from_millis(200));
+        e.merge_suggestions(8, None, 1, false);
+        assert_eq!(pair_keys(&merges(&mut ev, 8, Duration::from_secs(2)).0.unwrap()), [k(&a, &b)], "taken back: offered again");
+        // A merge (the user's) is the existing merge: one group fewer, one
+        // undo step; the pair is gone.
+        e.merge(a.clone(), vec![b.clone()]);
+        let _ = fursuit_groups(&e, 3);
+        e.merge_suggestions(9, None, 1, false);
+        assert!(!pair_keys(&merges(&mut ev, 9, Duration::from_secs(2)).0.unwrap()).contains(&k(&a, &b)));
+        e.undo();
+        let _ = fursuit_groups(&e, 4);
+        // Kinds never mix: a person's id is no fursuit group.
+        e.merge_suggestions(10, Some(GroupId::Subject(SubjectId("0".repeat(32)))), 1, false);
+        assert!(merges(&mut ev, 10, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// With the judge on, a pair under sure-yes is offered at once only
+    /// when both covers are clear enough (`judging::CLARITY_MIN`): a dim,
+    /// doubtful head is shown to the judge however close (the vectors
+    /// pull bad heads together).
+    #[test]
+    fn a_sure_pair_goes_to_the_judge_when_a_cover_is_unclear() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}{}", if n == 3 { "dim-" } else { "" }, if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0; B 0.5 from it (clear); C 0.5 from it the other way (dim).
+        let specs = [(1, 0), (2, Suits::at(0.5)), (3, -Suits::at(0.5))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("merges-dim", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Yes));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 3 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        // A and B group together; C alone.  Name A's group, then move B out
+        // to a group of its own.
+        let groups = fursuit_groups(&e, 2);
+        let ab = groups.iter().find(|g| g.1 != key_of(3)).unwrap().0.clone();
+        e.name_group(ab, "Suit".into());
+        let started = Instant::now();
+        let suit = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let b_ref = FaceRef::new(key_of(2), [0.3, 0.2, 0.3, 0.4]);
+        e.move_faces(suit.clone(), vec![b_ref], None);
+        let groups = fursuit_groups(&e, 3);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let k = |x: &GroupId, y: &GroupId| super::super::merging::order(x.clone(), y.clone());
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "the choice", |s| s.judge.active(Device::Gpu));
+        e.merge_suggestions(1, None, 1, true);
+        let (list, judged) = merges(&mut ev, 1, Duration::from_secs(5));
+        assert_eq!(list.unwrap().iter().map(|p| (p.key(), p.sure)).collect::<Vec<_>>(), [(k(&suit, &id(2)), true)], "clear and under sure-yes: at once");
+        let offered: Vec<_> = judged.iter().flat_map(|j| j.0.iter().map(|p| p.key())).collect();
+        assert_eq!(offered, [k(&suit, &id(3))], "the dim one was compared, then offered");
+        assert_eq!(fake.pairs.lock().len(), 1);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Below `whiten::MIN_HEADS` heads the step groups the raw vectors
+    /// with their own cut-offs; the suggestions use the same space and
+    /// cuts (suggest 0.097; the judge's band 0.082 to 0.124).
+    #[test]
+    fn merge_suggestions_use_the_raw_cut_offs_below_the_whitening() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.0955)), (3, -Suits::at(0.11)), (4, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("merges-raw", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Yes));
+        let f2 = fake.clone();
+        e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        assert!(!e.status().heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let groups = fursuit_groups(&e, 4);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let k = |x: &GroupId, y: &GroupId| super::super::merging::order(x.clone(), y.clone());
+        e.merge_suggestions(1, None, 1, false);
+        let list = merges(&mut ev, 1, Duration::from_secs(2)).0.unwrap();
+        assert_eq!(list.iter().map(|p| p.key()).collect::<Vec<_>>(), [k(&id(1), &id(2))], "raw suggest cut");
+        assert!((list[0].distance - 0.0955).abs() < 0.001, "raw distance: {}", list[0].distance);
+        // With the judge: the raw band (C at 0.11 is in it).
+        e.set_judge(JudgeChoice::Gemma4);
+        wait_for(&e, "the choice", |s| s.judge.active(Device::Gpu));
+        e.merge_suggestions(2, None, 1, true);
+        let (_, judged) = merges(&mut ev, 2, Duration::from_secs(5));
+        let offered: HashSet<(GroupId, GroupId)> = judged.iter().flat_map(|j| j.0.iter().map(|p| p.key())).collect();
+        assert_eq!(offered, [k(&id(1), &id(2)), k(&id(1), &id(3))].into_iter().collect(), "both in the raw band, both said yes");
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

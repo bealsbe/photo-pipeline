@@ -40,6 +40,7 @@ pub mod query;
 pub mod step;
 pub mod tags;
 pub mod judging;
+pub mod merging;
 pub mod vocab;
 pub mod whiten;
 
