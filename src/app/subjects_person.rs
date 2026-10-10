@@ -27,6 +27,7 @@ use super::subjects::{self as subj, m as sm};
 use super::{App, Message, View};
 use crate::imaging::thumbs::OWNER_PERSON;
 use crate::model::collection::RecordId;
+use crate::model::decisions::{At, Via};
 use crate::ui::grid::GridEvent;
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
@@ -527,7 +528,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             p.merged_into = Some(target.clone());
             let (a, b) = (subj::label(&app.subjects, &from), subj::label(&app.subjects, &target));
-            app.search.link.merge(&target, &[from]);
+            app.search.link.merge(&target, &[from], Via::Hand(At::Menu));
             let a = if a == "the unnamed group" { "The group".to_string() } else { a };
             app.show_status_action(format!("{a} was merged into {b}."), "Undo", sm(subj::Msg::Undo))
         }
@@ -625,7 +626,7 @@ fn take_name(app: &mut App, i: usize) -> Task<Message> {
         }
         NameOption::MergeInto { id: target, name, .. } => {
             p.merged_into = Some(target.clone());
-            app.search.link.merge(&target, &[id]);
+            app.search.link.merge(&target, &[id], Via::Hand(At::Name));
             Task::batch([unfocus(), app.show_status_action(format!("Merged this group into {name}."), "Undo", sm(subj::Msg::Undo))])
         }
     }
@@ -643,7 +644,8 @@ fn move_to(app: &mut App, to: Option<GroupId>) -> Task<Message> {
     let faces = std::mem::take(&mut p.picked);
     let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(&from, &faces, to.as_ref());
+    let at = if p.kind == Kind::Fursuit { At::Heads } else { At::Faces };
+    app.search.link.move_faces(&from, &faces, to.as_ref(), Via::Hand(at));
     let whom = to.as_ref().map_or_else(|| "a new group to name".to_string(), |t| subj::label(&app.subjects, t));
     app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, "face")), "Undo", sm(subj::Msg::Undo))
 }
@@ -657,7 +659,8 @@ fn not_this(app: &mut App) -> Task<Message> {
     let faces = std::mem::take(&mut p.picked);
     let group = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.answer(&group, &faces, Some(false));
+    let at = if p.kind == Kind::Fursuit { At::Heads } else { At::Faces };
+    app.search.link.answer(&group, &faces, Some(false), Via::Hand(at));
     let name = subj::label(&app.subjects, &group);
     app.show_status_action(format!("Took {} out of {name}. They won't be suggested again.", util::plural(n, "photo")), "Undo", sm(subj::Msg::Undo))
 }

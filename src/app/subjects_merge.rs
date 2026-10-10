@@ -34,6 +34,7 @@ use super::style;
 use super::subjects::{self as subj, MergeAsk, Page};
 use super::viewer_advance::BEAT_MS;
 use super::{App, Message, View};
+use crate::model::decisions::{At, Via};
 use crate::search::merging::{self, GroupPair};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
@@ -477,6 +478,12 @@ fn into_of(a: &super::people::Group, b: &super::people::Group) -> Option<GroupId
     }
 }
 
+/// A pair as the decision record has it: offered by its distance, or by
+/// the judge's majority.
+fn via(p: &GroupPair, at: At) -> Via {
+    Via::Pair { at, distance: p.distance, sure: p.sure, verdict: p.verdict }
+}
+
 fn answer(app: &mut App, yes: bool) -> Task<Message> {
     let advance = app.settings.viewer_advance;
     let Some(r) = app.subjects.merges.as_ref() else { return Task::none() };
@@ -499,13 +506,13 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
         match into_of(a, b) {
             Some(into) => {
                 let other = if into == p.a { p.b.clone() } else { p.a.clone() };
-                app.search.link.merge(&into, &[other]);
+                app.search.link.merge(&into, &[other], via(&p, At::MergeReview));
                 Answer::Merged
             }
             None => {
                 // Two names: the one dialog asks which to keep.
                 let all = app.subjects.all.clone();
-                app.subjects.merge = MergeAsk::new(&all, vec![p.a.clone(), p.b.clone()], Some(&p.a));
+                app.subjects.merge = MergeAsk::new(&all, vec![p.a.clone(), p.b.clone()], Some(&p.a)).map(|m| MergeAsk { via: via(&p, At::MergeReview), ..m });
                 if let Some(r) = app.subjects.merges.as_mut() {
                     r.pending_merge = Some(i);
                 }
@@ -514,7 +521,7 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
         }
     } else {
         let heads = |h: &[Face]| h.iter().map(|f| f.face).collect::<Vec<FaceRef>>();
-        app.search.link.not_same(&p.a, &p.b, &heads(&p.a_heads), &heads(&p.b_heads));
+        app.search.link.not_same(&p.a, &p.b, &heads(&p.a_heads), &heads(&p.b_heads), via(&p, At::MergeReview));
         Answer::NotSame
     };
     record(app, i, what, advance)
@@ -606,7 +613,7 @@ fn similar_merge(app: &mut App, i: usize) -> Task<Message> {
     match (mine.name.is_some(), other.name.is_some()) {
         (true, true) => {
             let all = app.subjects.all.clone();
-            app.subjects.merge = MergeAsk::new(&all, vec![me.clone(), other_id], Some(&me));
+            app.subjects.merge = MergeAsk::new(&all, vec![me.clone(), other_id], Some(&me)).map(|m| MergeAsk { via: via(&pair, At::Similar), ..m });
             subj::refresh_crops(app)
         }
         (named_me, named_other) => {
@@ -616,7 +623,7 @@ fn similar_merge(app: &mut App, i: usize) -> Task<Message> {
             if into != me {
                 super::subjects_person::follow(app, &into);
             }
-            app.search.link.merge(&into, &[gone]);
+            app.search.link.merge(&into, &[gone], via(&pair, At::Similar));
             let name = mine.name.or(other.name).unwrap_or_else(|| "one group".into());
             app.show_status_action(format!("Merged the two groups into {name}."), "Undo", subj::m(subj::Msg::Undo))
         }
@@ -626,7 +633,7 @@ fn similar_merge(app: &mut App, i: usize) -> Task<Message> {
 fn similar_not_same(app: &mut App, i: usize) -> Task<Message> {
     let Some((_, pair)) = similar_pair(app, i) else { return Task::none() };
     let heads = |h: &[Face]| h.iter().map(|f| f.face).collect::<Vec<FaceRef>>();
-    app.search.link.not_same(&pair.a, &pair.b, &heads(&pair.a_heads), &heads(&pair.b_heads));
+    app.search.link.not_same(&pair.a, &pair.b, &heads(&pair.a_heads), &heads(&pair.b_heads), via(&pair, At::Similar));
     app.show_status_action("Not the same fursuit: that group won't be suggested here again.", "Undo", subj::m(subj::Msg::Undo))
 }
 

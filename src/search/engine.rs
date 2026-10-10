@@ -40,7 +40,10 @@ use crate::model::bursts::Bursts;
 use crate::model::collection::Collection;
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, PhotoRecord};
+use crate::model::decisions::{Recorder, Via};
 use crate::model::subjects::{Face, FaceRef, Framing, GroupId, Kind, LabelBox, LabelEdit, LabelTarget, PendingWhy, PhotoLabels, Refused, SubjectId, Subjects};
+
+mod record;
 
 /// What a worker brought back for drawn boxes: per photo, the faces
 /// recognised (with their landmarks and tiles) and the heads embedded;
@@ -76,13 +79,13 @@ enum Cmd {
     FindFaces,
     NameGroup(GroupId, String),
     Rename(SubjectId, String),
-    Merge { into: GroupId, others: Vec<GroupId> },
+    Merge { into: GroupId, others: Vec<GroupId>, via: Via },
     SetHidden(GroupId, bool),
     Forget(SubjectId),
     ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
-    MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId> },
-    Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
+    MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via },
+    Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>, via: Via },
     Suggestions { seq: u64, group: GroupId },
     Undo,
     // The viewer's labels.
@@ -111,7 +114,7 @@ enum Cmd {
     GroupCheck { seq: u64, group: GroupId },
     SetGrouping(heads::Grouping),
     Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
-    NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
+    NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via },
     // Fursuit matching v2.
     CatchUpHeadVectors,
     /// Tests: whiten with fewer heads than a library needs.
@@ -131,6 +134,8 @@ enum Cmd {
     Whiten(Box<super::whiten::Whitening>),
     /// A whitening fit finished on its worker (`None`: too few heads).
     Whitened(Option<Box<super::whiten::Whitening>>),
+    /// Every decision sent so far written to the record (the exit).
+    FlushDecisions(Sender<()>),
     Shutdown,
 }
 
@@ -219,6 +224,9 @@ pub struct Storage {
 pub struct Engine {
     tx: Sender<Cmd>,
     shared: Arc<Shared>,
+    /// The record of the user's corrections (`model::decisions`), beside
+    /// the subjects file.
+    decisions: Recorder,
 }
 
 struct Shared {
@@ -292,6 +300,10 @@ impl Engine {
         let s = shared.clone();
         let me = tx.clone();
         let Config { factory, installed, index_dir, subjects_path, downloader } = config;
+        // The record lives beside the user's subjects file (in memory
+        // only when that is, for tests).
+        let decisions = Recorder::new(subjects_path.as_ref().map(|p| p.with_file_name(crate::model::decisions::FILE_NAME)));
+        let recorder = decisions.clone();
         std::thread::Builder::new()
             .name("search-engine".into())
             .spawn(move || {
@@ -347,11 +359,19 @@ impl Engine {
                     judge_token: 0,
                     embedder_has_faces: false,
                     drawn_running: false,
+                    decisions: recorder,
+                    answered: HashMap::new(),
                 }
                 .run()
             })
             .expect("spawn search-engine");
-        Engine { tx, shared }
+        Engine { tx, shared, decisions }
+    }
+
+    /// The record of the user's corrections: its switch, *Delete*,
+    /// *Export* (a cheap handle; its writing is on its own thread).
+    pub fn decisions(&self) -> Recorder {
+        self.decisions.clone()
     }
 
     /// The latest snapshot (a clone; no I/O).
@@ -375,6 +395,15 @@ impl Engine {
     }
 
     /// Stop the pass and the helper; the index is flushed.
+    /// Wait (at most `limit`) until the edits sent so far are in the
+    /// decision record: the exit's last step, so a correction made just
+    /// before quitting isn't lost.  **Blocks** for that long at most.
+    pub fn flush_decisions(&self, limit: Duration) {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.send(Cmd::FlushDecisions(tx));
+        let _ = rx.recv_timeout(limit);
+    }
+
     pub fn shutdown(&self) {
         self.send(Cmd::Shutdown);
     }
@@ -425,9 +454,10 @@ impl Engine {
     }
 
     /// Merge `others` into `into`; refused, and nothing changed, when the
-    /// kinds differ.  Ctrl+Z ([`Engine::undo`]) takes it back.
-    pub fn merge(&self, into: GroupId, others: Vec<GroupId>) {
-        self.send(Cmd::Merge { into, others });
+    /// kinds differ.  Ctrl+Z ([`Engine::undo`]) takes it back.  `via`:
+    /// how the page came to it, for the decision record.
+    pub fn merge(&self, into: GroupId, others: Vec<GroupId>, via: Via) {
+        self.send(Cmd::Merge { into, others, via });
     }
 
     /// Hide a group from its tab and from completions (its photos still
@@ -450,16 +480,16 @@ impl Engine {
 
     /// Move faces out of `from`: into `to` (the same kind, else refused),
     /// or into a new unnamed group (`None`).
-    pub fn move_faces(&self, from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>) {
-        self.send(Cmd::MoveFaces { from, faces, to });
+    pub fn move_faces(&self, from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via) {
+        self.send(Cmd::MoveFaces { from, faces, to, via });
     }
 
     /// A review answer: `Some(true)` adds the faces to the group,
     /// `Some(false)` is "not this person" (out of the members, never
     /// suggested again), `None` takes an answer back.  One call covers a
     /// burst's frames.
-    pub fn answer(&self, group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>) {
-        self.send(Cmd::Answer { group, faces, yes });
+    pub fn answer(&self, group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>, via: Via) {
+        self.send(Cmd::Answer { group, faces, yes, via });
     }
 
     /// Suggestions for review: `BgEvent::Suggestions { seq, .. }`, one
@@ -621,8 +651,8 @@ impl Engine {
     /// "Not the same": two fursuit groups a suggestion offered are
     /// different suits; kept by their heads (`a_heads`, `b_heads`, as
     /// shown) in the user's file, one undo step.
-    pub fn not_same(&self, a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>) {
-        self.send(Cmd::NotSame { a, b, a_heads, b_heads });
+    pub fn not_same(&self, a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via) {
+        self.send(Cmd::NotSame { a, b, a_heads, b_heads, via });
     }
 
     /// Tests: whiten with as few as `n` heads.
@@ -896,6 +926,11 @@ struct Worker {
     embedder_has_faces: bool,
     /// Drawn boxes are being matched on a worker (one batch at a time).
     drawn_running: bool,
+    /// The record of the user's corrections.
+    decisions: Recorder,
+    /// Review answers recorded this session, by their heads: an answer
+    /// taken back names its entry.
+    answered: HashMap<Vec<FaceRef>, (String, Kind)>,
 }
 
 /// One pair of groups the judge compares: its head pairs and their
@@ -1184,15 +1219,28 @@ impl Worker {
                 }
                 Cmd::FindFaces => self.face_pass_or_download(false),
                 Cmd::NameGroup(id, name) => {
+                    let before = self.before_name_group(&id, &name);
                     let r = self.people.name_group(&id, name);
+                    if r.is_ok() {
+                        self.record(before, Via::Hand(crate::model::decisions::At::Name));
+                    }
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::Rename(id, name) => {
-                    let r = self.people.name_group(&GroupId::Subject(id), name);
+                    let id = GroupId::Subject(id);
+                    let before = self.before_name_group(&id, &name);
+                    let r = self.people.name_group(&id, name);
+                    if r.is_ok() {
+                        self.record(before, Via::Hand(crate::model::decisions::At::Name));
+                    }
                     self.after_edit(r.map(|_| ()));
                 }
-                Cmd::Merge { into, others } => {
+                Cmd::Merge { into, others, via } => {
+                    let before = self.before_merge(&into, &others);
                     let r = self.people.merge(&into, &others);
+                    if r.is_ok() {
+                        self.record(before, via);
+                    }
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::SetHidden(id, hidden) => {
@@ -1204,6 +1252,9 @@ impl Worker {
                     self.after_edit(r);
                 }
                 Cmd::ForgetKind(kind) => {
+                    // The record's entries of the kind go with it.
+                    self.decisions.forget_kind(kind);
+                    self.answered.retain(|_, (_, k)| *k != kind);
                     self.people.forget_kind(kind);
                     match kind {
                         Kind::Person => self.people.reset_grouping(),
@@ -1225,12 +1276,28 @@ impl Worker {
                     let faces = self.people.faces(&group, &|f| self.resolve_face(f)).unwrap_or_default();
                     let _ = self.bus.unbounded_send(BgEvent::SubjectFaces { seq, group, faces: Arc::new(faces) });
                 }
-                Cmd::MoveFaces { from, faces, to } => {
+                Cmd::MoveFaces { from, faces, to, via } => {
+                    let before = self.before_move(&from, &faces, to.as_ref());
                     let r = self.people.move_faces(&from, faces, to.as_ref());
+                    if r.is_ok() {
+                        self.record(before, via);
+                    }
                     self.after_edit(r.map(|_| ()));
                 }
-                Cmd::Answer { group, faces, yes } => {
+                Cmd::Answer { group, faces, yes, via } => {
+                    let before = match yes {
+                        Some(y) => self.before_answer(&group, &faces, y),
+                        None => None,
+                    };
+                    // Taking an answer back is an undo of its entry.
+                    let undone = if yes.is_none() { self.answered_entry(&faces) } else { None };
                     let r = self.people.answer(&group, faces, yes);
+                    if r.is_ok() {
+                        match yes {
+                            Some(_) => self.record(before, via),
+                            None => self.record_undo(undone, true),
+                        }
+                    }
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::Suggestions { seq, group } => self.send_suggestions(seq, group, false),
@@ -1241,7 +1308,12 @@ impl Worker {
                 }
                 Cmd::Label(edit) => {
                     let draws = matches!(edit, LabelEdit::Add { .. } | LabelEdit::Kind { .. });
+                    let before = self.before_label(&edit);
                     let r = self.people.label(&edit);
+                    if r.is_ok() {
+                        let entry = self.after_label(&edit, before);
+                        self.record(entry, Via::Hand(crate::model::decisions::At::Viewer));
+                    }
                     if let Ok(what) = &r {
                         if std::env::var_os("PP_PROFILE").is_some() {
                             eprintln!("labels: {what}");
@@ -1256,11 +1328,14 @@ impl Worker {
                     }
                 }
                 Cmd::RemoveBoxes { kind, targets } => {
+                    let before = self.before_remove_boxes(kind, &targets);
                     let r = self.people.remove_boxes(kind, &targets);
-                    if let Ok((what, _)) = &r {
+                    if let Ok((what, heads)) = &r {
                         if std::env::var_os("PP_PROFILE").is_some() {
                             eprintln!("labels: {what}");
                         }
+                        let at = if kind == Kind::Fursuit { crate::model::decisions::At::Heads } else { crate::model::decisions::At::Faces };
+                        self.record(Worker::removed_heads(before, heads), Via::Hand(at));
                     }
                     self.after_edit(r.map(|_| ()));
                 }
@@ -1295,8 +1370,12 @@ impl Worker {
                     };
                     let _ = self.bus.unbounded_send(BgEvent::GroupCheck { seq, group, far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
                 }
-                Cmd::NotSame { a, b, a_heads, b_heads } => {
+                Cmd::NotSame { a, b, a_heads, b_heads, via } => {
+                    let before = self.before_not_same(&a, &b, &a_heads, &b_heads);
                     let r = self.people.not_same(&a, &b, a_heads, b_heads);
+                    if r.is_ok() {
+                        self.record(before, via);
+                    }
                     self.after_edit(r);
                 }
                 Cmd::SetFindHeads(on) => {
@@ -1381,7 +1460,8 @@ impl Worker {
                     self.maybe_fit(false);
                 }
                 Cmd::Undo => {
-                    if let Some(what) = self.people.undo() {
+                    if let Some((what, recorded)) = self.people.undo_recorded() {
+                        self.record_undo(recorded, false);
                         let _ = self.bus.unbounded_send(BgEvent::SubjectsUndone(what));
                         self.publish_subjects();
                         self.start_regroup();
@@ -1412,6 +1492,10 @@ impl Worker {
                         }
                     }
                 },
+                Cmd::FlushDecisions(reply) => {
+                    self.decisions.flush();
+                    let _ = reply.send(());
+                }
                 Cmd::Shutdown => break,
             }
         }
@@ -4246,7 +4330,7 @@ mod tests {
         assert_eq!(e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count(), 4, "the judge merges nothing");
         e.set_judge(JudgeChoice::Off);
         // Not the same: kept out, through a regroup; Ctrl+Z brings it back.
-        e.not_same(a.clone(), b.clone(), vec![], vec![]);
+        e.not_same(a.clone(), b.clone(), vec![], vec![], Via::default());
         e.merge_suggestions(6, None, 1, false);
         assert!(merges(&mut ev, 6, Duration::from_secs(2)).0.unwrap().is_empty());
         e.set_whitening(super::super::whiten::Whitening::identity(2));
@@ -4260,7 +4344,7 @@ mod tests {
         assert_eq!(pair_keys(&merges(&mut ev, 8, Duration::from_secs(2)).0.unwrap()), [k(&a, &b)], "taken back: offered again");
         // A merge (the user's) is the existing merge: one group fewer, one
         // undo step; the pair is gone.
-        e.merge(a.clone(), vec![b.clone()]);
+        e.merge(a.clone(), vec![b.clone()], Via::default());
         let _ = fursuit_groups(&e, 3);
         e.merge_suggestions(9, None, 1, false);
         assert!(!pair_keys(&merges(&mut ev, 9, Duration::from_secs(2)).0.unwrap()).contains(&k(&a, &b)));
@@ -4269,6 +4353,168 @@ mod tests {
         // Kinds never mix: a person's id is no fursuit group.
         e.merge_suggestions(10, Some(GroupId::Subject(SubjectId("0".repeat(32)))), 1, false);
         assert!(merges(&mut ev, 10, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The decision record through the engine: each decision (a merge,
+    /// its undo, "not the same", a split, a review answer and its taking
+    /// back, label edits) appends one self-contained entry, measured
+    /// before the change, with the heads by key and box, how it was
+    /// reached and the library's state; Clear and Rebuild keep it; the
+    /// switch off writes nothing; *Forget all fursuits* takes their
+    /// entries out.  The file is beside the subjects file, 0600.
+    #[test]
+    fn every_decision_is_recorded_and_the_record_survives_clear_and_rebuild() {
+        use crate::model::decisions::{Act, At, Entry, Via};
+        use crate::search::merging::GroupVerdict;
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0; B 0.699 from it; C 0.758 from A; E far from all.
+        let specs = [(1, 0), (2, Suits::at(0.699)), (3, -Suits::at(0.758)), (4, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("decisions", &refs);
+        let user = d.join("user").join("subjects.json");
+        let record = d.join("user").join(crate::model::decisions::FILE_NAME);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, _rx) = crate::bus::channel();
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(user.clone()), downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        assert_eq!(e.decisions().path(), Some(record.as_path()), "beside the subjects file");
+        // Not the default choice, so the entries show the one in force.
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+        let groups = fursuit_groups(&e, 4);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let (a, b) = (id(1), id(2));
+        let until = |n: usize| -> Vec<Entry> {
+            let started = Instant::now();
+            loop {
+                let got = e.decisions().entries();
+                if got.len() >= n {
+                    return got;
+                }
+                assert!(started.elapsed() < Duration::from_secs(5), "{} of {n} entries: {got:?}", got.len());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // Every entry stands alone: its kind, the library, how.
+        let alone = |x: &Entry| {
+            assert_eq!(x.kind, Kind::Fursuit);
+            let l = x.lib.as_ref().expect("the library's state");
+            assert!(l.white && l.heads == 4 && l.model == heads::VECTOR_MODEL.dir_name(), "{l:?}");
+            let g = heads::GroupingCuts::of(heads::Grouping::Tighter, true);
+            assert_eq!((l.grouping, l.cuts.group, l.cuts.suggest, l.cuts.merge_suggest, l.cuts.merge_far), (Some(g.grouping), g.group, heads::CUTOFFS.suggest, Some(g.merge_suggest), Some(g.merge_far)), "the setting and cut-offs in force");
+            assert!(x.how.is_some());
+        };
+        // A merge offered by distance: both sides by their heads, the
+        // other's distance measured in the step's space.
+        e.merge(a.clone(), vec![b.clone()], Via::Pair { at: At::MergeReview, distance: 0.6991, sure: true, verdict: None });
+        let got = until(1);
+        let merge = &got[0];
+        alone(merge);
+        let Act::Merge { groups } = &merge.act else { panic!("{merge:?}") };
+        assert_eq!((groups[0].heads[0].0, groups[1].heads[0].0, groups[0].n, groups[1].n), (head(1), head(2), 1, 1), "the kept group first");
+        assert!((groups[1].d.unwrap() - 0.699).abs() < 0.002, "{:?}", groups[1].d);
+        let how = merge.how.as_ref().unwrap();
+        assert_eq!((how.by.as_str(), how.at, how.d, how.sure), ("distance", Some(At::MergeReview), Some(0.6991), Some(true)));
+        // Undo appends, naming it.
+        let _ = fursuit_groups(&e, 3);
+        e.undo();
+        let got = until(2);
+        assert!(matches!(&got[1].act, Act::Undo { undoes, of } if *undoes == merge.id && of == "merge"), "{:?}", got[1]);
+        let groups = fursuit_groups(&e, 4);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let (a, c, far) = (id(1), id(3), id(4));
+        // "Not the same", the judge's majority against.
+        e.not_same(a.clone(), c.clone(), vec![head(1)], vec![head(3)], Via::Pair { at: At::MergeReview, distance: 0.758, sure: false, verdict: Some(GroupVerdict { yes: 0, no: 2, unjudged: 1 }) });
+        let got = until(3);
+        alone(&got[2]);
+        let how = got[2].how.as_ref().unwrap();
+        assert_eq!((how.by.as_str(), how.yes, how.no, how.unseen), ("judge", Some(0), Some(2), Some(1)));
+        assert!(matches!(&got[2].act, Act::NotSame { groups } if groups[0].heads[0].0 == head(1) && groups[1].heads[0].0 == head(3)));
+        // A split proposed around two heads of one photo.
+        e.move_faces(far.clone(), vec![head(4)], None, Via::Proposal);
+        let got = until(4);
+        alone(&got[3]);
+        assert!(matches!(&got[3].act, Act::Split { from, heads, moved: 1 } if from.n == 1 && heads[0].0 == head(4)), "{:?}", got[3]);
+        assert_eq!(got[3].how.as_ref().unwrap().by, "proposal");
+        // A review answer: C is A, by distance; the nearest member measured.
+        e.answer(a.clone(), vec![head(3)], Some(true), Via::Review { judge: None, check: false });
+        let got = until(5);
+        alone(&got[4]);
+        assert!(matches!(&got[4].act, Act::Answer { yes: true, group, heads } if group.heads[0].0 == head(1) && heads[0].0 == head(3)));
+        let how = got[4].how.as_ref().unwrap();
+        assert_eq!((how.by.as_str(), how.pair.map(|p| (p[0].0, p[1].0))), ("distance", Some((head(3), head(1)))));
+        assert!((how.d.unwrap() - 0.758).abs() < 0.002, "{how:?}");
+        // Taken back in the review: an undo naming the answer.
+        let answered = got[4].id.clone();
+        let named = e.subjects().groups.iter().find(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Subject(_))).map(|g| g.id.clone()).unwrap();
+        e.answer(named, vec![head(3)], None, Via::Review { judge: None, check: false });
+        let got = until(6);
+        assert!(matches!(&got[5].act, Act::Undo { undoes, of } if *undoes == answered && of == "answer"), "{:?}", got[5]);
+        // Label edits in the viewer: a name, a removal.
+        e.label(LabelEdit::Name { face: head(2), kind: Kind::Fursuit, to: crate::model::subjects::NameTo::New("Suit".into()) });
+        e.label(LabelEdit::Remove { face: head(4), kind: Kind::Fursuit });
+        let got = until(8);
+        alone(&got[6]);
+        assert!(matches!(&got[6].act, Act::Name { head: Some(h), name: Some(n), .. } if h.0 == head(2) && n == "Suit"), "{:?}", got[6]);
+        assert!(matches!(&got[7].act, Act::Remove { head: h } if h.0 == head(4)));
+        assert_eq!(got[7].how.as_ref().unwrap().at, Some(At::Viewer));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&record).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        // Clear and Rebuild keep the record, byte for byte.
+        let before = std::fs::read(&record).unwrap();
+        e.clear_index();
+        wait_for(&e, "cleared", |s| s.indexed_shots == 0);
+        e.rebuild_index();
+        wait_for(&e, "rebuilt", |s| s.indexed_shots == 4 && s.pass.is_none());
+        e.flush_decisions(Duration::from_secs(2));
+        assert_eq!(std::fs::read(&record).unwrap(), before, "Clear and Rebuild keep the record");
+        // The switch off: nothing is written.
+        e.decisions().set_on(false);
+        e.label(LabelEdit::Remove { face: head(1), kind: Kind::Fursuit });
+        e.undo();
+        e.flush_decisions(Duration::from_secs(2));
+        assert_eq!(std::fs::read(&record).unwrap(), before, "off writes nothing");
+        // ... but taking back a correction the record holds still says so.
+        e.decisions().set_on(true);
+        e.label(LabelEdit::Remove { face: head(3), kind: Kind::Fursuit });
+        let got = until(9);
+        let removed = got[8].id.clone();
+        e.decisions().set_on(false);
+        e.undo();
+        let got = until(10);
+        assert!(matches!(&got[9].act, Act::Undo { undoes, of } if *undoes == removed && of == "remove"), "{:?}", got[9]);
+        e.label(LabelEdit::Remove { face: head(3), kind: Kind::Fursuit });
+        e.flush_decisions(Duration::from_secs(2));
+        assert_eq!(e.decisions().entries().len(), 10, "nothing new while off");
+        e.decisions().set_on(true);
+        // "Not fursuit heads" on a group: one entry, the group as it was
+        // and the heads removed.
+        let suit = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")).map(|g| g.id.clone()).expect("the named head's group");
+        e.remove_boxes(Kind::Fursuit, vec![(suit, None)]);
+        let got = until(11);
+        // After the rebuild the heads are raw again (too few to whiten):
+        // the entry says so, with the raw cuts of the same choice.
+        let l = got[10].lib.as_ref().unwrap();
+        let g = heads::GroupingCuts::of(heads::Grouping::Tighter, false);
+        assert_eq!((l.white, l.grouping, l.cuts.group, l.cuts.merge_suggest), (false, Some(g.grouping), g.group, Some(g.merge_suggest)), "{l:?}");
+        assert!(matches!(&got[10].act, Act::RemoveMany { groups, heads, removed: 1 } if groups[0].name.as_deref() == Some("Suit") && heads[0].0 == head(2)), "{:?}", got[10]);
+        // Forget all fursuits: their entries go (here, all of them).
+        e.forget_kind(Kind::Fursuit);
+        e.flush_decisions(Duration::from_secs(2));
+        e.decisions().flush();
+        assert!(!record.exists(), "the fursuit entries are forgotten");
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -4421,7 +4667,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         let b_ref = FaceRef::new(key_of(2), [0.3, 0.2, 0.3, 0.4]);
-        e.move_faces(suit.clone(), vec![b_ref], None);
+        e.move_faces(suit.clone(), vec![b_ref], None, Via::default());
         // Three groups, B's of its own: a listing from before the move
         // landed can hold three groups too, so wait for B's.
         let started = Instant::now();

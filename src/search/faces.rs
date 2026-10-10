@@ -672,8 +672,10 @@ pub struct People {
     /// group finds its members and its kind here, and the kinds check
     /// refuses a mix.  Never people's rows.
     pub other_clusters: HashMap<u64, (Kind, Vec<FaceRef>)>,
-    /// Earlier states of the file with what changed them, newest last.
-    undo: Vec<(SubjectsFile, String)>,
+    /// Earlier states of the file with what changed them, newest last,
+    /// and the decision record's entry for the change (its id and kind),
+    /// when one was written.
+    undo: Vec<(SubjectsFile, String, Option<(String, Kind)>)>,
     /// The snapshot last built.
     pub snapshot: Arc<Subjects>,
     /// Moves on with every regroup: cluster ids are valid within one.
@@ -725,18 +727,33 @@ impl People {
     /// Record the state before an edit, so [`People::undo`] can restore
     /// it; `what` is the undo's description ("Named a group Someone").
     fn checkpoint(&mut self, what: impl Into<String>) {
-        self.undo.push((self.file.clone(), what.into()));
+        self.undo.push((self.file.clone(), what.into(), None));
         if self.undo.len() > UNDO_DEPTH {
             self.undo.remove(0);
         }
     }
 
     /// Take the last edit back; returns what was undone.
+    #[cfg(test)]
     pub fn undo(&mut self) -> Option<String> {
-        let (file, what) = self.undo.pop()?;
+        self.undo_recorded().map(|(what, _)| what)
+    }
+
+    /// [`People::undo`], with the decision record's entry for the change
+    /// taken back (its id and kind), if one was written.
+    pub fn undo_recorded(&mut self) -> Option<(String, Option<(String, Kind)>)> {
+        let (file, what, recorded) = self.undo.pop()?;
         self.file = file;
         self.save();
-        Some(what)
+        Some((what, recorded))
+    }
+
+    /// The decision record's entry for the last change (the newest undo
+    /// step), so its undo can name it.
+    pub fn mark_recorded(&mut self, id: String, kind: Kind) {
+        if let Some(last) = self.undo.last_mut() {
+            last.2 = Some((id, kind));
+        }
     }
 
     /// Write the file (whole, atomically, private).
@@ -790,7 +807,7 @@ impl People {
     }
 
     /// A group's confirmed or clustered faces.
-    fn members(&self, id: &GroupId) -> Result<(Kind, Vec<FaceRef>), Refused> {
+    pub fn members(&self, id: &GroupId) -> Result<(Kind, Vec<FaceRef>), Refused> {
         match id {
             GroupId::Subject(s) => {
                 let s = self.file.get(s).ok_or_else(|| Refused::NoSuchSubject(s.clone()))?;
@@ -1046,7 +1063,7 @@ impl People {
         let before = self.file.clone();
         match apply_label(&mut self.file, edit) {
             Ok(what) => {
-                self.undo.push((before, what.clone()));
+                self.undo.push((before, what.clone(), None));
                 if self.undo.len() > UNDO_DEPTH {
                     self.undo.remove(0);
                 }
@@ -1170,7 +1187,7 @@ impl People {
             }
         }
         groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
-        let undoable = self.undo.last().map(|(_, what)| what.clone());
+        let undoable = self.undo.last().map(|(_, what, _)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
         Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new() })
     }

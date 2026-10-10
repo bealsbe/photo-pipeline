@@ -31,6 +31,7 @@ use super::people::{Face, FaceRef, Framing, GroupId, Kind, KindWords};
 use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::{App, Message};
+use crate::model::decisions::{At, Via};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::subject_tile::{self as tile, Tile};
@@ -376,7 +377,7 @@ fn move_faces(app: &mut App, from: usize, faces: Vec<FaceRef>, target: Target) -
     p.anchors[from].retain(|f| !faces.contains(f));
     let crops = if p.kind == Kind::Fursuit { "head" } else { "face" };
     let n = faces.len() as u64;
-    app.search.link.move_faces(&source, &faces, to.as_ref());
+    app.search.link.move_faces(&source, &faces, to.as_ref(), Via::Hand(At::SideBySide));
     let whom = to.as_ref().map_or_else(|| "a new group".to_string(), |t| subj::label(&app.subjects, t));
     app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, crops)), "Undo", sm(subj::Msg::Undo))
 }
