@@ -111,6 +111,7 @@ enum Cmd {
     GroupCheck { seq: u64, group: GroupId },
     SetGrouping(heads::Grouping),
     Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
+    HeadsOrder { seq: u64, heads: Vec<FaceRef> },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -608,6 +609,12 @@ impl Engine {
     /// heads when a move gives a group a new id.
     pub fn locate(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
         self.send(Cmd::Locate { seq, kind, heads });
+    }
+
+    /// A set of fursuit heads farthest from the rest of the set first
+    /// (`BgEvent::HeadsOrder`): the sides of a split being arranged.
+    pub fn heads_order(&self, seq: u64, heads: Vec<FaceRef>) {
+        self.send(Cmd::HeadsOrder { seq, heads });
     }
 
     /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
@@ -1284,6 +1291,10 @@ impl Worker {
                 Cmd::Locate { seq, kind, heads } => {
                     let groups: Vec<Option<GroupId>> = heads.iter().map(|h| self.people.group_of(kind, h)).collect();
                     let _ = self.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
+                }
+                Cmd::HeadsOrder { seq, heads } => {
+                    let far = self.fursuits.far_order_of(&heads);
+                    let _ = self.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
                 }
                 Cmd::GroupCheck { seq, group } => {
                     self.fursuits.step();

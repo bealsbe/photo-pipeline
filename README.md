@@ -609,14 +609,24 @@ never shown, merged, suggested or completed together with people or pets.
   first, the few farthest marked, where a stray usually is (unnamed
   groups open that way, named ones *Clearest first*; either switches).
   Shift+click picks a run; *Split into a new group* in the pick strip
-  moves the picked heads out; or drag them onto a group in the tray that
-  shows while dragging (or *A new group*).  "Check this group" goes least
-  alike first too.  A group with **two heads in one photo** holds at least
-  two fursuits: its tile carries a split mark, and its page says so with
-  the two heads and *Propose a split…*, which shows the group split
-  around them (each head with the one it looks more like) for you to
-  check, swap and confirm.  Nothing moves until you do; each split is one
-  undo step; heads removed in the viewer are in none of it.
+  opens the group in two columns, the picked heads on *Splits off*, to
+  adjust before splitting; or drag them onto a group in the tray that
+  shows while dragging (*A new group* there splits them off at once).
+  "Check this group" goes least alike first too.  A group with **two
+  heads in one photo** holds at least two fursuits: its tile carries a
+  split mark, and its page says so with the two heads and *Propose a
+  split…*, which shows the group split around them (each head beside the
+  one it looks more like) in the same two columns.
+- **Arranging a split.**  *Stays* and *Splits off*, each least like the
+  rest of that side first and scrolling (crops load as they come on
+  screen).  Drag a head (the picked ones with it) to the other column, or
+  pick (Shift+click a run) and press ← or →; *Swap sides*; Ctrl+Z takes
+  back the last change.  In a proposal the two heads from one photo are
+  pinned, first in their columns: one stays, one splits off, and neither
+  moves.  "N stay · M split off" counts as you go.  Nothing changes in
+  the library until *Split off* (or Enter), which makes the final
+  arrangement as one move, one undo step; Esc or *Cancel* leaves
+  everything as it was.  Heads removed in the viewer are in none of it.
 - **Two groups side by side** (people and fursuits alike), to move faces
   or heads between them: pick two groups on the tab (S, then click) and
   press C or *Side by side*; or on a group's page ⋯ ▸ *Side by side

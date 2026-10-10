@@ -418,6 +418,18 @@ impl Link {
         }
     }
 
+    /// A set of fursuit heads farthest from the rest first
+    /// (`BgEvent::HeadsOrder`).
+    pub fn heads_order(&self, seq: u64, heads: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.heads_order(seq, heads.to_vec()),
+            Link::Fake(f) => {
+                let far = f.state.lock().fursuits.far_order_of(heads);
+                let _ = f.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
+            }
+        }
+    }
+
     /// Which group of `kind` holds each of `heads` now (`BgEvent::Located`).
     pub fn locate(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
         match self {

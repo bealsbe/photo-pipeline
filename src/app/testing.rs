@@ -200,6 +200,8 @@
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
 //! split propose|swap|go|cancel   # the proposed split (two heads in one photo)
+//! split arrange pick 0 2|shiftpick 1 5|move left|right|drag 0 2 right|dragto 0 2 right|pinned 0|undo
+//!                             # a split being arranged: pick / send / drag heads between the sides
 //! split drag 3 new|drag 3 group 0|dragto 3 group 0   # drag a head (the
 //!                             # picked ones with it) onto the tray
 //! split openflagged           # open a group flagged with two heads of one photo (unnamed first)
@@ -448,6 +450,49 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                         }
                     }
                 }
+                // The split being arranged: `arrange pick 0 2`, `arrange
+                // shiftpick 1 5`, `arrange move left|right`, `arrange drag 0 2
+                // right` (`dragto` holds it), `arrange pinned 0` (drags the
+                // left side's pinned head right), `arrange undo`.
+                "arrange" => {
+                    use super::columns::{ColMsg as C, Target};
+                    let y = |c: C| x(X::Arrange(c));
+                    let (act, rest) = rest.split_once(' ').unwrap_or((rest, ""));
+                    let n: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+                    let side = n.first().copied().unwrap_or(0).min(1);
+                    let target = if rest.contains("left") { Target::Side(0) } else { Target::Side(1) };
+                    let face = |app: &App, n: usize| app.subjects.person.as_ref().and_then(|p| p.proposal.as_ref()).and_then(|a| a.ordered(side).get(n).copied());
+                    match act {
+                        "pick" | "shiftpick" => {
+                            let Some(f) = face(app, n.get(1).copied().unwrap_or(0)) else { return Task::none() };
+                            if let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) {
+                                let order = a.ordered(side);
+                                a.cols.pick(side, f, act == "shiftpick", &order);
+                            }
+                            Task::none()
+                        }
+                        "move" => app.update(y(C::MoveTo(target))),
+                        "drag" | "dragto" | "pinned" => {
+                            let f = if act == "pinned" {
+                                app.subjects.person.as_ref().and_then(|p| p.proposal.as_ref()).and_then(|a| a.sides[side].iter().find(|f| a.cols.pinned.contains(f)).copied())
+                            } else {
+                                face(app, n.get(1).copied().unwrap_or(0))
+                            };
+                            let Some(f) = f else { return Task::none() };
+                            let to = if act == "pinned" { Target::Side(1 - side) } else { target };
+                            let mut t = vec![app.update(y(C::DragStart(side, f))), app.update(y(C::DragEnter(to)))];
+                            if act != "dragto" {
+                                t.push(app.update(y(C::DragDrop)));
+                            }
+                            Task::batch(t)
+                        }
+                        "undo" => super::subjects::undo(app),
+                        other => {
+                            eprintln!("[script] unknown arrange action {other}");
+                            Task::none()
+                        }
+                    }
+                }
                 "propose" => app.update(x(X::Propose)),
                 "swap" => app.update(x(X::ProposeSwap)),
                 "go" => app.update(x(X::ProposeGo)),
@@ -483,7 +528,8 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             }
         }
         "pair" => {
-            use super::subjects_pair::{Msg as Pm, Target};
+            use super::columns::{ColMsg as Pc, Target};
+            use super::subjects_pair::Msg as Pm;
             let x = |m: Pm| Message::Subjects(super::subjects::Msg::Pair(m));
             let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
             let nums: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
@@ -507,14 +553,14 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                     }
                     Task::none()
                 }
-                "move" => app.update(x(Pm::MoveTo(target(rest)))),
+                "move" => app.update(x(Pm::Cols(Pc::MoveTo(target(rest))))),
                 // `drag 0 2 right`: drag the left side's 3rd face onto the right.
                 "drag" | "dragto" => {
                     let side = nums.first().copied().unwrap_or(0).min(1);
                     let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) else { return Task::none() };
-                    let mut t = vec![app.update(x(Pm::DragStart(side, f))), app.update(x(Pm::DragEnter(target(rest))))];
+                    let mut t = vec![app.update(x(Pm::Cols(Pc::DragStart(side, f)))), app.update(x(Pm::Cols(Pc::DragEnter(target(rest)))))];
                     if what == "drag" {
-                        t.push(app.update(x(Pm::DragDrop)));
+                        t.push(app.update(x(Pm::Cols(Pc::DragDrop))));
                     }
                     Task::batch(t)
                 }

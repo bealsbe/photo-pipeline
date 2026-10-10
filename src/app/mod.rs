@@ -29,6 +29,7 @@ pub mod preferences_storage;
 pub mod style;
 pub mod subjects;
 pub mod subjects_fursuits;
+pub mod columns;
 pub mod subjects_merge;
 pub mod subjects_pair;
 pub mod subjects_split;
@@ -2241,6 +2242,7 @@ impl App {
                     }
                 }
                 BgEvent::Located { seq, groups } => tasks.push(subjects_pair::on_located(self, seq, &groups)),
+                BgEvent::HeadsOrder { seq, far } => tasks.push(subjects_split::on_heads_order(self, seq, &far)),
                 BgEvent::MergeSuggestions { seq, focus, list, judging } => tasks.push(subjects_merge::on_merge_suggestions(self, seq, focus, list, judging)),
                 BgEvent::MergeJudged { seq, offered, left_out, done, total, beyond } => tasks.push(subjects_merge::on_merge_judged(self, seq, offered, left_out, done, total, beyond)),
                 BgEvent::ModelDownload { model, done, fetched, total, state } => tasks.push(search::on_download(self, model, done, fetched, total, state)),

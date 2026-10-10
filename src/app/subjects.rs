@@ -281,6 +281,8 @@ pub enum Section {
     Small,
     Hidden,
     Faces,
+    /// A column of two side by side (or of a split being arranged).
+    Column(u8),
 }
 
 /// Who holds crops in the cache: the page's own (`refresh_crops`), or
@@ -916,6 +918,9 @@ pub fn select_mode(app: &mut App) {
 
 /// Ctrl+Z on the page: the last change to people.
 pub fn undo(app: &mut App) -> Task<Message> {
+    if let Some(t) = super::subjects_split::take_back(app) {
+        return t;
+    }
     if app.subjects.page() == Page::Review {
         return review::take_back(app);
     }

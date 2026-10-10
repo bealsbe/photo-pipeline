@@ -7,12 +7,20 @@
 //!   in that order, named ones clearest first; either switches.
 //! - **Picking a run**: Shift+click picks every head between the last one
 //!   clicked and this one, in the order shown.
-//! - **Split into a new group**, in the pick strip; or drag the picked
-//!   heads onto a group in the tray that shows while dragging (or *A new
-//!   group*).
+//! - **Split into a new group**, in the pick strip: the group in two
+//!   columns, the picked heads on *Splits off*, to adjust and confirm; or
+//!   drag the picked heads onto a group in the tray that shows while
+//!   dragging (or *A new group*, at once).
 //! - **Two heads in one photo**: a group holding both holds at least two
 //!   fursuits.  A strip says so with the two heads, and *Propose a split…*
-//!   shows the group split around them, for the user to confirm.
+//!   shows the group split around them in the same two columns, the two
+//!   heads pinned one on each side.
+//! - **Arranging a split** (`Arrange`): heads dragged between *Stays* and
+//!   *Splits off* (or picked, Shift+click a run, and sent with ← / →), each
+//!   side least like the rest first; *Swap sides*; Ctrl+Z takes back the
+//!   last change.  Nothing changes in the library until *Split off*, which
+//!   makes the final arrangement as one move (one undo step); Esc or
+//!   *Cancel* leaves everything as it was.
 //!
 //! Nothing moves without the user's click or drop; a split is the existing
 //! move (one undo step).  Fursuits only; heads the viewer's labels keep
@@ -21,9 +29,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use iced::widget::{column, container, pin, row, scrollable, text};
+use iced::widget::{Space, column, container, pin, row, text};
 use iced::{Alignment, Background, Element, Length, Padding, Point, Task};
 
+use super::columns::{self as cols, ColMsg, Columns, Look};
 use super::kit::{self, tip};
 use super::people::{Face, FaceRef, Framing, GroupId, Kind};
 use super::style;
@@ -40,9 +49,8 @@ pub fn m(msg: Msg) -> Message {
     sm(subj::Msg::Split(msg))
 }
 
-/// The proposal dialog's crops, and how many of each side it shows.
-const PROPOSE: f32 = 56.0;
-const PROPOSE_N: usize = 18;
+/// The arrangement's two columns: their crops load as they come on screen.
+const SECTIONS: [subj::Section; 2] = [subj::Section::Column(0), subj::Section::Column(1)];
 /// The flag strip's crops.
 const FLAG: f32 = 36.0;
 /// The drop tray's group crops, and how many groups it offers.
@@ -72,11 +80,110 @@ pub struct Check {
     pub split: Option<(Vec<FaceRef>, Vec<FaceRef>)>,
 }
 
-/// The proposal dialog: which side leaves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Proposal {
-    /// The side with the pair's second head leaves (else the first's).
-    pub second_leaves: bool,
+/// A change to an arrangement, for Ctrl+Z.
+#[derive(Debug, Clone)]
+enum Change {
+    /// The sides before heads were moved.
+    Moved([Vec<FaceRef>; 2]),
+    Swapped,
+}
+
+/// A split being arranged: what stays (side 0) and what splits off into a
+/// new group (side 1).  Nothing changes in the library until it is
+/// confirmed, as one move.
+#[derive(Debug, Clone)]
+pub struct Arrange {
+    pub sides: [Vec<FaceRef>; 2],
+    /// Where each head started (how many were moved by hand).
+    start: [HashSet<FaceRef>; 2],
+    /// Each side's order, least like the rest of that side first.
+    pub rank: [HashMap<FaceRef, usize>; 2],
+    rank_seq: [u64; 2],
+    /// The picks, the drag; the proposal's two heads from one photo pinned.
+    pub cols: Columns,
+    /// What Ctrl+Z takes back: the sides before a move, or a swap.
+    history: Vec<Change>,
+    /// Opened from picked heads (*Split into a new group*), not proposed.
+    pub from_pick: bool,
+}
+
+impl Arrange {
+    /// `stays` and `leaves`, with `pins` (the two heads from one photo, one
+    /// on each side) never moving.
+    pub fn new(stays: Vec<FaceRef>, leaves: Vec<FaceRef>, pins: Option<(FaceRef, FaceRef)>) -> Arrange {
+        let mut cols = Columns::new(false);
+        if let Some((a, b)) = pins {
+            cols.pinned.extend([a, b]);
+        }
+        let start = [stays.iter().copied().collect(), leaves.iter().copied().collect()];
+        Arrange { sides: [stays, leaves], start, rank: [HashMap::new(), HashMap::new()], rank_seq: [0, 0], cols, history: Vec::new(), from_pick: pins.is_none() }
+    }
+
+    /// Heads moved to the other side (not swapped).
+    pub fn apply(&mut self, mv: &cols::Move) -> bool {
+        let cols::Target::Side(to) = mv.to else { return false };
+        let to = to.min(1);
+        let faces: Vec<FaceRef> = mv.faces.iter().filter(|f| !self.cols.pinned.contains(f) && self.sides[1 - to].contains(f)).copied().collect();
+        if faces.is_empty() {
+            return false;
+        }
+        self.history.push(Change::Moved(self.sides.clone()));
+        self.sides[1 - to].retain(|f| !faces.contains(f));
+        // At the top of their new side until its order comes back.
+        let mut v = faces;
+        v.extend(self.sides[to].drain(..));
+        self.sides[to] = v;
+        true
+    }
+
+    /// *Swap sides*: what stays splits off and the other way round.
+    pub fn swap(&mut self) {
+        self.history.push(Change::Swapped);
+        self.swap_sides();
+    }
+
+    fn swap_sides(&mut self) {
+        self.sides.swap(0, 1);
+        self.start.swap(0, 1);
+        self.rank.swap(0, 1);
+        self.rank_seq.swap(0, 1);
+        self.cols.picked.swap(0, 1);
+        self.cols.drag = None;
+    }
+
+    /// Ctrl+Z: the last change taken back.
+    pub fn take_back(&mut self) -> bool {
+        match self.history.pop() {
+            None => return false,
+            Some(Change::Swapped) => self.swap_sides(),
+            Some(Change::Moved(sides)) => self.sides = sides,
+        }
+        self.cols.picked = [Vec::new(), Vec::new()];
+        self.cols.drag = None;
+        true
+    }
+
+    /// Heads on another side than they started on.
+    pub fn moved(&self) -> usize {
+        (0..2).map(|s| self.sides[s].iter().filter(|f| !self.start[s].contains(f)).count()).sum()
+    }
+
+    /// A side in the order shown: its pinned head first, then least like
+    /// the rest of it first (heads whose order isn't in yet, just moved
+    /// there, before the rest).
+    pub fn ordered(&self, side: usize) -> Vec<FaceRef> {
+        let mut v = self.sides[side].clone();
+        v.sort_by_key(|f| if self.cols.pinned.contains(f) { 0 } else { self.rank[side].get(f).map_or(1, |r| r + 2) });
+        v
+    }
+
+    /// What *Split off* moves: the side splitting off, of the heads still
+    /// in the group; `None` when either side would be empty.
+    pub fn confirm(&self, in_group: impl Fn(&FaceRef) -> bool) -> Option<Vec<FaceRef>> {
+        let stays = self.sides[0].iter().filter(|f| in_group(f)).count();
+        let leaves: Vec<FaceRef> = self.sides[1].iter().filter(|f| in_group(f)).copied().collect();
+        (stays > 0 && !leaves.is_empty()).then_some(leaves)
+    }
 }
 
 /// Heads being dragged, and the tray target under the pointer (`Some(None)`:
@@ -96,6 +203,8 @@ pub enum Msg {
     ProposeSwap,
     ProposeGo,
     ProposeCancel,
+    /// The two columns of a split being arranged.
+    Arrange(ColMsg),
     DragStart(FaceRef),
     DragEnter(Option<GroupId>),
     DragLeave(Option<GroupId>),
@@ -124,9 +233,6 @@ pub fn on_check(app: &mut App, seq: u64, group: GroupId, far: Arc<Vec<(FaceRef, 
     let rank: HashMap<FaceRef, usize> = far.iter().enumerate().map(|(i, (f, _))| (*f, i)).collect();
     let marked = far.iter().take(crate::search::splitting::marked(n)).map(|(f, _)| *f).collect();
     p.check = Some(Check { rank, marked, pairs: (*pairs).clone(), split: split.map(|s| (*s).clone()) });
-    if p.check.as_ref().is_some_and(|c| c.split.is_none()) {
-        p.proposal = None;
-    }
     // The flag strip and the proposal show heads: have them at hand.
     let want_faces = !pairs.is_empty() && p.faces.is_none();
     let group = p.group.clone();
@@ -206,21 +312,31 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             subj::refresh_crops(app)
         }
         Msg::SplitPicked => {
-            let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
-            let faces = std::mem::take(&mut p.picked);
-            split_off(app, faces)
+            let Some(p) = app.subjects.person.as_mut().filter(|p| p.kind == Kind::Fursuit) else { return Task::none() };
+            // The group in two columns, the picked heads splitting off.
+            let picked = std::mem::take(&mut p.picked);
+            p.anchor = None;
+            if picked.is_empty() {
+                return Task::none();
+            }
+            let stays: Vec<FaceRef> = in_group(p).into_iter().filter(|f| !picked.contains(f)).collect();
+            p.proposal = Some(Arrange::new(stays, picked, None));
+            ask_order(app);
+            subj::refresh_crops(app)
         }
         Msg::Propose => {
-            if let Some(p) = app.subjects.person.as_mut().filter(|p| p.check.as_ref().is_some_and(|c| c.split.is_some())) {
-                // The smaller side leaves, to start.
-                let second = p.check.as_ref().and_then(|c| c.split.as_ref()).is_some_and(|(a, b)| b.len() <= a.len());
-                p.proposal = Some(Proposal { second_leaves: second });
-            }
+            let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
+            let Some(c) = p.check.as_ref() else { return Task::none() };
+            let (Some((a, b)), Some(&(pa, pb))) = (c.split.clone(), c.pairs.first()) else { return Task::none() };
+            // The smaller side splits off, to start.
+            let (stays, leaves, pins) = if b.len() <= a.len() { (a, b, (pa, pb)) } else { (b, a, (pb, pa)) };
+            p.proposal = Some(Arrange::new(stays, leaves, Some(pins)));
+            ask_order(app);
             subj::refresh_crops(app)
         }
         Msg::ProposeSwap => {
-            if let Some(pr) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) {
-                pr.second_leaves = !pr.second_leaves;
+            if let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) {
+                a.swap();
             }
             Task::none()
         }
@@ -232,10 +348,28 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::ProposeGo => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
-            let Some(pr) = p.proposal.take() else { return Task::none() };
-            let Some((a, b)) = p.check.as_ref().and_then(|c| c.split.clone()) else { return Task::none() };
-            let leaving = if pr.second_leaves { b } else { a };
-            split_off(app, leaving)
+            let Some(a) = p.proposal.as_ref() else { return Task::none() };
+            let held: HashSet<FaceRef> = in_group(p).into_iter().collect();
+            let Some(leaving) = a.confirm(|f| held.contains(f)) else { return Task::none() };
+            let (moved, from_pick) = (a.moved(), a.from_pick);
+            p.proposal = None;
+            let t = split_off(app, leaving.clone());
+            if moved == 0 {
+                return t;
+            }
+            // Say what the hand changed (the status line's words).
+            let what = if from_pick { "after moving" } else { "the proposal, after moving" };
+            app.show_status_action(format!("Split {} into a new group ({what} {} by hand).", util::plural(leaving.len() as u64, "head"), util::plural(moved as u64, "head")), "Undo", sm(subj::Msg::Undo))
+        }
+        Msg::Arrange(c) => {
+            let shift = crate::ui::modifiers::get().shift();
+            let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) else { return Task::none() };
+            let orders = [a.ordered(0), a.ordered(1)];
+            let Some(mv) = a.cols.update(c, shift, |s| orders[s].clone()) else { return Task::none() };
+            if a.apply(&mv) {
+                ask_order(app);
+            }
+            Task::none()
         }
         Msg::DragStart(f) => {
             let Some(p) = app.subjects.person.as_mut().filter(|p| p.show == Show::Faces && p.kind == Kind::Fursuit) else { return Task::none() };
@@ -269,10 +403,74 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     }
 }
 
-/// Esc while dragging heads or proposing: put it away.
+/// Esc while dragging heads or arranging a split: a drag, the picks,
+/// then the arrangement (nothing changed).
 pub fn escape(app: &mut App) -> bool {
     let Some(p) = app.subjects.person.as_mut() else { return false };
-    p.head_drag.take().is_some() || p.proposal.take().is_some()
+    if p.head_drag.take().is_some() {
+        return true;
+    }
+    match p.proposal.as_mut() {
+        Some(a) => {
+            if !a.cols.escape() {
+                p.proposal = None;
+            }
+            true
+        }
+        None => false,
+    }
+}
+
+/// Keys while a split is arranged: ← / → send the picked heads to that
+/// side, Enter splits.  Whether the arrangement took the key.
+pub fn arrange_key(app: &mut App, key: &iced::keyboard::Key, mods: iced::keyboard::Modifiers) -> Option<Task<Message>> {
+    app.subjects.person.as_ref()?.proposal.as_ref()?;
+    if let Some(c) = cols::key_msg(key, mods, false) {
+        return Some(update(app, Msg::Arrange(c)));
+    }
+    if matches!(key, iced::keyboard::Key::Named(iced::keyboard::key::Named::Enter)) && !mods.control() && !mods.alt() {
+        return Some(update(app, Msg::ProposeGo));
+    }
+    Some(Task::none())
+}
+
+/// Ctrl+Z while a split is arranged: its last change taken back (the
+/// library's undo waits until it is closed).  Whether one was open.
+pub fn take_back(app: &mut App) -> Option<Task<Message>> {
+    let a = app.subjects.person.as_mut()?.proposal.as_mut()?;
+    if a.take_back() {
+        ask_order(app);
+    }
+    Some(Task::none())
+}
+
+/// The heads of the page's group a split arranges: those the check saw
+/// (the viewer's removed ones are in none), in the page's order.
+fn in_group(p: &Person) -> Vec<FaceRef> {
+    let faces = p.faces.iter().flat_map(|f| f.iter()).map(|f| f.face);
+    match p.check.as_ref().filter(|c| !c.rank.is_empty()) {
+        Some(c) => faces.filter(|f| c.rank.contains_key(f)).collect(),
+        None => faces.collect(),
+    }
+}
+
+/// Each side's order, least like the rest of that side first.
+fn ask_order(app: &mut App) {
+    let seqs = [app.subjects.next_seq(), app.subjects.next_seq()];
+    let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) else { return };
+    a.rank_seq = seqs;
+    let sides = a.sides.clone();
+    for (side, heads) in sides.iter().enumerate() {
+        app.search.link.heads_order(seqs[side], heads);
+    }
+}
+
+/// A side's order came back.
+pub fn on_heads_order(app: &mut App, seq: u64, far: &[(FaceRef, f32)]) -> Task<Message> {
+    let Some(a) = app.subjects.person.as_mut().and_then(|p| p.proposal.as_mut()) else { return Task::none() };
+    let Some(side) = (0..2).find(|&s| a.rank_seq[s] == seq) else { return Task::none() };
+    a.rank[side] = far.iter().enumerate().map(|(i, (f, _))| (*f, i)).collect();
+    subj::refresh_crops(app)
 }
 
 /// Heads out of the page's group into a new group of their own: the
@@ -316,10 +514,12 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         if let Some((a, b)) = c.pairs.first() {
             v.extend([a, b].into_iter().filter_map(|f| faces.get(f)).map(|f| ((*f).clone(), subj::px(app, FLAG), Framing::Face)));
         }
-        if p.proposal.is_some() {
-            if let Some((a, b)) = &c.split {
-                v.extend(a.iter().take(PROPOSE_N).chain(b.iter().take(PROPOSE_N)).filter_map(|f| faces.get(f)).map(|f| ((*f).clone(), subj::px(app, PROPOSE), Framing::Face)));
-            }
+    }
+    if let Some(a) = &p.proposal {
+        let small = subj::px(app, tile::SMALL_CROP);
+        for side in 0..2 {
+            let shown = a.ordered(side).into_iter().filter_map(|f| faces.get(&f).copied());
+            v.extend(shown.filter(|f| s.crops.is_seen(SECTIONS[side], &subj::Crops::key(&f.face, small, Framing::Face))).map(|f| (f.clone(), small, Framing::Face)));
         }
     }
     if p.head_drag.is_some() {
@@ -377,45 +577,74 @@ pub fn flag_strip<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message
     Some(container(r.padding(Padding::from([6.0, 12.0]))).width(Length::Fill).style(style::fill(t::MOUNT)).into())
 }
 
-/// The proposed split, for the user to confirm: what stays, what leaves
-/// into a new group.
+fn wrap(c: ColMsg) -> Message {
+    m(Msg::Arrange(c))
+}
+
+/// A split being arranged, in two columns: what stays, what splits off
+/// into a new group.  Nothing changes until *Split off*.
 pub fn proposal_dialog(app: &App) -> Option<Element<'_, Message>> {
     let s = &app.subjects;
     let p = s.person.as_ref()?;
-    let pr = p.proposal?;
-    let (a, b) = p.check.as_ref()?.split.as_ref()?;
-    let (stay, leave) = if pr.second_leaves { (a, b) } else { (b, a) };
+    let a = p.proposal.as_ref()?;
     let faces: HashMap<FaceRef, &Face> = p.faces.iter().flat_map(|f| f.iter()).map(|f| (f.face, f)).collect();
-    let shape = subj::shape(Kind::Fursuit);
-    let side = |title: String, heads: &[FaceRef], tone: iced::Color| -> Element<'_, Message> {
-        let mut grid = row![].spacing(6);
-        for f in heads.iter().take(PROPOSE_N) {
-            let handle = faces.get(f).and_then(|x| s.crops.get(&x.face, subj::px(app, PROPOSE), Framing::Face));
-            grid = grid.push(tile::crop(handle, PROPOSE, shape));
-        }
-        let more = heads.len().saturating_sub(PROPOSE_N);
-        let mut col = column![text(title).size(t::T_BODY).font(paint::MEDIUM).color(tone), container(grid.wrap().vertical_spacing(6)).width(Length::Fill)].spacing(8).width(Length::Fill);
-        if more > 0 {
-            col = col.push(kit::caption(format!("and {} more", util::thousands(more as u64))));
-        }
-        container(col).padding(10).width(Length::Fill).style(|_| container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(t::LINE, 1.0, t::R_CELL), ..Default::default() }).into()
-    };
+    let look = Look { kind: Kind::Fursuit, cols: &a.cols, wrap, sections: SECTIONS };
     let name = subj::label(s, &p.group);
-    let stays = side(format!("Stay in {} ({})", if name == "the unnamed group" { "this group".to_string() } else { name.clone() }, util::plural(stay.len() as u64, "head")), stay, t::INK);
-    let leaves = side(format!("Split off into a new group ({})", util::plural(leave.len() as u64, "head")), leave, t::INK);
-    let body = scrollable(column![stays, leaves].spacing(t::S2)).style(style::scroll).height(Length::Shrink);
-    let content = column![
-        super::dialogs::header("Split this group in two?", None),
-        kit::secondary("Two of its heads are in one photo, so they are two fursuits. Each head goes with the one of the two it looks more like. Check it: a head on the wrong side can be moved later, from Heads."),
-        container(body).max_height(app.window_size_height() * 0.55),
-        kit::caption("Ctrl+Z undoes it. The new group shows on the Fursuits tab, to name or merge."),
-        super::dialogs::footer(
-            vec![kit::btn("Swap sides", style::ghost(), Some(m(Msg::ProposeSwap))).into()],
-            vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::ProposeCancel))).into(), kit::btn(format!("Split off {}", util::plural(leave.len() as u64, "head")), style::primary(), Some(m(Msg::ProposeGo))).into()],
-        ),
-    ]
-    .spacing(t::S3);
-    Some(super::dialogs::backdrop(super::dialogs::frame_fit(content.into(), 640f32.min(app.window_size_width() - 48.0))))
+    let here = if name == "the unnamed group" { "this group".to_string() } else { name };
+    let n = [0, 1].map(|side| a.sides[side].iter().filter(|f| faces.contains_key(f)).count());
+    let column_of = |side: usize| -> Element<'_, Message> {
+        let order: Vec<&Face> = a.ordered(side).into_iter().filter_map(|f| faces.get(&f).copied()).collect();
+        let marked = if a.rank[side].is_empty() { 0 } else { crate::search::splitting::marked(order.len()) };
+        let title = if side == 0 { format!("Stays in {here}") } else { "Splits off into a new group".to_string() };
+        let head = column![
+            text(title).size(t::T_BODY).font(paint::SEMIBOLD).color(t::PHOTO_INK),
+            text(format!("{}, least like the rest first", util::plural(n[side] as u64, "head"))).size(t::T_SMALL).color(t::PHOTO_INK3)
+        ]
+        .spacing(2);
+        let tiles = cols::grid(app, &look, side, &order, marked);
+        let foot: Option<Element<'_, Message>> = order.is_empty().then(|| text("Drag heads here.").size(t::T_SMALL).color(t::PHOTO_INK3).into());
+        cols::side(&look, side, head.into(), tiles, foot)
+    };
+    let columns = container(cols::pair(column_of(0), column_of(1)))
+        .height(Length::Fixed((app.window_size_height() * 0.56).max(260.0)))
+        .width(Length::Fill)
+        .style(|_| container::Style { background: Some(Background::Color(t::PHOTO_GROUND)), border: style::border(t::LINE, 1.0, t::R_CELL), ..Default::default() });
+    let (title, about) = if a.from_pick {
+        ("Split off the picked heads?", "Your picked heads are on the right. Drag heads across, or pick them and press ← or →, until each side is one fursuit. Nothing changes until you split.")
+    } else {
+        ("Split this group in two?", "Two of its heads are in one photo, so they are two fursuits. Each head starts beside the one of the two it looks more like. Drag heads across, or pick them and press ← or →. Nothing changes until you split.")
+    };
+    let mut content = column![super::dialogs::header(title, None), kit::secondary(about)].spacing(t::S3);
+    if !a.cols.pinned.is_empty() {
+        // The two, as the flag strip shows them, in their sides' order.
+        let pins = [0, 1].map(|side| a.sides[side].iter().find(|f| a.cols.pinned.contains(f)).and_then(|f| faces.get(f)).map(|x| tile::crop(s.crops.get(&x.face, subj::px(app, FLAG), Framing::Face), FLAG * 0.75, subj::shape(Kind::Fursuit))));
+        let mut r = row![icons::view(Glyph::Pin, 16.0, t::INK2)].spacing(8).align_y(Alignment::Center);
+        for c in pins.into_iter().flatten() {
+            r = r.push(c);
+        }
+        content = content.push(r.push(text("These two are in one photo, so they are pinned: one stays, one splits off, and neither moves.").size(t::T_SMALL).color(t::INK2)));
+    }
+    let strip = cols::pick_strip(&look, ["Move to Stays".to_string(), "Move to Splits off".to_string()], None);
+    let mut body = column![].spacing(0);
+    if let Some(strip) = strip {
+        body = body.push(strip);
+    }
+    content = content.push(body.push(columns));
+    let counter = text(format!("{} stay · {} split off", util::thousands(n[0] as u64), util::thousands(n[1] as u64))).size(t::T_BODY).font(paint::MEDIUM).color(t::INK);
+    let moved = a.moved();
+    let mut status = row![counter].spacing(t::S3).align_y(Alignment::Center);
+    if moved > 0 {
+        status = status.push(kit::caption(format!("{} moved by hand", util::plural(moved as u64, "head"))));
+    }
+    status = status.push(Space::new().width(Length::Fill)).push(cols::keys(&[("Shift+click", "Pick a run"), ("← →", "Send the picked over"), ("Ctrl+Z", "Take back"), ("Enter", "Split off"), ("Esc", "Cancel")]));
+    content = content.push(status);
+    let go = (n[0] > 0 && n[1] > 0).then(|| m(Msg::ProposeGo));
+    content = content.push(super::dialogs::footer(
+        vec![kit::btn("Swap sides", style::ghost(), Some(m(Msg::ProposeSwap))).into()],
+        vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::ProposeCancel))).into(), kit::btn(format!("Split off {}", util::plural(n[1] as u64, "head")), style::primary(), go).into()],
+    ));
+    content = content.push(kit::caption("Ctrl+Z on the page undoes the split. The new group shows on the Fursuits tab, to name or merge."));
+    Some(super::dialogs::backdrop(super::dialogs::frame_fit(content.into(), 1180f32.min(app.window_size_width() - 48.0))))
 }
 
 /// The groups the drop tray offers (the test driver's names for them).
@@ -482,12 +711,65 @@ pub fn head_drag(f: FaceRef) -> crate::ui::drag::DragMessages<Message> {
 
 pub fn debug_state(p: &Person) -> String {
     let c = p.check.as_ref().map(|c| format!("rank={} marked={} pairs={} split={:?}", c.rank.len(), c.marked.len(), c.pairs.len(), c.split.as_ref().map(|(a, b)| (a.len(), b.len()))));
-    format!("split=[order={:?} check={} picked={} proposal={:?} drag={:?}]", p.order, c.unwrap_or_else(|| "none".into()), p.picked.len(), p.proposal, p.head_drag.as_ref().map(|d| (d.faces.len(), d.over.clone())))
+    let a = p.proposal.as_ref().map(|a| format!("[stay={} off={} pinned={} picked={:?} moved={} ranked={:?} from_pick={}]", a.sides[0].len(), a.sides[1].len(), a.cols.pinned.len(), [a.cols.picked[0].len(), a.cols.picked[1].len()], a.moved(), [a.rank[0].len(), a.rank[1].len()], a.from_pick));
+    format!("split=[order={:?} check={} picked={} proposal={} drag={:?}]", p.order, c.unwrap_or_else(|| "none".into()), p.picked.len(), a.unwrap_or_else(|| "none".into()), p.head_drag.as_ref().map(|d| (d.faces.len(), d.over.clone())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn h(n: u8) -> FaceRef {
+        FaceRef::new(crate::search::index::Key([n; 16]), [0.1, 0.1, 0.2, 0.2])
+    }
+
+    /// The two heads from one photo stay pinned, one on each side, however
+    /// heads are dragged, sent or swapped; Ctrl+Z takes back a change.
+    #[test]
+    fn the_pinned_heads_never_cross_and_stay_apart() {
+        let (pa, pb) = (h(1), h(2));
+        let mut a = Arrange::new(vec![pa, h(3), h(4)], vec![pb, h(5)], Some((pa, pb)));
+        let order = |a: &Arrange| [a.ordered(0), a.ordered(1)];
+        // A drag of the pinned head does nothing; a run leaves it out.
+        let o = order(&a);
+        assert_eq!(a.cols.update(ColMsg::DragStart(0, pa), false, |s| o[s].clone()), None);
+        assert!(a.cols.drag.is_none());
+        a.cols.pick(0, pa, false, &o[0]);
+        a.cols.pick(0, h(4), true, &o[0]);
+        assert!(!a.cols.picked[0].contains(&pa));
+        // Even a move made up to carry it moves only the rest.
+        assert!(a.apply(&cols::Move { from: 0, faces: vec![pa, h(3)], to: cols::Target::Side(1) }));
+        assert!(a.sides[0].contains(&pa) && a.sides[1].contains(&pb) && a.sides[1].contains(&h(3)));
+        assert!(!a.apply(&cols::Move { from: 1, faces: vec![pb], to: cols::Target::Side(0) }), "the other pin neither");
+        assert_eq!(a.moved(), 1);
+        a.swap();
+        assert!(a.sides[1].contains(&pa) && a.sides[0].contains(&pb), "a swap keeps them apart");
+        assert_eq!(a.moved(), 1, "a swap is no move by hand");
+        assert!(a.take_back());
+        assert!(a.sides[0].contains(&pa) && a.sides[1].contains(&pb));
+        assert!(a.take_back());
+        assert_eq!(a.sides, [vec![pa, h(3), h(4)], vec![pb, h(5)]], "back as proposed");
+        assert_eq!(a.moved(), 0);
+        assert!(!a.take_back());
+    }
+
+    /// *Split off* moves the final side splitting off, once (heads that
+    /// left the group meanwhile left out); never with a side empty.
+    /// Cancelling is dropping the arrangement: nothing was asked of the
+    /// library while arranging (`apply` only changes the two lists).
+    #[test]
+    fn confirm_moves_the_final_arrangement_once_and_never_an_empty_side() {
+        let mut a = Arrange::new(vec![h(3), h(4), h(6)], vec![h(5)], None);
+        assert!(a.from_pick);
+        a.apply(&cols::Move { from: 0, faces: vec![h(4), h(6)], to: cols::Target::Side(1) });
+        assert_eq!(a.confirm(|_| true), Some(vec![h(4), h(6), h(5)]));
+        assert_eq!(a.confirm(|f| *f != h(6)), Some(vec![h(4), h(5)]), "a head gone from the group meanwhile");
+        a.apply(&cols::Move { from: 0, faces: vec![h(3)], to: cols::Target::Side(1) });
+        assert_eq!(a.confirm(|_| true), None, "nothing would stay");
+        a.apply(&cols::Move { from: 1, faces: vec![h(3), h(4), h(5), h(6)], to: cols::Target::Side(0) });
+        assert_eq!(a.confirm(|_| true), None, "nothing would split off");
+        assert_eq!(a.moved(), 1, "h(5) is the one on another side than it started");
+    }
 
     #[test]
     fn unnamed_groups_open_least_alike_first_and_named_clearest_first() {

@@ -105,7 +105,8 @@ pub struct Person {
     pub check: Option<super::subjects_split::Check>,
     pub check_seq: u64,
     pub anchor: Option<FaceRef>,
-    pub proposal: Option<super::subjects_split::Proposal>,
+    /// A split being arranged (proposed, or from the picked heads).
+    pub proposal: Option<super::subjects_split::Arrange>,
     pub head_drag: Option<super::subjects_split::HeadDrag>,
 }
 
@@ -686,6 +687,9 @@ pub fn escape(app: &mut App) -> Task<Message> {
 }
 
 pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Message> {
+    if let Some(t) = super::subjects_split::arrange_key(app, key, mods) {
+        return t;
+    }
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if mods.control() || mods.alt() {
         return Task::none();
@@ -1119,7 +1123,7 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     // Fursuits: split them off into a new group of their own (or drag
     // them onto a group).
     if p.kind == Kind::Fursuit {
-        r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "Move them out into a group of their own, to name or merge. Or drag them onto a group.", true));
+        r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "The group in two columns, these on the side splitting off, to adjust and confirm. Or drag them onto a group.", true));
     }
     // Not heads at all (a mask, a plush, a sign): removed for good.
     let what = super::subjects_remove::nouns(p.kind);
