@@ -524,8 +524,8 @@ for you.
   how many more may show them, *Photos | Faces*, *Review N suggestions*
   (Y), and ⋯ for *Merge into…*, *Hide* and *Forget this person…*.
 - **Faces** shows every face in the group, clearest first; pick the wrong
-  ones and *Move to…* someone else, a new group, or out (*Not this
-  person*), which also stops them being suggested again.
+  ones and *Move to…* (the group editor, them picked), or *Not this
+  person*, which takes them out and stops them being suggested again.
 - **"Same person?": the review.**  One suggestion at a time, large,
   between the person's confirmed faces and the whole photo with the face
   outlined.  **Y** and **N** answer, in the keep and prune colours; the
@@ -612,36 +612,45 @@ never shown, merged, suggested or completed together with people or pets.
   first, the few farthest marked, where a stray usually is (unnamed
   groups open that way, named ones *Clearest first*; either switches).
   Shift+click picks a run; *Split into a new group* in the pick strip
-  opens the group in two columns, the picked heads on *Splits off*, to
-  adjust before splitting; or drag them onto a group in the tray that
-  shows while dragging (*A new group* there splits them off at once).
-  "Check this group" goes least alike first too.  A group with **two
-  heads in one photo** holds at least two fursuits: its tile carries a
-  split mark, and its page says so with the two heads and *Propose a
-  split…*, which shows the group split around them (each head beside the
-  one it looks more like) in the same two columns.
-- **Arranging a split.**  *Stays* and *Splits off*, each least like the
-  rest of that side first and scrolling (crops load as they come on
-  screen).  Drag a head (the picked ones with it) to the other column, or
-  pick (Shift+click a run) and press ← or →; *Swap sides*; Ctrl+Z takes
-  back the last change.  In a proposal the two heads from one photo are
-  pinned, first in their columns: one stays, one splits off, and neither
-  moves.  "N stay · M split off" counts as you go.  Nothing changes in
-  the library until *Split off* (or Enter), which makes the final
-  arrangement as one move, one undo step; Esc or *Cancel* leaves
-  everything as it was.  Heads removed in the viewer are in none of it.
-- **Two groups side by side** (people and fursuits alike), to move faces
-  or heads between them: pick two groups on the tab (S, then click) and
-  press C or *Side by side*; or on a group's page ⋯ ▸ *Side by side
-  with…* (C), the side-by-side button on a similar group, or C on a pair
-  in "Same fursuit?".  Each column shows its group least like the rest
-  first, the few farthest marked.  Drag a face (the picked ones with it)
-  onto the other column or onto *New group* below; or click to pick
-  (Shift+click a run) and press ← or → to send them to that side, N for
-  a new group.  Each move is one undo step and names stay with their
-  groups; a group a move turns into a subject is followed.  Two groups of
-  different kinds are never shown together, and faces removed in the
-  viewer are left out.  Esc puts the picks away, then leaves.
+  opens the group editor with them in a new column.  "Check this group"
+  goes least alike first too.  A group with **two heads in one photo**
+  holds at least two fursuits: its tile carries a split mark, and its
+  page says so with the two heads and *Propose a split…*, which opens the
+  editor with the group split around them (each head beside the one it
+  looks more like), the two in different columns.
+- **The group editor** (people and fursuits alike, never the two mixed):
+  one place to sort a group.  *Edit group* (E) on a group's page, or E
+  with a group picked on the tab; every other way to move faces opens it
+  too, set up for the task: *Propose a split…*, side by side (C with two
+  groups picked, the button on a similar group, C on a pair in "Same
+  fursuit?"), and the picked faces' *Split into a new group* and *Move
+  to…* (with them picked).
+  - **Columns:** *Stays* (the group), any group opened beside it, and any
+    number of new groups (*+ New group*, or drop on it).  Each least like
+    the rest first, the farthest few marked, scrolling; only the tiles on
+    screen load.  Name a new group (or rename the one edited) in its
+    header; a name that is taken offers *Merge into …* instead.
+  - **The panel:** the kind's named groups, nearest first (a box finds
+    one by name), then the largest unnamed.  Drop faces on one to send
+    them there (its count shows the change), or open it as a column.
+    Below: *Take out of this group* (*Not this person*): out, free for any
+    other group, never back in this one; and *Not fursuit heads* (*Not
+    faces*): the boxes go.
+  - **Moving:** drag a face (the picked ones with it); Shift+click picks a
+    run; ← / → to the column beside, N a new group, R take out, Delete
+    not heads; Ctrl+Z takes back the last step.  Two heads of one photo
+    never end up in one column, or in a group holding the other: such a
+    drop is refused with a short note.
+  - **Nothing changes until *Apply*** (Enter): the whole arrangement, as
+    one undo step ("Split into 3 groups, 4 heads to Kiba, 2 removed",
+    with Undo).  *Cancel* or Esc leaves everything as it was.  It applies
+    to the groups as they are then: a regroup while the editor is open
+    changes nothing you arranged.  If a named group you sent faces to was
+    forgotten meanwhile, nothing is changed and the editor says so, with
+    *Send to a new group*.  Faces removed in the viewer are in none of it.
+- **Take out of group** (fursuits; people: *Not Person A*), in the pick
+  strip on *Heads* / *Faces*: the picked ones out of the group at once,
+  never suggested for it again, one undo step.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).
@@ -785,8 +794,9 @@ decision is added to a file, one line each:
 
 - **What is recorded.**  Merges (dragged, picked with S then M, *Merge
   into…*, a suggested pair, *Similar groups*), "Not the same", splits and
-  moves (*Split into a new group*, *Move to…*, the two-heads proposal, a
-  head dragged to a group, two groups side by side), review answers (Y,
+  moves (each *Apply* of the group editor, one entry: the groups as they
+  were and where each set of heads went, new groups, taken out or not
+  heads, with how many were moved by hand), review answers (Y,
   N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
   names given to groups, and the viewer's label edits (a name, *It's a
   person* / *It's a fursuit*, a drawn box, *Not a face*).  Ctrl+Z, or Z

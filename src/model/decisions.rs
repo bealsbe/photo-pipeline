@@ -208,6 +208,11 @@ pub enum Act {
     /// `groups` as they were (each target once), the `heads` removed (at
     /// most [`MOVED_HEADS`]) and how many.
     RemoveMany { groups: Vec<Side>, heads: Vec<Head>, removed: usize },
+    /// The group editor's *Apply* (one undo step): `groups` as they were
+    /// (each group heads left or went to, once), and where heads went,
+    /// one [`Out`] per group they left and where they went, so each reads
+    /// as a `move` / `split` / `remove_many` does.
+    Edit { groups: Vec<Side>, out: Vec<Out> },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -227,9 +232,40 @@ impl Act {
             Act::Draw { .. } => "draw",
             Act::Remove { .. } => "remove",
             Act::RemoveMany { .. } => "remove_many",
+            Act::Edit { .. } => "edit",
             Act::Undo { .. } => "undo",
         }
     }
+}
+
+/// Heads that went one way in an edit: from `groups[from]` (absent: in
+/// no group) to `to`; the heads (at most [`MOVED_HEADS`]) and how many.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Out {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<usize>,
+    pub to: To,
+    pub heads: Vec<Head>,
+    pub moved: usize,
+}
+
+/// Where heads went in an edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "is", rename_all = "snake_case")]
+pub enum To {
+    /// An existing group: `groups[group]`.
+    Group { group: usize },
+    /// A new group the edit made (`new`: its number among them).
+    New {
+        new: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// "Not fursuit heads" / "Not faces".
+    Removed,
+    /// "Take out of this group" / "Not this person": not the group they
+    /// left (`from`), every pair against its heads labelled different.
+    TakenOut,
 }
 
 /// Where in the app a decision was made.
@@ -259,6 +295,8 @@ pub enum At {
     Similar,
     /// The "Same person?" / "Same fursuit?" review.
     Review,
+    /// The group editor (Edit group, and what opens it).
+    Editor,
 }
 
 /// How a decision came to be offered, as the page knows it; the engine
@@ -276,12 +314,9 @@ pub enum Via {
     /// judge and shown on request (`Some(false)`); `check`: an unnamed
     /// group's own heads ("Check this group").
     Review { judge: Option<bool>, check: bool },
-    /// The split proposed around two heads seen in one photo, confirmed
-    /// after `edited` heads were moved between its sides by hand.
-    Proposal { edited: u32 },
-    /// Picked heads split off after arranging the group in two columns,
-    /// `edited` heads moved between the sides by hand first.
-    Arranged { edited: u32 },
+    /// The group editor's *Apply*: opened from a proposed split
+    /// (`proposal`) or not, `edited` heads moved by hand in it.
+    Editor { proposal: bool, edited: u32 },
     #[default]
     Unknown,
 }
@@ -346,8 +381,8 @@ impl How {
         match via {
             Via::Hand(at) => How::hand(at),
             Via::Unknown => How { by: "hand".into(), ..How::default() },
-            Via::Proposal { edited } => How { by: "proposal".into(), at: Some(At::Heads), edited: Some(edited), ..How::default() },
-            Via::Arranged { edited } => How { edited: Some(edited), ..How::hand(At::Heads) },
+            Via::Editor { proposal: true, edited } => How { by: "proposal".into(), at: Some(At::Editor), edited: Some(edited), ..How::default() },
+            Via::Editor { proposal: false, edited } => How { edited: Some(edited), ..How::hand(At::Editor) },
             Via::Pair { at, distance, sure, verdict: Some(v) } => {
                 How { by: "judge".into(), at: Some(at), d: Some(round4(distance)), sure: Some(sure), judge: name, judge_cut: cut, yes: Some(v.yes), no: Some(v.no), unseen: Some(v.unjudged), ..How::default() }
             }
@@ -781,6 +816,14 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
         match &mut e.act {
             Act::Merge { groups } | Act::NotSame { groups } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Split { from, .. } => c.side(k, from),
+            Act::Edit { groups, out } => {
+                groups.iter_mut().for_each(|g| c.side(k, g));
+                for o in out {
+                    if let To::New { name, .. } = &mut o.to {
+                        c.name(k, name);
+                    }
+                }
+            }
             Act::Move { from, to, .. } => {
                 c.side(k, from);
                 c.side(k, to);
@@ -1194,15 +1237,19 @@ mod tests {
     /// *Heads*; other decisions carry no such field.
     #[test]
     fn an_arranged_split_records_the_heads_moved_by_hand() {
-        let how = How::of(Via::Proposal { edited: 3 }, None);
-        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Heads), Some(3)));
+        let how = How::of(Via::Editor { proposal: true, edited: 3 }, None);
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(3)));
         let line = serde_json::to_string(&how).unwrap();
-        assert!(line.contains(r#""edited":3"#), "{line}");
+        assert!(line.contains(r#""edited":3"#) && line.contains(r#""at":"editor""#), "{line}");
         assert_eq!(serde_json::from_str::<How>(&line).unwrap(), how);
-        let as_offered = How::of(Via::Proposal { edited: 0 }, None);
+        let as_offered = How::of(Via::Editor { proposal: true, edited: 0 }, None);
         assert!(serde_json::to_string(&as_offered).unwrap().contains(r#""edited":0"#), "0 is kept: confirmed as offered");
-        let picked = How::of(Via::Arranged { edited: 2 }, None);
-        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Heads), Some(2)));
+        let picked = How::of(Via::Editor { proposal: false, edited: 2 }, None);
+        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Editor), Some(2)));
+        // An entry written before the editor (a proposal confirmed in the
+        // old dialog) still reads.
+        let old: How = serde_json::from_str(r#"{"by":"proposal","at":"heads","edited":1}"#).unwrap();
+        assert_eq!((old.by.as_str(), old.at, old.edited), ("proposal", Some(At::Heads), Some(1)));
         assert!(!serde_json::to_string(&How::of(Via::Hand(At::Heads), None)).unwrap().contains("edited"));
     }
 
@@ -1221,6 +1268,16 @@ mod tests {
             Act::Remove { head: Head(head(7, 0)) },
             Act::RemoveMany { groups: vec![side(8, 2)], heads: heads([head(8, 0), head(8, 10)]), removed: 2 },
             Act::Undo { undoes: "0123456789abcdef".into(), of: "merge".into() },
+            Act::Edit {
+                groups: vec![side(1, 5), side(2, 3)],
+                out: vec![
+                    Out { from: Some(0), to: To::Group { group: 1 }, heads: heads([head(1, 0)]), moved: 1 },
+                    Out { from: Some(0), to: To::New { new: 0, name: Some("Someone".into()) }, heads: heads([head(1, 10)]), moved: 1 },
+                    Out { from: Some(0), to: To::Removed, heads: heads([head(1, 20)]), moved: 1 },
+                    Out { from: Some(0), to: To::TakenOut, heads: heads([head(1, 30)]), moved: 1 },
+                    Out { from: None, to: To::New { new: 1, name: None }, heads: heads([head(9, 0)]), moved: 1 },
+                ],
+            },
         ];
         for act in acts {
             let e = Entry::new(Kind::Fursuit, act, Some(How::hand(At::Drag)), Some(lib()));

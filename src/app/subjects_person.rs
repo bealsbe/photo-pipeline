@@ -66,10 +66,6 @@ pub enum Menu {
     More,
     /// ⋯ ▸ Merge into…
     MergeInto,
-    /// ⋯ ▸ Side by side with…
-    SideBySide,
-    /// The picked faces' *Move to…*.
-    MoveTo,
 }
 
 pub struct Person {
@@ -100,15 +96,11 @@ pub struct Person {
     /// suggestions waited before, to say what it found.
     pub more: Option<(u64, usize)>,
     /// Splitting a fursuit group (stage 3): how *Heads* is ordered, the
-    /// engine's check, the last head clicked (Shift+click picks a run),
-    /// the proposed split shown, heads being dragged.
+    /// engine's check, the last head clicked (Shift+click picks a run).
     pub order: super::subjects_split::Order,
     pub check: Option<super::subjects_split::Check>,
     pub check_seq: u64,
     pub anchor: Option<FaceRef>,
-    /// A split being arranged (proposed, or from the picked heads).
-    pub proposal: Option<super::subjects_split::Arrange>,
-    pub head_drag: Option<super::subjects_split::HeadDrag>,
 }
 
 impl Person {
@@ -135,8 +127,6 @@ impl Person {
             check: None,
             check_seq: 0,
             anchor: None,
-            proposal: None,
-            head_drag: None,
         }
     }
 }
@@ -157,7 +147,9 @@ pub enum Msg {
     FacesClear,
     FacesMore,
     Menu(Option<Menu>),
-    MoveTo(Option<GroupId>),
+    /// The group editor: the group alone, or (picked faces) with them
+    /// picked, the groups beside to send them to.
+    Edit,
     /// "Not Person A": the picked faces out, never suggested again.
     NotThis,
     Rename,
@@ -241,14 +233,6 @@ pub(super) fn follow(app: &mut App, into: &GroupId) {
     if let Some(p) = app.subjects.person.as_mut() {
         p.merged_into = Some(into.clone());
     }
-}
-
-/// C on a group's page: choose the group to show beside it.
-pub(super) fn open_side_by_side_menu(app: &mut App) -> Task<Message> {
-    if let Some(p) = app.subjects.person.as_mut() {
-        p.menu = Some(Menu::SideBySide);
-    }
-    subj::refresh_crops(app)
 }
 
 fn focus_name() -> Task<Message> {
@@ -406,7 +390,7 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             v.extend(faces.iter().take(p.faces_shown).filter(|f| s.crops.is_seen(subj::Section::Faces, &subj::Crops::key(&f.face, small, Framing::Face))).map(|f| (f.clone(), small, Framing::Face)));
         }
     }
-    if matches!(p.menu, Some(Menu::MergeInto | Menu::MoveTo | Menu::SideBySide)) || p.naming.is_some() {
+    if matches!(p.menu, Some(Menu::MergeInto)) || p.naming.is_some() {
         for g in s.all.groups.iter().filter(|g| g.kind == p.kind && g.id != p.group).take(40) {
             v.push((g.cover.clone(), subj::px(app, 22.0), Framing::Face));
         }
@@ -488,7 +472,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             subj::refresh_crops(app)
         }
-        Msg::MoveTo(to) => move_to(app, to),
+        Msg::Edit => edit_group(app),
         Msg::NotThis => not_this(app),
         Msg::Rename => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
@@ -633,22 +617,15 @@ fn take_name(app: &mut App, i: usize) -> Task<Message> {
     }
 }
 
-fn move_to(app: &mut App, to: Option<GroupId>) -> Task<Message> {
+/// The group editor on the page's group (the picked faces picked).
+fn edit_group(app: &mut App) -> Task<Message> {
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     p.menu = None;
-    if p.picked.is_empty() {
-        return Task::none();
-    }
-    if to.as_ref().is_some_and(|t| app.subjects.all.group(t).is_none_or(|g| g.kind != p.kind)) {
-        return app.show_status("Faces move only to someone of the same kind.", 5000);
-    }
-    let faces = std::mem::take(&mut p.picked);
-    let from = p.group.clone();
-    let n = faces.len() as u64;
-    let at = if p.kind == Kind::Fursuit { At::Heads } else { At::Faces };
-    app.search.link.move_faces(&from, &faces, to.as_ref(), Via::Hand(at));
-    let whom = to.as_ref().map_or_else(|| "a new group to name".to_string(), |t| subj::label(&app.subjects, t));
-    app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, "face")), "Undo", sm(subj::Msg::Undo))
+    let picked = std::mem::take(&mut p.picked);
+    p.anchor = None;
+    let group = p.group.clone();
+    let preset = if picked.is_empty() { super::subjects_editor::Preset::Plain } else { super::subjects_editor::Preset::Pick(picked) };
+    super::subjects_editor::open(app, group, preset)
 }
 
 fn not_this(app: &mut App) -> Task<Message> {
@@ -671,9 +648,6 @@ fn not_this(app: &mut App) -> Task<Message> {
 /// Esc: a menu, then the name field, then the picked faces, then back to
 /// the tab.
 pub fn escape(app: &mut App) -> Task<Message> {
-    if super::subjects_split::escape(app) {
-        return Task::none();
-    }
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if p.menu.take().is_some() {
         return Task::none();
@@ -690,12 +664,13 @@ pub fn escape(app: &mut App) -> Task<Message> {
 }
 
 pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Message> {
-    if let Some(t) = super::subjects_split::arrange_key(app, key, mods) {
-        return t;
-    }
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if mods.control() || mods.alt() {
         return Task::none();
+    }
+    // E: the group editor (with the picked faces picked).
+    if matches!(key, Key::Character(c) if c.as_str().eq_ignore_ascii_case("e")) && !mods.shift() && p.naming.is_none() {
+        return edit_group(app);
     }
     // The name's options: ↑ ↓ choose, Tab takes.
     if let Some(typed) = p.naming.clone() {
@@ -769,18 +744,13 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         layers.push(subj::catcher(pm(Msg::Menu(None))));
         layers.push(menu);
     }
-    // While heads are dragged: the groups to drop them on.
-    if let Some(tray) = super::subjects_split::tray(app, p) {
-        layers.push(tray);
-    }
     subj::layered(layers)
 }
 
-/// Dialogs the person's page puts over everything (none of its own yet:
-/// forgetting asks through the page's dialog).
-pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
-    // A proposed split of a fursuit group, to confirm.
-    super::subjects_split::proposal_dialog(app)
+/// Dialogs the person's page puts over everything (none of its own:
+/// forgetting asks through the page's dialog; a split is the editor's).
+pub fn overlay(_app: &App) -> Option<Element<'_, Message>> {
+    None
 }
 
 fn quiet<'a>(title: String, body: String) -> Element<'a, Message> {
@@ -944,6 +914,7 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         };
         r = r.push(review);
     }
+    r = r.push(tip(kit::icon_text_btn(Glyph::Pencil, "Edit group", t::INK, style::secondary(), Some(pm(Msg::Edit))), "Sort its faces into groups: split, move, take out  (E)", true));
     r = r.push(more);
     container(r.padding(Padding::from([10.0, 12.0]))).height(BAND_H).center_y(BAND_H).width(Length::Fill).style(style::fill(t::MOUNT)).into()
 }
@@ -1072,7 +1043,7 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         Menu::More => {
             let mut rows = vec![
                 menu_row(icons::view(Glyph::Merge, 15.0, t::INK2), "Merge into…".into(), String::new(), Some(pm(Msg::Menu(Some(Menu::MergeInto))))),
-                menu_row(icons::view(Glyph::Compare, 15.0, t::INK2), "Side by side with…".into(), "C".into(), Some(pm(Msg::Menu(Some(Menu::SideBySide))))),
+                menu_row(icons::view(Glyph::Pencil, 15.0, t::INK2), "Edit group…".into(), "E".into(), Some(pm(Msg::Edit))),
                 menu_row(icons::view(Glyph::Hide, 15.0, t::INK2), "Hide".into(), String::new(), Some(pm(Msg::Hide))),
                 menu_row(
                     icons::view(Glyph::Close, 15.0, t::REJECT),
@@ -1091,22 +1062,6 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
             let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.title().to_lowercase()), String::new(), None)] } else { rows };
             (menu_panel(Some(format!("Merge {} into", g.name.clone().unwrap_or_else(|| "this group".into()))), rows, 280.0), page_w - 280.0 - 12.0, subj::HEADER_H + BAND_H - 6.0, 280.0)
         }
-        Menu::SideBySide => {
-            let me = p.group.clone();
-            let rows = other_groups(app, p, move |id| super::subjects_pair::m(super::subjects_pair::Msg::Open(me.clone(), id)));
-            let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.title().to_lowercase()), String::new(), None)] } else { rows };
-            (menu_panel(Some("Side by side with".to_string()), rows, 280.0), page_w - 280.0 - 12.0, subj::HEADER_H + BAND_H - 6.0, 280.0)
-        }
-        Menu::MoveTo => {
-            let mut rows = vec![menu_row(icons::view(Glyph::Plus, 15.0, t::INK2), format!("A new {one}"), String::new(), Some(pm(Msg::MoveTo(None))))];
-            rows.extend(other_groups(app, p, |id| pm(Msg::MoveTo(Some(id)))));
-            // Under *Move to…*: its right edge is left of "Not …" and ×.
-            let name = subj::label(s, &p.group);
-            let not = if name == "the unnamed group" { "Not this one".to_string() } else { format!("Not {name}") };
-            let not_w = 12.0 + 16.0 + 8.0 + paint::text_width(&not, t::T_BODY, paint::MEDIUM).ceil() + 12.0;
-            let right = page_w - 8.0 - t::CONTROL_H - t::S3 - not_w - t::S3;
-            (menu_panel(Some(format!("Move {} to", util::plural(p.picked.len() as u64, "face"))), rows, 280.0), right - 280.0, subj::HEADER_H + 1.0 + BAND_H + 1.0 + 40.0, 280.0)
-        }
     };
     let _ = w;
     Some(pin(panel).position(Point::new(x.max(8.0), y)).width(Length::Fill).height(Length::Fill).into())
@@ -1115,7 +1070,11 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
 /// While faces are picked: how many, and where they go.
 fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let name = subj::label(&app.subjects, &p.group);
-    let not = if name == "the unnamed group" { "Not this one".to_string() } else { format!("Not {name}") };
+    let not = match (p.kind, name == "the unnamed group") {
+        (Kind::Fursuit, _) => "Take out of group".to_string(),
+        (_, true) => "Not this one".to_string(),
+        (_, false) => format!("Not {name}"),
+    };
     let mut r = row![
         icons::view(Glyph::Select, 16.0, t::SIGNAL),
         text(format!("{} picked", util::plural(p.picked.len() as u64, if p.kind == Kind::Fursuit { "head" } else { "face" }))).size(t::T_BODY).color(t::INK).width(Length::Fill),
@@ -1123,11 +1082,8 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     .spacing(t::S3)
     .align_y(Alignment::Center)
     .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
-    // Fursuits: split them off into a new group of their own (or drag
-    // them onto a group).
-    if p.kind == Kind::Fursuit {
-        r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "The group in two columns, these on the side splitting off, to adjust and confirm. Or drag them onto a group.", true));
-    }
+    // Split them off: the editor, with them in a new column to adjust.
+    r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "The group editor, these in a new column, to adjust before applying  (E for the editor as it is)", true));
     // Not heads at all (a mask, a plush, a sign): removed for good.
     let what = super::subjects_remove::nouns(p.kind);
     r = r.push(tip(
@@ -1136,8 +1092,8 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         true,
     ));
     let r = r.push(row![
-        kit::icon_text_btn(Glyph::Split, "Move to…", t::INK, style::secondary(), Some(pm(Msg::Menu(if p.menu == Some(Menu::MoveTo) { None } else { Some(Menu::MoveTo) })))),
-        tip(kit::icon_text_btn(Glyph::Close, not, t::REJECT, style::secondary(), Some(pm(Msg::NotThis))), "Take them out, and never suggest them again", true),
+        tip(kit::icon_text_btn(Glyph::Split, "Move to…", t::INK, style::secondary(), Some(pm(Msg::Edit))), "The group editor, these picked: drop them on a group  (E)", true),
+        tip(kit::icon_text_btn(Glyph::LeaveOut, not, t::REJECT, style::secondary(), Some(pm(Msg::NotThis))), "Take them out of this group, and never suggest them for it again (one undo step)", true),
         tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(pm(Msg::FacesClear))), "Stop picking  (Esc)", true),
     ]
     .spacing(t::S3)
@@ -1161,14 +1117,11 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let mut r = row![].spacing(8);
     let mut keys = Vec::with_capacity(p.faces_shown.min(faces.len()));
     let shown = super::subjects_split::ordered(p);
-    let dragging = p.head_drag.is_some();
     for f in shown.into_iter().take(p.faces_shown) {
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, subj::shape(p.kind));
         let badge = if fursuit { super::subjects_split::badge(p, &f.face) } else { None };
         let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: badge.map(|b| b.0), on: pm(Msg::FacePick(f.face)) }.into();
-        // Fursuit heads drag onto a group (the tray that shows meanwhile).
-        let el: Element<'a, Message> = if fursuit { crate::ui::drag::DragArea::new(el, super::subjects_split::head_drag(f.face), dragging).into() } else { el };
         let words = format!("{}{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }, badge.map(|b| format!(". {}", b.1)).unwrap_or_default());
         r = r.push(tip(el, words, true));
     }

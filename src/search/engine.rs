@@ -84,7 +84,6 @@ enum Cmd {
     Forget(SubjectId),
     ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
-    MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via },
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>, via: Via },
     Suggestions { seq: u64, group: GroupId },
     Undo,
@@ -113,8 +112,9 @@ enum Cmd {
     MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
     GroupCheck { seq: u64, group: GroupId },
     SetGrouping(heads::Grouping),
-    Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
-    HeadsOrder { seq: u64, heads: Vec<FaceRef> },
+    HeadsOrder { seq: u64, kind: Kind, heads: Vec<FaceRef> },
+    NearGroups { seq: u64, kind: Kind, heads: Vec<FaceRef> },
+    ApplyEdit { seq: u64, edit: crate::model::subjects::GroupEdit, via: Via },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -491,12 +491,6 @@ impl Engine {
         self.send(Cmd::Faces { seq, group });
     }
 
-    /// Move faces out of `from`: into `to` (the same kind, else refused),
-    /// or into a new unnamed group (`None`).
-    pub fn move_faces(&self, from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via) {
-        self.send(Cmd::MoveFaces { from, faces, to, via });
-    }
-
     /// A review answer: `Some(true)` adds the faces to the group,
     /// `Some(false)` is "not this person" (out of the members, never
     /// suggested again), `None` takes an answer back.  One call covers a
@@ -646,17 +640,22 @@ impl Engine {
         self.send(Cmd::SetGrouping(g));
     }
 
-    /// Which group of `kind` holds each of `heads` now
-    /// (`BgEvent::Located`): the two groups side by side follow their
-    /// heads when a move gives a group a new id.
-    pub fn locate(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
-        self.send(Cmd::Locate { seq, kind, heads });
-    }
-
     /// A set of fursuit heads farthest from the rest of the set first
     /// (`BgEvent::HeadsOrder`): the sides of a split being arranged.
-    pub fn heads_order(&self, seq: u64, heads: Vec<FaceRef>) {
-        self.send(Cmd::HeadsOrder { seq, heads });
+    pub fn heads_order(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
+        self.send(Cmd::HeadsOrder { seq, kind, heads });
+    }
+
+    /// Every group of `kind` with its average-linkage distance to `heads`
+    /// (`BgEvent::NearGroups`): the group editor's panel, nearest first.
+    pub fn near_groups(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
+        self.send(Cmd::NearGroups { seq, kind, heads });
+    }
+
+    /// The group editor's *Apply*, as one undo step
+    /// (`BgEvent::EditApplied`, or `EditRefused` with nothing changed).
+    pub fn apply_edit(&self, seq: u64, edit: crate::model::subjects::GroupEdit, via: Via) {
+        self.send(Cmd::ApplyEdit { seq, edit, via });
     }
 
     /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
@@ -1295,14 +1294,6 @@ impl Worker {
                     let faces = self.people.faces(&group, &|f| self.resolve_face(f)).unwrap_or_default();
                     let _ = self.bus.unbounded_send(BgEvent::SubjectFaces { seq, group, faces: Arc::new(faces) });
                 }
-                Cmd::MoveFaces { from, faces, to, via } => {
-                    let before = self.before_move(&from, &faces, to.as_ref());
-                    let r = self.people.move_faces(&from, faces, to.as_ref());
-                    if r.is_ok() {
-                        self.record(before, via);
-                    }
-                    self.after_edit(r.map(|_| ()));
-                }
                 Cmd::Answer { group, faces, yes, via } => {
                     let before = match yes {
                         Some(y) => self.before_answer(&group, &faces, y),
@@ -1375,14 +1366,37 @@ impl Worker {
                     }
                     self.publish_heads();
                 }
-                Cmd::Locate { seq, kind, heads } => {
-                    let groups: Vec<Option<GroupId>> = heads.iter().map(|h| self.people.group_of(kind, h)).collect();
-                    let _ = self.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
-                }
-                Cmd::HeadsOrder { seq, heads } => {
-                    let far = self.fursuits.far_order_of(&heads);
+                Cmd::HeadsOrder { seq, kind, heads } => {
+                    let far = self.far_order_of(kind, &heads);
                     let _ = self.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
                 }
+                Cmd::NearGroups { seq, kind, heads } => {
+                    let list = self.near_groups_of(kind, &heads);
+                    let _ = self.bus.unbounded_send(BgEvent::NearGroups { seq, list: Arc::new(list) });
+                }
+                Cmd::ApplyEdit { seq, edit, via } => match self.people.plan_edit(&edit) {
+                    Err(e) => {
+                        let gone = match &e {
+                            Refused::NoSuchSubject(s) => Some(s.clone()),
+                            _ => None,
+                        };
+                        let _ = self.bus.unbounded_send(BgEvent::EditRefused { seq, why: e.to_string(), gone });
+                    }
+                    Ok(plan) => {
+                        let before = self.before_edit(&plan);
+                        match self.people.apply_edit(&plan) {
+                            Ok((words, _)) => {
+                                self.record(before, via);
+                                let _ = self.bus.unbounded_send(BgEvent::EditApplied { seq, words });
+                                self.after_edit(Ok(()));
+                            }
+                            Err(e) => {
+                                let _ = self.bus.unbounded_send(BgEvent::EditRefused { seq, why: e.to_string(), gone: None });
+                                self.after_edit(Err(e));
+                            }
+                        }
+                    }
+                },
                 Cmd::GroupCheck { seq, group } => {
                     self.fursuits.step();
                     // A person's group: its faces farthest first (the two
@@ -1570,6 +1584,50 @@ impl Worker {
 
     /// After a subjects edit: a refusal is logged (nothing changed); any
     /// outcome republishes the page's state.
+    /// Any set of a kind's heads farthest from the rest of the set first.
+    fn far_order_of(&mut self, kind: Kind, heads: &[FaceRef]) -> Vec<(FaceRef, f32)> {
+        let Some(step) = self.edit_step(kind) else { return Vec::new() };
+        let want: HashSet<&FaceRef> = heads.iter().collect();
+        let refs = step.refs();
+        let rows: Vec<usize> = refs.iter().enumerate().filter(|(_, r)| want.contains(r)).map(|(i, _)| i).collect();
+        super::splitting::far_order(&step.rows(), &rows).into_iter().map(|(m, d)| (refs[m], d)).collect()
+    }
+
+    /// Every group of `kind` on the page now, with its average linkage to
+    /// `heads`, nearest first (groups without vectors last).
+    fn near_groups_of(&mut self, kind: Kind, heads: &[FaceRef]) -> Vec<(GroupId, f32)> {
+        let snapshot = self.shared.subjects.lock().clone();
+        let groups: Vec<(GroupId, Vec<FaceRef>)> = snapshot.groups.iter().filter(|g| g.kind == kind).filter_map(|g| self.people.members(&g.id).ok().map(|(_, m)| (g.id.clone(), m))).collect();
+        let Some(step) = self.edit_step(kind) else { return groups.into_iter().map(|(g, _)| (g, 2.0)).collect() };
+        let index: HashMap<&FaceRef, usize> = step.refs().iter().enumerate().map(|(i, r)| (r, i)).collect();
+        let rows_of = |faces: &[FaceRef]| -> Vec<usize> { faces.iter().filter_map(|f| index.get(f).copied()).collect() };
+        let mine = rows_of(heads);
+        let all: Vec<Vec<usize>> = groups.iter().map(|(_, m)| rows_of(m)).collect();
+        let mut sets: Vec<&[usize]> = vec![&mine];
+        sets.extend(all.iter().map(|v| v.as_slice()));
+        let rows = step.rows();
+        let means = super::merging::means(&rows, &sets);
+        let mut out: Vec<(GroupId, f32)> = groups
+            .into_iter()
+            .enumerate()
+            .map(|(i, (g, _))| {
+                let d = if mine.is_empty() || all[i].is_empty() { 2.0 } else { 1.0 - means[0].iter().zip(&means[i + 1]).map(|(x, y)| x * y).sum::<f32>() };
+                (g, d)
+            })
+            .collect();
+        out.sort_by(|a, b| a.1.total_cmp(&b.1));
+        out
+    }
+
+    /// The kind's vectors, for the editor's orders and distances.
+    fn edit_step(&mut self, kind: Kind) -> Option<&dyn super::step::KindStep> {
+        match kind {
+            Kind::Person => self.people.store.as_ref().map(|s| s as &dyn super::step::KindStep),
+            Kind::Fursuit => self.fursuits.step().map(|s| s as &dyn super::step::KindStep),
+            Kind::Pet => None,
+        }
+    }
+
     fn after_edit(&mut self, result: Result<(), Refused>) {
         match result {
             Err(e) => eprintln!("subjects: refused: {e}"),
@@ -4463,14 +4521,16 @@ mod tests {
         let how = got[2].how.as_ref().unwrap();
         assert_eq!((how.by.as_str(), how.yes, how.no, how.unseen), ("judge", Some(0), Some(2), Some(1)));
         assert!(matches!(&got[2].act, Act::NotSame { groups } if groups[0].heads[0].0 == head(1) && groups[1].heads[0].0 == head(3)));
-        // A split proposed around two heads of one photo, two heads moved
-        // between its sides by hand before it was confirmed.
-        e.move_faces(far.clone(), vec![head(4)], None, Via::Proposal { edited: 2 });
+        // A split proposed around two heads of one photo, applied from the
+        // editor after two heads were moved by hand: one `edit` entry.
+        let _ = far;
+        let edit = crate::model::subjects::GroupEdit { kind: Kind::Fursuit, new_names: vec![None], moves: vec![(head(4), crate::model::subjects::EditDest::New(0))], ..Default::default() };
+        e.apply_edit(9, edit, Via::Editor { proposal: true, edited: 2 });
         let got = until(4);
         alone(&got[3]);
-        assert!(matches!(&got[3].act, Act::Split { from, heads, moved: 1 } if from.n == 1 && heads[0].0 == head(4)), "{:?}", got[3]);
+        assert!(matches!(&got[3].act, Act::Edit { groups, out } if groups[0].n == 1 && out[0].from == Some(0) && matches!(out[0].to, crate::model::decisions::To::New { new: 0, .. }) && out[0].heads[0].0 == head(4)), "{:?}", got[3]);
         let how = got[3].how.as_ref().unwrap();
-        assert_eq!((how.by.as_str(), how.edited), ("proposal", Some(2)));
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(2)));
         // A review answer: C is A, by distance; the nearest member measured.
         e.answer(a.clone(), vec![head(3)], Some(true), Via::Review { judge: None, check: false });
         let got = until(5);
@@ -4708,7 +4768,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         let b_ref = FaceRef::new(key_of(2), [0.3, 0.2, 0.3, 0.4]);
-        e.move_faces(suit.clone(), vec![b_ref], None, Via::default());
+        let _ = &suit;
+        let edit = crate::model::subjects::GroupEdit { kind: Kind::Fursuit, new_names: vec![None], moves: vec![(b_ref, crate::model::subjects::EditDest::New(0))], ..Default::default() };
+        e.apply_edit(9, edit, Via::default());
         // Three groups, B's of its own: a listing from before the move
         // landed can hold three groups too, so wait for B's.
         let started = Instant::now();
@@ -4961,6 +5023,118 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(!e.status().heads.whitened, "raw: too few heads to whiten");
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The group editor's *Apply* through the engine, with a regroup
+    /// landing between opening the editor and applying (raw: the grouping
+    /// choice changed; whitened: the space changed): the heads are found
+    /// where they are then, it applies as one step, one undo takes it
+    /// back, and the record has one `edit` entry.
+    #[test]
+    fn an_edit_applies_after_a_regroup_and_undoes_in_one_step() {
+        for whiten in [false, true] {
+            let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+            let specs = [(1, 0), (2, Suits::at(0.1)), (3, -Suits::at(0.9)), (4, -Suits::at(0.95))];
+            let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+            let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+            let (lib, d) = library_of(if whiten { "edit-white" } else { "edit-raw" }, &refs);
+            let config = Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+            let (bus, _rx) = crate::bus::channel();
+            let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+            e.on_library(lib.clone());
+            e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+            wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+            let _ = fursuit_groups(&e, 2);
+            let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+            let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+            // The editor opens on {1, 2}: head 2 goes to the group of {3, 4}
+            // (known by its heads), head 1 into a new group named Rook.
+            let edit = crate::model::subjects::GroupEdit {
+                kind: Kind::Fursuit,
+                targets: vec![crate::model::subjects::EditTarget::ClusterOf(vec![head(3), head(4)])],
+                new_names: vec![Some("Rook".into())],
+                moves: vec![(head(2), crate::model::subjects::EditDest::Group(0)), (head(1), crate::model::subjects::EditDest::New(0))],
+                renames: Vec::new(),
+            };
+            // A regroup lands meanwhile.
+            if whiten {
+                e.set_whitening(super::super::whiten::Whitening::identity(2));
+                wait_for(&e, "the whitening", |s| s.heads.whitened);
+            } else {
+                e.set_fursuit_grouping(heads::Grouping::Looser);
+                wait_for(&e, "the regroup", |s| s.heads.grouping == heads::Grouping::Looser && !s.heads.regrouping);
+            }
+            let _ = fursuit_groups(&e, 2);
+            e.apply_edit(1, edit, Via::Editor { proposal: false, edited: 2 });
+            let started = Instant::now();
+            let sizes = |e: &Engine| {
+                let mut v: Vec<(Option<String>, usize)> = e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).map(|g| (g.name.clone(), g.photos)).collect();
+                v.sort();
+                v
+            };
+            while sizes(&e) != [(None, 3), (Some("Rook".to_string()), 1)] {
+                assert!(started.elapsed() < Duration::from_secs(5), "whiten={whiten}: {:?}", sizes(&e));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            e.undo();
+            let started = Instant::now();
+            while sizes(&e) != [(None, 2), (None, 2)] {
+                assert!(started.elapsed() < Duration::from_secs(5), "whiten={whiten}, after undo: {:?}", sizes(&e));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            e.shutdown();
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// A fursuit head taken out of its group never rejoins it when the
+    /// grouping runs again, and can still be sent to another group.
+    #[test]
+    fn a_taken_out_head_never_rejoins_its_group_after_a_regroup() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.05)), (3, Suits::at(0.08)), (4, -Suits::at(0.9)), (5, -Suits::at(0.95))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("edit-takeout", &refs);
+        let config = Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 5 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        let _ = fursuit_groups(&e, 2);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+        use crate::model::subjects::{EditDest, EditTarget, GroupEdit};
+        e.apply_edit(1, GroupEdit { kind: Kind::Fursuit, moves: vec![(head(3), EditDest::TakenOut)], ..GroupEdit::default() }, Via::Editor { proposal: false, edited: 1 });
+        // The group of 1 and 2 is a subject now, 3 rejected for it; the
+        // regroup after the edit leaves 3 out of it.
+        let started = Instant::now();
+        let holder = loop {
+            let s = e.subjects();
+            if let Some(g) = s.groups.iter().find(|g| g.kind == Kind::Fursuit && matches!(g.id, GroupId::Subject(_))) {
+                if g.photos == 2 && !e.status().heads.regrouping {
+                    break g.id.clone();
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", s.groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        e.set_fursuit_grouping(heads::Grouping::Looser);
+        wait_for(&e, "the regroup", |s| s.heads.grouping == heads::Grouping::Looser && !s.heads.regrouping);
+        std::thread::sleep(Duration::from_millis(200));
+        let photos_of = |e: &Engine, id: &GroupId| e.subjects().groups.iter().find(|g| g.id == *id).map(|g| g.photos);
+        assert_eq!(photos_of(&e, &holder), Some(2), "3 never back in");
+        // Still free for another group: sent to the group of 4 and 5.
+        e.apply_edit(2, GroupEdit { kind: Kind::Fursuit, targets: vec![EditTarget::ClusterOf(vec![head(4), head(5)])], moves: vec![(head(3), EditDest::Group(0))], ..GroupEdit::default() }, Via::Editor { proposal: false, edited: 1 });
+        let started = Instant::now();
+        while !e.subjects().groups.iter().any(|g| g.kind == Kind::Fursuit && g.photos == 3) {
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", e.subjects().groups);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(photos_of(&e, &holder), Some(2));
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

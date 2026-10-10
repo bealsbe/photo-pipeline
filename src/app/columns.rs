@@ -1,41 +1,46 @@
-//! Two columns of faces (or fursuit heads) to move between, by drag or
-//! key: the one piece behind two groups side by side (`subjects_pair`,
-//! where a move is the engine's) and a split being arranged
-//! (`subjects_split`, where nothing moves until it is confirmed).
+//! Columns of faces (or fursuit heads) to move between, by drag or key:
+//! the picks, the drag and the tiles of the group editor
+//! (`subjects_editor`), where nothing changes until *Apply*.
 //!
 //! - A click picks a face (or puts it back); Shift+click picks the run from
-//!   the last one clicked, in the order shown.  Picks live on one side.
+//!   the last one clicked, in the order shown.  Picks live in one column.
 //! - A face dragged (the picked ones with it when it is one of them) onto
-//!   the other column, or onto *New group* where the owner offers one.
-//! - ← / → send the picked faces to that side; N to a new group.
-//! - **Pinned** faces never move: a click or a drag on one does nothing,
-//!   and a move never carries one (a split's two heads from one photo).
+//!   another column, *New group*, a group in the panel, *Take out* or
+//!   *Not heads*.
+//! - ← / → send the picked faces to the previous / next column; N to a new
+//!   group; R takes them out of the group; Delete: not heads at all.
 //!
-//! The owner keeps the faces and the order; this keeps the picks and the
-//! drag, and hands back a [`Move`] for the owner to make.
-
-use std::collections::HashSet;
+//! The owner keeps the faces, the order and what a move may do (two heads
+//! of one photo never share a column); this keeps the picks and the drag,
+//! and hands back a [`Move`] for the owner to make.
 
 use iced::keyboard::{self, Key, key::Named};
 use iced::widget::{Space, column, container, row, scrollable, stack, text};
 use iced::{Alignment, Background, Element, Length, Padding};
 
-use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, Kind, KindWords};
+use super::kit::tip;
+use super::people::{Face, FaceRef, Framing, GroupId, Kind};
 use super::style;
 use super::subjects as subj;
 use super::{App, Message};
-use crate::ui::icons::{self, Glyph};
+use crate::ui::icons::Glyph;
 use crate::ui::paint;
 use crate::ui::subject_tile::{self as tile, Tile};
 use crate::ui::theme::{self as t, alpha};
-use crate::util;
 
 /// Where a drag or a key sends the picked faces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
-    Side(usize),
+    /// A column, by its place.
+    Col(usize),
+    /// A new column of its own.
     New,
+    /// A group in the panel (not shown as a column).
+    Group(GroupId),
+    /// "Take out of this group" / "Not this person".
+    TakenOut,
+    /// "Not fursuit heads" / "Not faces".
+    Removed,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -57,6 +62,8 @@ pub struct Move {
 pub enum ColMsg {
     Pick(usize, FaceRef),
     MoveTo(Target),
+    /// ← (false) / → (true): the picked faces to the previous / next column.
+    Step(bool),
     DragStart(usize, FaceRef),
     DragEnter(Target),
     DragLeave(Target),
@@ -64,47 +71,44 @@ pub enum ColMsg {
     Nothing,
 }
 
-/// The picks and the drag of two columns.
+/// The picks and the drag.
 #[derive(Debug, Clone, Default)]
 pub struct Columns {
-    pub picked: [Vec<FaceRef>; 2],
-    anchor: [Option<FaceRef>; 2],
+    pub picked: Vec<FaceRef>,
+    /// The column the picks are in.
+    pub picked_in: Option<usize>,
+    anchor: Option<FaceRef>,
     pub drag: Option<Drag>,
-    /// Faces that never move.
-    pub pinned: HashSet<FaceRef>,
-    /// Whether *New group* is offered (N, the drop target).
-    pub new_group: bool,
 }
 
 impl Columns {
-    pub fn new(new_group: bool) -> Columns {
-        Columns { new_group, ..Columns::default() }
-    }
-
-    /// A message, with each side's faces in the order shown; a move to
-    /// make, if any.  `shift`: a click picks a run.
-    pub fn update(&mut self, msg: ColMsg, shift: bool, order: impl Fn(usize) -> Vec<FaceRef>) -> Option<Move> {
+    /// A message, with each column's faces in the order shown and how many
+    /// columns there are; a move to make, if any.  `shift`: a click picks a
+    /// run.
+    pub fn update(&mut self, msg: ColMsg, shift: bool, order: impl Fn(usize) -> Vec<FaceRef>, columns: usize) -> Option<Move> {
         match msg {
-            ColMsg::Pick(side, f) => {
-                self.pick(side, f, shift, &order(side));
+            ColMsg::Pick(col, f) => {
+                self.pick(col, f, shift, &order(col));
                 None
             }
             ColMsg::MoveTo(to) => {
-                if to == Target::New && !self.new_group {
+                let from = self.picked_in?;
+                if to == Target::Col(from) {
                     return None;
                 }
-                let from = match to {
-                    Target::Side(s) => 1 - s.min(1),
-                    Target::New => usize::from(self.picked[0].is_empty()),
-                };
-                self.take(from, self.picked[from].clone(), to)
+                self.take(from, self.picked.clone(), to)
             }
-            ColMsg::DragStart(side, f) => {
-                if self.pinned.contains(&f) {
+            ColMsg::Step(forward) => {
+                let from = self.picked_in?;
+                let to = if forward { from + 1 } else { from.checked_sub(1)? };
+                if to >= columns {
                     return None;
                 }
-                let faces = if self.picked[side].contains(&f) { self.picked[side].clone() } else { vec![f] };
-                self.drag = Some(Drag { from: side, faces, over: None });
+                self.take(from, self.picked.clone(), Target::Col(to))
+            }
+            ColMsg::DragStart(col, f) => {
+                let faces = if self.picked_in == Some(col) && self.picked.contains(&f) { self.picked.clone() } else { vec![f] };
+                self.drag = Some(Drag { from: col, faces, over: None });
                 None
             }
             ColMsg::DragEnter(to) => {
@@ -114,7 +118,7 @@ impl Columns {
                 None
             }
             ColMsg::DragLeave(to) => {
-                if let Some(d) = self.drag.as_mut().filter(|d| d.over == Some(to)) {
+                if let Some(d) = self.drag.as_mut().filter(|d| d.over.as_ref() == Some(&to)) {
                     d.over = None;
                 }
                 None
@@ -122,7 +126,7 @@ impl Columns {
             ColMsg::DragDrop => {
                 let Drag { from, faces, over } = self.drag.take()?;
                 let to = over?;
-                if to == Target::Side(from) || (to == Target::New && !self.new_group) {
+                if to == Target::Col(from) {
                     return None;
                 }
                 self.take(from, faces, to)
@@ -132,45 +136,57 @@ impl Columns {
     }
 
     /// A click picks or puts back; with Shift, every face from the last one
-    /// clicked on that side to this one, in `order`.  Pinned faces are
-    /// never picked.
-    pub fn pick(&mut self, side: usize, f: FaceRef, shift: bool, order: &[FaceRef]) {
-        let side = side.min(1);
-        if self.pinned.contains(&f) {
-            return;
+    /// clicked in that column to this one, in `order`.
+    pub fn pick(&mut self, col: usize, f: FaceRef, shift: bool, order: &[FaceRef]) {
+        if self.picked_in != Some(col) {
+            self.picked.clear();
+            self.anchor = None;
+            self.picked_in = Some(col);
         }
-        self.picked[1 - side].clear();
-        self.anchor[1 - side] = None;
         if shift {
-            if let Some(run) = self.anchor[side].and_then(|a| super::subjects_split::run(order, a, f)) {
-                for x in run.into_iter().filter(|x| !self.pinned.contains(x)) {
-                    if !self.picked[side].contains(&x) {
-                        self.picked[side].push(x);
+            if let Some(run) = self.anchor.and_then(|a| super::subjects_split::run(order, a, f)) {
+                for x in run {
+                    if !self.picked.contains(&x) {
+                        self.picked.push(x);
                     }
                 }
-                self.anchor[side] = Some(f);
+                self.anchor = Some(f);
                 return;
             }
         }
-        match self.picked[side].iter().position(|x| *x == f) {
+        match self.picked.iter().position(|x| *x == f) {
             Some(i) => {
-                self.picked[side].remove(i);
+                self.picked.remove(i);
             }
-            None => self.picked[side].push(f),
+            None => self.picked.push(f),
         }
-        self.anchor[side] = Some(f);
+        self.anchor = Some(f);
+        if self.picked.is_empty() {
+            self.picked_in = None;
+        }
     }
 
-    /// The move of `faces` from `from`, without the pinned ones; the
-    /// picks of that side put away.
+    /// Pick these (a preset: the heads picked before the editor opened).
+    pub fn pick_all(&mut self, col: usize, faces: Vec<FaceRef>) {
+        self.picked_in = (!faces.is_empty()).then_some(col);
+        self.anchor = faces.last().copied();
+        self.picked = faces;
+    }
+
     fn take(&mut self, from: usize, faces: Vec<FaceRef>, to: Target) -> Option<Move> {
-        let faces: Vec<FaceRef> = faces.into_iter().filter(|f| !self.pinned.contains(f)).collect();
         if faces.is_empty() {
             return None;
         }
-        self.picked[from].retain(|f| !faces.contains(f));
-        self.anchor[from] = None;
         Some(Move { from, faces, to })
+    }
+
+    /// The move was made: its faces are no longer picked.
+    pub fn moved(&mut self, faces: &[FaceRef]) {
+        self.picked.retain(|f| !faces.contains(f));
+        if self.picked.is_empty() {
+            self.picked_in = None;
+            self.anchor = None;
+        }
     }
 
     /// Esc: a drag, then the picks.  Whether there was one.
@@ -178,51 +194,50 @@ impl Columns {
         if self.drag.take().is_some() {
             return true;
         }
-        if self.picked.iter().any(|p| !p.is_empty()) {
-            self.picked = [Vec::new(), Vec::new()];
-            self.anchor = [None, None];
+        if !self.picked.is_empty() {
+            self.clear();
             return true;
         }
         false
     }
 
-    /// Picks of faces no longer on their side are put away.
-    pub fn keep_only(&mut self, side: usize, on_side: impl Fn(&FaceRef) -> bool) {
-        self.picked[side].retain(|f| on_side(f));
-        if self.anchor[side].is_some_and(|a| !on_side(&a)) {
-            self.anchor[side] = None;
+    pub fn clear(&mut self) {
+        self.picked.clear();
+        self.picked_in = None;
+        self.anchor = None;
+    }
+
+    /// Columns were removed or reordered: picks follow, or go.
+    pub fn renumber(&mut self, map: impl Fn(usize) -> Option<usize>) {
+        match self.picked_in.and_then(&map) {
+            Some(c) => self.picked_in = Some(c),
+            None => self.clear(),
         }
-    }
-
-    pub fn clear(&mut self, side: usize) {
-        self.picked[side].clear();
-        self.anchor[side] = None;
-    }
-
-    pub fn picked_side(&self) -> Option<usize> {
-        (0..2).find(|&s| !self.picked[s].is_empty())
+        self.drag = None;
     }
 }
 
-/// ← / → (and N when offered): the message, if the key is one.
-pub fn key_msg(key: &Key, mods: keyboard::Modifiers, new_group: bool) -> Option<ColMsg> {
+/// The editor's keys: ← / →, N, R, Delete.  The message, if the key is one.
+pub fn key_msg(key: &Key, mods: keyboard::Modifiers) -> Option<ColMsg> {
     if mods.control() || mods.alt() {
         return None;
     }
     match key {
-        Key::Named(Named::ArrowLeft) => Some(ColMsg::MoveTo(Target::Side(0))),
-        Key::Named(Named::ArrowRight) => Some(ColMsg::MoveTo(Target::Side(1))),
-        Key::Character(c) if new_group && c.as_str().eq_ignore_ascii_case("n") => Some(ColMsg::MoveTo(Target::New)),
+        Key::Named(Named::ArrowLeft) => Some(ColMsg::Step(false)),
+        Key::Named(Named::ArrowRight) => Some(ColMsg::Step(true)),
+        Key::Named(Named::Delete) => Some(ColMsg::MoveTo(Target::Removed)),
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("n") => Some(ColMsg::MoveTo(Target::New)),
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("r") => Some(ColMsg::MoveTo(Target::TakenOut)),
         _ => None,
     }
 }
-
-// ── views ───────────────────────────────────────────────────────────────────
 
 /// One crop's word: "head" for fursuits, "face" for people.
 pub fn crop_word(kind: Kind) -> &'static str {
     if kind == Kind::Fursuit { "head" } else { "face" }
 }
+
+// ── views ───────────────────────────────────────────────────────────────────
 
 /// What the views need from their owner.
 pub struct Look<'a> {
@@ -230,14 +245,17 @@ pub struct Look<'a> {
     pub cols: &'a Columns,
     /// The owner's message for a column message.
     pub wrap: fn(ColMsg) -> Message,
-    /// The crops loaded for what is on screen: each side's section.
-    pub sections: [subj::Section; 2],
 }
 
-/// One side's faces as tiles: the first `marked` are the least like the
-/// rest; pinned ones carry the pin.  Only the tiles on screen (or near)
-/// load their crops (`InView`).
-pub fn grid<'a>(app: &'a App, look: &Look<'a>, side: usize, order: &[&'a Face], marked: usize) -> Element<'a, Message> {
+/// A column's crops: only those on screen (or near) load.
+pub fn section(col: usize) -> subj::Section {
+    subj::Section::Column(col.min(250) as u8)
+}
+
+/// One column's faces as tiles: the first `marked` are the least like the
+/// rest; `paired` ones (another head of their photo is in the edit) carry
+/// the pin.  Only the tiles on screen (or near) load their crops.
+pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], marked: usize, paired: &dyn Fn(&FaceRef) -> bool) -> Element<'a, Message> {
     let s = &app.subjects;
     let shape = subj::shape(look.kind);
     let small = subj::px(app, tile::SMALL_CROP);
@@ -248,94 +266,66 @@ pub fn grid<'a>(app: &'a App, look: &Look<'a>, side: usize, order: &[&'a Face], 
     for (i, f) in order.iter().enumerate() {
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, shape);
-        let pinned = look.cols.pinned.contains(&f.face);
+        let pinned = paired(&f.face);
         let badge = if pinned { Some(Glyph::Pin) } else { (i < marked).then_some(Glyph::Split) };
-        let el: Element<'a, Message> = Tile { crop, name: None, count: if pinned { "Pinned".to_string() } else { f.day.format("%b %-d, %Y").to_string() }, picked: look.cols.picked[side].contains(&f.face), small: true, badge, on: wrap(ColMsg::Pick(side, f.face)) }.into();
-        let el: Element<'a, Message> = if pinned {
-            el
-        } else {
-            let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::DragStart(side, f.face)), enter: wrap(ColMsg::Nothing), leave: wrap(ColMsg::Nothing), drop: wrap(ColMsg::DragDrop) };
-            crate::ui::drag::DragArea::new(el, messages, dragging).into()
-        };
+        let picked = look.cols.picked_in == Some(col) && look.cols.picked.contains(&f.face);
+        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked, small: true, badge, on: wrap(ColMsg::Pick(col, f.face)) }.into();
+        let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::DragStart(col, f.face)), enter: wrap(ColMsg::Nothing), leave: wrap(ColMsg::Nothing), drop: wrap(ColMsg::DragDrop) };
+        let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, dragging).into();
         let words = if pinned {
-            format!("{}. In one photo with the other side's pinned {}: the two stay apart", super::search::long_date(f.day), crop_word(look.kind))
+            format!("{}. Another {} of this photo is in the edit: the two can't share a column", super::search::long_date(f.day), crop_word(look.kind))
         } else {
             format!("{}{}", super::search::long_date(f.day), if i < marked { ". Among the least like the rest" } else { "" })
         };
         r = r.push(tip(el, words, true));
     }
-    let section = look.sections[side.min(1)];
-    crate::ui::in_view::InView::new(r.wrap().vertical_spacing(8), keys, move |keys| subj::m(subj::Msg::InView(section, keys))).into()
+    crate::ui::in_view::InView::new(r.wrap().vertical_spacing(8), keys, move |keys| subj::m(subj::Msg::InView(section(col), keys))).into()
 }
 
-/// A side's column: `head` over its tiles, scrolling; the whole of it
-/// takes a drop from the other side, outlined while one is over it.
-pub fn side<'a>(look: &Look<'a>, side: usize, head: Element<'a, Message>, tiles: Element<'a, Message>, foot: Option<Element<'a, Message>>) -> Element<'a, Message> {
+/// A column: `head` over its tiles, scrolling; the whole of it takes a
+/// drop from another column, outlined while one is over it.
+pub fn column_box<'a>(look: &Look<'a>, col: usize, head: Element<'a, Message>, tiles: Element<'a, Message>, foot: Option<Element<'a, Message>>, width: Length) -> Element<'a, Message> {
     let wrap = look.wrap;
     let dragging = look.cols.drag.is_some();
-    let mut col = column![head, container(tiles).width(Length::Fill)].spacing(12).padding(Padding::from([14.0, 16.0]));
+    let mut body = column![container(tiles).width(Length::Fill)].spacing(10).padding(Padding { top: 4.0, bottom: 14.0, left: 12.0, right: 12.0 });
     if let Some(foot) = foot {
-        col = col.push(foot);
+        body = body.push(foot);
     }
-    let over = look.cols.drag.as_ref().is_some_and(|d| d.over == Some(Target::Side(side)) && d.from != side);
-    let body: Element<'a, Message> = scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill).into();
-    let body: Element<'a, Message> = if over {
-        stack![body, container(Space::new()).width(Length::Fill).height(Length::Fill).style(|_| container::Style { border: style::border(t::SIGNAL, 2.0, t::R_CELL), background: Some(Background::Color(alpha(t::SIGNAL, 0.05))), ..Default::default() })].into()
-    } else {
-        body
-    };
-    let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::Nothing), enter: wrap(ColMsg::DragEnter(Target::Side(side))), leave: wrap(ColMsg::DragLeave(Target::Side(side))), drop: wrap(ColMsg::Nothing) };
-    container(crate::ui::drag::DragArea::new(body, messages, dragging).target_only()).width(Length::FillPortion(1)).height(Length::Fill).into()
+    let over = look.cols.drag.as_ref().is_some_and(|d| d.over == Some(Target::Col(col)) && d.from != col);
+    let scroll: Element<'a, Message> = scrollable(body).style(style::scroll).width(Length::Fill).height(Length::Fill).into();
+    let whole: Element<'a, Message> = column![container(head).padding(Padding { top: 12.0, bottom: 6.0, left: 12.0, right: 12.0 }).width(Length::Fill), scroll].into();
+    let whole: Element<'a, Message> = if over { outlined(whole) } else { whole };
+    let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::Nothing), enter: wrap(ColMsg::DragEnter(Target::Col(col))), leave: wrap(ColMsg::DragLeave(Target::Col(col))), drop: wrap(ColMsg::Nothing) };
+    container(crate::ui::drag::DragArea::new(whole, messages, dragging).target_only()).width(width).height(Length::Fill).into()
 }
 
-/// The two columns with the line between them.
-pub fn pair<'a>(left: Element<'a, Message>, right: Element<'a, Message>) -> Element<'a, Message> {
-    row![left, container(Space::new().width(1).height(Length::Fill)).style(style::fill(t::PHOTO_LINE)), right].height(Length::Fill).into()
+/// Outlined in the accent: a drop is over it.
+pub fn outlined<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
+    stack![content, container(Space::new()).width(Length::Fill).height(Length::Fill).style(|_| container::Style { border: style::border(t::SIGNAL, 2.0, t::R_CELL), background: Some(Background::Color(alpha(t::SIGNAL, 0.05))), ..Default::default() })].into()
 }
 
-/// While faces are picked: how many, the move to the other side (named
-/// `to_other`), *Split into a new group* when offered, and `close`.
-pub fn pick_strip<'a>(look: &Look<'a>, to_other: [String; 2], close: Option<(Message, &'a str)>) -> Option<Element<'a, Message>> {
-    let side = look.cols.picked_side()?;
+/// A drop target (a panel group, *Take out*, *Not heads*, *New group*):
+/// `content`, outlined while a drag is over it.
+pub fn drop_target<'a>(look: &Look<'a>, target: Target, content: Element<'a, Message>) -> Element<'a, Message> {
     let wrap = look.wrap;
-    let crops = crop_word(look.kind);
-    let key = if side == 0 { "→" } else { "←" };
-    let mut r = row![
-        icons::view(Glyph::Select, 16.0, t::SIGNAL),
-        text(format!("{} picked", util::plural(look.cols.picked[side].len() as u64, crops))).size(t::T_BODY).color(t::INK).width(Length::Fill),
-        tip(kit::icon_text_btn(if side == 0 { Glyph::ChevronRight } else { Glyph::ChevronLeft }, to_other[1 - side].clone(), t::INK, style::secondary(), Some(wrap(ColMsg::MoveTo(Target::Side(1 - side))))), format!("To the other side  ({key})"), true),
-    ]
-    .spacing(t::S3)
-    .align_y(Alignment::Center)
-    .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
-    if look.cols.new_group {
-        r = r.push(tip(kit::icon_text_btn(Glyph::Plus, "Split into a new group", t::INK, style::secondary(), Some(wrap(ColMsg::MoveTo(Target::New)))), "Into a group of their own, to name or merge  (N)", true));
-    }
-    if let Some((msg, words)) = close {
-        r = r.push(tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(msg)), words, true));
-    }
-    Some(column![container(r).width(Length::Fill).style(style::fill(alpha(t::SIGNAL, 0.08))), container(Space::new().width(Length::Fill).height(1)).style(style::fill(alpha(t::SIGNAL, 0.3)))].into())
-}
-
-/// Under the columns: *New group*, a drop target.
-pub fn new_group_target<'a>(look: &Look<'a>) -> Element<'a, Message> {
-    let wrap = look.wrap;
-    let over = look.cols.drag.as_ref().is_some_and(|d| d.over == Some(Target::New));
-    let words = if look.cols.drag.is_some() { "Drop here for a new group".to_string() } else { format!("New group: drop {} here to split them off", look.kind.crops().to_lowercase()) };
-    let chip = container(row![icons::view(Glyph::Plus, 16.0, if over { t::SIGNAL } else { t::INK2 }), text(words).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2)].spacing(8).align_y(Alignment::Center))
-        .padding(Padding::from([8.0, 14.0]))
+    let over = look.cols.drag.as_ref().is_some_and(|d| d.over.as_ref() == Some(&target));
+    let content: Element<'a, Message> = container(content)
         .width(Length::Fill)
-        .center_x(Length::Fill)
-        .style(move |_| container::Style { background: Some(Background::Color(if over { alpha(t::SIGNAL, 0.14) } else { t::RAISED })), border: style::border(if over { t::SIGNAL } else { t::LINE_HI }, if over { 2.0 } else { 1.0 }, t::R_CONTROL), ..Default::default() });
-    let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::Nothing), enter: wrap(ColMsg::DragEnter(Target::New)), leave: wrap(ColMsg::DragLeave(Target::New)), drop: wrap(ColMsg::Nothing) };
-    container(crate::ui::drag::DragArea::new(chip, messages, look.cols.drag.is_some()).target_only()).padding(Padding::from([6.0, 16.0])).width(Length::Fill).style(style::fill(t::MOUNT)).into()
+        .style(move |_| container::Style {
+            background: Some(Background::Color(if over { alpha(t::SIGNAL, 0.14) } else { Default::default() })),
+            border: style::border(if over { t::SIGNAL } else { iced::Color::TRANSPARENT }, if over { 2.0 } else { 0.0 }, t::R_CONTROL),
+            ..Default::default()
+        })
+        .into();
+    let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::Nothing), enter: wrap(ColMsg::DragEnter(target.clone())), leave: wrap(ColMsg::DragLeave(target)), drop: wrap(ColMsg::Nothing) };
+    crate::ui::drag::DragArea::new(content, messages, look.cols.drag.is_some()).target_only().into()
 }
 
 /// A row of keys and what they do.
 pub fn keys<'a>(list: &[(&'a str, &'a str)]) -> Element<'a, Message> {
     let mut r = row![].spacing(16);
     for (k, what) in list {
-        r = r.push(row![text(*k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(*what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4));
+        r = r.push(row![text(*k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(*what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4).align_y(Alignment::Center));
     }
     r.wrap().vertical_spacing(4).into()
 }
@@ -350,48 +340,51 @@ mod tests {
     }
 
     /// A drag carries the picked faces when it starts on one of them; a
-    /// drop on its own side or on nothing moves nothing; picks live on one
-    /// side; ← / → send them over.
+    /// drop on its own column or on nothing moves nothing; picks live in
+    /// one column; ← / → send them to the column beside, not past the
+    /// ends.
     #[test]
     fn drags_and_keys_move_the_picked_faces() {
-        let order = |s: usize| if s == 0 { vec![f(1), f(2), f(3), f(4)] } else { vec![f(7), f(8)] };
-        let mut c = Columns::new(true);
-        c.update(ColMsg::Pick(0, f(1)), false, order);
-        c.update(ColMsg::Pick(0, f(3)), true, order);
-        assert_eq!(c.picked[0], [f(1), f(2), f(3)], "a Shift run");
-        c.update(ColMsg::DragStart(0, f(2)), false, order);
-        c.update(ColMsg::DragEnter(Target::Side(0)), false, order);
-        assert_eq!(c.update(ColMsg::DragDrop, false, order), None, "its own side");
-        assert_eq!(c.picked[0].len(), 3, "kept");
-        c.update(ColMsg::DragStart(0, f(4)), false, order);
-        c.update(ColMsg::DragEnter(Target::Side(1)), false, order);
-        assert_eq!(c.update(ColMsg::DragDrop, false, order), Some(Move { from: 0, faces: vec![f(4)], to: Target::Side(1) }), "not picked: it alone");
-        assert_eq!(c.update(ColMsg::MoveTo(Target::Side(1)), false, order), Some(Move { from: 0, faces: vec![f(1), f(2), f(3)], to: Target::Side(1) }));
-        assert!(c.picked[0].is_empty());
-        c.update(ColMsg::Pick(1, f(7)), false, order);
-        c.update(ColMsg::Pick(0, f(1)), false, order);
-        assert!(c.picked[1].is_empty(), "picks live on one side");
-        assert_eq!(c.update(ColMsg::MoveTo(Target::Side(0)), false, order), None, "← with the picks on the left: nothing");
-    }
-
-    /// Pinned faces are never picked, dragged or carried, even inside a
-    /// Shift run; *New group* only where it is offered.
-    #[test]
-    fn pinned_faces_never_move_and_new_group_only_when_offered() {
-        let order = |_: usize| vec![f(1), f(2), f(3)];
-        let mut c = Columns::new(false);
-        c.pinned.insert(f(2));
-        c.update(ColMsg::Pick(0, f(2)), false, order);
-        assert!(c.picked[0].is_empty());
-        c.update(ColMsg::DragStart(0, f(2)), false, order);
-        assert!(c.drag.is_none(), "a pinned face doesn't drag");
-        c.update(ColMsg::Pick(0, f(1)), false, order);
-        c.update(ColMsg::Pick(0, f(3)), true, order);
-        assert_eq!(c.picked[0], [f(1), f(3)], "the run leaves the pin out");
-        assert_eq!(c.update(ColMsg::MoveTo(Target::New), false, order), None, "no New group here");
-        c.drag = Some(Drag { from: 0, faces: vec![f(1), f(2)], over: Some(Target::Side(1)) });
-        assert_eq!(c.update(ColMsg::DragDrop, false, order), Some(Move { from: 0, faces: vec![f(1)], to: Target::Side(1) }), "a pin never rides along");
+        let order = |s: usize| match s {
+            0 => vec![f(1), f(2), f(3), f(4)],
+            1 => vec![f(7), f(8)],
+            _ => vec![],
+        };
+        let mut c = Columns::default();
+        c.update(ColMsg::Pick(0, f(1)), false, order, 3);
+        c.update(ColMsg::Pick(0, f(3)), true, order, 3);
+        assert_eq!(c.picked, [f(1), f(2), f(3)], "a Shift run");
+        c.update(ColMsg::DragStart(0, f(2)), false, order, 3);
+        c.update(ColMsg::DragEnter(Target::Col(0)), false, order, 3);
+        assert_eq!(c.update(ColMsg::DragDrop, false, order, 3), None, "its own column");
+        c.update(ColMsg::DragStart(0, f(4)), false, order, 3);
+        c.update(ColMsg::DragEnter(Target::Col(2)), false, order, 3);
+        assert_eq!(c.update(ColMsg::DragDrop, false, order, 3), Some(Move { from: 0, faces: vec![f(4)], to: Target::Col(2) }), "not picked: it alone");
+        c.update(ColMsg::DragStart(0, f(1)), false, order, 3);
+        c.update(ColMsg::DragEnter(Target::Group(GroupId::Cluster(9))), false, order, 3);
+        assert_eq!(c.update(ColMsg::DragDrop, false, order, 3), Some(Move { from: 0, faces: vec![f(1), f(2), f(3)], to: Target::Group(GroupId::Cluster(9)) }), "picked: all of them");
+        assert_eq!(c.update(ColMsg::Step(false), false, order, 3), None, "← from the first column: nowhere");
+        assert_eq!(c.update(ColMsg::Step(true), false, order, 3), Some(Move { from: 0, faces: vec![f(1), f(2), f(3)], to: Target::Col(1) }));
+        c.moved(&[f(1), f(2), f(3)]);
+        assert!(c.picked.is_empty() && c.picked_in.is_none());
+        c.update(ColMsg::Pick(1, f(7)), false, order, 3);
+        c.update(ColMsg::Pick(0, f(1)), false, order, 3);
+        assert_eq!((c.picked.clone(), c.picked_in), (vec![f(1)], Some(0)), "picks live in one column");
         assert!(c.escape(), "the picks");
         assert!(!c.escape());
+    }
+
+    /// The editor's keys: N, R and Delete send the picked faces to a new
+    /// group, out of the group, or out as not heads; with Ctrl or Alt,
+    /// nothing.
+    #[test]
+    fn the_keys_name_their_targets() {
+        let k = |s: &str| Key::Character(s.into());
+        let none = keyboard::Modifiers::empty();
+        assert!(matches!(key_msg(&k("n"), none), Some(ColMsg::MoveTo(Target::New))));
+        assert!(matches!(key_msg(&k("R"), none), Some(ColMsg::MoveTo(Target::TakenOut))));
+        assert!(matches!(key_msg(&Key::Named(Named::Delete), none), Some(ColMsg::MoveTo(Target::Removed))));
+        assert!(matches!(key_msg(&Key::Named(Named::ArrowRight), none), Some(ColMsg::Step(true))));
+        assert!(key_msg(&k("r"), keyboard::Modifiers::CTRL).is_none());
     }
 }

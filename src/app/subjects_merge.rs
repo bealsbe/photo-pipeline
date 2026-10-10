@@ -748,7 +748,7 @@ pub fn similar_row<'a>(app: &'a App, group: &GroupId) -> Option<Element<'a, Mess
         ]
         .spacing(0);
         let merge = tip(kit::btn("Merge", style::secondary(), Some(m(Msg::SimilarMerge(i)))).height(26).padding(Padding::from([0.0, 10.0])), "Merge it with this fursuit (Ctrl+Z undoes it)", true);
-        let side = tip(kit::icon_btn(Glyph::Compare, t::INK2, style::ghost(), Some(super::subjects_pair::m(super::subjects_pair::Msg::Open(group.clone(), other.clone())))).width(24).height(24).padding(0), "The two side by side, to move heads between them", true);
+        let side = tip(kit::icon_btn(Glyph::Compare, t::INK2, style::ghost(), Some(super::subjects_editor::m(super::subjects_editor::Msg::Open(group.clone(), super::subjects_editor::Preset::With(other.clone()))))).width(24).height(24).padding(0), "The two side by side, to move heads between them", true);
         let not = tip(kit::icon_btn(Glyph::Close, t::INK3, style::ghost(), Some(m(Msg::SimilarNotSame(i)))).width(24).height(24).padding(0), "Not the same fursuit: don't suggest it here again", true);
         let chip = container(row![crop, words, merge, side, not].spacing(8).align_y(Alignment::Center))
             .padding(Padding { left: 4.0, right: 4.0, top: 3.0, bottom: 3.0 })

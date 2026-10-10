@@ -357,6 +357,113 @@ pub enum NameTo {
     Unnamed,
 }
 
+/// An existing group the group editor sends heads to (or renames), as it
+/// will be found when *Apply* runs: a regroup may land while the editor
+/// is open and give automatic groups new ids, so one is known by a few of
+/// its heads, not its id.
+#[derive(Debug, Clone, PartialEq)]
+pub enum EditTarget {
+    /// A subject (named, or made by an earlier move): its id lasts.
+    Subject(SubjectId),
+    /// The automatic group holding (most of) these heads when it applies.
+    ClusterOf(Vec<FaceRef>),
+}
+
+/// Where the editor sends a head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditDest {
+    /// `GroupEdit::targets[i]`.
+    Group(usize),
+    /// `GroupEdit::new_names[i]`: a new group (named, or not).
+    New(usize),
+    /// "Not fursuit heads" / "Not faces": the box goes.
+    Removed,
+    /// "Take out of this group" / "Not this person": the head leaves the
+    /// group it is in and is rejected for it (never suggested or grouped
+    /// back into it), free for any other group.
+    TakenOut,
+}
+
+/// The group editor's *Apply*: the heads whose place changed, by head (the
+/// group each is in is found when it applies), as one undo step.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GroupEdit {
+    pub kind: Kind,
+    pub targets: Vec<EditTarget>,
+    pub new_names: Vec<Option<String>>,
+    pub moves: Vec<(FaceRef, EditDest)>,
+    /// Names given to existing groups (`targets[i]`).
+    pub renames: Vec<(usize, String)>,
+}
+
+/// A [`GroupEdit`] resolved against the groups as they are now: each
+/// head's group, each target's group.  What the record measures, then
+/// what applies.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditPlan {
+    pub kind: Kind,
+    /// New groups to make: the editor's, then one for each automatic
+    /// target that is gone (its heads go to a group of their own).
+    pub new_names: Vec<Option<String>>,
+    /// (head, the group it is in now, where it goes).
+    pub moves: Vec<(FaceRef, Option<GroupId>, PlanDest)>,
+    pub renames: Vec<(GroupId, String)>,
+    /// Automatic targets that were gone, sent to a new group instead.
+    pub gone: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PlanDest {
+    Group(GroupId),
+    New(usize),
+    Removed,
+    /// Out of the group it is in (the move's `from`), rejected for it.
+    TakenOut,
+}
+
+/// A planned edit in words, for the status line and the undo: "Split
+/// into 3 groups, 4 heads to Kiba, 2 removed".  `name_of` names an
+/// existing group (`None`: unnamed).
+pub fn edit_words(kind: Kind, moves: &[(FaceRef, Option<GroupId>, PlanDest)], renames: &[(GroupId, String)], name_of: impl Fn(&GroupId) -> Option<String>) -> String {
+    let noun = if kind == Kind::Fursuit { "head" } else { "face" };
+    let plural = |n: usize| if n == 1 { noun.to_string() } else { format!("{noun}s") };
+    let mut parts: Vec<String> = Vec::new();
+    let new_used: HashSet<usize> = moves.iter().filter_map(|(_, _, to)| if let PlanDest::New(i) = to { Some(*i) } else { None }).collect();
+    if !new_used.is_empty() {
+        parts.push(format!("split into {} groups", new_used.len() + 1));
+    }
+    let mut to_groups: Vec<(GroupId, usize)> = Vec::new();
+    for (_, _, to) in moves {
+        if let PlanDest::Group(g) = to {
+            match to_groups.iter_mut().find(|(x, _)| x == g) {
+                Some((_, n)) => *n += 1,
+                None => to_groups.push((g.clone(), 1)),
+            }
+        }
+    }
+    for (g, n) in to_groups {
+        parts.push(format!("{n} {} to {}", plural(n), name_of(&g).unwrap_or_else(|| "an unnamed group".to_string())));
+    }
+    let count = |d: PlanDest| moves.iter().filter(|(_, _, to)| *to == d).count();
+    let removed = count(PlanDest::Removed);
+    if removed > 0 {
+        parts.push(format!("{removed} removed"));
+    }
+    let taken = count(PlanDest::TakenOut);
+    if taken > 0 {
+        parts.push(format!("{taken} taken out"));
+    }
+    for (_, name) in renames {
+        parts.push(format!("named {name}"));
+    }
+    if parts.is_empty() {
+        return "Edited a group".to_string();
+    }
+    let s = parts.join(", ");
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
 /// A change made on a box in the viewer's labels.  Each is one undo step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum LabelEdit {
