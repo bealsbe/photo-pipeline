@@ -1795,6 +1795,9 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
         &[
             ("L  or  Esc", "Show or hide the labels"),
             ("Click a box", "Name it, change it to the other kind, or remove it"),
+            ("Delete  or  Backspace", "Remove the picked box (not a face, not a fursuit head)"),
+            ("×  on the picked box", "Remove it"),
+            ("×  on a name", "Back to Unnamed; the box stays"),
             ("Drag on the photo", "Add a face or fursuit head that was missed"),
             ("Enter", "Give the name typed"),
             ("Esc", "Done with the box (or the box drawn)"),

@@ -21,6 +21,7 @@
 //! labels draw 0.1 0.2 0.15 0.2   # draw a box (fractions of the photo)
 //! labels name Person C|enter|take 0   # type a name, Enter, the 1st offered
 //! labels unnamed|swap|remove|deselect # the picked box's buttons
+//! labels x-box 0|x-name 0     # the × on the picked box / on a name tag
 //! labels kind person|fursuit|add|cancel   # a drawn box's choices
 //! labels dump                 # print the labels' state
 //! labels-wait 30000           # wait (up to 30 s) for drawn boxes being
@@ -187,12 +188,21 @@
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
 //! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
+//! subjects notheads page|tab|picked|go|cancel|dump   # "Not fursuit heads"
+//!                             # (or "Not faces"): a group's ⋯, the tab's
+//!                             # picked groups, the heads picked on a
+//!                             # page; its confirmation
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
 //! merges open [2]             # "Possibly the same fursuit": the review (at
 //!                             # the tab's 3rd pair)
 //! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
 //! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
 //! merges dump                 # print the lists and the review
+//! pair open 0 3               # two groups (the tab's 1st and 4th) side by side
+//! pair pick 0 2|shiftpick 1 5 # pick a face of the left (0) / right (1) side
+//! pair move left|right|new    # the picked faces to that side / a new group
+//! pair drag 0 2 right|dragto 0 2 new   # drag a face (the picked with it)
+//! pair close|dump
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
@@ -498,6 +508,53 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
             }
         }
+        "pair" => {
+            use super::subjects_pair::{Msg as Pm, Target};
+            let x = |m: Pm| Message::Subjects(super::subjects::Msg::Pair(m));
+            let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
+            let nums: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+            let target = |rest: &str| if rest.contains("new") { Target::New } else if rest.contains("left") { Target::Side(0) } else { Target::Side(1) };
+            let face = |app: &App, side: usize, n: usize| app.subjects.pair.as_ref().and_then(|p| p.ordered(side).get(n).map(|f| f.face));
+            match what {
+                // `open 0 3`: the 1st and 4th groups in the tab's order.
+                "open" => {
+                    let st = &app.subjects;
+                    let order = super::subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open);
+                    match (order.get(nums.first().copied().unwrap_or(0)), order.get(nums.get(1).copied().unwrap_or(1))) {
+                        (Some(a), Some(b)) => app.update(x(Pm::Open(a.clone(), b.clone()))),
+                        _ => Task::none(),
+                    }
+                }
+                // `pick 0 2` / `shiftpick 0 5`: the 3rd / 6th face of the left side.
+                "pick" | "shiftpick" => {
+                    let side = nums.first().copied().unwrap_or(0).min(1);
+                    if let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) {
+                        super::subjects_pair::pick(app, side, f, what == "shiftpick");
+                    }
+                    Task::none()
+                }
+                "move" => app.update(x(Pm::MoveTo(target(rest)))),
+                // `drag 0 2 right`: drag the left side's 3rd face onto the right.
+                "drag" | "dragto" => {
+                    let side = nums.first().copied().unwrap_or(0).min(1);
+                    let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) else { return Task::none() };
+                    let mut t = vec![app.update(x(Pm::DragStart(side, f))), app.update(x(Pm::DragEnter(target(rest))))];
+                    if what == "drag" {
+                        t.push(app.update(x(Pm::DragDrop)));
+                    }
+                    Task::batch(t)
+                }
+                "close" => app.update(x(Pm::Close)),
+                "dump" => {
+                    eprintln!("[pair] {}", super::subjects_pair::debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown pair action {other}");
+                    Task::none()
+                }
+            }
+        }
         "merges" => {
             use super::subjects_merge::{Msg as G, debug_state};
             let g = |x: G| Message::Subjects(super::subjects::Msg::Merges(x));
@@ -578,6 +635,9 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let rest: Vec<&str> = a.collect();
             match what {
                 "pick" => app.update(stage(StageEvent::LabelPick(rest.first().and_then(|n| n.parse().ok())))),
+                // The ×s, as the stage reports a click on them.
+                "x-box" => app.update(stage(StageEvent::LabelRemove(rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)))),
+                "x-name" => app.update(stage(StageEvent::LabelUnname(rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)))),
                 "draw" => {
                     let v: Vec<f32> = rest.iter().filter_map(|x| x.parse().ok()).collect();
                     match v.as_slice() {
@@ -1445,6 +1505,21 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
     let photo = |app: &App, n: usize| app.subjects.pane().and_then(|pp| pp.layout.tiles.get(n).copied());
     let t = match what {
         "open" => app.update(Message::Cmd(Cmd::Subjects)),
+        "notheads" | "notfaces" => {
+            use super::subjects_remove::{Msg as X, debug_state};
+            let x = |m: X| Message::Subjects(Msg::Remove(m));
+            match rest {
+                "page" => app.update(x(X::AskPage)),
+                "tab" => app.update(x(X::AskTab)),
+                "picked" => app.update(x(X::AskPicked)),
+                "go" => app.update(x(X::Go)),
+                "cancel" => app.update(x(X::Cancel)),
+                _ => {
+                    eprintln!("[remove] {}", debug_state(app));
+                    Task::none()
+                }
+            }
+        }
         "tab" => {
             let k = match rest {
                 "fursuit" | "fursuits" => Some(Kind::Fursuit),

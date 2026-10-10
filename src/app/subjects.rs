@@ -3,7 +3,7 @@
 //! phase.  Pets are on hold: no tab, though the model keeps the kind.
 //!
 //! - **The People tab** lists the groups of faces found while indexing:
-//!   the named first, then the groups to name, most bursts first, each a face
+//!   the named first, then the groups to name, most days first, each a face
 //!   crop with its name (or "Unnamed") and how many photos
 //!   and bursts.  Groups under
 //!   the smallest size to show (5 photos by default, a burst counting as one) fold away under
@@ -81,6 +81,8 @@ pub enum Page {
     Review,
     /// "Same fursuit?" for pairs of groups: merge suggestions.
     Merges,
+    /// Two groups side by side, to move faces between them.
+    Pair,
 }
 
 /// Merging picked groups: which name to keep.
@@ -138,6 +140,8 @@ pub struct Subjects {
     pub drag: Option<Drag>,
     /// "Forget this person?" waiting for an answer.
     pub forget: Option<GroupId>,
+    /// "Not fursuit heads?" (or "Not faces?") waiting for an answer.
+    pub remove: Option<super::subjects_remove::Ask>,
     pub person: Option<Person>,
     pub review: Option<Review>,
     /// The close-call judge's latest run (fursuits).
@@ -146,6 +150,8 @@ pub struct Subjects {
     /// and a group page's lists, and their review.
     pub lists: super::subjects_merge::Lists,
     pub merges: Option<super::subjects_merge::MergeReview>,
+    /// Two groups side by side.
+    pub pair: Option<super::subjects_pair::PairView>,
     pub crops: Crops,
     pub(super) seq: u64,
 }
@@ -163,18 +169,22 @@ impl Subjects {
             merge: None,
             drag: None,
             forget: None,
+            remove: None,
             person: None,
             review: None,
             judge: None,
             lists: Default::default(),
             merges: None,
+            pair: None,
             crops: Crops::new(CROP_CACHE_MIN),
             seq: 0,
         }
     }
 
     pub fn page(&self) -> Page {
-        if self.merges.is_some() {
+        if self.pair.is_some() {
+            Page::Pair
+        } else if self.merges.is_some() {
             Page::Merges
         } else if self.review.is_some() {
             Page::Review
@@ -210,9 +220,9 @@ impl Subjects {
 /// The groups of one kind as its tab lays them out.
 #[derive(Debug, Default)]
 pub struct Arranged<'a> {
-    /// Named, most bursts first.
+    /// Named, most days first.
     pub named: Vec<&'a Group>,
-    /// Unnamed, at least the smallest size to show, most bursts first.
+    /// Unnamed, at least the smallest size to show, most days first.
     pub to_name: Vec<&'a Group>,
     /// Unnamed and smaller: folded away under *Smaller groups*.
     pub small: Vec<&'a Group>,
@@ -221,10 +231,11 @@ pub struct Arranged<'a> {
 }
 
 /// Lay out `kind`'s groups: everything else is left out, so a tab never
-/// shows another kind.  Size is counted in bursts (a burst is one moment,
-/// a photo on its own is one), so a long burst can neither put a group
-/// first nor lift it out of *Smaller groups*; ties go to the photo count,
-/// then the cover's capture time.
+/// shows another kind.  Groups run by the days they were seen on, then
+/// their bursts (a burst is one moment, a photo on its own is one), then
+/// their photos, then the cover's capture time, so neither a long burst
+/// nor a busy day puts a group first.  *Smaller groups* are decided by
+/// bursts alone.
 pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
     let mut a = Arranged::default();
     for g in all.groups.iter().filter(|g| g.kind == kind) {
@@ -238,7 +249,7 @@ pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
             a.small.push(g);
         }
     }
-    let by_size = |x: &&Group, y: &&Group| y.bursts.cmp(&x.bursts).then(y.photos.cmp(&x.photos)).then(x.cover.capture.cmp(&y.cover.capture));
+    let by_size = |x: &&Group, y: &&Group| y.days.cmp(&x.days).then(y.bursts.cmp(&x.bursts)).then(y.photos.cmp(&x.photos)).then(x.cover.capture.cmp(&y.cover.capture));
     a.named.sort_by(by_size);
     a.to_name.sort_by(by_size);
     a.small.sort_by(by_size);
@@ -509,6 +520,7 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         }
         Page::Review => review::wanted(app),
         Page::Merges => super::subjects_merge::wanted(app),
+        Page::Pair => super::subjects_pair::wanted(app),
     };
     // The merge dialog, over any page.
     let mut v = v;
@@ -516,6 +528,8 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
         v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
     }
+    // "Not fursuit heads?", over any page.
+    v.extend(super::subjects_remove::wanted(app));
     v
 }
 
@@ -565,7 +579,10 @@ pub enum Msg {
     Person(person::Msg),
     Review(review::Msg),
     Merges(super::subjects_merge::Msg),
+    Pair(super::subjects_pair::Msg),
     Split(super::subjects_split::Msg),
+    /// "Not fursuit heads" / "Not faces" on groups or picked heads.
+    Remove(super::subjects_remove::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -627,6 +644,12 @@ pub fn on_undone(app: &mut App, what: String) -> Task<Message> {
 /// A group's faces arrived: the review's reference faces, or a subject's
 /// page's split view.
 pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) -> Task<Message> {
+    if super::subjects_pair::on_faces(app, seq, &faces) {
+        return refresh_crops(app);
+    }
+    if super::subjects_remove::on_faces(app, seq, &faces) {
+        return refresh_crops(app);
+    }
     if review::on_faces(app, seq, &faces) {
         return refresh_crops(app);
     }
@@ -680,6 +703,7 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     }
     let t = person::on_subjects(app);
     super::subjects_merge::on_subjects(app);
+    super::subjects_pair::on_subjects(app);
     let split = super::subjects_split::on_subjects(app);
     Task::batch([t, split, refresh_crops(app)])
 }
@@ -862,7 +886,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Person(msg) => person::update(app, msg),
         Msg::Review(msg) => review::update(app, msg),
         Msg::Merges(msg) => super::subjects_merge::update(app, msg),
+        Msg::Pair(msg) => super::subjects_pair::update(app, msg),
         Msg::Split(msg) => super::subjects_split::update(app, msg),
+        Msg::Remove(msg) => super::subjects_remove::update(app, msg),
     }
 }
 
@@ -934,7 +960,7 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.drag.take().is_some() || s.forget.take().is_some() {
+    if s.drag.take().is_some() || s.forget.take().is_some() || s.remove.take().is_some() {
         return Task::none();
     }
     if s.merge.take().is_some() {
@@ -945,6 +971,7 @@ pub fn escape(app: &mut App) -> Task<Message> {
     match s.page() {
         Page::Review => review::update(app, review::Msg::Done),
         Page::Merges => super::subjects_merge::update(app, super::subjects_merge::Msg::Done),
+        Page::Pair => super::subjects_pair::escape(app),
         Page::Person => person::escape(app),
         Page::Overview => {
             if !s.picked.is_empty() || s.select_mode {
@@ -970,9 +997,16 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
             _ => Task::none(),
         };
     }
+    if app.subjects.remove.is_some() {
+        return match key {
+            Key::Named(Named::Enter) => update(app, Msg::Remove(super::subjects_remove::Msg::Go)),
+            _ => Task::none(),
+        };
+    }
     match app.subjects.page() {
         Page::Review => review::on_key(app, key, mods),
         Page::Merges => super::subjects_merge::on_key(app, key, mods),
+        Page::Pair => super::subjects_pair::on_key(app, key, mods),
         Page::Person => person::on_key(app, key, mods),
         Page::Overview => overview_key(app, key, mods),
     }
@@ -1037,6 +1071,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     match app.subjects.page() {
         Page::Review => review::view(app),
         Page::Merges => super::subjects_merge::view(app),
+        Page::Pair => super::subjects_pair::view(app),
         Page::Person => person::view(app, keyboard_ok),
         Page::Overview => overview(app),
     }
@@ -1053,6 +1088,9 @@ pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
     }
     if let Some(id) = &s.forget {
         return Some(forget_dialog(app, id));
+    }
+    if let Some(d) = super::subjects_remove::dialog(app) {
+        return Some(d);
     }
     person::overlay(app)
 }
@@ -1373,10 +1411,10 @@ pub fn heading<'a>(label: &str, note: String) -> Element<'a, Message> {
     container(r).height(crate::ui::grid::HEADER_H).center_y(crate::ui::grid::HEADER_H).padding(Padding::from([0.0, 16.0])).width(Length::Fill).into()
 }
 
-/// A group's two counts, one to a line: its photos, then the bursts they
-/// fall in.
+/// A group's three counts, one to a line (a tile is too narrow for two
+/// on a line): the days it was seen on, its bursts, its photos.
 fn counts(g: &Group) -> String {
-    format!("{}\n{}", util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
+    format!("{}\n{}\n{}", util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo"))
 }
 
 /// A group's tile on its tab.
@@ -1420,7 +1458,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let mut hint = if g.name.is_none() {
         format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
     } else {
-        format!("{}: {} in {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
+        format!("{}: seen on {}, {}, {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo"))
     };
     if together {
         hint.push_str(" Two of its heads are in one photo, so it holds at least two fursuits: open it to split it.");
@@ -1483,7 +1521,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(tiles(app, &a.named, Section::Named));
     }
     if !a.to_name.is_empty() {
-        let note = format!("{}, most bursts first", util::thousands(a.to_name.len() as u64));
+        let note = format!("{}, most days first", util::thousands(a.to_name.len() as u64));
         col = col.push(heading("Groups to name", note));
         col = col.push(tiles(app, &a.to_name, Section::ToName));
     }
@@ -1523,9 +1561,21 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
     let n = s.picked.len();
     let merge = tip(kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk))), "Merge the picked groups into one  (M)", true);
     let hide = kit::icon_text_btn(Glyph::Hide, "Hide", t::INK2, style::ghost(), (n >= 1).then(|| m(Msg::HidePicked)));
+    let what = super::subjects_remove::nouns(s.tab);
+    let not = tip(
+        kit::icon_text_btn(Glyph::Close, format!("{}…", super::subjects_remove::action(s.tab)), t::REJECT, style::ghost(), (n >= 1).then(|| m(Msg::Remove(super::subjects_remove::Msg::AskTab)))),
+        format!("None of the picked groups are {what}: remove every one of their {what}, so they are never grouped, suggested or found again (asks first)"),
+        true,
+    );
+    // Two picked: side by side, to move faces between them.
+    let side = (n == 2).then(|| tip(kit::icon_text_btn(Glyph::Compare, "Side by side", t::INK, style::secondary(), Some(super::subjects_pair::m(super::subjects_pair::Msg::Open(s.picked[0].clone(), s.picked[1].clone())))), "The two groups side by side, to drag faces between them  (C)", true));
     let close = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::ClearPicks))), "Stop picking  (Esc)", true);
     let words = if n == 0 { "Click groups to pick them".to_string() } else { format!("{n} picked") };
-    let r = row![icons::view(Glyph::Select, 16.0, t::SIGNAL), text(words).size(t::T_BODY).color(t::INK).width(Length::Fill), merge, hide, close]
+    let mut r = row![icons::view(Glyph::Select, 16.0, t::SIGNAL), text(words).size(t::T_BODY).color(t::INK).width(Length::Fill)];
+    if let Some(side) = side {
+        r = r.push(side);
+    }
+    let r = r.push(merge).push(hide).push(not).push(close)
         .spacing(t::S3)
         .align_y(Alignment::Center)
         .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
@@ -1727,7 +1777,7 @@ pub fn debug_state(app: &App) -> String {
         s.crops.bytes() / 1024,
         s.crops.cap() / 1024,
         person::debug_state(app),
-        review::debug_state(app),
+        review::debug_state(app) + " " + &super::subjects_pair::debug_state(app),
     ) + " " + &super::subjects_merge::debug_state(app)
 }
 
@@ -1801,11 +1851,44 @@ mod tests {
         assert_eq!(arrange(&f, Kind::Pet, 5).to_name.len(), 1);
     }
 
-    /// Groups are ordered and folded by the bursts they appear in, so a
+    /// Groups run by days seen, then bursts, then photos, whatever the
+    /// kind of group; the fold is still by bursts alone.
+    #[test]
+    fn groups_run_by_days_then_bursts_then_photos() {
+        let seen = |id: u64, kind, name: Option<&str>, days: usize, bursts: usize, photos: usize| Group { days, ..in_bursts(id, kind, name, photos, bursts) };
+        let f = Found {
+            generation: 1,
+            groups: vec![
+                seen(1, Kind::Fursuit, None, 1, 30, 90),
+                seen(2, Kind::Fursuit, None, 3, 6, 6),
+                seen(3, Kind::Fursuit, None, 3, 8, 9),
+                seen(4, Kind::Fursuit, None, 3, 8, 20),
+                seen(5, Kind::Fursuit, None, 5, 5, 5),
+                // Few bursts: folded away, in the same order.
+                seen(6, Kind::Fursuit, None, 4, 4, 40),
+                seen(7, Kind::Fursuit, None, 2, 2, 2),
+                seen(8, Kind::Fursuit, Some("A"), 1, 12, 12),
+                seen(9, Kind::Fursuit, Some("B"), 2, 1, 1),
+                seen(10, Kind::Person, None, 9, 9, 9),
+            ],
+            faces_found: 0,
+            undoable: None,
+            seen_together: Default::default(),
+        };
+        let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+        let c = GroupId::Cluster;
+        let a = arrange(&f, Kind::Fursuit, 5);
+        assert_eq!(ids(&a.to_name), [c(5), c(4), c(3), c(2), c(1)], "days, then bursts, then photos");
+        assert_eq!(ids(&a.small), [c(6), c(7)], "fewer than five bursts, however many days: folded, by days");
+        assert_eq!(ids(&a.named), [c(9), c(8)], "named groups run the same way");
+        assert_eq!(ids(&arrange(&f, Kind::Person, 5).to_name), [c(10)]);
+    }
+
+    /// On equal days, groups are ordered and folded by the bursts they appear in, so a
     /// long burst of one suit does not outrank a suit seen again and
     /// again; ties go to the photo count, then the cover's capture.
     #[test]
-    fn groups_are_ordered_and_folded_by_bursts() {
+    fn groups_with_equal_days_are_ordered_and_folded_by_bursts() {
         let f = Found {
             generation: 1,
             groups: vec![
@@ -1839,8 +1922,8 @@ mod tests {
         // Never another kind's.
         assert_eq!(ids(&arrange(&f, Kind::Person, 5).to_name), [c(8)]);
         // The tile says both counts.
-        assert_eq!(counts(&f.groups[2]), "12 photos\n6 bursts");
-        assert_eq!(counts(&in_bursts(9, Kind::Person, None, 1, 1)), "1 photo\n1 burst");
+        assert_eq!(counts(&f.groups[2]), "1 day\n6 bursts\n12 photos");
+        assert_eq!(counts(&in_bursts(9, Kind::Person, None, 1, 1)), "1 day\n1 burst\n1 photo");
     }
 
     /// The merge dialog's name: the named group keeps its name whichever

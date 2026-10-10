@@ -822,6 +822,42 @@ impl People {
         }
     }
 
+    /// A person's group's faces farthest from the group first (the two
+    /// groups side by side order both kinds so), without the faces the
+    /// viewer's labels keep out.  `None` for anything but a person's group.
+    pub fn far_order(&self, id: &GroupId) -> Option<Vec<(FaceRef, f32)>> {
+        let (kind, members) = self.members(id).ok()?;
+        if kind != Kind::Person {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let out = step::Exclusion::new(&self.file, Kind::Person);
+        let refs = store.refs();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let rows: Vec<usize> = members.iter().filter(|f| !out.excludes(store, f)).filter_map(|f| by_ref.get(f).copied()).collect();
+        Some(crate::search::splitting::far_order(&store.rows(), &rows).into_iter().map(|(r, d)| (refs[r], d)).collect())
+    }
+
+    /// The group of `kind` holding a face or head now: the subject it is
+    /// confirmed to, else the automatic group it sits in.  (A move into an
+    /// automatic group makes a subject of it, with a new id: the two groups
+    /// side by side follow their heads.)
+    pub fn group_of(&self, kind: Kind, f: &FaceRef) -> Option<GroupId> {
+        if let Some(s) = self.file.member_of(kind, f) {
+            return Some(GroupId::Subject(s.id.clone()));
+        }
+        if let Some((id, _)) = self.other_clusters.iter().find(|(_, (k, m))| *k == kind && m.contains(f)) {
+            return Some(GroupId::Cluster(*id));
+        }
+        if kind != Kind::Person {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let row = store.refs().iter().position(|r| r == f)?;
+        let i = self.grouped.clusters.iter().position(|c| c.members.contains(&row))?;
+        self.grouped.ids.get(i).map(|&c| GroupId::Cluster(c))
+    }
+
     /// Name a group: a subject is renamed; a cluster becomes a subject
     /// with the cluster's faces as its members.
     pub fn name_group(&mut self, id: &GroupId, name: String) -> Result<SubjectId, Refused> {
@@ -1041,6 +1077,67 @@ impl People {
         }
     }
 
+    /// "Not fursuit heads" (or "Not faces") on whole groups, or on heads
+    /// picked in one: every box goes as the viewer's "Not a fursuit head"
+    /// does (the `removed` list, so a rebuild never brings it back), in
+    /// one undo step.  Each target is a group of `kind` (another kind is
+    /// refused, nothing changed) with the boxes to remove (`None`: all its
+    /// members; picked boxes not in it are ignored).  A subject left with
+    /// no member goes too.  Returns the words and the boxes removed (one
+    /// decision, for the record of the user's corrections).
+    pub fn remove_boxes(&mut self, kind: Kind, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<(String, Vec<FaceRef>), Refused> {
+        let mut boxes: Vec<FaceRef> = Vec::new();
+        let mut subjects: Vec<SubjectId> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for (id, picked) in targets {
+            let (k, members) = self.members(id)?;
+            if k != kind {
+                return Err(Refused::MixedKinds);
+            }
+            let take: Vec<FaceRef> = match picked {
+                Some(p) => members.iter().filter(|m| p.contains(m)).copied().collect(),
+                None => members,
+            };
+            for f in take {
+                if !boxes.contains(&f) {
+                    boxes.push(f);
+                }
+            }
+            if let GroupId::Subject(s) = id {
+                subjects.push(s.clone());
+                if let Some(n) = self.file.get(s).and_then(|s| s.name.clone()) {
+                    names.push(n);
+                }
+            }
+        }
+        if boxes.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        let n = boxes.len();
+        // Named in the words only when it is one named group.
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { format!("a {}", box_noun(kind)) } else { format!("{n} {}", plural(n, box_noun(kind))) };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.checkpoint(what.clone());
+        for f in &boxes {
+            // Already removed (or never there) is fine: the rest go.
+            let _ = self.file.remove_box(kind, *f);
+        }
+        // A subject with nothing left is gone too (its name with it).
+        for s in subjects {
+            if self.file.get(&s).is_some_and(|x| x.members.is_empty()) {
+                let _ = self.file.forget(&s);
+            }
+        }
+        self.save();
+        Ok((what, boxes))
+    }
+
     /// *Forget all people* (or fursuits, or pets): that kind's subjects
     /// go from the user's file, and for people the face cache too; the
     /// other kinds' names, answers and caches stay untouched.  Beyond
@@ -1075,7 +1172,7 @@ impl People {
             let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
             let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
             let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
-            let days = faces.iter().map(|f| f.day).collect::<HashSet<_>>().len();
+            let days = subjects::count_days(&faces);
             Some(Group { id, kind, name, hidden, photos, bursts: subjects::count_bursts(&faces), days, cover, suggestions })
         };
         for s in &self.file.subjects {
@@ -1656,6 +1753,79 @@ mod tests {
         assert_eq!(p.file.not_same.len(), 1, "people's forget leaves the fursuits' answers");
         p.forget_kind(Kind::Fursuit);
         assert!(p.file.not_same.is_empty());
+    }
+
+    /// Two groups side by side: a person's faces come least like the rest
+    /// first (never another kind's group); and after a move into an
+    /// automatic group (which makes a subject of it, a new id) the group
+    /// holding a face is found again, of its own kind only.
+    #[test]
+    fn faces_far_first_and_a_moved_face_is_found_again() {
+        let d = std::env::temp_dir().join(format!("pp-people-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut p = People::load(None);
+        let mut store = FaceStore::load(&d, ModelId::AuraFace);
+        for (n, v) in [(1u8, [1.0f32, 0.0]), (2, [0.99, 0.14]), (3, [0.98, -0.2]), (4, [0.0, 1.0])] {
+            store.add(Key([n; 16]), &[found(0.1, 80.0, &v)]).unwrap();
+        }
+        p.store = Some(store);
+        let f = |n: u8| p.store.as_ref().unwrap().faces_of(&Key([n; 16]))[0].face_ref(Key([n; 16]));
+        let (f1, f2, f3, f4) = (f(1), f(2), f(3), f(4));
+        let sid = GroupId::Subject(p.file.create(Kind::Person, None, vec![f1, f2, f3, f4]));
+        let far = p.far_order(&sid).unwrap();
+        assert_eq!(far[0].0, f4, "the stray first: {far:?}");
+        let suit = GroupId::Subject(p.file.create(Kind::Fursuit, None, vec![FaceRef::new(Key([9; 16]), [0.1, 0.1, 0.2, 0.2])]));
+        assert!(p.far_order(&suit).is_none(), "a fursuit's group is not a person's");
+        // A cluster published for fursuits never answers for a person.
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])])]);
+        assert_eq!(p.group_of(Kind::Fursuit, &FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])), Some(GroupId::Cluster(7)));
+        assert_eq!(p.group_of(Kind::Person, &FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])), None);
+        // Moved into a new group: found there.
+        let to = p.move_faces(&sid, vec![f4], None).unwrap();
+        assert_eq!(p.group_of(Kind::Person, &f4), Some(GroupId::Subject(to)));
+        assert_eq!(p.group_of(Kind::Person, &f1), Some(sid));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// "Not fursuit heads" on whole groups (or picked heads): every box
+    /// goes to the removed list in one undo step; a subject left empty
+    /// goes with it; a group of another kind is refused and changes
+    /// nothing; picked heads not in the group are ignored.
+    #[test]
+    fn whole_groups_are_removed_in_one_step_and_never_across_kinds() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)])]);
+        let suit = p.file.create(Kind::Fursuit, Some("Suit".into()), vec![face(3), face(4)]);
+        let kept = p.file.create(Kind::Fursuit, Some("Kept".into()), vec![face(5), face(6)]);
+        let person = p.file.create(Kind::Person, Some("Someone".into()), vec![face(8)]);
+        let before = p.file.clone();
+        // A person's group among fursuits: refused whole.
+        let mixed = [(GroupId::Cluster(7), None), (GroupId::Subject(person.clone()), None)];
+        assert_eq!(p.remove_boxes(Kind::Fursuit, &mixed), Err(Refused::MixedKinds));
+        assert_eq!(p.remove_boxes(Kind::Person, &[(GroupId::Cluster(7), None)]), Err(Refused::MixedKinds));
+        assert_eq!(p.file, before, "a refusal changes nothing");
+        assert!(p.undo.is_empty());
+        // Two whole groups: one step.
+        let (what, boxes) = p.remove_boxes(Kind::Fursuit, &[(GroupId::Cluster(7), None), (GroupId::Subject(suit.clone()), None)]).unwrap();
+        assert_eq!(what, "Removed 4 fursuit heads");
+        assert_eq!(boxes, [face(1), face(2), face(3), face(4)]);
+        assert!(p.file.get(&suit).is_none(), "the emptied subject goes");
+        let removed = p.file.removed_index(Kind::Fursuit);
+        assert!(boxes.iter().all(|b| removed.covers(b)));
+        assert!(!p.file.removed_index(Kind::Person).covers(&face(1)), "a fursuit removal is no face's");
+        assert!(p.file.get(&person).is_some() && p.file.get(&kept).unwrap().members.len() == 2);
+        // Picked heads only; one not in the group is ignored.
+        let (what, boxes) = p.remove_boxes(Kind::Fursuit, &[(GroupId::Subject(kept.clone()), Some(vec![face(5), face(9)]))]).unwrap();
+        assert_eq!((what.as_str(), boxes), ("Removed a fursuit head from Kept", vec![face(5)]));
+        assert_eq!(p.file.get(&kept).unwrap().members, [face(6)], "the rest stay, and so does the name");
+        assert_eq!(p.remove_boxes(Kind::Fursuit, &[(GroupId::Subject(kept.clone()), Some(vec![face(9)]))]), Err(Refused::Nothing));
+        // People, for symmetry: a named person's faces.
+        assert_eq!(p.remove_boxes(Kind::Person, &[(GroupId::Subject(person.clone()), None)]).map(|r| r.0).as_deref(), Ok("Removed a face from Someone"));
+        // One undo each.
+        assert_eq!(p.undo().as_deref(), Some("Removed a face from Someone"));
+        assert_eq!(p.undo().as_deref(), Some("Removed a fursuit head from Kept"));
+        assert_eq!(p.undo().as_deref(), Some("Removed 4 fursuit heads"));
+        assert_eq!(p.file, before, "all back as it was");
     }
 
     #[test]

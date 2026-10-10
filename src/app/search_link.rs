@@ -474,8 +474,60 @@ impl Link {
         match self {
             Link::Engine(e) => e.group_check(seq, id.clone()),
             Link::Fake(f) => {
-                let (far, pairs, split) = f.state.lock().fursuits.check(id).unwrap_or_default();
+                let (far, pairs, split) = {
+                    let s = f.state.lock();
+                    s.fursuits.check(id).unwrap_or_else(|| (s.people.far_order(id).unwrap_or_default(), Vec::new(), None))
+                };
                 let _ = f.bus.unbounded_send(BgEvent::GroupCheck { seq, group: id.clone(), far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
+            }
+        }
+    }
+
+    /// Which group of `kind` holds each of `heads` now (`BgEvent::Located`).
+    pub fn locate(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.locate(seq, kind, heads.to_vec()),
+            Link::Fake(f) => {
+                let groups: Vec<Option<GroupId>> = {
+                    let s = f.state.lock();
+                    heads.iter().map(|h| if kind == Kind::Fursuit { s.fursuits.group_of(h) } else { s.people.group_of(h) }).collect()
+                };
+                let _ = f.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
+            }
+        }
+    }
+
+    /// "Not fursuit heads" / "Not faces": every head of the groups (or
+    /// the ones picked in them) removed, in one undo step.
+    pub fn remove_boxes(&self, kind: Kind, targets: &[(GroupId, Option<Vec<FaceRef>>)]) {
+        match self {
+            Link::Engine(e) => e.remove_boxes(kind, targets.to_vec()),
+            Link::Fake(f) => {
+                let Some((first, _)) = targets.first() else { return };
+                // The groups as they were, and the heads each target names
+                // (a whole group: all its heads).
+                let before = f.before(
+                    |s| {
+                        let mut removed: Vec<FaceRef> = Vec::new();
+                        for (id, picked) in targets {
+                            let all: Vec<FaceRef> = if s.fursuits.owns(id) { s.fursuits.faces(id) } else { s.people.faces(id) }.iter().map(|x| x.face).collect();
+                            for h in picked.clone().unwrap_or(all) {
+                                if !removed.contains(&h) {
+                                    removed.push(h);
+                                }
+                            }
+                        }
+                        Act::RemoveMany { groups: targets.iter().map(|(id, _)| s.side(id, &[])).collect(), heads: decisions::heads(removed.iter().take(decisions::MOVED_HEADS).copied()), removed: removed.len() }
+                    },
+                    first,
+                );
+                let done = f.edit(
+                    first,
+                    |p, _| if kind == Kind::Person { p.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                    |z, _| if kind == Kind::Fursuit { z.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                );
+                let at = if kind == Kind::Fursuit { decisions::At::Heads } else { decisions::At::Faces };
+                f.record(done, before, Via::Hand(at), None);
             }
         }
     }

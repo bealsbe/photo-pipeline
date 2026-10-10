@@ -769,6 +769,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             StageEvent::Sheet(ev) => return viewer_burst::on_stage(app, ev),
             StageEvent::LabelPick(i) => return super::viewer_labels::on_pick(app, i),
             StageEvent::LabelDraw(b) => return super::viewer_labels::on_draw(app, b),
+            StageEvent::LabelRemove(i) => return super::viewer_labels::on_remove_box(app, i),
+            StageEvent::LabelUnname(i) => return super::viewer_labels::on_unname_box(app, i),
         },
         Msg::Labels(m) => return super::viewer_labels::update(app, m),
         Msg::Allocated(path, Ok(allocation)) => app.loader.hold_allocation(&path, allocation),

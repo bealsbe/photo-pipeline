@@ -397,9 +397,9 @@ impl FakeFursuits {
             let faces: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
-            let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
+            let days = crate::model::subjects::count_days(&faces);
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
-            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
+            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days, cover, suggestions });
         }
         out.extend((0..self.many).map(many_group));
         out
@@ -541,6 +541,11 @@ impl FakeFursuits {
     fn far_of(&self, g: &FakeGroup, f: &FaceRef) -> f32 {
         let u = unit(&(f, "far")) as f32;
         if self.look_of(f) == Some(g.suit) { 0.25 + 0.2 * u } else { 0.7 + 0.2 * u }
+    }
+
+    /// The group holding a head, if any.
+    pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
+        self.groups.iter().find(|g| g.members.contains(f)).map(|g| g.id.clone())
     }
 
     /// The groups holding two heads of one photo (stage 3's flag).
@@ -696,6 +701,47 @@ impl FakeFursuits {
             g.judged.clear();
             g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 100 * g.part as u64 + 1000 * (generation + 1));
         }
+    }
+
+    /// "Not fursuit heads": the groups' heads (all, or the picked ones)
+    /// out of them and never back, as the engine's removal; one undo step.
+    pub fn remove_boxes(&mut self, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<String, String> {
+        if targets.iter().any(|(id, _)| self.group(id).is_none()) {
+            return Err("That group changed: look again.".into());
+        }
+        let mut n = 0;
+        let mut names = Vec::new();
+        for (id, picked) in targets {
+            let g = self.group(id).expect("checked");
+            n += match picked {
+                Some(p) => g.members.iter().filter(|f| p.contains(f)).count(),
+                None => g.members.len(),
+            };
+            names.extend(g.name.clone());
+        }
+        if n == 0 {
+            return Err("nothing to remove".into());
+        }
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { "a fursuit head".to_string() } else { format!("{n} fursuit heads") };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.remember(what.clone());
+        for (id, picked) in targets {
+            let g = self.group_mut(id).expect("checked");
+            let gone: Vec<FaceRef> = g.members.iter().copied().filter(|f| picked.as_ref().is_none_or(|p| p.contains(f))).collect();
+            g.members.retain(|f| !gone.contains(f));
+            g.confirmed.retain(|f| !gone.contains(f));
+            g.rejected.extend(gone);
+            if g.members.is_empty() {
+                g.name = None;
+            }
+        }
+        Ok(what)
     }
 
     /// Move heads out of `from`: into `to` (a fursuit), or a new group.

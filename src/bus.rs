@@ -163,6 +163,9 @@ pub enum BgEvent {
         pairs: Arc<Vec<(crate::model::subjects::FaceRef, crate::model::subjects::FaceRef)>>,
         split: Option<Arc<(Vec<crate::model::subjects::FaceRef>, Vec<crate::model::subjects::FaceRef>)>>,
     },
+    /// Which group holds each of `heads` now (`Engine::locate`), in order;
+    /// `None` for one in no group.
+    Located { seq: u64, groups: Arc<Vec<Option<crate::model::subjects::GroupId>>> },
     /// Pairs of fursuit groups that may be one suit
     /// (`Engine::merge_suggestions`), nearest first: those offered now
     /// (by distance, or with verdicts already kept).  `focus`: the group
@@ -240,6 +243,7 @@ impl BgEvent {
             BgEvent::Judged { .. } => "Judged",
             BgEvent::MergeSuggestions { .. } => "MergeSuggestions",
             BgEvent::GroupCheck { .. } => "GroupCheck",
+            BgEvent::Located { .. } => "Located",
             BgEvent::MergeJudged { .. } => "MergeJudged",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }

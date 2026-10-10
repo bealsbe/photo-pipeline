@@ -1873,7 +1873,7 @@ fn corrections_row(app: &App) -> Element<'_, Message> {
         words = words.push(text("That's a lot: export it, then delete it to start a new one.").size(t::T_SMALL).color(t::INK2));
     }
     if let Some(path) = app.search.link.decisions().path() {
-        words = words.push(text(util::elide_path(Path::new(&tilde(path)), 48)).size(t::T_SMALL).color(t::INK4));
+        words = words.push(text(util::elide_path(Path::new(&tilde(path)), 40)).size(t::T_SMALL).color(t::INK4));
     }
     let export = focusable(p, Control::ExportCorrections, kit::btn("Export…", style::ghost(), kept.then(|| m(Msg::Press(Control::ExportCorrections)))));
     let delete = focusable(p, Control::DeleteCorrections, kit::btn("Delete the record…", style::secondary(), kept.then(|| m(Msg::Press(Control::DeleteCorrections)))));

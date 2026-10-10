@@ -204,6 +204,10 @@ pub enum Act {
     },
     /// "Not a face" / "Not a fursuit head".
     Remove { head: Head },
+    /// "Not fursuit heads" / "Not faces" on whole groups or picked heads:
+    /// `groups` as they were (each target once), the `heads` removed (at
+    /// most [`MOVED_HEADS`]) and how many.
+    RemoveMany { groups: Vec<Side>, heads: Vec<Head>, removed: usize },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -222,6 +226,7 @@ impl Act {
             Act::KindChange { .. } => "kind_change",
             Act::Draw { .. } => "draw",
             Act::Remove { .. } => "remove",
+            Act::RemoveMany { .. } => "remove_many",
             Act::Undo { .. } => "undo",
         }
     }
@@ -242,6 +247,8 @@ pub enum At {
     Name,
     /// A fursuit's *Heads*: split off, moved, dragged to a group.
     Heads,
+    /// Two groups side by side: heads moved between them.
+    SideBySide,
     /// A person's *Faces*: *Move to…*, *Not this person*.
     Faces,
     /// The viewer's labels.
@@ -754,6 +761,7 @@ pub fn without_names(mut entries: Vec<Entry>) -> Vec<Entry> {
                 c.name(to, name);
             }
             Act::Draw { name, .. } => c.name(k, name),
+            Act::RemoveMany { groups, .. } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Remove { .. } | Act::Undo { .. } => {}
         }
     }
@@ -1022,6 +1030,7 @@ The record on the user's computer keeps the names.
 | `kind_change` | `head`, `to` (the new kind), `name` | none |
 | `draw` | `head`, `name` | none |
 | `remove` | `head` (not a face / not a fursuit head) | none |
+| `remove_many` | `groups` (as they were), `heads`, `removed` (whole groups or picked heads: not faces / not fursuit heads) | none |
 | `undo` | `undoes` (an id), `of` (its act) | takes that entry's pairs back |
 
 ## How
@@ -1034,8 +1043,8 @@ The record on the user's computer keeps the names.
   pair of groups `yes`, `no`, `unseen` (head pairs; the majority decided),
   for a review answer `p` (P(yes), the mean of both orders) and
   `offered` (`false`: the judge left it out and the user asked to see it).
-- `at`: `drag`, `pick`, `menu`, `name`, `heads`, `faces`, `viewer`,
-  `merge-review`, `similar`, `review`.
+- `at`: `drag`, `pick`, `menu`, `name`, `heads`, `side-by-side`,
+  `faces`, `viewer`, `merge-review`, `similar`, `review`.
 "#;
 
 #[cfg(test)]
@@ -1095,6 +1104,7 @@ mod tests {
             Act::KindChange { head: Head(head(5, 0)), to: Kind::Person, name: None },
             Act::Draw { head: Head(head(6, 0)), name: Some("Someone".into()) },
             Act::Remove { head: Head(head(7, 0)) },
+            Act::RemoveMany { groups: vec![side(8, 2)], heads: heads([head(8, 0), head(8, 10)]), removed: 2 },
             Act::Undo { undoes: "0123456789abcdef".into(), of: "merge".into() },
         ];
         for act in acts {

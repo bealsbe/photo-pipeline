@@ -369,9 +369,9 @@ impl FakePeople {
         for g in &self.groups {
             let faces: Vec<Face> = g.members.iter().filter_map(|&k| self.face_of(k, g.confirmed.contains(&k))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
-            let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
+            let days = crate::model::subjects::count_days(&faces);
             let suggestions = if g.name.is_some() { self.suggestions_of(g, usize::MAX).len() } else { 0 };
-            groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
+            groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), bursts: crate::model::subjects::count_bursts(&faces), days, cover, suggestions });
         }
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
         let faces_found = self.groups.iter().map(|g| g.members.len()).sum::<usize>()
@@ -386,6 +386,27 @@ impl FakePeople {
 
     pub fn named(&self) -> usize {
         self.groups.iter().filter(|g| g.name.is_some()).count()
+    }
+
+    /// The group holding a face (by its photo), if any.
+    pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
+        self.groups.iter().find(|g| g.members.contains(&f.key)).map(|g| g.id.clone())
+    }
+
+    /// A group's faces farthest from the rest first: those of another
+    /// person than the group's look first, then the rest by clarity.
+    pub fn far_order(&self, id: &GroupId) -> Option<Vec<(FaceRef, f32)>> {
+        let g = self.group(id)?;
+        let mut v: Vec<(FaceRef, f32)> = self
+            .faces(id)
+            .into_iter()
+            .map(|f| {
+                let other = self.by_key.get(&f.face.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)) != Some(g.person);
+                (f.face, if other { 0.8 } else { 0.3 } + 0.1 * (1.0 - f.clarity))
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(v)
     }
 
     /// A group's faces, clearest first.
@@ -596,6 +617,47 @@ impl FakePeople {
             }
         }
         Ok(())
+    }
+
+    /// "Not faces": the groups' faces (all, or the picked ones) out of
+    /// them and never back, as the engine's removal; one undo step.
+    pub fn remove_boxes(&mut self, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<String, String> {
+        if targets.iter().any(|(id, _)| self.group(id).is_none()) {
+            return Err("That group changed: look again.".into());
+        }
+        let mut n = 0;
+        let mut names = Vec::new();
+        for (id, picked) in targets {
+            let g = self.group(id).expect("checked");
+            n += match picked {
+                Some(p) => g.members.iter().filter(|k| p.iter().any(|f| f.key == **k)).count(),
+                None => g.members.len(),
+            };
+            names.extend(g.name.clone());
+        }
+        if n == 0 {
+            return Err("nothing to remove".into());
+        }
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { "a face".to_string() } else { format!("{n} faces") };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.remember(what.clone());
+        for (id, picked) in targets {
+            let g = self.group_mut(id).expect("checked");
+            let gone: Vec<Key> = g.members.iter().copied().filter(|k| picked.as_ref().is_none_or(|p| p.iter().any(|f| f.key == *k))).collect();
+            g.members.retain(|k| !gone.contains(k));
+            g.confirmed.retain(|k| !gone.contains(k));
+            g.rejected.extend(gone);
+            if g.members.is_empty() {
+                g.name = None;
+            }
+        }
+        Ok(what)
     }
 
     /// Yes (add the faces), No (not this person: out, and never suggested

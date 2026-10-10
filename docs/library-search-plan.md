@@ -3313,6 +3313,82 @@ review's and *Find more*'s per-head cut-offs, and the judge's sure-yes.
   to name (and smaller groups) Tighter 18 (186), Balanced 22 (144),
   Looser 24 (132).
 
+## As built — not fursuit heads (or faces) for whole groups, and the labels' quick removal
+
+The user (2026-10-10): "I should be able to label an entire group as
+'not a fursuit head'", and, in the viewer's labels, quicker removal.
+
+### Whole groups (`app/subjects_remove.rs`, `People::remove_boxes`)
+
+- **Three ways in, one confirmation:**
+  - ⋯ ▸ *Not fursuit heads…* on a group's page (the whole group);
+  - *Not fursuit heads…* in the tab's pick strip (the picked groups);
+  - the same in *Heads*' pick strip (the picked heads only).
+  - People have the same as *Not faces…*.
+  - The dialog asks the engine for the groups' heads (`Link::faces`,
+    answered on the bus: no I/O on the UI thread), counts them, and
+    shows the clearest eight with "and N more".
+  - A named group is named in the title, and a firmer line says its
+    name goes too. Enter confirms, Esc stops.
+- **One edit:** `Engine::remove_boxes(kind, targets)`, where each target
+  is a group with `None` (all its members) or the heads picked in it.
+  - On the engine thread, `People::remove_boxes` resolves the members
+    (clusters of either kind through `members`; subjects from the file).
+  - It refuses a group of another kind as a whole
+    (`Refused::MixedKinds`, nothing changed, no undo step).
+  - It puts every head through `SubjectsFile::remove_box`, the viewer's
+    path, so they go in `removed`.
+  - It forgets a subject left with no member, and takes one checkpoint:
+    one Ctrl+Z.
+  - It returns the words ("Removed 40 fursuit heads", or "… from Suit"
+    for one named group) and the heads removed. That is the shape the
+    decision record logs as one entry.
+- **Where they go:** the `Exclusion` already keeps removed heads out of
+  the grouping, the suggestions, *Find more*, the close calls, the
+  merge suggestions and the split tools. A rebuild matches them by IoU,
+  so they are not found again. *Forget all* of the kind clears them.
+- **Tests:**
+  - `whole_groups_are_removed_in_one_step_and_never_across_kinds`:
+    whole groups, picked heads, an emptied subject forgotten, mixed
+    kinds refused, one undo each.
+  - `a_whole_group_removed_is_gone_through_a_rebuild_and_one_undo`:
+    through the engine, with the merge suggestions and a rebuild.
+
+### The labels' quick removal (`viewer_labels::key_action`, `image_stage`)
+
+- **Delete or Backspace** on the picked box removes it ("Not a face" /
+  "Not a fursuit head"), when nothing is typed in the name field.
+- While the labels show, both keys are always the labels', so they
+  never reach the viewer's prune key. With the labels hidden, Delete
+  prunes as before. The main window is untouched.
+- **The ×s** are drawn in the overlay layer at a fixed screen size, and
+  answer to a square larger than they look:
+  - the picked box's ×, on its top-right corner (bottom-right when its
+    tag reaches the corner), removes it;
+  - a named tag's ×, at the tag's end, shown on the picked or hovered
+    box, sets it back to "Unnamed" and keeps the box.
+  - Each is one undo step. Neither is a fill on the photo.
+- **Tests:**
+  - `delete_removes_the_picked_box_and_never_prunes_while_labels_show`;
+  - `the_label_crosses_sit_on_the_picked_box_and_named_tags`;
+  - `unnamed_clears_the_name_and_keeps_the_box`.
+- The shortcuts sheet and the labels' hint line say so.
+
+### Checked
+
+- **Stand-in:** both ×s on a picked named box; the name cleared; Delete
+  removing a head and Ctrl+Z bringing it back; Delete not pruning a
+  working-folder photo while the labels show; the group dialog (named,
+  unnamed, picked groups, picked heads, a named person).
+- **Real engine** (night-day library, under the card lock,
+  `PP_PROFILE=1`):
+  - "Not fursuit heads" on the named "Test suit" removed its head and
+    its name. The viewer's labels no longer showed it, and after a
+    rebuild (heads found again) it stayed out.
+  - A 40-head unnamed group removed in one step and brought back by
+    one undo.
+  - Nothing under the library changed.
+
 ## As built — the record of corrections
 
 The user (2026-10-09): "Is it possible for you to keep track of all the
@@ -3395,10 +3471,12 @@ average-linkage distance to the entry's first group (the step's space;
 | `kind_change` | `head`, `to`, `name` | none |
 | `draw` | `head`, `name` | none |
 | `remove` | `head` | none |
+| `remove_many` | `groups` (as they were), `heads`, `removed` | none: "Not fursuit heads" / "Not faces" on whole groups or picked heads, one entry |
 | `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
 
 `how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,
-`faces`, `viewer`, `merge-review`, `similar`), `distance` (a pair: its
+`side-by-side`, `faces`, `viewer`, `merge-review`, `similar`),
+`distance` (a pair: its
 average linkage `d` and `sure`; a review answer: the nearest confirmed
 member's distance `d` and that head `pair`), `judge` (`judge`, the
 model's folder, and `judge_cut`; a pair: the head pairs' `yes`, `no`,
@@ -3479,11 +3557,12 @@ driver: `prefs export-to <dir>`, `decisions print|pairs`.
   fursuits alike.
 - Exports carry codes, not names.
 
-### Open
+### With the later work on main
 
-- Group-level "Not fursuit heads" (another branch) should append one
-  entry listing the heads removed (`remove_many`: `heads`, `removed`,
-  `group` when one group), from its engine handler as for
-  `LabelEdit::Remove`.
-- The side-by-side view's moves pass `Via::Hand(At::Drag)` (or an `At`
-  of their own) at its one `move_faces` call.
+- Whole-group and picked-head "Not fursuit heads" / "Not faces"
+  (`Engine::remove_boxes`) append one `remove_many` entry: the target
+  groups as they were and every head removed, as the edit resolved them;
+  one undo step, so one `undo` entry.  The viewer's Delete and × go
+  through its label edits (`remove`, `name`).
+- Moves between two groups side by side (`subjects_pair`) are `move`
+  entries with `at: "side-by-side"`.

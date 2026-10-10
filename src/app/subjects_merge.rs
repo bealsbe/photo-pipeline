@@ -541,6 +541,13 @@ fn record(app: &mut App, i: usize, a: Answer, advance: bool) -> Task<Message> {
     subj::after(BEAT_MS, m(Msg::Beat(r.beat)))
 }
 
+/// The pair shown in the review (C shows it side by side).
+pub fn current_pair(app: &App) -> Option<(GroupId, GroupId)> {
+    let r = app.subjects.merges.as_ref()?;
+    let p = r.list.get(r.at)?;
+    Some((p.a.clone(), p.b.clone()))
+}
+
 /// The merge dialog merged a pair the review asked about (two named).
 pub fn merged_by_dialog(app: &mut App) -> Task<Message> {
     let advance = app.settings.viewer_advance;
@@ -741,8 +748,9 @@ pub fn similar_row<'a>(app: &'a App, group: &GroupId) -> Option<Element<'a, Mess
         ]
         .spacing(0);
         let merge = tip(kit::btn("Merge", style::secondary(), Some(m(Msg::SimilarMerge(i)))).height(26).padding(Padding::from([0.0, 10.0])), "Merge it with this fursuit (Ctrl+Z undoes it)", true);
+        let side = tip(kit::icon_btn(Glyph::Compare, t::INK2, style::ghost(), Some(super::subjects_pair::m(super::subjects_pair::Msg::Open(group.clone(), other.clone())))).width(24).height(24).padding(0), "The two side by side, to move heads between them", true);
         let not = tip(kit::icon_btn(Glyph::Close, t::INK3, style::ghost(), Some(m(Msg::SimilarNotSame(i)))).width(24).height(24).padding(0), "Not the same fursuit: don't suggest it here again", true);
-        let chip = container(row![crop, words, merge, not].spacing(8).align_y(Alignment::Center))
+        let chip = container(row![crop, words, merge, side, not].spacing(8).align_y(Alignment::Center))
             .padding(Padding { left: 4.0, right: 4.0, top: 3.0, bottom: 3.0 })
             .style(|_| container::Style { background: Some(Background::Color(t::RAISED)), border: style::border(t::LINE_HI, 1.0, t::R_CONTROL), ..Default::default() });
         r = r.push(chip);
@@ -938,7 +946,7 @@ fn strip<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
 fn footer<'a>() -> Element<'a, Message> {
     let note = "A merge or a no takes effect at once, and Z takes the last one back.";
     let key = |k: &'a str, what: &'a str| row![text(k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4);
-    let keys = row![key("Y", "Merge"), key("N", "Not the same"), key("← →", "Step"), key("Z", "Take back"), key("Esc", "Done")].spacing(16);
+    let keys = row![key("Y", "Merge"), key("N", "Not the same"), key("← →", "Step"), key("C", "Side by side"), key("Z", "Take back"), key("Esc", "Done")].spacing(16);
     container(row![text(note).size(t::T_SMALL).color(t::PHOTO_INK3).width(Length::Fill), keys].align_y(Alignment::Center)).padding(Padding::from([7.0, 20.0])).width(Length::Fill).into()
 }
 

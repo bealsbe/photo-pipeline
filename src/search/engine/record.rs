@@ -243,6 +243,34 @@ impl Worker {
         Some(Before { kind, act: Act::Answer { yes, group: side, heads }, answered: Some((members, faces.to_vec())) })
     }
 
+    /// "Not fursuit heads" / "Not faces" on groups or picked heads: the
+    /// groups as they were (the heads removed are filled in after, from
+    /// what the edit resolved).
+    pub(super) fn before_remove_boxes(&mut self, kind: Kind, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Option<Before> {
+        if !self.decisions.is_on() {
+            return None;
+        }
+        let mut groups = Vec::new();
+        for (id, _) in targets {
+            if let Some((k, side, _)) = self.record_side(id, &[]) {
+                if k == kind && !groups.contains(&side) {
+                    groups.push(side);
+                }
+            }
+        }
+        Some(Before { kind, act: Act::RemoveMany { groups, heads: Vec::new(), removed: 0 }, answered: None })
+    }
+
+    /// The removal's heads, once resolved.
+    pub(super) fn removed_heads(before: Option<Before>, removed: &[FaceRef]) -> Option<Before> {
+        let mut b = before?;
+        if let Act::RemoveMany { heads, removed: n, .. } = &mut b.act {
+            *heads = decisions::heads(removed.iter().take(decisions::MOVED_HEADS).copied());
+            *n = removed.len();
+        }
+        Some(b)
+    }
+
     /// Naming a group (the tab, a group's page).
     pub(super) fn before_name_group(&mut self, id: &GroupId, name: &str) -> Option<Before> {
         if !self.decisions.is_on() {

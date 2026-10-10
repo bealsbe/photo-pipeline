@@ -1299,6 +1299,13 @@ pub fn count_bursts(faces: &[Face]) -> usize {
     per_burst(photos).len()
 }
 
+/// How many days `faces` were seen on: the library's days (the calendar's,
+/// a day folder's date, else the capture date), each counted once whatever
+/// the photos and heads on it.
+pub fn count_days(faces: &[Face]) -> usize {
+    faces.iter().map(|f| f.day).collect::<HashSet<_>>().len()
+}
+
 /// Whether the user said two groups are not the same: some answer in
 /// `index` ([`SubjectsFile::not_same_index`]) names a head of `a` on one
 /// side and a head of `b` on the other.  Groups are known by their
@@ -1352,6 +1359,19 @@ mod tests {
         // Two heads in one photo are one photo, and so one moment.
         assert_eq!(count_bursts(&[shot(1, 0.2, None), shot(1, 0.7, None)]), 1);
         assert_eq!(count_bursts(&[shot(1, 0.2, Some(3)), shot(1, 0.7, Some(3)), shot(2, 0.2, Some(3))]), 1);
+    }
+
+    /// Days seen: photos of one day count once, days count each, two
+    /// heads in one photo are one photo on one day.
+    #[test]
+    fn days_are_counted_once_each() {
+        let on = |n: u8, d: u32| Face { day: NaiveDate::from_ymd_opt(2024, 6, d).unwrap(), ..shot(n, 0.3, None) };
+        assert_eq!(count_days(&[]), 0);
+        assert_eq!(count_days(&(0..30).map(|n| on(n, 8)).collect::<Vec<_>>()), 1);
+        assert_eq!(count_days(&[on(1, 8), on(2, 9), on(3, 8), on(4, 20)]), 3);
+        let mut two_heads = on(5, 8);
+        two_heads.face = face(5, 0.8);
+        assert_eq!(count_days(&[on(5, 8), two_heads]), 1);
     }
 
     #[test]

@@ -30,8 +30,10 @@ pub mod style;
 pub mod subjects;
 pub mod subjects_fursuits;
 pub mod subjects_merge;
+pub mod subjects_pair;
 pub mod subjects_split;
 pub mod subjects_person;
+pub mod subjects_remove;
 pub mod subjects_review;
 pub mod testing;
 pub mod undo;
@@ -1831,6 +1833,8 @@ impl App {
                 self.settings.save_in_background();
                 Task::none()
             }
+            // On People and fursuits: two groups side by side.
+            Cmd::Compare if self.view == View::Subjects => subjects_pair::compare_key(self),
             Cmd::Compare => compare::open_selected(self),
             Cmd::ReviewBurst => viewer_burst::open_from_main(self),
             Cmd::StackBurst if self.view == View::Search => search::toggle_focused(self),
@@ -2237,7 +2241,14 @@ impl App {
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
-                BgEvent::GroupCheck { seq, group, far, pairs, split } => tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split)),
+                BgEvent::GroupCheck { seq, group, far, pairs, split } => {
+                    if subjects_pair::on_check(self, seq, &far) {
+                        tasks.push(subjects::refresh_crops(self));
+                    } else {
+                        tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split));
+                    }
+                }
+                BgEvent::Located { seq, groups } => tasks.push(subjects_pair::on_located(self, seq, &groups)),
                 BgEvent::MergeSuggestions { seq, focus, list, judging } => tasks.push(subjects_merge::on_merge_suggestions(self, seq, focus, list, judging)),
                 BgEvent::MergeJudged { seq, offered, left_out, done, total, beyond } => tasks.push(subjects_merge::on_merge_judged(self, seq, offered, left_out, done, total, beyond)),
                 BgEvent::ModelDownload { model, done, fetched, total, state } => tasks.push(search::on_download(self, model, done, fetched, total, state)),

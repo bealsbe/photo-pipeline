@@ -491,11 +491,12 @@ merge, a move or a suggestion never crosses kinds.  Nothing is ever named
 for you.
 
 - **The People tab** shows the people you named, then *Groups to name*,
-  most bursts first: each a round face crop with its name (or "Unnamed"),
-  how many photos and how many bursts.  A burst counts as one, and so does
-  a photo on its own, so twenty frames of one moment don't make a group
-  look bigger than one seen at five different moments (ties go to the
-  photo count).  Groups of fewer photos than *Smallest group to show*
+  most days first: each a round face crop with its name (or "Unnamed") and
+  how many days, bursts and photos.  Groups run by the days they were seen
+  on (the library's days, as the calendar has them), then by bursts, then
+  by photos.  A burst counts as one, and so does a photo on its own, so
+  twenty frames of one moment don't make a group look bigger than one seen
+  at five different moments.  Groups of fewer photos than *Smallest group to show*
   (5 by default, counted the same way: a burst is one photo) fold away
   under *Smaller groups*, so an event's strangers stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
   move between groups, Enter opens one, F2 names it.
@@ -547,6 +548,15 @@ for you.
   dialog says in plain words.  YuNet finds the faces for whichever model
   you pick.  Changing the model recognises every face again; the names
   you gave and the faces you confirmed are kept.
+- **Not faces at all** (a poster, a statue, a fursuit taken for a
+  face): ⋯ ▸ *Not faces…* on a group's page removes every face of the
+  group; *Not faces…* in the tab's pick strip does it for the groups
+  picked, and in *Faces*' pick strip for the faces picked.  It asks
+  first, with how many and a few of them; a named group is named, and
+  its name goes with its last face.  They are removed as the viewer's
+  *Not a face* removes one: never grouped, suggested or found again,
+  even after Rebuild.  One Ctrl+Z takes the whole removal back.
+  Fursuits have the same, *Not fursuit heads…*.
 - **Forget:** *Forget this person…* removes one name and its answers (their
   faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
   deletes every face found and every name, behind a plain confirmation.
@@ -562,9 +572,9 @@ fursuits, as a step of indexing after search and faces; you name a fursuit
 from one group and confirm its suggestions with Y and N.  Fursuits are
 never shown, merged, suggested or completed together with people or pets.
 
-- **The tab** lists named fursuits, then *Groups to name*, most bursts first
-  (as on People: a burst counts once, in the order, the size to show and
-  *Possibly the same fursuit*),
+- **The tab** lists named fursuits, then *Groups to name*, most days first
+  (as on People: days, then bursts, then photos; the size to show and
+  *Possibly the same fursuit* count bursts, a burst being one photo),
   as rounded-square head crops (people are round), with *Smaller groups*,
   *Hidden*, picking, merging (S then M, or a tile dragged onto another)
   and hiding as on People.  Groups are tight by design (below), so one
@@ -610,9 +620,28 @@ never shown, merged, suggested or completed together with people or pets.
   around them (each head with the one it looks more like) for you to
   check, swap and confirm.  Nothing moves until you do; each split is one
   undo step; heads removed in the viewer are in none of it.
+- **Two groups side by side** (people and fursuits alike), to move faces
+  or heads between them: pick two groups on the tab (S, then click) and
+  press C or *Side by side*; or on a group's page ⋯ ▸ *Side by side
+  with…* (C), the side-by-side button on a similar group, or C on a pair
+  in "Same fursuit?".  Each column shows its group least like the rest
+  first, the few farthest marked.  Drag a face (the picked ones with it)
+  onto the other column or onto *New group* below; or click to pick
+  (Shift+click a run) and press ← or → to send them to that side, N for
+  a new group.  Each move is one undo step and names stay with their
+  groups; a group a move turns into a subject is followed.  Two groups of
+  different kinds are never shown together, and faces removed in the
+  viewer are left out.  Esc puts the picks away, then leaves.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).
+- **Not fursuit heads…** (⋯ on a group's page, the tab's pick strip for
+  picked groups, *Heads*' pick strip for picked heads) removes every
+  head of them, after a confirmation that counts them and shows a few:
+  a mask, a plush, a sign the finder took for a head.  They leave the
+  groups, the suggestions, *Find more*, the merge suggestions and the
+  split tools, and a rebuild doesn't find them again; one Ctrl+Z takes
+  it all back.  Never across kinds.
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
@@ -711,6 +740,13 @@ bar under the top bar does the editing; L, *Done* or Esc hides them.
 - **Remove a label.**  *Not a face* (or *Not a fursuit head*) removes
   the box and takes it out of its group; the answer is kept, so
   looking at the library again (Rebuild) doesn't bring it back.
+  Quicker: **Delete** (or Backspace, with nothing typed in the name
+  field) removes the picked box, and so does the small **×** on its
+  corner (only the picked box shows it).  While the labels show,
+  Delete never reaches the viewer's prune key.
+- **Clear a name.**  The small **×** on a name tag (on the picked box,
+  or the one under the pointer) sets it back to "Unnamed"; the box
+  stays.
 - **Ctrl+Z** takes back the last change, one at a time, as on the
   subjects pages (while the labels show it doesn't touch marks).
 - **Which photos.**  Faces and heads are found in the library only
@@ -740,7 +776,8 @@ decision is added to a file, one line each:
 - **What is recorded.**  Merges (dragged, picked with S then M, *Merge
   into…*, a suggested pair, *Similar groups*), "Not the same", splits and
   moves (*Split into a new group*, *Move to…*, the two-heads proposal, a
-  head dragged to a group), review answers (Y, N, *Not this person*),
+  head dragged to a group, two groups side by side), review answers (Y,
+  N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
   names given to groups, and the viewer's label edits (a name, *It's a
   person* / *It's a fursuit*, a drawn box, *Not a face*).  Ctrl+Z, or Z
   in a review, adds an entry naming the one it takes back: nothing is

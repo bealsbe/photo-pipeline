@@ -66,6 +66,8 @@ pub enum Menu {
     More,
     /// ⋯ ▸ Merge into…
     MergeInto,
+    /// ⋯ ▸ Side by side with…
+    SideBySide,
     /// The picked faces' *Move to…*.
     MoveTo,
 }
@@ -240,6 +242,14 @@ pub(super) fn follow(app: &mut App, into: &GroupId) {
     }
 }
 
+/// C on a group's page: choose the group to show beside it.
+pub(super) fn open_side_by_side_menu(app: &mut App) -> Task<Message> {
+    if let Some(p) = app.subjects.person.as_mut() {
+        p.menu = Some(Menu::SideBySide);
+    }
+    subj::refresh_crops(app)
+}
+
 fn focus_name() -> Task<Message> {
     iced::widget::operation::focus::<Message>(NAME_FIELD).chain(iced::widget::operation::select_all(NAME_FIELD))
 }
@@ -395,7 +405,7 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             v.extend(faces.iter().take(p.faces_shown).filter(|f| s.crops.is_seen(subj::Section::Faces, &subj::Crops::key(&f.face, small, Framing::Face))).map(|f| (f.clone(), small, Framing::Face)));
         }
     }
-    if matches!(p.menu, Some(Menu::MergeInto | Menu::MoveTo)) || p.naming.is_some() {
+    if matches!(p.menu, Some(Menu::MergeInto | Menu::MoveTo | Menu::SideBySide)) || p.naming.is_some() {
         for g in s.all.groups.iter().filter(|g| g.kind == p.kind && g.id != p.group).take(40) {
             v.push((g.cover.clone(), subj::px(app, 22.0), Framing::Face));
         }
@@ -1058,7 +1068,14 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         Menu::More => {
             let mut rows = vec![
                 menu_row(icons::view(Glyph::Merge, 15.0, t::INK2), "Merge into…".into(), String::new(), Some(pm(Msg::Menu(Some(Menu::MergeInto))))),
+                menu_row(icons::view(Glyph::Compare, 15.0, t::INK2), "Side by side with…".into(), "C".into(), Some(pm(Msg::Menu(Some(Menu::SideBySide))))),
                 menu_row(icons::view(Glyph::Hide, 15.0, t::INK2), "Hide".into(), String::new(), Some(pm(Msg::Hide))),
+                menu_row(
+                    icons::view(Glyph::Close, 15.0, t::REJECT),
+                    format!("{}…", super::subjects_remove::action(p.kind)),
+                    String::new(),
+                    Some(subj::m(subj::Msg::Remove(super::subjects_remove::Msg::AskPage))),
+                ),
             ];
             if g.name.is_some() {
                 rows.push(menu_row(icons::view(Glyph::Close, 15.0, t::REJECT), format!("Forget this {one}…"), String::new(), Some(pm(Msg::Forget))));
@@ -1069,6 +1086,12 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
             let rows = other_groups(app, p, |id| pm(Msg::MergeInto(id)));
             let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.title().to_lowercase()), String::new(), None)] } else { rows };
             (menu_panel(Some(format!("Merge {} into", g.name.clone().unwrap_or_else(|| "this group".into()))), rows, 280.0), page_w - 280.0 - 12.0, subj::HEADER_H + BAND_H - 6.0, 280.0)
+        }
+        Menu::SideBySide => {
+            let me = p.group.clone();
+            let rows = other_groups(app, p, move |id| super::subjects_pair::m(super::subjects_pair::Msg::Open(me.clone(), id)));
+            let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.title().to_lowercase()), String::new(), None)] } else { rows };
+            (menu_panel(Some("Side by side with".to_string()), rows, 280.0), page_w - 280.0 - 12.0, subj::HEADER_H + BAND_H - 6.0, 280.0)
         }
         Menu::MoveTo => {
             let mut rows = vec![menu_row(icons::view(Glyph::Plus, 15.0, t::INK2), format!("A new {one}"), String::new(), Some(pm(Msg::MoveTo(None))))];
@@ -1101,6 +1124,13 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     if p.kind == Kind::Fursuit {
         r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "Move them out into a group of their own, to name or merge. Or drag them onto a group.", true));
     }
+    // Not heads at all (a mask, a plush, a sign): removed for good.
+    let what = super::subjects_remove::nouns(p.kind);
+    r = r.push(tip(
+        kit::icon_text_btn(Glyph::Close, format!("{}…", super::subjects_remove::action(p.kind)), t::REJECT, style::ghost(), Some(subj::m(subj::Msg::Remove(super::subjects_remove::Msg::AskPicked)))),
+        format!("These aren't {what} at all: remove them, so they are never grouped, suggested or found again (asks first)"),
+        true,
+    ));
     let r = r.push(row![
         kit::icon_text_btn(Glyph::Split, "Move to…", t::INK, style::secondary(), Some(pm(Msg::Menu(if p.menu == Some(Menu::MoveTo) { None } else { Some(Menu::MoveTo) })))),
         tip(kit::icon_text_btn(Glyph::Close, not, t::REJECT, style::secondary(), Some(pm(Msg::NotThis))), "Take them out, and never suggest them again", true),
