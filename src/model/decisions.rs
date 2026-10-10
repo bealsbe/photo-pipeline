@@ -276,8 +276,12 @@ pub enum Via {
     /// judge and shown on request (`Some(false)`); `check`: an unnamed
     /// group's own heads ("Check this group").
     Review { judge: Option<bool>, check: bool },
-    /// The split proposed around two heads seen in one photo.
-    Proposal,
+    /// The split proposed around two heads seen in one photo, confirmed
+    /// after `edited` heads were moved between its sides by hand.
+    Proposal { edited: u32 },
+    /// Picked heads split off after arranging the group in two columns,
+    /// `edited` heads moved between the sides by hand first.
+    Arranged { edited: u32 },
     #[default]
     Unknown,
 }
@@ -322,6 +326,11 @@ pub struct How {
     /// and its nearest confirmed member.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pair: Option<[Head; 2]>,
+    /// A split arranged in two columns before it was confirmed (a
+    /// proposal, or picked heads): how many heads the user moved between
+    /// the sides (0: as it was offered).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited: Option<u32>,
 }
 
 impl How {
@@ -337,7 +346,8 @@ impl How {
         match via {
             Via::Hand(at) => How::hand(at),
             Via::Unknown => How { by: "hand".into(), ..How::default() },
-            Via::Proposal => How { by: "proposal".into(), at: Some(At::Heads), ..How::default() },
+            Via::Proposal { edited } => How { by: "proposal".into(), at: Some(At::Heads), edited: Some(edited), ..How::default() },
+            Via::Arranged { edited } => How { edited: Some(edited), ..How::hand(At::Heads) },
             Via::Pair { at, distance, sure, verdict: Some(v) } => {
                 How { by: "judge".into(), at: Some(at), d: Some(round4(distance)), sure: Some(sure), judge: name, judge_cut: cut, yes: Some(v.yes), no: Some(v.no), unseen: Some(v.unjudged), ..How::default() }
             }
@@ -1089,6 +1099,23 @@ mod tests {
         let s = serde_json::to_string(&h).unwrap();
         assert_eq!(s, r#"["abababababababababababababababab",123,500,79,90]"#);
         assert_eq!(serde_json::from_str::<Head>(&s).unwrap(), h);
+    }
+
+    /// A split arranged before it was confirmed says how many heads were
+    /// moved by hand: a proposal as `proposal`, picked heads as `hand` on
+    /// *Heads*; other decisions carry no such field.
+    #[test]
+    fn an_arranged_split_records_the_heads_moved_by_hand() {
+        let how = How::of(Via::Proposal { edited: 3 }, None);
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Heads), Some(3)));
+        let line = serde_json::to_string(&how).unwrap();
+        assert!(line.contains(r#""edited":3"#), "{line}");
+        assert_eq!(serde_json::from_str::<How>(&line).unwrap(), how);
+        let as_offered = How::of(Via::Proposal { edited: 0 }, None);
+        assert!(serde_json::to_string(&as_offered).unwrap().contains(r#""edited":0"#), "0 is kept: confirmed as offered");
+        let picked = How::of(Via::Arranged { edited: 2 }, None);
+        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Heads), Some(2)));
+        assert!(!serde_json::to_string(&How::of(Via::Hand(At::Heads), None)).unwrap().contains("edited"));
     }
 
     /// Every act round-trips through a line, with its kind, how and lib.

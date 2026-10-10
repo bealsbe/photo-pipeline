@@ -114,6 +114,7 @@ enum Cmd {
     GroupCheck { seq: u64, group: GroupId },
     SetGrouping(heads::Grouping),
     Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
+    HeadsOrder { seq: u64, heads: Vec<FaceRef> },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -638,6 +639,12 @@ impl Engine {
     /// heads when a move gives a group a new id.
     pub fn locate(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
         self.send(Cmd::Locate { seq, kind, heads });
+    }
+
+    /// A set of fursuit heads farthest from the rest of the set first
+    /// (`BgEvent::HeadsOrder`): the sides of a split being arranged.
+    pub fn heads_order(&self, seq: u64, heads: Vec<FaceRef>) {
+        self.send(Cmd::HeadsOrder { seq, heads });
     }
 
     /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
@@ -1359,6 +1366,10 @@ impl Worker {
                 Cmd::Locate { seq, kind, heads } => {
                     let groups: Vec<Option<GroupId>> = heads.iter().map(|h| self.people.group_of(kind, h)).collect();
                     let _ = self.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
+                }
+                Cmd::HeadsOrder { seq, heads } => {
+                    let far = self.fursuits.far_order_of(&heads);
+                    let _ = self.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
                 }
                 Cmd::GroupCheck { seq, group } => {
                     self.fursuits.step();
@@ -4439,12 +4450,14 @@ mod tests {
         let how = got[2].how.as_ref().unwrap();
         assert_eq!((how.by.as_str(), how.yes, how.no, how.unseen), ("judge", Some(0), Some(2), Some(1)));
         assert!(matches!(&got[2].act, Act::NotSame { groups } if groups[0].heads[0].0 == head(1) && groups[1].heads[0].0 == head(3)));
-        // A split proposed around two heads of one photo.
-        e.move_faces(far.clone(), vec![head(4)], None, Via::Proposal);
+        // A split proposed around two heads of one photo, two heads moved
+        // between its sides by hand before it was confirmed.
+        e.move_faces(far.clone(), vec![head(4)], None, Via::Proposal { edited: 2 });
         let got = until(4);
         alone(&got[3]);
         assert!(matches!(&got[3].act, Act::Split { from, heads, moved: 1 } if from.n == 1 && heads[0].0 == head(4)), "{:?}", got[3]);
-        assert_eq!(got[3].how.as_ref().unwrap().by, "proposal");
+        let how = got[3].how.as_ref().unwrap();
+        assert_eq!((how.by.as_str(), how.edited), ("proposal", Some(2)));
         // A review answer: C is A, by distance; the nearest member measured.
         e.answer(a.clone(), vec![head(3)], Some(true), Via::Review { judge: None, check: false });
         let got = until(5);

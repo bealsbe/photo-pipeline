@@ -3448,7 +3448,7 @@ whose `v` is newer.
 | `app` | The app's version. |
 | `kind` | `person` or `fursuit` (for `kind_change`, the kind left). |
 | `act` | Below. |
-| `how` | `{by, at, d, sure, judge, judge_cut, p, yes, no, unseen, offered, pair}`, the fields that apply; absent on `undo`. |
+| `how` | `{by, at, d, sure, judge, judge_cut, p, yes, no, unseen, offered, pair, edited}`, the fields that apply; absent on `undo`. |
 | `lib` | `{heads, white, model, grouping, cuts: {group, suggest, strict, sure_yes, sure_no, merge_suggest, merge_sure, merge_far}}`: heads of the kind, whitened or raw, the vectors' model folder, the fursuit grouping choice in force (`tighter`, `balanced`, `looser`), and the cut-offs in force when it was decided: the group and merge cuts from the choice (`GroupingCuts`, read where the grouping reads them, `Fursuits::cuts`), the review's own suggest, strict and judge band. |
 
 A head is `["<32 hex key>", x, y, w, h]`, the box in thousandths (the
@@ -3483,7 +3483,10 @@ model's folder, and `judge_cut`; a pair: the head pairs' `yes`, `no`,
 `unseen`; a review answer: `p`, the mean P(yes) of both orders from the
 verdicts kept, and `offered: false` when the judge had left it out and
 the user asked to see it), `proposal` (the split around two heads of one
-photo), `check` (an unnamed group's own heads).
+photo), `check` (an unnamed group's own heads).  A split arranged in two
+columns before it was confirmed (a proposal, `proposal`; picked heads,
+`hand` at `heads`) carries `edited`: how many heads the user moved
+between the sides (0: confirmed as offered).
 
 **Why 16 heads a side is enough.**  A merge of two full sides gives
 16 × 16 = 256 labelled same pairs, and "not the same" as many different

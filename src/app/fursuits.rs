@@ -543,6 +543,25 @@ impl FakeFursuits {
         if self.look_of(f) == Some(g.suit) { 0.25 + 0.2 * u } else { 0.7 + 0.2 * u }
     }
 
+    /// A set of heads farthest from the rest first: those of another suit
+    /// than most of the set's, first.
+    pub fn far_order_of(&self, heads: &[FaceRef]) -> Vec<(FaceRef, f32)> {
+        let mut count: HashMap<Option<usize>, usize> = HashMap::new();
+        for h in heads {
+            *count.entry(self.look_of(h)).or_default() += 1;
+        }
+        let most = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(l, _)| l);
+        let mut v: Vec<(FaceRef, f32)> = heads
+            .iter()
+            .map(|h| {
+                let u = unit(&(h, "far")) as f32;
+                (*h, if Some(self.look_of(h)) == most { 0.25 + 0.2 * u } else { 0.7 + 0.2 * u })
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
+    }
+
     /// The group holding a head, if any.
     pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
         self.groups.iter().find(|g| g.members.contains(f)).map(|g| g.id.clone())

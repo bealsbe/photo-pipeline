@@ -22,24 +22,32 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Space, column, container, row, scrollable, stack, text};
-use iced::{Alignment, Background, Element, Length, Padding, Task};
+use iced::keyboard::{self, Key};
+use iced::widget::{Space, column, container, row, text};
+use iced::{Alignment, Element, Length, Padding, Task};
 
+use super::columns::{self as cols, ColMsg, Columns, Look, Target};
 use super::kit::{self, tip};
 use super::people::{Face, FaceRef, Framing, GroupId, Kind, KindWords};
 use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::{App, Message};
 use crate::model::decisions::{At, Via};
-use crate::ui::icons::{self, Glyph};
+use crate::ui::icons::Glyph;
 use crate::ui::paint;
-use crate::ui::subject_tile::{self as tile, Tile};
-use crate::ui::theme::{self as t, alpha};
+use crate::ui::subject_tile as tile;
+use crate::ui::theme as t;
 use crate::util;
 
 pub fn m(msg: Msg) -> Message {
     sm(subj::Msg::Pair(msg))
+}
+
+/// Each column's crops: only those on screen (or near) load.
+const SECTIONS: [subj::Section; 2] = [subj::Section::Column(0), subj::Section::Column(1)];
+
+fn look(p: &PairView) -> Look<'_> {
+    Look { kind: p.kind, cols: &p.cols, wrap, sections: SECTIONS }
 }
 
 /// Faces shown per column, at most (more wait for *Show more*).
@@ -50,20 +58,6 @@ const ANCHORS: usize = 6;
 /// automatic groups come back only when the worker's regroup lands).
 const TRIES: u8 = 4;
 
-/// Where a drag or a key sends the picked faces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Target {
-    Side(usize),
-    New,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PairDrag {
-    pub from: usize,
-    pub faces: Vec<FaceRef>,
-    pub over: Option<Target>,
-}
-
 pub struct PairView {
     pub kind: Kind,
     pub ids: [GroupId; 2],
@@ -72,9 +66,8 @@ pub struct PairView {
     /// Each face's place from the far end of its group.
     pub rank: [HashMap<FaceRef, usize>; 2],
     rank_seq: [u64; 2],
-    pub picked: [Vec<FaceRef>; 2],
-    anchor: [Option<FaceRef>; 2],
-    pub drag: Option<PairDrag>,
+    /// The picks and the drag.
+    pub cols: Columns,
     /// A few faces of each side, to find its group again.
     anchors: [Vec<FaceRef>; 2],
     locate_seq: [u64; 2],
@@ -91,9 +84,7 @@ impl PairView {
             faces_seq: [0, 0],
             rank: [HashMap::new(), HashMap::new()],
             rank_seq: [0, 0],
-            picked: [Vec::new(), Vec::new()],
-            anchor: [None, None],
-            drag: None,
+            cols: Columns::new(true),
             anchors: [Vec::new(), Vec::new()],
             locate_seq: [0, 0],
             tries: [0, 0],
@@ -113,14 +104,12 @@ impl PairView {
 pub enum Msg {
     /// Show two groups side by side.
     Open(GroupId, GroupId),
-    Pick(usize, FaceRef),
-    MoveTo(Target),
-    DragStart(usize, FaceRef),
-    DragEnter(Target),
-    DragLeave(Target),
-    DragDrop,
+    Cols(ColMsg),
     Close,
-    Nothing,
+}
+
+fn wrap(c: ColMsg) -> Message {
+    m(Msg::Cols(c))
 }
 
 // ── opening ─────────────────────────────────────────────────────────────────
@@ -180,7 +169,7 @@ fn ask(app: &mut App, side: usize) {
 pub fn on_faces(app: &mut App, seq: u64, faces: &Arc<Vec<Face>>) -> bool {
     let Some(p) = app.subjects.pair.as_mut() else { return false };
     let Some(side) = (0..2).find(|&s| p.faces_seq[s] == seq) else { return false };
-    p.picked[side].retain(|f| faces.iter().any(|x| x.face == *f));
+    p.cols.keep_only(side, |f| faces.iter().any(|x| x.face == *f));
     p.anchors[side] = faces.iter().take(ANCHORS).map(|f| f.face).collect();
     p.faces[side] = Some(faces.clone());
     true
@@ -255,7 +244,7 @@ pub fn on_subjects(app: &mut App) {
         for (side, _) in &gone {
             p.faces[*side] = None;
             p.rank[*side].clear();
-            p.picked[*side].clear();
+            p.cols.clear(*side);
         }
     }
     for side in 0..2 {
@@ -278,76 +267,25 @@ pub fn on_subjects(app: &mut App) {
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Open(a, b) => open(app, a, b),
-        Msg::Pick(side, f) => {
-            pick(app, side, f, crate::ui::modifiers::get().shift());
-            Task::none()
-        }
-        Msg::MoveTo(target) => {
-            // The picked faces of the side they are on.
-            let Some(p) = app.subjects.pair.as_ref() else { return Task::none() };
-            let from = match target {
-                Target::Side(s) => 1 - s,
-                Target::New => if p.picked[0].is_empty() { 1 } else { 0 },
-            };
-            let faces = p.picked[from].clone();
-            move_faces(app, from, faces, target)
-        }
-        Msg::DragStart(side, f) => {
+        Msg::Cols(c) => {
+            let shift = crate::ui::modifiers::get().shift();
             let Some(p) = app.subjects.pair.as_mut() else { return Task::none() };
-            let faces = if p.picked[side].contains(&f) { p.picked[side].clone() } else { vec![f] };
-            p.drag = Some(PairDrag { from: side, faces, over: None });
-            Task::none()
-        }
-        Msg::DragEnter(target) => {
-            if let Some(d) = app.subjects.pair.as_mut().and_then(|p| p.drag.as_mut()) {
-                d.over = Some(target);
+            let orders = [0, 1].map(|s| p.ordered(s).iter().map(|f| f.face).collect::<Vec<_>>());
+            let mv = p.cols.update(c, shift, |s| orders[s].clone());
+            match mv {
+                Some(cols::Move { from, faces, to }) => move_faces(app, from, faces, to),
+                None => Task::none(),
             }
-            Task::none()
-        }
-        Msg::DragLeave(target) => {
-            if let Some(d) = app.subjects.pair.as_mut().and_then(|p| p.drag.as_mut()).filter(|d| d.over == Some(target)) {
-                d.over = None;
-            }
-            Task::none()
-        }
-        Msg::DragDrop => {
-            let Some(p) = app.subjects.pair.as_mut() else { return Task::none() };
-            let Some(PairDrag { from, faces, over: Some(target) }) = p.drag.take() else { return Task::none() };
-            if target == Target::Side(from) {
-                return Task::none();
-            }
-            move_faces(app, from, faces, target)
         }
         Msg::Close => close(app),
-        Msg::Nothing => Task::none(),
     }
 }
 
-/// A click picks or puts back; with Shift, every face from the last one
-/// clicked on that side to this one, in the order shown.
+/// A click on a face (the test driver's): picks it, or a run with Shift.
 pub fn pick(app: &mut App, side: usize, f: FaceRef, shift: bool) {
     let Some(p) = app.subjects.pair.as_mut() else { return };
-    // Picks live on one side at a time.
-    p.picked[1 - side].clear();
-    if shift {
-        let order: Vec<FaceRef> = p.ordered(side).iter().map(|x| x.face).collect();
-        if let Some(run) = p.anchor[side].and_then(|a| super::subjects_split::run(&order, a, f)) {
-            for x in run {
-                if !p.picked[side].contains(&x) {
-                    p.picked[side].push(x);
-                }
-            }
-            p.anchor[side] = Some(f);
-            return;
-        }
-    }
-    match p.picked[side].iter().position(|x| *x == f) {
-        Some(i) => {
-            p.picked[side].remove(i);
-        }
-        None => p.picked[side].push(f),
-    }
-    p.anchor[side] = Some(f);
+    let order: Vec<FaceRef> = p.ordered(side.min(1)).iter().map(|x| x.face).collect();
+    p.cols.pick(side, f, shift, &order);
 }
 
 /// Faces of side `from` to the other side or a new group: the existing
@@ -368,8 +306,6 @@ fn move_faces(app: &mut App, from: usize, faces: Vec<FaceRef>, target: Target) -
         return app.show_status("People and fursuits are never mixed.", 5000);
     }
     let p = app.subjects.pair.as_mut().expect("pair");
-    p.picked[from].retain(|f| !faces.contains(f));
-    p.anchor[from] = None;
     // Both sides are found again by their faces if their ids change.
     if let Target::Side(s) = target {
         p.anchors[s].extend(faces.iter().take(ANCHORS));
@@ -390,11 +326,7 @@ fn close(app: &mut App) -> Task<Message> {
 /// Esc: a drag, then the picks, then the view.
 pub fn escape(app: &mut App) -> Task<Message> {
     let Some(p) = app.subjects.pair.as_mut() else { return Task::none() };
-    if p.drag.take().is_some() {
-        return Task::none();
-    }
-    if !p.picked[0].is_empty() || !p.picked[1].is_empty() {
-        p.picked = [Vec::new(), Vec::new()];
+    if p.cols.escape() {
         return Task::none();
     }
     close(app)
@@ -402,14 +334,9 @@ pub fn escape(app: &mut App) -> Task<Message> {
 
 /// ← / → move the picked faces to that side; N into a new group.
 pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Message> {
-    if mods.control() || mods.alt() {
-        return Task::none();
-    }
-    match key {
-        Key::Named(Named::ArrowLeft) => update(app, Msg::MoveTo(Target::Side(0))),
-        Key::Named(Named::ArrowRight) => update(app, Msg::MoveTo(Target::Side(1))),
-        Key::Character(c) if c.as_str().eq_ignore_ascii_case("n") => update(app, Msg::MoveTo(Target::New)),
-        _ => Task::none(),
+    match cols::key_msg(key, mods, true) {
+        Some(c) => update(app, Msg::Cols(c)),
+        None => Task::none(),
     }
 }
 
@@ -425,7 +352,8 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         if let Some(g) = s.group(&p.ids[side]) {
             v.push((g.cover.clone(), cover, Framing::Face));
         }
-        v.extend(p.ordered(side).into_iter().take(SHOWN).map(|f| (f.clone(), small, Framing::Face)));
+        let section = SECTIONS[side];
+        v.extend(p.ordered(side).into_iter().take(SHOWN).filter(|f| s.crops.is_seen(section, &subj::Crops::key(&f.face, small, Framing::Face))).map(|f| (f.clone(), small, Framing::Face)));
     }
     v
 }
@@ -451,14 +379,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .spacing(t::S2)
     .align_y(Alignment::Center);
     let header = container(header.padding(Padding::from([0.0, t::S3]))).height(subj::HEADER_H).center_y(subj::HEADER_H).width(Length::Fill).style(style::fill(t::MOUNT));
-    let body = row![side_column(app, p, 0), container(Space::new().width(1).height(Length::Fill)).style(style::fill(t::PHOTO_LINE)), side_column(app, p, 1)].height(Length::Fill);
+    let body = cols::pair(side_column(app, p, 0), side_column(app, p, 1));
+    let look = look(p);
     let mut col = column![header, kit::hairline()];
-    if let Some(strip) = pick_strip(app, p) {
+    let to_other = [0, 1].map(|s| {
+        let name = subj::label(&app.subjects, &p.ids[s]);
+        format!("Move to {}", if name == "the unnamed group" { "the other group".to_string() } else { name })
+    });
+    if let Some(strip) = cols::pick_strip(&look, to_other, Some((m(Msg::Close), "Leave  (Esc)"))) {
         col = col.push(strip);
     }
     col = col.push(container(body).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)));
-    col = col.push(new_group_target(p));
-    col = col.push(footer());
+    col = col.push(cols::new_group_target(&look));
+    col = col.push(container(cols::keys(&[("Click", "Pick"), ("Shift+click", "Pick a run"), ("← →", "Move the picked to that side"), ("N", "New group"), ("Ctrl+Z", "Undo"), ("Esc", "Done")])).padding(Padding::from([7.0, 20.0])).width(Length::Fill).style(style::fill(t::PHOTO_GROUND)));
     col.width(Length::Fill).height(Length::Fill).into()
 }
 
@@ -479,77 +412,20 @@ fn side_column<'a>(app: &'a App, p: &'a PairView, side: usize) -> Element<'a, Me
     ]
     .spacing(12)
     .align_y(Alignment::Center);
-    let small = subj::px(app, tile::SMALL_CROP);
-    let dragging = p.drag.is_some();
     let order = p.ordered(side);
     let marked = crate::search::splitting::marked(order.len());
-    let mut grid = row![].spacing(8);
-    for (i, f) in order.iter().take(SHOWN).enumerate() {
-        let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, shape);
-        let badge = (i < marked).then_some(Glyph::Split);
-        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked[side].contains(&f.face), small: true, badge, on: m(Msg::Pick(side, f.face)) }.into();
-        let messages = crate::ui::drag::DragMessages { start: m(Msg::DragStart(side, f.face)), enter: m(Msg::Nothing), leave: m(Msg::Nothing), drop: m(Msg::DragDrop) };
-        let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, dragging).into();
-        let words = format!("{}{}", super::search::long_date(f.day), if badge.is_some() { ". Among the least like the rest" } else { "" });
-        grid = grid.push(tip(el, words, true));
-    }
     let more = order.len().saturating_sub(SHOWN);
-    let mut col = column![head, container(grid.wrap().vertical_spacing(8)).width(Length::Fill)].spacing(12).padding(Padding::from([14.0, 16.0]));
-    if more > 0 {
-        col = col.push(kit::caption(format!("and {} more", util::thousands(more as u64))));
-    }
-    if p.faces[side].is_none() {
-        col = col.push(text("Reading…").size(t::T_SMALL).color(t::PHOTO_INK3));
-    }
-    let over = p.drag.as_ref().is_some_and(|d| d.over == Some(Target::Side(side)) && d.from != side);
-    let body: Element<'a, Message> = scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill).into();
-    let body: Element<'a, Message> = if over {
-        stack![body, container(Space::new()).width(Length::Fill).height(Length::Fill).style(|_| container::Style { border: style::border(t::SIGNAL, 2.0, t::R_CELL), background: Some(Background::Color(alpha(t::SIGNAL, 0.05))), ..Default::default() })].into()
+    let shown: Vec<&Face> = order.into_iter().take(SHOWN).collect();
+    let look = look(p);
+    let tiles = cols::grid(app, &look, side, &shown, marked);
+    let foot: Option<Element<'a, Message>> = if more > 0 {
+        Some(kit::caption(format!("and {} more", util::thousands(more as u64))).into())
+    } else if p.faces[side].is_none() {
+        Some(text("Reading…").size(t::T_SMALL).color(t::PHOTO_INK3).into())
     } else {
-        body
+        None
     };
-    // The whole column takes a drop from the other side.
-    let messages = crate::ui::drag::DragMessages { start: m(Msg::Nothing), enter: m(Msg::DragEnter(Target::Side(side))), leave: m(Msg::DragLeave(Target::Side(side))), drop: m(Msg::Nothing) };
-    container(crate::ui::drag::DragArea::new(body, messages, dragging).target_only()).width(Length::FillPortion(1)).height(Length::Fill).into()
-}
-
-/// While faces are picked: how many, and where they go.
-fn pick_strip<'a>(app: &'a App, p: &'a PairView) -> Option<Element<'a, Message>> {
-    let side = (0..2).find(|&s| !p.picked[s].is_empty())?;
-    let other = subj::label(&app.subjects, &p.ids[1 - side]);
-    let crops = if p.kind == Kind::Fursuit { "head" } else { "face" };
-    let move_label = format!("Move to {}", if other == "the unnamed group" { "the other group".to_string() } else { other });
-    let key = if side == 0 { "→" } else { "←" };
-    let r = row![
-        icons::view(Glyph::Select, 16.0, t::SIGNAL),
-        text(format!("{} picked", util::plural(p.picked[side].len() as u64, crops))).size(t::T_BODY).color(t::INK).width(Length::Fill),
-        tip(kit::icon_text_btn(Glyph::Split, move_label, t::INK, style::secondary(), Some(m(Msg::MoveTo(Target::Side(1 - side))))), format!("To the other side  ({key})"), true),
-        tip(kit::icon_text_btn(Glyph::Plus, "Split into a new group", t::INK, style::secondary(), Some(m(Msg::MoveTo(Target::New)))), "Into a group of their own, to name or merge  (N)", true),
-        tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::Close))), "Leave  (Esc)", true),
-    ]
-    .spacing(t::S3)
-    .align_y(Alignment::Center)
-    .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
-    Some(column![container(r).width(Length::Fill).style(style::fill(alpha(t::SIGNAL, 0.08))), container(Space::new().width(Length::Fill).height(1)).style(style::fill(alpha(t::SIGNAL, 0.3)))].into())
-}
-
-/// Under the columns: *New group*, a drop target.
-fn new_group_target<'a>(p: &'a PairView) -> Element<'a, Message> {
-    let over = p.drag.as_ref().is_some_and(|d| d.over == Some(Target::New));
-    let words = if p.drag.is_some() { "Drop here for a new group".to_string() } else { format!("New group: drop {} here to split them off", p.kind.crops().to_lowercase()) };
-    let chip = container(row![icons::view(Glyph::Plus, 16.0, if over { t::SIGNAL } else { t::INK2 }), text(words).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2)].spacing(8).align_y(Alignment::Center))
-        .padding(Padding::from([8.0, 14.0]))
-        .width(Length::Fill)
-        .center_x(Length::Fill)
-        .style(move |_| container::Style { background: Some(Background::Color(if over { alpha(t::SIGNAL, 0.14) } else { t::RAISED })), border: style::border(if over { t::SIGNAL } else { t::LINE_HI }, if over { 2.0 } else { 1.0 }, t::R_CONTROL), ..Default::default() });
-    let messages = crate::ui::drag::DragMessages { start: m(Msg::Nothing), enter: m(Msg::DragEnter(Target::New)), leave: m(Msg::DragLeave(Target::New)), drop: m(Msg::Nothing) };
-    container(crate::ui::drag::DragArea::new(chip, messages, p.drag.is_some()).target_only()).padding(Padding::from([6.0, 16.0])).width(Length::Fill).style(style::fill(t::MOUNT)).into()
-}
-
-fn footer<'a>() -> Element<'a, Message> {
-    let key = |k: &'a str, what: &'a str| row![text(k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4);
-    let keys = row![key("Click", "Pick"), key("Shift+click", "Pick a run"), key("← →", "Move the picked to that side"), key("N", "New group"), key("Ctrl+Z", "Undo"), key("Esc", "Done")].spacing(16);
-    container(keys).padding(Padding::from([7.0, 20.0])).width(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
+    cols::side(&look, side, head.into(), tiles, foot)
 }
 
 pub fn debug_state(app: &App) -> String {
@@ -560,8 +436,8 @@ pub fn debug_state(app: &App) -> String {
         p.ids.iter().map(super::people::short).collect::<Vec<_>>(),
         p.faces.iter().map(|f| f.as_ref().map(|v| v.len())).collect::<Vec<_>>(),
         [p.rank[0].len(), p.rank[1].len()],
-        [p.picked[0].len(), p.picked[1].len()],
-        p.drag.as_ref().map(|d| (d.from, d.faces.len(), d.over))
+        [p.cols.picked[0].len(), p.cols.picked[1].len()],
+        p.cols.drag.as_ref().map(|d| (d.from, d.faces.len(), d.over))
     )
 }
 

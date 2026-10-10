@@ -1621,6 +1621,17 @@ impl Fursuits {
         Some((far, pairs, split))
     }
 
+    /// Any set of fursuit heads farthest from the rest of the set first (a
+    /// split being arranged: each side's strays first).  Heads the store
+    /// doesn't hold are left out.
+    pub fn far_order_of(&self, heads: &[FaceRef]) -> Vec<(FaceRef, f32)> {
+        let Some(store) = self.store.as_ref() else { return Vec::new() };
+        let refs = store.refs();
+        let want: HashSet<&FaceRef> = heads.iter().collect();
+        let rows: Vec<usize> = refs.iter().enumerate().filter(|(_, r)| want.contains(r)).map(|(i, _)| i).collect();
+        super::splitting::far_order(&store.rows(), &rows).into_iter().map(|(m, d)| (refs[m], d)).collect()
+    }
+
     /// The step's cut-offs and the judge's band, in the space it groups
     /// in now (raw below `whiten::MIN_HEADS` heads, whitened from there).
     pub fn cuts(&self) -> Option<GroupingCuts> {

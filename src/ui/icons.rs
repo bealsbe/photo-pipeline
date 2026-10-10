@@ -113,6 +113,8 @@ pub enum Glyph {
     CloseCall,
     /// The viewer's labels: a name tag.
     Label,
+    /// Held in place (a split's two heads from one photo): a push pin.
+    Pin,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -629,6 +631,7 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.line(&[(12.0, 5.0), (12.0, 19.0)]);
             p.line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
+        Pin => p.path("M9 3.5h6M10 3.5l-.6 5.5L6.5 12.5h11L14.6 9 14 3.5M12 12.5V21"),
         CloseCall => {
             // Two heads (the fursuit tiles' rounded squares) side by side
             // on a beam with its post: a pair weighed.
@@ -797,7 +800,7 @@ mod tests {
             Keyboard, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, Swap, Crop, Orientation, ZoomIn, ZoomOut, Fit,
             Info, Refresh, Close, Check, ArrowUp, ArrowDown, Warning, Scissors, Skip, Photos, Undo, Redo, Compare, Filmstrip, FullScreen, Network,
             Settings, Analyse, HintSharp, HintSoft, HintAccident, HintCopy, Search, GraphicsCard, Clock, LeaveOut, Subjects, Person, Fursuit,
-            Merge, Split, Hide, Pencil, More, Plus, CloseCall,
+            Merge, Split, Hide, Pencil, More, Plus, CloseCall, Pin,
         ] {
             let px = render(g, 32, [255, 255, 255, 255]);
             assert!(px.chunks_exact(4).any(|p| p[3] > 128), "{g:?} is blank");
