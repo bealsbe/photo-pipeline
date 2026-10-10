@@ -397,9 +397,9 @@ impl FakeFursuits {
             let faces: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
-            let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
+            let days = crate::model::subjects::count_days(&faces);
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
-            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
+            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days, cover, suggestions });
         }
         out.extend((0..self.many).map(many_group));
         out

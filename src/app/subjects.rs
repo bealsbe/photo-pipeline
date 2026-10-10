@@ -3,7 +3,7 @@
 //! phase.  Pets are on hold: no tab, though the model keeps the kind.
 //!
 //! - **The People tab** lists the groups of faces found while indexing:
-//!   the named first, then the groups to name, most bursts first, each a face
+//!   the named first, then the groups to name, most days first, each a face
 //!   crop with its name (or "Unnamed") and how many photos
 //!   and bursts.  Groups under
 //!   the smallest size to show (5 photos by default, a burst counting as one) fold away under
@@ -206,9 +206,9 @@ impl Subjects {
 /// The groups of one kind as its tab lays them out.
 #[derive(Debug, Default)]
 pub struct Arranged<'a> {
-    /// Named, most bursts first.
+    /// Named, most days first.
     pub named: Vec<&'a Group>,
-    /// Unnamed, at least the smallest size to show, most bursts first.
+    /// Unnamed, at least the smallest size to show, most days first.
     pub to_name: Vec<&'a Group>,
     /// Unnamed and smaller: folded away under *Smaller groups*.
     pub small: Vec<&'a Group>,
@@ -217,10 +217,11 @@ pub struct Arranged<'a> {
 }
 
 /// Lay out `kind`'s groups: everything else is left out, so a tab never
-/// shows another kind.  Size is counted in bursts (a burst is one moment,
-/// a photo on its own is one), so a long burst can neither put a group
-/// first nor lift it out of *Smaller groups*; ties go to the photo count,
-/// then the cover's capture time.
+/// shows another kind.  Groups run by the days they were seen on, then
+/// their bursts (a burst is one moment, a photo on its own is one), then
+/// their photos, then the cover's capture time, so neither a long burst
+/// nor a busy day puts a group first.  *Smaller groups* are decided by
+/// bursts alone.
 pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
     let mut a = Arranged::default();
     for g in all.groups.iter().filter(|g| g.kind == kind) {
@@ -234,7 +235,7 @@ pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
             a.small.push(g);
         }
     }
-    let by_size = |x: &&Group, y: &&Group| y.bursts.cmp(&x.bursts).then(y.photos.cmp(&x.photos)).then(x.cover.capture.cmp(&y.cover.capture));
+    let by_size = |x: &&Group, y: &&Group| y.days.cmp(&x.days).then(y.bursts.cmp(&x.bursts)).then(y.photos.cmp(&x.photos)).then(x.cover.capture.cmp(&y.cover.capture));
     a.named.sort_by(by_size);
     a.to_name.sort_by(by_size);
     a.small.sort_by(by_size);
@@ -1369,10 +1370,10 @@ pub fn heading<'a>(label: &str, note: String) -> Element<'a, Message> {
     container(r).height(crate::ui::grid::HEADER_H).center_y(crate::ui::grid::HEADER_H).padding(Padding::from([0.0, 16.0])).width(Length::Fill).into()
 }
 
-/// A group's two counts, one to a line: its photos, then the bursts they
-/// fall in.
+/// A group's three counts, one to a line (a tile is too narrow for two
+/// on a line): the days it was seen on, its bursts, its photos.
 fn counts(g: &Group) -> String {
-    format!("{}\n{}", util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
+    format!("{}\n{}\n{}", util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo"))
 }
 
 /// A group's tile on its tab.
@@ -1416,7 +1417,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let mut hint = if g.name.is_none() {
         format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
     } else {
-        format!("{}: {} in {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
+        format!("{}: seen on {}, {}, {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo"))
     };
     if together {
         hint.push_str(" Two of its heads are in one photo, so it holds at least two fursuits: open it to split it.");
@@ -1479,7 +1480,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(tiles(app, &a.named, Section::Named));
     }
     if !a.to_name.is_empty() {
-        let note = format!("{}, most bursts first", util::thousands(a.to_name.len() as u64));
+        let note = format!("{}, most days first", util::thousands(a.to_name.len() as u64));
         col = col.push(heading("Groups to name", note));
         col = col.push(tiles(app, &a.to_name, Section::ToName));
     }
@@ -1797,11 +1798,44 @@ mod tests {
         assert_eq!(arrange(&f, Kind::Pet, 5).to_name.len(), 1);
     }
 
-    /// Groups are ordered and folded by the bursts they appear in, so a
+    /// Groups run by days seen, then bursts, then photos, whatever the
+    /// kind of group; the fold is still by bursts alone.
+    #[test]
+    fn groups_run_by_days_then_bursts_then_photos() {
+        let seen = |id: u64, kind, name: Option<&str>, days: usize, bursts: usize, photos: usize| Group { days, ..in_bursts(id, kind, name, photos, bursts) };
+        let f = Found {
+            generation: 1,
+            groups: vec![
+                seen(1, Kind::Fursuit, None, 1, 30, 90),
+                seen(2, Kind::Fursuit, None, 3, 6, 6),
+                seen(3, Kind::Fursuit, None, 3, 8, 9),
+                seen(4, Kind::Fursuit, None, 3, 8, 20),
+                seen(5, Kind::Fursuit, None, 5, 5, 5),
+                // Few bursts: folded away, in the same order.
+                seen(6, Kind::Fursuit, None, 4, 4, 40),
+                seen(7, Kind::Fursuit, None, 2, 2, 2),
+                seen(8, Kind::Fursuit, Some("A"), 1, 12, 12),
+                seen(9, Kind::Fursuit, Some("B"), 2, 1, 1),
+                seen(10, Kind::Person, None, 9, 9, 9),
+            ],
+            faces_found: 0,
+            undoable: None,
+            seen_together: Default::default(),
+        };
+        let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+        let c = GroupId::Cluster;
+        let a = arrange(&f, Kind::Fursuit, 5);
+        assert_eq!(ids(&a.to_name), [c(5), c(4), c(3), c(2), c(1)], "days, then bursts, then photos");
+        assert_eq!(ids(&a.small), [c(6), c(7)], "fewer than five bursts, however many days: folded, by days");
+        assert_eq!(ids(&a.named), [c(9), c(8)], "named groups run the same way");
+        assert_eq!(ids(&arrange(&f, Kind::Person, 5).to_name), [c(10)]);
+    }
+
+    /// On equal days, groups are ordered and folded by the bursts they appear in, so a
     /// long burst of one suit does not outrank a suit seen again and
     /// again; ties go to the photo count, then the cover's capture.
     #[test]
-    fn groups_are_ordered_and_folded_by_bursts() {
+    fn groups_with_equal_days_are_ordered_and_folded_by_bursts() {
         let f = Found {
             generation: 1,
             groups: vec![
@@ -1835,8 +1869,8 @@ mod tests {
         // Never another kind's.
         assert_eq!(ids(&arrange(&f, Kind::Person, 5).to_name), [c(8)]);
         // The tile says both counts.
-        assert_eq!(counts(&f.groups[2]), "12 photos\n6 bursts");
-        assert_eq!(counts(&in_bursts(9, Kind::Person, None, 1, 1)), "1 photo\n1 burst");
+        assert_eq!(counts(&f.groups[2]), "1 day\n6 bursts\n12 photos");
+        assert_eq!(counts(&in_bursts(9, Kind::Person, None, 1, 1)), "1 day\n1 burst\n1 photo");
     }
 
     /// The merge dialog's name: the named group keeps its name whichever
