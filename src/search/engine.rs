@@ -107,6 +107,7 @@ enum Cmd {
     // Fursuit merging, stage 2.
     MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
     GroupCheck { seq: u64, group: GroupId },
+    SetGrouping(heads::Grouping),
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -579,6 +580,15 @@ impl Engine {
     /// Suggestions only: nothing is merged.
     pub fn merge_suggestions(&self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
         self.send(Cmd::MergeSuggestions { seq, focus, min_photos, judge });
+    }
+
+    /// Preferences ▸ Fursuits ▸ *Grouping*: how tight the automatic
+    /// fursuit groups are.  A change regroups on a worker
+    /// (`HeadsStatus.regrouping` while it runs); names, answers, "not the
+    /// same" and labels point at heads and stay.  The cut-offs in force are
+    /// `Status.heads.cuts()`.
+    pub fn set_fursuit_grouping(&self, g: heads::Grouping) {
+        self.send(Cmd::SetGrouping(g));
     }
 
     /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
@@ -1230,6 +1240,19 @@ impl Worker {
                 Cmd::Drawn(done) => self.on_drawn(*done),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
                 Cmd::MergeSuggestions { seq, focus, min_photos, judge } => self.send_merge_suggestions(seq, focus, min_photos, judge),
+                Cmd::SetGrouping(g) => {
+                    if self.fursuits.set_grouping(g) {
+                        self.people.set_other_clusters(Kind::Fursuit, Vec::new());
+                        self.fursuits.status.regrouping = true;
+                        self.start_heads_regroup();
+                        // Nothing to group (no heads with vectors yet): done.
+                        if !self.heads_regroup_running {
+                            self.fursuits.status.regrouping = false;
+                        }
+                        self.publish_subjects();
+                    }
+                    self.publish_heads();
+                }
                 Cmd::GroupCheck { seq, group } => {
                     self.fursuits.step();
                     let (far, pairs, split) = self.fursuits.check(&self.people.file, &group).unwrap_or_default();
@@ -1334,6 +1357,9 @@ impl Worker {
                         if self.fursuits.apply_regroup(*r, &self.people.file) {
                             self.people.set_other_clusters(Kind::Fursuit, self.fursuits.clusters());
                             self.publish_subjects();
+                            if std::mem::take(&mut self.fursuits.status.regrouping) {
+                                self.publish_heads();
+                            }
                         }
                         if std::mem::take(&mut self.heads_regroup_wanted) {
                             self.start_heads_regroup();
@@ -1815,7 +1841,9 @@ impl Worker {
         let empty = |me: &Self| {
             let _ = me.bus.unbounded_send(BgEvent::MergeSuggestions { seq, focus: focus.clone(), list: Arc::new(Vec::new()), judging: false });
         };
-        let Some((cutoffs, (sure_yes, sure_no))) = self.fursuits.cuts() else { return empty(self) };
+        let Some(cuts) = self.fursuits.cuts() else { return empty(self) };
+        // The grouping choice's cuts in the step's space (raw or whitened).
+        let (sure_yes, sure_no, suggest) = (cuts.merge_sure, cuts.merge_far, cuts.merge_suggest);
         let use_judge = judge && self.judge_status().active(self.device);
         let groups = self.fursuits.merge_groups(&self.people.file);
         // The groups as rows of the step, the cover first then clearest
@@ -1856,7 +1884,7 @@ impl Worker {
             },
             None => None,
         };
-        let cut = if use_judge { sure_no } else { cutoffs.suggest };
+        let cut = if use_judge { sure_no } else { suggest };
         let told = self.people.file.not_same_index(Kind::Fursuit);
         let near: Vec<(usize, usize, f32)> = merging::pairs(&means, cut, focus_ix).into_iter().filter(|&(i, j, _)| !crate::model::subjects::told_apart(&told, &cands[i].0.heads, &cands[j].0.heads)).collect();
         let shown = |faces: &[Face]| Arc::new(faces.iter().take(4).cloned().collect::<Vec<_>>());
@@ -4129,6 +4157,7 @@ mod tests {
         let mut ev = Events::new(&rx);
         let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
         let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Alternate));
         let f2 = fake.clone();
         e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));
@@ -4223,6 +4252,7 @@ mod tests {
         let mut ev = Events::new(&rx);
         let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
         e.on_library(lib);
         e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e, "the heads", |s| s.heads.found == 3 && s.heads.step == heads::Step::Idle && s.pass.is_none());
@@ -4429,6 +4459,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Preferences ▸ Fursuits ▸ *Grouping* through the engine: the cuts
+    /// follow the choice in the step's space; a change regroups (two heads
+    /// 0.70 apart are two groups Tighter, one Balanced) and the user's
+    /// names stay; the review's per-head cut-offs don't move.
+    #[test]
+    fn the_grouping_choice_regroups_and_keeps_names() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0 and B 0.70 from it; C far, named later.
+        let specs = [(1, 0), (2, Suits::at(0.70)), (3, -1700), (4, -1710)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("grouping", &refs);
+        let config = Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        assert_eq!(e.status().heads.grouping, heads::Grouping::Balanced, "Balanced by default");
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let c = e.status().heads.cuts();
+        assert_eq!((c.grouping, c.whitened, c.group, c.merge_suggest), (heads::Grouping::Tighter, true, 0.69, 0.711));
+        let _ = fursuit_groups(&e, 3);
+        // C and its neighbour named.
+        let key3 = Key::of(1, lib_path(&d, &files[2]).as_os_str().as_encoded_bytes());
+        let c_group = fursuit_groups(&e, 3).into_iter().find(|g| g.1 == key3 || g.1 == Key::of(1, lib_path(&d, &files[3]).as_os_str().as_encoded_bytes())).unwrap().0;
+        e.name_group(c_group, "Suit".into());
+        wait_for(&e, "named", |_| e.subjects().groups.iter().any(|g| g.name.as_deref() == Some("Suit")));
+        // Balanced: A and B are one group now; the name stays.
+        e.set_fursuit_grouping(heads::Grouping::Balanced);
+        wait_for(&e, "regrouped", |s| s.heads.grouping == heads::Grouping::Balanced && !s.heads.regrouping);
+        let groups = fursuit_groups(&e, 2);
+        assert!(e.subjects().groups.iter().any(|g| g.name.as_deref() == Some("Suit") && g.photos == 2), "the name and its heads stay: {groups:?}");
+        assert_eq!(e.status().heads.cuts().group, 0.72);
+        // Tighter again: two groups again.
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
+        wait_for(&e, "regrouped", |s| s.heads.grouping == heads::Grouping::Tighter && !s.heads.regrouping);
+        let _ = fursuit_groups(&e, 3);
+        assert!(e.subjects().groups.iter().any(|g| g.name.as_deref() == Some("Suit")));
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// Below `whiten::MIN_HEADS` heads the step groups the raw vectors
     /// with their own cut-offs; the suggestions use the same space and
     /// cuts (suggest 0.097; the judge's band 0.082 to 0.124).
@@ -4444,6 +4519,7 @@ mod tests {
         let mut ev = Events::new(&rx);
         let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
         let fake = Arc::new(crate::ml::judge_client::Fake::new(crate::ml::judge_client::FakeMode::Yes));
         let f2 = fake.clone();
         e.set_judge_factory(Box::new(move |_| f2.clone() as Arc<dyn crate::ml::judge_client::Judge>));

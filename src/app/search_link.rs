@@ -590,6 +590,22 @@ impl Link {
 
     /// Preferences ▸ Fursuits ▸ *Close-call judge*.  Off unloads it and
     /// drops a run.
+    /// Preferences ▸ Fursuits ▸ *Grouping*: the fursuits are grouped again
+    /// (names and answers stay).
+    pub fn set_fursuit_grouping(&self, g: fursuits::Grouping) {
+        match self {
+            Link::Engine(e) => e.set_fursuit_grouping(g),
+            Link::Fake(f) => f.change(|s| {
+                s.status.heads.grouping = g;
+                if s.fursuits.grouping != g {
+                    s.fursuits.grouping = g;
+                    s.fursuits.regroup_now();
+                    s.refresh_people();
+                }
+            }),
+        }
+    }
+
     pub fn set_judge(&self, choice: JudgeChoice) {
         match self {
             Link::Engine(e) => e.set_judge(choice),

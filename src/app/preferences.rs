@@ -99,6 +99,8 @@ pub enum Control {
     FindHeadsNow,
     /// *Forget all…* (fursuits).
     ForgetFursuits,
+    /// *Grouping*: Tighter, Balanced or Looser.
+    Grouping(crate::search::heads::Grouping),
     /// *Close-call judge*: one of the choices.
     Judge(JudgeChoice),
     /// Download the chosen judge (chosen, not in place).
@@ -152,6 +154,9 @@ impl Control {
             Control::RailSubjects => "pref-rail-subjects",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
+            Control::Grouping(crate::search::heads::Grouping::Tighter) => "pref-grouping-tighter",
+            Control::Grouping(crate::search::heads::Grouping::Balanced) => "pref-grouping-balanced",
+            Control::Grouping(crate::search::heads::Grouping::Looser) => "pref-grouping-looser",
             Control::Judge(JudgeChoice::Off) => "pref-judge-off",
             Control::Judge(JudgeChoice::Gemma4) => "pref-judge-gemma4",
             Control::Judge(JudgeChoice::Qwen3VlReranker) => "pref-judge-qwen",
@@ -685,6 +690,7 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::Grouping(g) => choose_grouping(app, g),
         Control::Judge(c) => choose_judge(app, c),
         Control::JudgeDownload => {
             let c = app.settings.fursuit_judge;
@@ -784,6 +790,73 @@ fn not_looked_at(n: usize, skipped: usize) -> String {
 /// running or waiting: Preferences offers them, with their cost.
 fn heads_catch_up(app: &App) -> bool {
     app.settings.find_heads && app.search.status.heads.catch_up_wanted() && app.search.status.indexed_shots > 0
+}
+
+/// A grouping was picked: the fursuits are grouped again on the engine's
+/// worker; the tab says so meanwhile.  Names and answers stay.
+fn choose_grouping(app: &mut App, g: crate::search::heads::Grouping) -> Task<Message> {
+    if app.settings.fursuit_grouping == g {
+        return Task::none();
+    }
+    app.settings.fursuit_grouping = g;
+    app.settings.save_in_background();
+    app.search.link.set_fursuit_grouping(g);
+    app.show_status(format!("Fursuit grouping: {}. The groups are made again; names, answers and labels stay.", g.label()), 6000)
+}
+
+/// What a grouping choice means, in plain words.
+pub fn grouping_words(g: crate::search::heads::Grouping) -> &'static str {
+    match g {
+        crate::search::heads::Grouping::Tighter => "More, smaller groups; rarely mixes suits.",
+        crate::search::heads::Grouping::Balanced => "Fewer split-up suits; now and then a stray to move out.",
+        crate::search::heads::Grouping::Looser => "The fewest small groups; check groups for strays.",
+    }
+}
+
+/// Preferences ▸ Fursuits ▸ *Grouping*: Tighter, Balanced (the default),
+/// Looser, and a calm line while the groups are made again.
+fn grouping_setting(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let chosen = app.settings.fursuit_grouping;
+    let mut list = column![].spacing(2).padding(2);
+    for g in crate::search::heads::Grouping::ALL {
+        let on = g == chosen;
+        let mut top = row![text(g.label()).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
+        if g == crate::search::heads::Grouping::default() {
+            top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
+        }
+        let body = column![top, text(grouping_words(g)).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill);
+        let dot = container(if on {
+            Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() }))
+        } else {
+            Space::new().into()
+        })
+        .width(16)
+        .height(16)
+        .center(16)
+        .style(move |_| container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(if on { t::SIGNAL } else { t::LINE_HI }, 1.0, 8.0), ..Default::default() });
+        let b = iced::widget::button(row![container(dot).padding(Padding { top: 1.0, ..Padding::ZERO }), body].spacing(t::S3))
+            .width(Length::Fill)
+            .padding(Padding::from([7.0, 12.0]))
+            .style(move |_t, status| {
+                let hot = matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+                iced::widget::button::Style { background: (on || hot).then_some(Background::Color(t::RAISED)), text_color: t::INK, border: Border { radius: t::R_CONTROL.into(), ..Border::default() }, ..iced::widget::button::Style::default() }
+            })
+            .on_press(m(Msg::Press(Control::Grouping(g))));
+        list = list.push(focusable(p, Control::Grouping(g), b));
+    }
+    let mut col = column![
+        text("Grouping").size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
+        about("How readily heads that look alike are grouped together. Tighter keeps one suit at one event per group; looser joins more of a suit, and now and then a look-alike. Possibly the same fursuit and Split into a new group fix either kind of mistake."),
+        Space::new().height(t::S1),
+        container(list).width(Length::Fill).style(style::group()),
+    ]
+    .spacing(3);
+    if app.search.status.heads.regrouping {
+        col = col.push(Space::new().height(t::S1));
+        col = col.push(row![icons::view(Glyph::Info, 13.0, t::INK3), text("Grouping the fursuits again. Names, answers and labels stay.").size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center));
+    }
+    container(col).padding(Padding::from([t::S3, t::S4])).width(Length::Fill).into()
 }
 
 /// A close-call judge was picked: Off at once; a judge in place at once;
@@ -909,6 +982,7 @@ fn controls(app: &App) -> Vec<Control> {
     if heads_to_update(app) {
         v.push(Control::UpdateHeads);
     }
+    v.extend(crate::search::heads::Grouping::ALL.iter().map(|&g| Control::Grouping(g)));
     v.extend(JudgeChoice::ALL.iter().map(|&c| Control::Judge(c)));
     if judge_wants_download(app) {
         v.push(Control::JudgeDownload);
@@ -1670,6 +1744,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
             go,
         ));
     }
+    rows.push(grouping_setting(app));
     rows.push(judge_setting(app));
     if heads_catch_up(app) {
         let n = h.unscanned();

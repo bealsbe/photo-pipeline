@@ -657,7 +657,7 @@ never shown, merged, suggested or completed together with people or pets.
   *Preferences*; nothing moves to the processor.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
-  heads…*, heads to update with *Update them*, *Close-call judge* (a
+  heads…*, heads to update with *Update them*, *Grouping* (*Tighter*: more, smaller groups, rarely mixing suits; *Balanced*, the default: fewer split-up suits; *Looser*: the fewest small groups, check them for strays; a change groups the fursuits again, keeping names and answers), *Close-call judge* (a
   choice list: *Off*, the default; *Qwen3-VL-Reranker*, about 10 GB and
   about 1 second a close call; or *Gemma 4*, about 18 GB and about
   2 seconds; each on the graphics card only, one loaded at a time;
@@ -827,8 +827,10 @@ drift from the cut-offs, which raw vectors don't.  Names and answers
 point at heads, not rows, so a refit loses nothing.
 
 Fursuit groups are **tight by design**: a head joins a group only when it
-is close to the group's members on average (average linkage at 0.69 in
-whitened cosine distance), and groups are never merged afterwards; so a
+is close to the group's members on average (average linkage, at 0.72 in
+whitened cosine distance with the default *Balanced* grouping; 0.69
+*Tighter*, 0.75 *Looser*; raw 0.110, 0.094, 0.115), and groups are never
+merged afterwards; so a
 group is one suit at one event, and *Find more* (strict, 0.671: 95 %
 precision on the labels) and the "Same fursuit?" review (0.711: 90 %),
 nearest first, are how a suit is gathered across days and years.  The
