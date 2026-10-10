@@ -794,6 +794,37 @@ impl People {
         Ok(target)
     }
 
+    /// "Not the same": two groups of one kind (else refused) that a merge
+    /// suggestion offered are different subjects.  Kept by their heads
+    /// (`a_heads`, `b_heads`: clearest first, as the suggestion showed
+    /// them; their members when empty), so the pair isn't offered again
+    /// after a regroup.  One undo step; nothing is merged or moved.
+    pub fn not_same(&mut self, a: &GroupId, b: &GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>) -> Result<(), Refused> {
+        if a == b {
+            return Err(Refused::Nothing);
+        }
+        let (ka, ma) = self.members(a)?;
+        let (kb, mb) = self.members(b)?;
+        if ka != kb {
+            return Err(Refused::MixedKinds);
+        }
+        // The heads shown first, then the rest of the members.
+        let side = |shown: Vec<FaceRef>, members: Vec<FaceRef>| -> Vec<FaceRef> { shown.into_iter().filter(|f| members.contains(f)).chain(members.iter().copied()).collect() };
+        let (sa, sb) = (side(a_heads, ma), side(b_heads, mb));
+        let label = |id: &GroupId| self.subject_of(id).and_then(|s| s.name.clone());
+        self.checkpoint(match (label(a), label(b)) {
+            (Some(x), Some(y)) => format!("Said {x} and {y} are not the same"),
+            (Some(x), None) | (None, Some(x)) => format!("Said a group is not {x}"),
+            (None, None) => "Said two groups are not the same".to_string(),
+        });
+        if let Err(e) = self.file.add_not_same(ka, sa, sb) {
+            self.undo.pop();
+            return Err(e);
+        }
+        self.save();
+        Ok(())
+    }
+
     /// Hide or show a group (a hidden cluster becomes an unnamed subject,
     /// so the hide outlives a regroup).
     pub fn set_hidden(&mut self, id: &GroupId, hidden: bool) -> Result<SubjectId, Refused> {
@@ -904,8 +935,9 @@ impl People {
     /// undo's reach, like [`People::forget_all`].
     pub fn forget_kind(&mut self, kind: Kind) {
         self.file.subjects.retain(|s| s.kind != kind);
+        self.file.not_same.retain(|n| n.kind != kind);
         self.undo.clear();
-        if self.file.subjects.is_empty() {
+        if self.file.is_empty() {
             if let Some(p) = &self.file_path {
                 let _ = std::fs::remove_file(p);
             }
@@ -1339,6 +1371,34 @@ mod tests {
         assert_eq!(p.file.named_count(Kind::Fursuit), 1, "the other name goes");
         assert_eq!(p.undo().as_deref(), Some("Merged 2 groups into Other"));
         assert_eq!(p.file, before);
+    }
+
+    /// "Not the same" is the user's answer: kept by the groups' heads,
+    /// one undo step, never across kinds, and gone with its kind's
+    /// *Forget all*.
+    #[test]
+    fn not_the_same_is_remembered_undone_and_kept_to_its_kind() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)]), (8, vec![face(3)])]);
+        let person = GroupId::Subject(p.file.create(Kind::Person, Some("Someone".into()), vec![face(9)]));
+        assert_eq!(p.not_same(&GroupId::Cluster(7), &person, vec![], vec![]), Err(Refused::MixedKinds));
+        assert_eq!(p.not_same(&GroupId::Cluster(7), &GroupId::Cluster(7), vec![], vec![]), Err(Refused::Nothing));
+        assert!(p.undo().is_none(), "a refusal leaves nothing to undo");
+        p.not_same(&GroupId::Cluster(7), &GroupId::Cluster(8), vec![face(2)], vec![face(3)]).unwrap();
+        assert_eq!(p.file.not_same.len(), 1);
+        assert_eq!(p.file.not_same[0].a, [face(2), face(1)], "the heads shown first, then the rest");
+        assert_eq!(p.file.subjects.len(), 1, "nothing named or merged");
+        // After a regroup the clusters have new numbers: still told apart.
+        p.set_other_clusters(Kind::Fursuit, vec![(70, vec![face(1), face(4)]), (80, vec![face(3), face(5)])]);
+        let ix = p.file.not_same_index(Kind::Fursuit);
+        assert!(subjects::told_apart(&ix, &[face(1), face(4)], &[face(3), face(5)]));
+        assert_eq!(p.undo().as_deref(), Some("Said two groups are not the same"));
+        assert!(p.file.not_same.is_empty());
+        p.not_same(&GroupId::Cluster(70), &GroupId::Cluster(80), vec![], vec![]).unwrap();
+        p.forget_kind(Kind::Person);
+        assert_eq!(p.file.not_same.len(), 1, "people's forget leaves the fursuits' answers");
+        p.forget_kind(Kind::Fursuit);
+        assert!(p.file.not_same.is_empty());
     }
 
     #[test]

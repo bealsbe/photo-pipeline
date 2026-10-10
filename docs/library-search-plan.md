@@ -2809,3 +2809,133 @@ the judges comparing groups, then splitting mixed groups.
   or edit; opening it now regroups whenever heads have vectors
   (`fursuit_groups_come_back_when_a_raw_library_opens`).
 - The shortcuts sheet has a *People and fursuits* section.
+
+## As built — easier fursuit merging, stage 2: merge suggestions
+
+"Possibly the same fursuit": pairs of fursuit groups that may be one
+suit, to merge (Y) or tell apart (N), with the close-call judges
+comparing groups when one is on.
+
+### The distance and its cut
+
+- **Average linkage between groups**, the linkage the groups are built
+  with: the mean of every cross pair's cosine distance.  The step's rows
+  are unit length, so it is exactly `1 − mean_a · mean_b` (each group's
+  mean row, not normalised): groups², not heads² (`search::merging`,
+  tested against the explicit mean of the cross distances).
+- **The step's own space and cut-offs**: raw vectors below
+  `whiten::MIN_HEADS` heads (suggest 0.097, the judge's band 0.082 to
+  0.124), whitened from there (0.711; 0.639 to 0.786), switching when the
+  whitening arrives (`Fursuits::cuts`; tests on both).
+- **Judge off**: the pairs under the suggest cut, nearest first.
+- **Judge on** (card only, the user's choice): every pair up to sure-no.
+  A pair under sure-yes whose covers are both clear enough
+  (`judging::CLARITY_MIN`) is offered at once; every other one is
+  compared on up to three head pairs (`merging::questions`): the two
+  covers; the member of each nearest the other group's mean; the second
+  clearest of each (one odd frame doesn't decide).  The verdict is the
+  majority of the head pairs asked (`GroupVerdict::same`); a head pair
+  the judge couldn't look at (a photo gone, an unreadable file) counts as
+  a no, so a tie and an unseen pair are never offered.  Verdicts are the
+  judge's kept per head pair (`judged-<model>.bin`), so asking again is
+  free.  Sixty head pairs a request (`MAX_CLOSE_CALLS`, about twenty
+  pairs of groups), nearest first; *Compare the next 20* asks for more.
+  One judge at a time, never while a pass or head scan holds the card
+  (`MergeJudging` beside the review's `Judging`; starting either drops
+  the other's queue).
+- Left out: groups folded under *Smaller groups* (unnamed, fewer photos
+  than the setting) and hidden ones; pairs the user said are not the
+  same.
+
+### Measured on the labels
+
+The research's 10 826 heads (whitened SigLIP2 as the app fits it, and
+the raw vectors), the app's grouping mirrored (average linkage, clarity
+order), the user's labelled pairs (relabel and confirmation rounds: 978
+mapped to heads, 421 same).  A group pair is "split" when a labelled
+same pair crosses it; "labelled different" when only different ones do.
+Groups of at least 5 photos (the tab's default).
+
+| Library | Same pairs split | Split group pairs | Distance alone: offered (labelled same / different) | With the judge (proxy) |
+|---|---|---|---|---|
+| All 10 826 heads, whitened | 236 of 421 | 103 | 178 pairs; 46 of 103 (46 / 2) | 70 of 103; 2 different (both under sure-yes) |
+| All 10 826 heads, raw | 234 of 421 | 91 | 132 pairs; 39 of 91 (39 / 3) | 72 of 91; 1 different |
+| Newest 16 days, 7 276 heads, raw (as the app groups it) | 63 of 171 | 30 | 69 pairs; 14 of 30 (14 / 1) | 23 of 30; 0 different |
+| Newest 8 days, 3 925 heads, raw | 17 of 56 | 5 | 19 pairs; 3 of 5 (3 / 1) | 3 of 5; 0 different |
+
+- Nearest first, the whitened list holds 4 of the 103 in its top 10, 9
+  in the top 20, 15 in the top 50, 33 in the top 100.
+- The judge's band is where the extra pairs are, and where the
+  different ones are: whitened 27 same and 12 different past the suggest
+  cut; raw 33 and 33.
+- "With the judge (proxy)" is Qwen's verdict at the app's threshold on
+  the labelled pairs that cross each group pair (the research's runs),
+  the majority per group pair.  It is not the three views the app asks,
+  and these are the pairs the judge was measured on, so it is an upper
+  estimate.
+- Other measures tried: the closest pair of heads offered 8 102 whitened
+  pairs under the cut, with 101 labelled same and 163 different; the
+  mean of the 3 closest, 101 and 134; each member's nearest in the other
+  group averaged, 92 and 58.  Average linkage: 46 and 2.
+- Cost: a full raw library's band holds about 1 100 pairs of groups,
+  about 56 requests of twenty at 1 to 3 head pairs each (Qwen: about
+  0.8 s a head pair on a free card; 10 s a pair in the real run below,
+  with the user's own indexing holding the card).
+
+### "Not the same"
+
+- Kept in the user's `subjects.json` as an optional list `not_same`
+  (`NotSame { kind, a, b }`: each side's heads, clearest first, at most
+  24). Versioning, shared with the viewer-labelling work: the file is
+  written as version 2 only while an optional list is non-empty;
+  version 1 files load and save back byte for byte
+  (`an_old_file_loads_and_saves_back_unchanged`).
+- A pair is told apart while one group holds a head of one side and the
+  other a head of the other (`subjects::told_apart`), so it holds through
+  a regroup that renumbers and reshapes the groups
+  (`not_the_same_holds_through_a_regroup_and_by_kind`, and through the
+  engine in `merge_suggestions_by_distance_by_the_judge_and_not_the_same`).
+- `People::not_same`: one undo step, refused across kinds, gone with its
+  kind's *Forget all*.
+
+### The pages
+
+- `src/app/subjects_merge.rs`:
+  - the tab's row (`tab_section`);
+  - the review (`MergeReview`): Y merges through the existing merge,
+    the named group kept, two named asking in the merge dialog; N is
+    `not_same`; ← → step; Z or Ctrl+Z take the last answer back; the
+    judge's line, strip tail, *Show them*, *Compare the next 20*;
+  - a fursuit page's *Similar groups* row (`similar_row`).
+- After a merge, pairs naming a group that went are asked for again; the
+  answered pairs keep their places (`refreshed`).
+- `JudgeState::Comparing { done, total }`: the status bar and the
+  review's line say "Comparing possible merges".
+- The stand-in splits some suits into two groups (two "events"), offers
+  their pairs, and judges pairs of groups a tick at a time.
+
+### Checked
+
+- Tests:
+  - the distance and its cut;
+  - questions and the majority, with an unjudged view counting as a no;
+  - the engine, whitened and raw, by distance and by the judge, with
+    verdicts kept;
+  - not the same through a regroup, and undo;
+  - a merge as one undo step;
+  - the low-clarity rule;
+  - kinds never mix;
+  - an old file loads;
+  - the stand-in's pairs and judge.
+- Headless, stand-in: the tab's row, the review (Y, N, Z), the judge's
+  comparisons (loading, comparing, end, left out shown), and *Similar
+  groups* with a merge.
+- Headless, real engine (night-day library, 455 heads, raw, under the
+  card lock, Qwen3-VL-Reranker linked read-only):
+  - the tab offered 2 pairs by distance; the review with the judge
+    compared 6 pairs on 12 head pairs (loaded in 3.6 s);
+  - offered 2 (3 of 3 views agreeing), left out 1 before the run was
+    asked again after a merge;
+  - N, Z, Y (a merge into the larger group), Z;
+  - *Similar groups* on a group's page.
+- `PP_PROFILE=1`: no slow update but the driver's screenshots.

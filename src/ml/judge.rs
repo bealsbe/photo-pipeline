@@ -139,6 +139,9 @@ pub enum JudgeState {
     Loading,
     /// Judging a group's close calls, nearest first: `done` of `total`.
     Judging { group: GroupId, done: usize, total: usize },
+    /// Comparing pairs of fursuit groups that may be one suit (merge
+    /// suggestions), nearest first: `done` of `total` pairs.
+    Comparing { done: usize, total: usize },
     /// The card failed, or the model doesn't fit on it: the judge is
     /// stopped and says why; nothing moves to the processor.
     Failed(CardFailure),
@@ -179,7 +182,7 @@ impl JudgeStatus {
     }
 
     pub fn judging(&self) -> bool {
-        matches!(self.state, JudgeState::Judging { .. } | JudgeState::Loading | JudgeState::WaitingForCard)
+        matches!(self.state, JudgeState::Judging { .. } | JudgeState::Comparing { .. } | JudgeState::Loading | JudgeState::WaitingForCard)
     }
 }
 

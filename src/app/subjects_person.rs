@@ -204,12 +204,22 @@ pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     let naming = p.naming.is_some();
     app.subjects.person = Some(p);
     app.subjects.review = None;
+    app.subjects.merges = None;
     app.quicklook = None;
+    super::subjects_merge::ask_similar(app);
     let mut tasks = vec![search(app, false), subj::refresh_crops(app)];
     if naming {
         tasks.push(focus_name());
     }
     Task::batch(tasks)
+}
+
+/// The page's group is being merged into `into` (kept): the page follows
+/// it there once the groups change.
+pub(super) fn follow(app: &mut App, into: &GroupId) {
+    if let Some(p) = app.subjects.person.as_mut() {
+        p.merged_into = Some(into.clone());
+    }
 }
 
 fn focus_name() -> Task<Message> {
@@ -691,6 +701,10 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Space::new().into() };
     let mut col = column![header(app, p), kit::hairline(), band(app, p), kit::hairline()].width(Length::Fill).height(Length::Fill);
+    // A fursuit's nearest groups, to merge with one click.
+    if let Some(similar) = super::subjects_merge::similar_row(app, &p.group) {
+        col = col.push(similar).push(kit::hairline());
+    }
     if p.show == Show::Faces && !p.picked.is_empty() {
         col = col.push(faces_strip(app, p));
     }

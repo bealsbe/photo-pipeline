@@ -562,6 +562,32 @@ never shown, merged, suggested or completed together with people or pets.
   its *Heads* (to split a group), naming and "Same fursuit?" (the review,
   Y and N in the keep and prune colours, one answer per burst, Ctrl+Z to
   take an answer back) are the same pages as a person's.
+- **Possibly the same fursuit.**  Over the groups, a row of pairs of
+  groups that may be one suit, nearest first (each card two covers, their
+  names and sizes); a click, or Y on the tab, opens the review: the two
+  groups side by side, their covers large with a few more heads under
+  them; **Y** merges them (a named group keeps its name; two named ask
+  which name to keep), **N** says they are not the same, ← → step, **Z**
+  (or Ctrl+Z) takes the last answer back, Esc stops.  "Not the same" is
+  remembered by the groups' heads in the user's file, so the pair isn't
+  offered again after a regroup.  Each answer is one undo step; nothing
+  merges without Y or a click.  A pair is two groups whose members are
+  close on average (the distance the groups are built with, in the same
+  space and cut-offs the head step uses now: raw below 8 000 heads,
+  whitened from there); groups folded under *Smaller groups* and hidden
+  ones are left out.
+- **With a close-call judge on**, the review has the judge compare the
+  pairs up to the band's far end, nearest first, on three views each
+  (the covers, the heads where the groups look most alike, the second
+  clearest): pairs most views call one suit join the end of the list as
+  they come; the rest are counted ("7 compared and left out") and *Show
+  them* adds them, marked.  A view the judge couldn't look at counts as
+  a no.  A pair under sure-yes is offered at once unless a cover is too
+  dim to trust.  Sixty views a request (twenty pairs), with *Compare the
+  next 20*; card only, one judge at a time, as everywhere.
+- **Similar groups** on a fursuit's page: its nearest groups, each with
+  *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
+  and × (not the same).
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
@@ -746,6 +772,21 @@ cut-offs were chosen on even days of the labels and held on the odd ones
 (`docs/library-search-plan.md`, "As built — fursuit matching v2"); the
 nearest-centroid grouping people use chained the library's fursuit heads
 into one group and is not used for this kind.
+
+**Groups that may be one suit** (merge suggestions) are measured the way
+groups are built: the mean distance between their members, which for
+unit vectors is exactly `1 − mean_a · mean_b`, so it costs groups², not
+heads², in the space and cut-offs the head step uses (raw or
+whitened).  On the labels, 236 of 421 same-suit pairs sit in different
+groups; between groups of at least 5 photos, 103 pairs of groups hold
+one (whitened).  Under the suggest cut the list finds 46 of the 103,
+with 46 labelled the same suit and 2 different; with the judge comparing
+the band, about 70.  Grouped raw, as a library under 8 000 heads is:
+39 of 91 by distance (3 different), about 72 with the judge; on the
+newest 7 276 heads alone, 14 of 30, about 23 with the judge
+(`docs/library-search-plan.md`, "As built — easier fursuit merging,
+stage 2").  The closest pair of heads was measured too: as many found,
+with 163 different.
 
 **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*:
 *Off*, the default, *Qwen3-VL-Reranker* or *Gemma 4*) looks at the candidates the vectors

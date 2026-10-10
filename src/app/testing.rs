@@ -169,6 +169,11 @@
 //! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
+//! merges open [2]             # "Possibly the same fursuit": the review (at
+//!                             # the tab's 3rd pair)
+//! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
+//! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
+//! merges dump                 # print the lists and the review
 //! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
 //!                             # (and let go; dragto holds it there)
 //! subjects hide|unhide 0      # hide the picked; show a hidden one again
@@ -378,6 +383,34 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
                 other => {
                     eprintln!("[script] unknown judge action {other}");
+                    Task::none()
+                }
+            }
+        }
+        "merges" => {
+            use super::subjects_merge::{Msg as G, debug_state};
+            let g = |x: G| Message::Subjects(super::subjects::Msg::Merges(x));
+            let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
+            let n: usize = rest.split_whitespace().last().and_then(|x| x.parse().ok()).unwrap_or(0);
+            match what {
+                "open" => app.update(g(G::Review(rest.trim().parse().ok()))),
+                "y" => app.update(g(G::Answer(true))),
+                "n" => app.update(g(G::Answer(false))),
+                "next" => app.update(g(G::Step(1))),
+                "prev" => app.update(g(G::Step(-1))),
+                "at" => app.update(g(G::At(n))),
+                "undo" => app.update(g(G::TakeBack)),
+                "done" => app.update(g(G::Done)),
+                "showleftout" => app.update(g(G::ShowLeftOut)),
+                "checkmore" => app.update(g(G::CheckMore)),
+                "similar" if rest.starts_with("merge") => app.update(g(G::SimilarMerge(n))),
+                "similar" if rest.starts_with("notsame") => app.update(g(G::SimilarNotSame(n))),
+                "dump" => {
+                    eprintln!("[merges] {}", debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown merges action {other}");
                     Task::none()
                 }
             }
