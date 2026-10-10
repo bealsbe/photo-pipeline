@@ -490,11 +490,12 @@ merge, a move or a suggestion never crosses kinds.  Nothing is ever named
 for you.
 
 - **The People tab** shows the people you named, then *Groups to name*,
-  most bursts first: each a round face crop with its name (or "Unnamed"),
-  how many photos and how many bursts.  A burst counts as one, and so does
-  a photo on its own, so twenty frames of one moment don't make a group
-  look bigger than one seen at five different moments (ties go to the
-  photo count).  Groups of fewer photos than *Smallest group to show*
+  most days first: each a round face crop with its name (or "Unnamed") and
+  how many days, bursts and photos.  Groups run by the days they were seen
+  on (the library's days, as the calendar has them), then by bursts, then
+  by photos.  A burst counts as one, and so does a photo on its own, so
+  twenty frames of one moment don't make a group look bigger than one seen
+  at five different moments.  Groups of fewer photos than *Smallest group to show*
   (5 by default, counted the same way: a burst is one photo) fold away
   under *Smaller groups*, so an event's strangers stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
   move between groups, Enter opens one, F2 names it.
@@ -559,9 +560,9 @@ fursuits, as a step of indexing after search and faces; you name a fursuit
 from one group and confirm its suggestions with Y and N.  Fursuits are
 never shown, merged, suggested or completed together with people or pets.
 
-- **The tab** lists named fursuits, then *Groups to name*, most bursts first
-  (as on People: a burst counts once, in the order, the size to show and
-  *Possibly the same fursuit*),
+- **The tab** lists named fursuits, then *Groups to name*, most days first
+  (as on People: days, then bursts, then photos; the size to show and
+  *Possibly the same fursuit* count bursts, a burst being one photo),
   as rounded-square head crops (people are round), with *Smaller groups*,
   *Hidden*, picking, merging (S then M, or a tile dragged onto another)
   and hiding as on People.  Groups are tight by design (below), so one

@@ -1094,7 +1094,7 @@ impl People {
             let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
             let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
             let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
-            let days = faces.iter().map(|f| f.day).collect::<HashSet<_>>().len();
+            let days = subjects::count_days(&faces);
             Some(Group { id, kind, name, hidden, photos, bursts: subjects::count_bursts(&faces), days, cover, suggestions })
         };
         for s in &self.file.subjects {
