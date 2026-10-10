@@ -41,6 +41,7 @@ pub mod step;
 pub mod tags;
 pub mod judging;
 pub mod merging;
+pub mod splitting;
 pub mod vocab;
 pub mod whiten;
 

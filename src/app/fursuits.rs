@@ -296,7 +296,15 @@ impl FakeFursuits {
     fn heads_parted(&self) -> impl Iterator<Item = (usize, u8, FaceRef)> + '_ {
         self.tagged[..self.scanned].iter().flat_map(|&i| {
             let s = &self.shots[i];
-            heads_of(s).into_iter().map(move |(suit, f)| (suit, part_of(s, suit), f))
+            let heads = heads_of(s);
+            // A crowded press now and then: the second suit's head lands in
+            // the first's group, as two heads of one photo do (stage 3).
+            let crowded = heads.len() > 1 && unit(&(press_seed(s), "crowd")) < 0.12;
+            let main = heads[0].0;
+            heads.into_iter().enumerate().map(move |(k, (suit, f))| {
+                let grouped = if crowded && k > 0 { main } else { suit };
+                (grouped, part_of(s, grouped), f)
+            })
         })
     }
 
@@ -506,8 +514,38 @@ impl FakeFursuits {
             by_press.entry(f.burst.unwrap_or_else(|| hash64(&f.face.key))).or_default().push(f);
         }
         let mut v: Vec<Vec<Face>> = by_press.into_values().collect();
-        v.sort_by(|a, b| a[0].clarity.total_cmp(&b[0].clarity));
+        // "Check this group": the least like the rest first (stage 3).
+        v.sort_by(|a, b| self.far_of(g, &b[0].face).total_cmp(&self.far_of(g, &a[0].face)));
         v
+    }
+
+    /// The stand-in's distance of a head from its group's mean: the
+    /// group's own suit near (0.25 to 0.45), anything else far (0.7 to 0.9).
+    fn far_of(&self, g: &FakeGroup, f: &FaceRef) -> f32 {
+        let u = unit(&(f, "far")) as f32;
+        if self.look_of(f) == Some(g.suit) { 0.25 + 0.2 * u } else { 0.7 + 0.2 * u }
+    }
+
+    /// The groups holding two heads of one photo (stage 3's flag).
+    pub fn seen_together(&self) -> HashSet<GroupId> {
+        self.groups.iter().filter(|g| !crate::search::splitting::photo_pairs(&g.members).is_empty()).map(|g| g.id.clone()).collect()
+    }
+
+    /// A group's split check, as the engine sends it: heads farthest from
+    /// the rest first, heads seen in one photo, and a split proposed around
+    /// the first such pair (each head with the seed of its own look).
+    #[allow(clippy::type_complexity)]
+    pub fn check(&self, id: &GroupId) -> Option<(Vec<(FaceRef, f32)>, Vec<(FaceRef, FaceRef)>, Option<(Vec<FaceRef>, Vec<FaceRef>)>)> {
+        let g = self.group(id)?;
+        let mut far: Vec<(FaceRef, f32)> = g.members.iter().map(|f| (*f, self.far_of(g, f))).collect();
+        far.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let pairs = crate::search::splitting::photo_pairs(&g.members);
+        let split = pairs.first().map(|&(a, b)| {
+            let lb = self.look_of(&b);
+            let (with_b, with_a): (Vec<FaceRef>, Vec<FaceRef>) = g.members.iter().partition(|f| **f == b || (**f != a && self.look_of(f) == lb && lb != self.look_of(&a)));
+            (with_a, with_b)
+        });
+        Some((far, pairs, split))
     }
 
     /// *Find more*, strict: let the next few through.  How many new
@@ -1048,6 +1086,29 @@ mod tests {
         assert!(f.merge_pairs(5, None, false).0.iter().any(|x| x.key() == p.key()));
         // A group's own pairs.
         assert!(f.merge_pairs(5, Some(&p.a), false).0.iter().all(|x| x.a == p.a || x.b == p.a));
+    }
+
+    /// The stand-in's split check (stage 3): crowded presses put a second
+    /// suit's head in the first's group, flagged; the check puts the heads
+    /// that aren't the group's suit first and proposes a split around the
+    /// two; "Check this group" goes least alike first; nothing moves.
+    #[test]
+    fn the_stand_in_flags_two_heads_of_one_photo_and_orders_strays_first() {
+        let f = fursuits(false);
+        let flagged = f.seen_together();
+        assert!(!flagged.is_empty(), "some groups hold two heads of one photo");
+        let id = flagged.iter().next().unwrap().clone();
+        let g = f.group(&id).unwrap().clone();
+        let (far, pairs, split) = f.check(&id).unwrap();
+        assert_eq!(far.len(), g.members.len());
+        let strays = g.members.iter().filter(|h| f.look_of(h) != Some(g.suit)).count();
+        assert!(strays > 0 && far.iter().take(strays).all(|(h, _)| f.look_of(h) != Some(g.suit)), "strays first");
+        assert!(!pairs.is_empty());
+        let (a, b) = split.unwrap();
+        assert_eq!(a.len() + b.len(), g.members.len());
+        let list = f.suggestions(&id);
+        assert!(list.first().is_some_and(|e| f.look_of(&e[0].face) != Some(g.suit)), "the review's first is a stray");
+        assert!(f.check(&GroupId::Cluster(7)).is_none(), "no other group");
     }
 
     #[test]

@@ -589,6 +589,19 @@ never shown, merged, suggested or completed together with people or pets.
   dim to trust.  A hundred pairs a request (up to 300 views, about 4 to 5
   minutes with Qwen3-VL-Reranker, × to stop), with *Compare the next
   100*; card only, one judge at a time, as everywhere.
+- **Splitting a group that holds more than one suit.**  On a fursuit's
+  *Heads*, *Least like the rest* shows the heads farthest from the group
+  first, the few farthest marked, where a stray usually is (unnamed
+  groups open that way, named ones *Clearest first*; either switches).
+  Shift+click picks a run; *Split into a new group* in the pick strip
+  moves the picked heads out; or drag them onto a group in the tray that
+  shows while dragging (or *A new group*).  "Check this group" goes least
+  alike first too.  A group with **two heads in one photo** holds at least
+  two fursuits: its tile carries a split mark, and its page says so with
+  the two heads and *Propose a split…*, which shows the group split
+  around them (each head with the one it looks more like) for you to
+  check, swap and confirm.  Nothing moves until you do; each split is one
+  undo step; heads removed in the viewer are in none of it.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).

@@ -402,6 +402,19 @@ impl Link {
         }
     }
 
+    /// A fursuit group's split check (`BgEvent::GroupCheck`): its heads
+    /// farthest from the rest first, heads seen in one photo, a proposed
+    /// split.  Nothing moves.
+    pub fn group_check(&self, seq: u64, id: &GroupId) {
+        match self {
+            Link::Engine(e) => e.group_check(seq, id.clone()),
+            Link::Fake(f) => {
+                let (far, pairs, split) = f.state.lock().fursuits.check(id).unwrap_or_default();
+                let _ = f.bus.unbounded_send(BgEvent::GroupCheck { seq, group: id.clone(), far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
+            }
+        }
+    }
+
     /// *Possibly the same fursuit*: pairs of fursuit groups to merge or
     /// tell apart (`BgEvent::MergeSuggestions`, then with `judge` and a
     /// judge that can run, `BgEvent::MergeJudged`).  `focus`: one group's
@@ -912,6 +925,7 @@ impl FakeState {
         f.looked_at = self.people.looked_at;
         // The fursuits' groups ride along, each carrying its kind.
         snap.groups.extend(self.fursuits.groups());
+        snap.seen_together = self.fursuits.seen_together();
         snap.groups.sort_by(|a, b| (b.name.is_some(), b.photos).cmp(&(a.name.is_some(), a.photos)).then(a.cover.capture.cmp(&b.cover.capture)));
         snap.generation += self.fursuits.generation();
         self.refresh_heads();

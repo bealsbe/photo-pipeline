@@ -292,6 +292,9 @@ pub struct Subjects {
     /// What Ctrl+Z would take back ("Merged 2 groups into Someone"), if
     /// anything.
     pub undoable: Option<String>,
+    /// Fursuit groups holding two heads of one photo, so at least two
+    /// fursuits (`search::splitting`).  Never a person's.
+    pub seen_together: HashSet<GroupId>,
 }
 
 impl Subjects {

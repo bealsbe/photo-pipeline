@@ -185,6 +185,14 @@
 //! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
 //! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
 //! merges dump                 # print the lists and the review
+//! split order far|clear       # a fursuit's Heads: least like the rest / clearest
+//! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
+//! split splitpicked           # Split into a new group (the pick strip)
+//! split propose|swap|go|cancel   # the proposed split (two heads in one photo)
+//! split drag 3 new|drag 3 group 0|dragto 3 group 0   # drag a head (the
+//!                             # picked ones with it) onto the tray
+//! split openflagged           # open a group flagged with two heads of one photo (unnamed first)
+//! split dump                  # print the order, the check, the picks
 //! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
 //!                             # (and let go; dragto holds it there)
 //! subjects hide|unhide 0      # hide the picked; show a hidden one again
@@ -395,6 +403,70 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
                 other => {
                     eprintln!("[script] unknown judge action {other}");
+                    Task::none()
+                }
+            }
+        }
+        "split" => {
+            use super::subjects_split::{Msg as X, Order};
+            let x = |m: X| Message::Subjects(super::subjects::Msg::Split(m));
+            let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
+            let nums: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+            let head = |app: &App, n: usize| app.subjects.person.as_ref().and_then(|p| super::subjects_split::ordered(p).get(n).map(|f| f.face));
+            match what {
+                "order" => app.update(x(X::Order(if rest.starts_with("clear") { Order::Clearest } else { Order::LeastAlike }))),
+                // `pick 3` clicks the 4th head shown; `shiftpick 7` Shift+clicks.
+                "pick" | "shiftpick" => {
+                    if let Some(f) = head(app, nums.first().copied().unwrap_or(0)) {
+                        super::subjects_split::pick(app, f, what == "shiftpick");
+                    }
+                    Task::none()
+                }
+                "splitpicked" => app.update(x(X::SplitPicked)),
+                // The first group on the tab flagged as holding two heads of one photo.
+                "openflagged" => {
+                    let st = &app.subjects;
+                    let order = super::subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open);
+                    let flagged: Vec<_> = order.into_iter().filter(|id| app.subjects.all.seen_together.contains(id)).collect();
+                    let unnamed = flagged.iter().find(|id| app.subjects.all.group(id).is_some_and(|g| g.name.is_none())).cloned();
+                    match unnamed.or(flagged.first().cloned()) {
+                        Some(id) => app.update(Message::Subjects(super::subjects::Msg::Tile(id))),
+                        None => {
+                            eprintln!("[split] no flagged group shown");
+                            Task::none()
+                        }
+                    }
+                }
+                "propose" => app.update(x(X::Propose)),
+                "swap" => app.update(x(X::ProposeSwap)),
+                "go" => app.update(x(X::ProposeGo)),
+                "cancel" => app.update(x(X::ProposeCancel)),
+                // `drag 3 new` / `drag 3 group 0` drags the 4th head shown onto
+                // A new group / the 1st group in the tray and lets go;
+                // `dragto` holds it there.
+                "drag" | "dragto" => {
+                    let Some(f) = head(app, nums.first().copied().unwrap_or(0)) else { return Task::none() };
+                    let mut t = vec![app.update(x(X::DragStart(f)))];
+                    let target = if rest.contains("new") {
+                        Some(None)
+                    } else {
+                        let k = nums.get(1).copied().unwrap_or(0);
+                        app.subjects.person.as_ref().and_then(|p| super::subjects_split::tray_ids(app, p).get(k).cloned()).map(Some)
+                    };
+                    if let Some(target) = target {
+                        t.push(app.update(x(X::DragEnter(target))));
+                    }
+                    if what == "drag" {
+                        t.push(app.update(x(X::DragDrop)));
+                    }
+                    Task::batch(t)
+                }
+                "dump" => {
+                    eprintln!("[split] {}", app.subjects.person.as_ref().map(super::subjects_split::debug_state).unwrap_or_else(|| "no page".into()));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown split action {other}");
                     Task::none()
                 }
             }

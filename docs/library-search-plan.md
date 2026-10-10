@@ -3147,3 +3147,86 @@ Groups of at least 5 photos (the tab's default).
   - N, Z, Y (a merge into the larger group), Z;
   - *Similar groups* on a group's page.
 - `PP_PROFILE=1`: no slow update but the driver's screenshots.
+
+## As built — splitting mixed fursuit groups (stage 3)
+
+"A cluster of unrelated suits, or a few multiple suits in a group" (the
+user).  Investigated first, then the user picked: the least-alike order
+with Split off and drag, and the two-heads-in-one-photo flag.  The judge
+checking a group's far end (on request, card only) was measured and left
+for later.
+
+### How groups mix (measured)
+
+The research's 10 826 heads grouped as the app does (whitened at 0.69;
+raw at 0.094 for a library under 8 000 heads); the user's labelled pairs
+over their tracks; two heads of one photo (boxes overlapping under 5 %)
+as different suits; the heads marked bad.  Groups of 5+ photos.
+
+- Labelled different pairs inside one group: 5 of 557 whitened (against
+  178 same), 7 raw (against 182 same).
+- Groups holding two heads of one photo: 25 of 492 whitened (40 pairs),
+  8 of 446 raw (29 pairs).
+- By eye, 12 random whitened groups: 5 clean, 4 one suit with one or two
+  strays at the far end, 1 two suits, 2 piles of unrelated heads (heads
+  behind cameras and hands; crowded dark shots).  10 random raw groups:
+  8 clean, 1 stray, 1 two suits half and half (a crowded photo).
+- **Strays sit at the far end.**  Ranked by distance to the group's mean,
+  one head of a photo pair is among the 5 farthest in 29 of 40 pairs
+  whitened (11 of 29 raw); of the labelled different pairs, 3 of 4 (6 of
+  7 raw); against 17 of 178 labelled same pairs (25 of 180 raw).  A fixed
+  distance does much worse: at the group cut it flags 3 of the 40.
+- Not built, with why: a tighter re-cluster of a group splits real suits
+  far more than it separates mixes (whitened 0.62: 367 of 492 groups
+  split, 59 of 178 same pairs apart, 19 of 40 photo pairs separated; raw
+  0.088: 176 of 446, 17 of 180, 8 of 29); keeping unclear heads out of
+  the groups barely changes the mixed ones (25 to 21 whitened, 8 to 8
+  raw) and leaves 1 255 heads ungrouped.  The judge on a group's far end
+  (Qwen's verdicts on the labelled pairs inside groups: 177 of 178 same
+  kept, 5 of 5 different flagged; 181 of 182 and 7 of 7 raw) costs about
+  30 head pairs a group: a possible later add-on.
+
+### As built
+
+- `search::splitting` (pure, tested): `far_order` (each head's cosine
+  distance to the group's unit mean, farthest first), `marked` (the
+  farthest few: a third of the group, at most 5), `photo_pairs` (heads of
+  one photo whose boxes overlap under 5 %), `around` (a split around two
+  heads: each member with the one it is nearer).
+- `Fursuits::group_heads` (a cluster's members or a fursuit subject's,
+  less what `step::Exclusion` keeps out: heads removed in the viewer,
+  drawn boxes taken back), `check` and `seen_together`;
+  `Engine::group_check` → `BgEvent::GroupCheck`; `Subjects.seen_together`
+  (the snapshot's flagged groups; never a person's).
+- "Check this group" (an unnamed cluster's own heads) goes farthest
+  first, its excluded heads left out (`Fursuits::suggestions`).
+- `src/app/subjects_split.rs`: *Heads*' order bar (*Least like the rest*
+  / *Clearest first*; unnamed groups open least alike first, named ones
+  clearest first), the marks, Shift+click runs (`run`), *Split into a new
+  group* in the pick strip, the drag tray (the page's similar groups, the
+  named, the largest; *A new group*), the flag strip with the two heads
+  and *Propose a split…*, and the proposal dialog (stay / split off, *Swap
+  sides*, confirm).  Every split or move is `move_faces`: one undo step.
+- The tab: a flagged group's tile carries the split mark, its tooltip
+  saying why.
+- The stand-in: crowded presses put a second suit's head in the first's
+  group now and then (flagged); its check orders the other suits' heads
+  first; its "Check this group" goes least alike first.
+
+### Checked
+
+- Tests: the far end, the marks, photo pairs and one head boxed twice,
+  the proposal, the Shift run, the default order; through the engine, a
+  group with two heads of one photo flagged, ordered least alike first,
+  a split proposed, "Check this group" stray first, a person's group
+  without a check, and a head removed in the viewer out of all of it;
+  the stand-in's flag and order.
+- Headless, stand-in: the tab's marks, a flagged page, *Heads* least
+  alike first with marks, a Shift run, the drag tray, the proposal, the
+  split and its undo, *Split into a new group*, "Check this group" stray
+  first.
+- Headless, real engine (night-day library, 455 heads, raw, under the
+  card lock): a flagged small group (3 heads) split by the proposal and
+  undone; *Split into a new group* and undo; the largest group's heads
+  least alike first; "Check this group" farthest first.  `PP_PROFILE=1`:
+  no slow update but the driver's.

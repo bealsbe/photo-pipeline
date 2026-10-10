@@ -1075,7 +1075,7 @@ impl People {
         groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
-        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable })
+        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new() })
     }
 
     /// Suggestions for review (UI 6): for a subject, the faces within
