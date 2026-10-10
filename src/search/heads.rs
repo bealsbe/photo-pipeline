@@ -1418,9 +1418,14 @@ impl Fursuits {
                 subjects::candidates(&rows, &members, &pool, if strict { cutoffs.strict } else { cutoffs.suggest })
             }
             GroupId::Cluster(cid) => {
+                // "Check this group": farthest from the group first, where
+                // its strays are (stage 3; on the labels one head of two
+                // suits seen in one photo is among the 5 farthest in 29 of
+                // 40 pairs).  Heads the user's labels keep out never come.
                 let c = grouped.cluster(*cid).ok_or(Refused::StaleGroup)?;
-                let mut v: Vec<(usize, f32)> = c.members.iter().map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
-                v.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let out = step::Exclusion::new(file, Kind::Fursuit);
+                let mut v: Vec<(usize, f32)> = c.members.iter().filter(|&&m| refs.get(m).is_some_and(|r| !out.excludes(store, r))).map(|&m| (m, 1.0 - rows.dot(m, &c.centroid))).collect();
+                v.sort_by(|a, b| b.1.total_cmp(&a.1));
                 v
             }
         };
@@ -1443,6 +1448,60 @@ impl Fursuits {
         let mut out: Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> = self.clusters().into_iter().map(|(id, m)| (GroupId::Cluster(id), m, false, None)).collect();
         out.extend(file.subjects.iter().filter(|s| s.kind == Kind::Fursuit && !s.hidden).map(|s| (GroupId::Subject(s.id.clone()), s.members.clone(), s.name.is_some(), s.cover)));
         out
+    }
+
+    /// A fursuit group's heads (a cluster's members, a fursuit subject's
+    /// confirmed ones), without those the user's labels keep out (removed
+    /// in the viewer, or drawn and taken back).  `None`: not a fursuit
+    /// group (never a person's).
+    pub fn group_heads(&self, file: &SubjectsFile, id: &GroupId) -> Option<Vec<FaceRef>> {
+        let store = self.store.as_ref()?;
+        let heads: Vec<FaceRef> = match id {
+            GroupId::Cluster(c) => {
+                let cl = self.grouped.cluster(*c)?;
+                let refs = store.refs();
+                cl.members.iter().filter_map(|&m| refs.get(m).copied()).collect()
+            }
+            GroupId::Subject(s) => {
+                let s = file.get(s).filter(|s| s.kind == Kind::Fursuit)?;
+                s.members.clone()
+            }
+        };
+        let out = step::Exclusion::new(file, Kind::Fursuit);
+        Some(heads.into_iter().filter(|h| !out.excludes(store, h)).collect())
+    }
+
+    /// The fursuit groups holding two heads of one photo, so at least two
+    /// fursuits (stage 3's flag): every cluster and every fursuit subject
+    /// not hidden.  Needs no vectors.
+    pub fn seen_together(&self, file: &SubjectsFile) -> HashSet<GroupId> {
+        let mut ids: Vec<GroupId> = self.grouped.ids.iter().map(|&c| GroupId::Cluster(c)).collect();
+        ids.extend(file.subjects.iter().filter(|s| s.kind == Kind::Fursuit && !s.hidden).map(|s| GroupId::Subject(s.id.clone())));
+        ids.into_iter().filter(|id| self.group_heads(file, id).is_some_and(|h| !super::splitting::photo_pairs(&h).is_empty())).collect()
+    }
+
+    /// What a fursuit group's *Heads* shows to split it (stage 3): every
+    /// head with its distance to the group's mean, farthest first; the
+    /// pairs of heads seen in one photo; and, when there is such a pair, a
+    /// split proposed around its two heads (the part with the first head,
+    /// the part with the second).  The vectors must be in memory
+    /// ([`Fursuits::step`]).  `None` for anything but a fursuit group.
+    #[allow(clippy::type_complexity)]
+    pub fn check(&self, file: &SubjectsFile, id: &GroupId) -> Option<(Vec<(FaceRef, f32)>, Vec<(FaceRef, FaceRef)>, Option<(Vec<FaceRef>, Vec<FaceRef>)>)> {
+        let heads = self.group_heads(file, id)?;
+        let store = self.store.as_ref()?;
+        let refs = store.refs();
+        let rows = store.rows();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let members: Vec<usize> = heads.iter().filter_map(|h| by_ref.get(h).copied()).collect();
+        let far: Vec<(FaceRef, f32)> = super::splitting::far_order(&rows, &members).into_iter().map(|(m, d)| (refs[m], d)).collect();
+        let pairs = super::splitting::photo_pairs(&heads);
+        let split = pairs.iter().find_map(|(a, b)| {
+            let (ra, rb) = (*by_ref.get(a)?, *by_ref.get(b)?);
+            let (x, y) = super::splitting::around(&rows, &members, ra, rb);
+            Some((x.into_iter().map(|m| refs[m]).collect(), y.into_iter().map(|m| refs[m]).collect()))
+        });
+        Some((far, pairs, split))
     }
 
     /// The step's cut-offs and the judge's band, in the space it groups

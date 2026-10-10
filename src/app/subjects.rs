@@ -557,6 +557,7 @@ pub enum Msg {
     Person(person::Msg),
     Review(review::Msg),
     Merges(super::subjects_merge::Msg),
+    Split(super::subjects_split::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -671,7 +672,8 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     }
     let t = person::on_subjects(app);
     super::subjects_merge::on_subjects(app);
-    Task::batch([t, refresh_crops(app)])
+    let split = super::subjects_split::on_subjects(app);
+    Task::batch([t, split, refresh_crops(app)])
 }
 
 // ── update ──────────────────────────────────────────────────────────────────
@@ -852,6 +854,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Person(msg) => person::update(app, msg),
         Msg::Review(msg) => review::update(app, msg),
         Msg::Merges(msg) => super::subjects_merge::update(app, msg),
+        Msg::Split(msg) => super::subjects_split::update(app, msg),
     }
 }
 
@@ -1375,7 +1378,10 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let target = drag.is_some_and(|d| d.over.as_ref() == Some(&g.id));
     let source = drag.is_some_and(|d| d.from == g.id);
     let picked = target || s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
-    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge: g.hidden.then_some(Glyph::Hide), on }.into();
+    // Two of its heads in one photo: it holds at least two fursuits.
+    let together = g.kind == Kind::Fursuit && s.all.seen_together.contains(&g.id);
+    let badge = if g.hidden { Some(Glyph::Hide) } else if together { Some(Glyph::Split) } else { None };
+    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge, on }.into();
     if g.hidden {
         return tip(el, "Show it on the tab again", true);
     }
@@ -1397,11 +1403,14 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     // The same widgets whether or not a drag is under way, so the dragged
     // tile keeps its place in the tree (and its drag) as the page redraws.
     let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, drag.is_some()).ghost(ghost, shape(g.kind).radius(64.0)).into();
-    let hint = if g.name.is_none() {
+    let mut hint = if g.name.is_none() {
         format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
     } else {
         format!("{}: {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
     };
+    if together {
+        hint.push_str(" Two of its heads are in one photo, so it holds at least two fursuits: open it to split it.");
+    }
     tip(el, hint, true)
 }
 
@@ -1745,7 +1754,7 @@ mod tests {
                 group(7, Kind::Person, None, 9, false),
             ],
             faces_found: 200,
-            undoable: None,
+            undoable: None, seen_together: Default::default(),
         }
     }
 

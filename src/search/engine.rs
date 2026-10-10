@@ -106,6 +106,7 @@ enum Cmd {
     FindMore { seq: u64, group: GroupId },
     // Fursuit merging, stage 2.
     MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
+    GroupCheck { seq: u64, group: GroupId },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -578,6 +579,14 @@ impl Engine {
     /// Suggestions only: nothing is merged.
     pub fn merge_suggestions(&self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
         self.send(Cmd::MergeSuggestions { seq, focus, min_photos, judge });
+    }
+
+    /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
+    /// with its heads farthest from the group first, the heads seen
+    /// together in one photo, and a proposed split around them.  Nothing
+    /// moves: the user splits through `move_faces`.
+    pub fn group_check(&self, seq: u64, group: GroupId) {
+        self.send(Cmd::GroupCheck { seq, group });
     }
 
     /// "Not the same": two fursuit groups a suggestion offered are
@@ -1221,6 +1230,11 @@ impl Worker {
                 Cmd::Drawn(done) => self.on_drawn(*done),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
                 Cmd::MergeSuggestions { seq, focus, min_photos, judge } => self.send_merge_suggestions(seq, focus, min_photos, judge),
+                Cmd::GroupCheck { seq, group } => {
+                    self.fursuits.step();
+                    let (far, pairs, split) = self.fursuits.check(&self.people.file, &group).unwrap_or_default();
+                    let _ = self.bus.unbounded_send(BgEvent::GroupCheck { seq, group, far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
+                }
                 Cmd::NotSame { a, b, a_heads, b_heads } => {
                     let r = self.people.not_same(&a, &b, a_heads, b_heads);
                     self.after_edit(r);
@@ -2330,6 +2344,7 @@ impl Worker {
         self.ensure_resolver();
         let mut snapshot = (*self.people.build_snapshot(&|f| self.resolve_face(f))).clone();
         self.fursuits.extend_snapshot(&mut snapshot, &|f| self.resolve_face(f));
+        snapshot.seen_together = self.fursuits.seen_together(&self.people.file);
         let snapshot = Arc::new(snapshot);
         self.people.set_snapshot(snapshot.clone());
         let named = self.people.file.named_count(Kind::Person);
@@ -4295,6 +4310,119 @@ mod tests {
         let offered: Vec<_> = judged.iter().flat_map(|j| j.0.iter().map(|p| p.key())).collect();
         assert_eq!(offered, [k(&suit, &id(3))], "the dim one was compared, then offered");
         assert_eq!(fake.pairs.lock().len(), 1);
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// [`Suits`], with a second head on photos named `-two<tenths>-`: at
+    /// that angle, beside the first.
+    struct TwoHeads;
+
+    impl Embedder for TwoHeads {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            Suits.device_report()
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            Suits.embed_images(files, want)
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Suits.encode_text(texts)
+        }
+        fn find_heads(&self, files: &[(PathBuf, FileType)]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            let mut out = Suits.find_heads(files)?;
+            for r in &mut out {
+                let stem = crate::util::stem(&r.path);
+                let Some(two) = stem.split('-').find_map(|w| w.strip_prefix("two")).and_then(|d| d.trim_start_matches('m').parse::<f32>().ok()) else { continue };
+                let sign = if stem.contains("-twom") { -1.0 } else { 1.0 };
+                let a = (sign * two / 10.0).to_radians();
+                if let Ok(ph) = &mut r.result {
+                    ph.heads.push(crate::ml::heads::Head { bbox: [0.65, 0.2, 0.25, 0.35], score: 0.5, size: 300, sharpness: 0.2, vector: vec![a.cos(), a.sin()], tile: Vec::new() });
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    /// The split check through the engine (stage 3): a group holding two
+    /// heads of one photo is flagged (fursuits only), its heads come
+    /// farthest from the rest first, a split is proposed around the two,
+    /// and "Check this group" goes farthest first.  A head the viewer's
+    /// labels removed is in none of it.  Nothing moves.
+    #[test]
+    fn a_group_with_two_heads_of_one_photo_is_flagged_and_ordered_least_alike_first() {
+        // Heads at 0, ±0.05 and 0.1 (one suit), and on photo 4 a second
+        // head 0.3 the other way: all one group by average linkage.
+        let name = |n: u32, a: i32, two: Option<i32>| format!("{n:04}-fursuit-90-{}{}{}", two.map_or(String::new(), |t| format!("two{}{}-", if t < 0 { "m" } else { "" }, t.abs())), if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0, None), (2, Suits::at(0.05), None), (3, -Suits::at(0.05), None), (4, Suits::at(0.1), Some(-Suits::at(0.3)))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a, two)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a, two)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("split", &refs);
+        let factory: EmbedderFactory = Box::new(|_| Ok(Arc::new(TwoHeads) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 5 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key4 = Key::of(1, lib_path(&d, &files[3]).as_os_str().as_encoded_bytes());
+        let second = FaceRef::new(key4, [0.65, 0.2, 0.25, 0.35]);
+        let first4 = FaceRef::new(key4, [0.3, 0.2, 0.3, 0.4]);
+        let groups = fursuit_groups(&e, 1);
+        let g = groups[0].0.clone();
+        let started = Instant::now();
+        while !e.subjects().seen_together.contains(&g) {
+            assert!(started.elapsed() < Duration::from_secs(5), "the flag: {:?}", e.subjects().seen_together);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let check = |ev: &mut Events, seq: u64| -> (Vec<(FaceRef, f32)>, Vec<(FaceRef, FaceRef)>, Option<(Vec<FaceRef>, Vec<FaceRef>)>) {
+            let stream = &mut ev.stream;
+            ev.rt.block_on(async {
+                use iced::futures::StreamExt;
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while Instant::now() < deadline {
+                    let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await else { continue };
+                    for e in batch {
+                        if let BgEvent::GroupCheck { seq: s, far, pairs, split, .. } = e {
+                            if s == seq {
+                                return ((*far).clone(), (*pairs).clone(), split.map(|x| (*x).clone()));
+                            }
+                        }
+                    }
+                }
+                panic!("no check");
+            })
+        };
+        e.group_check(1, g.clone());
+        let (far, pairs, split) = check(&mut ev, 1);
+        assert_eq!(far.len(), 5);
+        assert_eq!(far[0].0, second, "the other suit's head comes first");
+        assert!(far.windows(2).all(|w| w[0].1 >= w[1].1));
+        assert_eq!(pairs.len(), 1);
+        let (with_first, with_second) = split.expect("a proposal");
+        assert!(with_first.contains(&first4) && with_second.contains(&second) && !with_second.contains(&first4), "{with_first:?} / {with_second:?}");
+        assert_eq!(with_first.len() + with_second.len(), 5, "every head on one side");
+        assert_eq!(e.subjects().groups.iter().find(|x| x.id == g).map(|x| x.photos), Some(4), "nothing moved");
+        // "Check this group": farthest first.
+        e.suggestions(2, g.clone());
+        let (list, _) = review(&mut ev, 2, Duration::from_secs(2));
+        assert_eq!(list.expect("the group's own heads")[0][0].face, second, "the stray first");
+        // A person's group has no split check.
+        e.group_check(3, GroupId::Subject(SubjectId("0".repeat(32))));
+        assert!(check(&mut ev, 3).0.is_empty());
+        // The viewer's label removes the second head: out of everything.
+        e.label(crate::model::subjects::LabelEdit::Remove { face: second, kind: Kind::Fursuit });
+        let started = Instant::now();
+        while e.subjects().seen_together.contains(&g) || e.subjects().groups.iter().filter(|x| x.kind == Kind::Fursuit).count() != 1 {
+            assert!(started.elapsed() < Duration::from_secs(5), "the flag stays: {:?}", e.subjects().seen_together);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let g = fursuit_groups(&e, 1)[0].0.clone();
+        e.group_check(4, g);
+        let (far, pairs, split) = check(&mut ev, 4);
+        assert!(far.iter().all(|(f, _)| *f != second) && pairs.is_empty() && split.is_none());
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

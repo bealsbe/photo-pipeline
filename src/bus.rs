@@ -151,6 +151,18 @@ pub enum BgEvent {
         /// *Find more*) judges them.  The same on every event of a request.
         beyond: usize,
     },
+    /// A fursuit group's split check (`Engine::group_check`): its heads
+    /// with their distance to the group's mean, farthest first; the pairs
+    /// of its heads seen in one photo; a split proposed around the first
+    /// such pair (the part with its first head, the part with its second).
+    /// Empty for anything but a fursuit group.
+    GroupCheck {
+        seq: u64,
+        group: crate::model::subjects::GroupId,
+        far: Arc<Vec<(crate::model::subjects::FaceRef, f32)>>,
+        pairs: Arc<Vec<(crate::model::subjects::FaceRef, crate::model::subjects::FaceRef)>>,
+        split: Option<Arc<(Vec<crate::model::subjects::FaceRef>, Vec<crate::model::subjects::FaceRef>)>>,
+    },
     /// Pairs of fursuit groups that may be one suit
     /// (`Engine::merge_suggestions`), nearest first: those offered now
     /// (by distance, or with verdicts already kept).  `focus`: the group
@@ -227,6 +239,7 @@ impl BgEvent {
             BgEvent::Suggestions { .. } => "Suggestions",
             BgEvent::Judged { .. } => "Judged",
             BgEvent::MergeSuggestions { .. } => "MergeSuggestions",
+            BgEvent::GroupCheck { .. } => "GroupCheck",
             BgEvent::MergeJudged { .. } => "MergeJudged",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }

@@ -96,6 +96,15 @@ pub struct Person {
     /// *Find more* asked (strict, fursuits): its request, and how many
     /// suggestions waited before, to say what it found.
     pub more: Option<(u64, usize)>,
+    /// Splitting a fursuit group (stage 3): how *Heads* is ordered, the
+    /// engine's check, the last head clicked (Shift+click picks a run),
+    /// the proposed split shown, heads being dragged.
+    pub order: super::subjects_split::Order,
+    pub check: Option<super::subjects_split::Check>,
+    pub check_seq: u64,
+    pub anchor: Option<FaceRef>,
+    pub proposal: Option<super::subjects_split::Proposal>,
+    pub head_drag: Option<super::subjects_split::HeadDrag>,
 }
 
 impl Person {
@@ -118,6 +127,12 @@ impl Person {
             follow: None,
             merged_into: None,
             more: None,
+            order: super::subjects_split::Order::Clearest,
+            check: None,
+            check_seq: 0,
+            anchor: None,
+            proposal: None,
+            head_drag: None,
         }
     }
 }
@@ -198,6 +213,7 @@ pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     let Some(g) = app.subjects.group(id).cloned() else { return Task::none() };
     let mut p = Person::new(id.clone(), g.kind);
     p.pane.thumb_size = app.search.pane.thumb_size;
+    p.order = super::subjects_split::default_order(g.name.is_some());
     if g.name.is_none() || rename {
         p.naming = Some(g.name.clone().unwrap_or_default());
     }
@@ -207,6 +223,7 @@ pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     app.subjects.merges = None;
     app.quicklook = None;
     super::subjects_merge::ask_similar(app);
+    super::subjects_split::ask(app);
     let mut tasks = vec![search(app, false), subj::refresh_crops(app)];
     if naming {
         tasks.push(focus_name());
@@ -268,15 +285,16 @@ pub fn on_results(app: &mut App, seq: u64, reply: Reply) -> Task<Message> {
 /// show them as they are now.
 pub fn after_change(app: &mut App) -> Task<Message> {
     let Some(p) = app.subjects.person.as_ref() else { return Task::none() };
-    let (group, faces) = (p.group.clone(), p.show == Show::Faces);
+    let (group, faces) = (p.group.clone(), p.show == Show::Faces || p.faces.is_some());
     let mut tasks = vec![search(app, true)];
     if faces {
         tasks.push(ask_faces(app, group));
     }
+    super::subjects_split::ask(app);
     Task::batch(tasks)
 }
 
-fn ask_faces(app: &mut App, group: GroupId) -> Task<Message> {
+pub(super) fn ask_faces(app: &mut App, group: GroupId) -> Task<Message> {
     let seq = app.subjects.next_seq();
     if let Some(p) = app.subjects.person.as_mut() {
         p.faces_seq = seq;
@@ -381,6 +399,7 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             v.push((g.cover.clone(), subj::px(app, 22.0), Framing::Face));
         }
     }
+    v.extend(super::subjects_split::wanted(app));
     v
 }
 
@@ -428,19 +447,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let group = p.group.clone();
             if show == Show::Faces {
                 let t = ask_faces(app, group);
+                super::subjects_split::ask(app);
                 return Task::batch([t, subj::refresh_crops(app)]);
             }
             Task::none()
         }
         Msg::FacePick(f) => {
-            let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
-            match p.picked.iter().position(|x| *x == f) {
-                Some(i) => {
-                    p.picked.remove(i);
-                }
-                None => p.picked.push(f),
-            }
-            p.menu = None;
+            // Shift+click picks a run, in the order shown.
+            super::subjects_split::pick(app, f, crate::ui::modifiers::get().shift());
             Task::none()
         }
         Msg::FacesClear => {
@@ -643,6 +657,9 @@ fn not_this(app: &mut App) -> Task<Message> {
 /// Esc: a menu, then the name field, then the picked faces, then back to
 /// the tab.
 pub fn escape(app: &mut App) -> Task<Message> {
+    if super::subjects_split::escape(app) {
+        return Task::none();
+    }
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if p.menu.take().is_some() {
         return Task::none();
@@ -701,6 +718,10 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Space::new().into() };
     let mut col = column![header(app, p), kit::hairline(), band(app, p), kit::hairline()].width(Length::Fill).height(Length::Fill);
+    // A group holding two heads of one photo holds two fursuits.
+    if let Some(flag) = super::subjects_split::flag_strip(app, p) {
+        col = col.push(flag).push(kit::hairline());
+    }
     // A fursuit's nearest groups, to merge with one click.
     if let Some(similar) = super::subjects_merge::similar_row(app, &p.group) {
         col = col.push(similar).push(kit::hairline());
@@ -731,13 +752,18 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         layers.push(subj::catcher(pm(Msg::Menu(None))));
         layers.push(menu);
     }
+    // While heads are dragged: the groups to drop them on.
+    if let Some(tray) = super::subjects_split::tray(app, p) {
+        layers.push(tray);
+    }
     subj::layered(layers)
 }
 
 /// Dialogs the person's page puts over everything (none of its own yet:
 /// forgetting asks through the page's dialog).
-pub fn overlay(_app: &App) -> Option<Element<'_, Message>> {
-    None
+pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
+    // A proposed split of a fursuit group, to confirm.
+    super::subjects_split::proposal_dialog(app)
 }
 
 fn quiet<'a>(title: String, body: String) -> Element<'a, Message> {
@@ -1060,16 +1086,25 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
 fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let name = subj::label(&app.subjects, &p.group);
     let not = if name == "the unnamed group" { "Not this one".to_string() } else { format!("Not {name}") };
-    let r = row![
+    let mut r = row![
         icons::view(Glyph::Select, 16.0, t::SIGNAL),
-        text(format!("{} picked", util::plural(p.picked.len() as u64, "face"))).size(t::T_BODY).color(t::INK).width(Length::Fill),
+        text(format!("{} picked", util::plural(p.picked.len() as u64, if p.kind == Kind::Fursuit { "head" } else { "face" }))).size(t::T_BODY).color(t::INK).width(Length::Fill),
+    ]
+    .spacing(t::S3)
+    .align_y(Alignment::Center)
+    .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
+    // Fursuits: split them off into a new group of their own (or drag
+    // them onto a group).
+    if p.kind == Kind::Fursuit {
+        r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "Move them out into a group of their own, to name or merge. Or drag them onto a group.", true));
+    }
+    let r = r.push(row![
         kit::icon_text_btn(Glyph::Split, "Move to…", t::INK, style::secondary(), Some(pm(Msg::Menu(if p.menu == Some(Menu::MoveTo) { None } else { Some(Menu::MoveTo) })))),
         tip(kit::icon_text_btn(Glyph::Close, not, t::REJECT, style::secondary(), Some(pm(Msg::NotThis))), "Take them out, and never suggest them again", true),
         tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(pm(Msg::FacesClear))), "Stop picking  (Esc)", true),
     ]
     .spacing(t::S3)
-    .align_y(Alignment::Center)
-    .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
+    .align_y(Alignment::Center));
     column![container(r).width(Length::Fill).style(style::fill(alpha(t::SIGNAL, 0.08))), container(Space::new().width(Length::Fill).height(1)).style(style::fill(alpha(t::SIGNAL, 0.3)))].into()
 }
 
@@ -1078,15 +1113,27 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
 fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let s = &app.subjects;
     let Some(faces) = &p.faces else { return container(Space::new()).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into() };
-    let mut col = column![subj::heading(p.kind.crops(), format!("{}, clearest first. Pick the ones that aren't them.", util::thousands(faces.len() as u64)))];
+    let fursuit = p.kind == Kind::Fursuit;
+    let mut col = if fursuit {
+        // Fursuits: least like the rest first, or clearest first.
+        column![super::subjects_split::order_bar(p, faces.len())]
+    } else {
+        column![subj::heading(p.kind.crops(), format!("{}, clearest first. Pick the ones that aren't them.", util::thousands(faces.len() as u64)))]
+    };
     let small = subj::px(app, tile::SMALL_CROP);
     let mut r = row![].spacing(8);
     let mut keys = Vec::with_capacity(p.faces_shown.min(faces.len()));
-    for f in faces.iter().take(p.faces_shown) {
+    let shown = super::subjects_split::ordered(p);
+    let dragging = p.head_drag.is_some();
+    for f in shown.into_iter().take(p.faces_shown) {
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, subj::shape(p.kind));
-        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: None, on: pm(Msg::FacePick(f.face)) }.into();
-        r = r.push(tip(el, format!("{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }), true));
+        let badge = if fursuit { super::subjects_split::badge(p, &f.face) } else { None };
+        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: badge.map(|b| b.0), on: pm(Msg::FacePick(f.face)) }.into();
+        // Fursuit heads drag onto a group (the tray that shows meanwhile).
+        let el: Element<'a, Message> = if fursuit { crate::ui::drag::DragArea::new(el, super::subjects_split::head_drag(f.face), dragging).into() } else { el };
+        let words = format!("{}{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }, badge.map(|b| format!(". {}", b.1)).unwrap_or_default());
+        r = r.push(tip(el, words, true));
     }
     let watched = crate::ui::in_view::InView::new(r.wrap().vertical_spacing(8), keys, |keys| subj::m(subj::Msg::InView(subj::Section::Faces, keys)));
     col = col.push(container(watched).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 12.0 }));
@@ -1098,6 +1145,11 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
 }
 
 pub fn debug_state(app: &App) -> String {
+    let split = app.subjects.person.as_ref().map(super::subjects_split::debug_state).unwrap_or_default();
+    debug_state_inner(app) + " " + &split
+}
+
+fn debug_state_inner(app: &App) -> String {
     let Some(p) = app.subjects.person.as_ref() else { return "person=none".into() };
     let name = |id: RecordId| p.pane.results.as_ref().and_then(|r| r.coll.get(id)).map(|r| r.stem()).unwrap_or_else(|| "?".into());
     format!(
@@ -1138,7 +1190,7 @@ mod tests {
             generation: 1,
             groups: vec![g(1, Kind::Person, Some("Person A"), 312), g(2, Kind::Person, Some("Pat"), 20), g(3, Kind::Person, None, 58), g(4, Kind::Fursuit, Some("Patches"), 90)],
             faces_found: 400,
-            undoable: None,
+            undoable: None, seen_together: Default::default(),
         }
     }
 

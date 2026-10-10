@@ -376,7 +376,7 @@ impl FakePeople {
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
         let faces_found = self.groups.iter().map(|g| g.members.len()).sum::<usize>()
             + self.shots[..self.looked_at].iter().filter(|s| true_person(&s.key, s.burst).is_some_and(|p| placed(&s.key, p) == Placed::Held)).count();
-        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()) }
+        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()), seen_together: HashSet::new() }
     }
 
     /// Photos with a face found in them so far.
