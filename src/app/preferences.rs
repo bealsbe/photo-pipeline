@@ -93,6 +93,8 @@ pub enum Control {
     ForgetPeople,
     /// *Find fursuit heads*.
     FindHeads,
+    /// *Show People and fursuits in the sidebar*.
+    RailSubjects,
     /// Look at the fursuit photos not looked at yet (the catch-up).
     FindHeadsNow,
     /// *Forget all…* (fursuits).
@@ -147,6 +149,7 @@ impl Control {
             Control::SmallestGroup(_) => "pref-smallest-5",
             Control::ForgetPeople => "pref-forget-people",
             Control::FindHeads => "pref-find-heads",
+            Control::RailSubjects => "pref-rail-subjects",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
             Control::Judge(JudgeChoice::Off) => "pref-judge-off",
@@ -662,6 +665,11 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
                 app.show_status("Finding fursuit heads is off. The heads found and the names you gave are kept.", 5000)
             }
         }
+        Control::RailSubjects => {
+            app.settings.rail_subjects = !app.settings.rail_subjects;
+            app.settings.save_in_background();
+            Task::none()
+        }
         Control::FindHeadsNow => {
             if !heads_catch_up(app) {
                 return Task::none();
@@ -893,6 +901,7 @@ fn controls(app: &App) -> Vec<Control> {
     if people_to_forget(app) {
         v.push(Control::ForgetPeople);
     }
+    v.push(Control::RailSubjects);
     v.push(Control::FindHeads);
     if heads_catch_up(app) {
         v.push(Control::FindHeadsNow);
@@ -1612,6 +1621,11 @@ fn people_section(app: &App) -> Element<'_, Message> {
                 about(format!("{kept} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
                 forget,
             ),
+            setting(
+                "Show People and fursuits in the sidebar",
+                about("Hides only the sidebar button. Ctrl+4 and View ▸ People and fursuits still open the page."),
+                switch(p, Control::RailSubjects, s.rail_subjects, true),
+            ),
         ],
     );
     container(people).id("pref-section-people").width(Length::Fill).into()
@@ -1735,6 +1749,9 @@ fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
         Some(mi) => {
             let coming = app.search.downloads.iter().find(|d| d.model == mi.id && !d.state.is_final());
             let right = match coming {
+                Some(d) if d.state == crate::ml::download::DownloadState::Downloading => {
+                    super::download_speed::with_speed(super::search_setup::progress_bytes(d.done, d.total), app.search.speed_now())
+                }
                 Some(d) => super::search_setup::progress_bytes(d.done, d.total),
                 None if j.downloaded.contains(&c) => "Downloaded".to_string(),
                 None => format!("{} to download", super::search_setup::size(mi.bytes())),
@@ -1784,7 +1801,16 @@ fn judge_note(app: &App) -> Option<Element<'_, Message>> {
         .align_y(Alignment::Center)
         .into(),
         crate::ml::judge::JudgeState::Broken(why) => line(Glyph::Warning, t::WARN, format!("The close-call judge couldn't run. {why}")).into(),
-        _ if judge_downloading(app) => line(Glyph::Info, t::INK2, format!("{} is downloading; close calls are checked once it's in place.", c.label())).into(),
+        _ if judge_downloading(app) => {
+            // "…, about 3 minutes left" or "…, waiting for the network".
+            let how = match app.search.speed_now() {
+                Some(r @ (super::download_speed::Reading::Rate { .. } | super::download_speed::Reading::Stalled)) => {
+                    format!(", {}", super::download_speed::note(r, super::search_setup::remaining(&app.search.downloads)))
+                }
+                _ => String::new(),
+            };
+            line(Glyph::Info, t::INK2, format!("{} is downloading{how}; close calls are checked once it's in place.", c.label())).into()
+        }
         _ if !j.downloaded.contains(&c) => row![
             line(Glyph::Info, t::INK2, format!("{} isn't downloaded, so close calls are matched by look alone for now.", c.label())),
             focusable(p, Control::JudgeDownload, kit::btn("Download…", style::secondary(), Some(m(Msg::Press(Control::JudgeDownload))))),

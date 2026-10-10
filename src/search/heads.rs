@@ -1435,6 +1435,23 @@ impl Fursuits {
         Ok(subjects::per_burst(heads))
     }
 
+    /// The groups merge suggestions look at (stage 2): every fursuit
+    /// cluster and every fursuit subject not hidden, with its members, its
+    /// chosen cover and whether it is named.  Never another kind's.
+    #[allow(clippy::type_complexity)]
+    pub fn merge_groups(&self, file: &SubjectsFile) -> Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> {
+        let mut out: Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> = self.clusters().into_iter().map(|(id, m)| (GroupId::Cluster(id), m, false, None)).collect();
+        out.extend(file.subjects.iter().filter(|s| s.kind == Kind::Fursuit && !s.hidden).map(|s| (GroupId::Subject(s.id.clone()), s.members.clone(), s.name.is_some(), s.cover)));
+        out
+    }
+
+    /// The step's cut-offs and the judge's band, in the space it groups
+    /// in now (raw below `whiten::MIN_HEADS` heads, whitened from there).
+    pub fn cuts(&self) -> Option<(subjects::Cutoffs, (f32, f32))> {
+        let store = self.store.as_ref()?;
+        Some((store.cutoffs(), store.band()))
+    }
+
     /// Whether a group is this kind's: a fursuit subject, or one of the
     /// current fursuit clusters.
     pub fn is_fursuit_group(&self, file: &SubjectsFile, id: &GroupId) -> bool {

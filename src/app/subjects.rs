@@ -43,14 +43,22 @@ use crate::ml::models::ModelId;
 use crate::search::PassKind;
 use crate::search::estimate;
 use crate::ui::icons::{self, Glyph};
+use crate::ui::in_view::InView;
 use crate::ui::paint;
 use crate::ui::subject_tile::{self as tile, Shape, Tile};
 use crate::ui::theme as t;
 use crate::util;
 
 pub const HEADER_H: f32 = 60.0;
-/// The face crops kept decoded, by bytes.
-const CROP_CACHE_BYTES: usize = 48 * 1024 * 1024;
+/// The face crops kept decoded, by bytes, at the least: the cap grows to
+/// twice what the page wants now (the tiles on screen and a screen either
+/// side, at this screen's scale), so it always holds what is shown and
+/// some screens more.
+const CROP_CACHE_MIN: usize = 48 * 1024 * 1024;
+/// The cap's room over what is wanted now.
+const CROP_CACHE_ROOM: usize = 2;
+/// The tab's groups' scrollable (scripts scroll it).
+pub const GROUPS_SCROLL: &str = "subjects-groups";
 /// Crops drawn on one worker at a time, in a batch.
 const CROP_BATCH: usize = 48;
 
@@ -69,6 +77,8 @@ pub enum Page {
     Person,
     /// "Same person?"
     Review,
+    /// "Same fursuit?" for pairs of groups: merge suggestions.
+    Merges,
 }
 
 /// Merging picked groups: which name to keep.
@@ -76,6 +86,34 @@ pub enum Page {
 pub struct MergeAsk {
     pub groups: Vec<GroupId>,
     pub keep: GroupId,
+}
+
+impl MergeAsk {
+    /// Merge `groups` (as `all` knows them): the named one keeps its
+    /// name, so the first named is kept by default; with none named,
+    /// `prefer` (the tile dropped onto), else the first.
+    pub fn new(all: &Found, groups: Vec<GroupId>, prefer: Option<&GroupId>) -> Option<MergeAsk> {
+        if groups.len() < 2 {
+            return None;
+        }
+        let named = |id: &GroupId| all.group(id).is_some_and(|g| g.name.is_some());
+        let keep = prefer.filter(|p| named(p)).or_else(|| groups.iter().find(|id| named(id))).or(prefer).unwrap_or(&groups[0]).clone();
+        Some(MergeAsk { groups, keep })
+    }
+
+    /// More than one of the groups has a name: the dialog asks which to
+    /// keep (otherwise the one name there is stays).
+    pub fn asks_name(&self, all: &Found) -> bool {
+        self.groups.iter().filter(|id| all.group(id).is_some_and(|g| g.name.is_some())).count() > 1
+    }
+}
+
+/// A group tile being dragged onto another (to merge them), and the
+/// tile the pointer is over.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Drag {
+    pub from: GroupId,
+    pub over: Option<GroupId>,
 }
 
 pub struct Subjects {
@@ -91,12 +129,18 @@ pub struct Subjects {
     pub small_open: bool,
     pub hidden_open: bool,
     pub merge: Option<MergeAsk>,
+    /// A tile dragged onto another, while the button is down.
+    pub drag: Option<Drag>,
     /// "Forget this person?" waiting for an answer.
     pub forget: Option<GroupId>,
     pub person: Option<Person>,
     pub review: Option<Review>,
     /// The close-call judge's latest run (fursuits).
     pub judge: Option<super::fursuit_judge::Run>,
+    /// Pairs of fursuit groups that may be one suit (stage 2): the tab's
+    /// and a group page's lists, and their review.
+    pub lists: super::subjects_merge::Lists,
+    pub merges: Option<super::subjects_merge::MergeReview>,
     pub crops: Crops,
     pub(super) seq: u64,
 }
@@ -112,17 +156,22 @@ impl Subjects {
             small_open: false,
             hidden_open: false,
             merge: None,
+            drag: None,
             forget: None,
             person: None,
             review: None,
             judge: None,
-            crops: Crops::new(CROP_CACHE_BYTES),
+            lists: Default::default(),
+            merges: None,
+            crops: Crops::new(CROP_CACHE_MIN),
             seq: 0,
         }
     }
 
     pub fn page(&self) -> Page {
-        if self.review.is_some() {
+        if self.merges.is_some() {
+            Page::Merges
+        } else if self.review.is_some() {
             Page::Review
         } else if self.person.is_some() {
             Page::Person
@@ -208,13 +257,38 @@ impl Arranged<'_> {
 /// whole photo (else the face, framed).
 pub type CropKey = (FaceRef, u32, bool);
 
+/// A run of tiles drawn as they come into view: a section of the tab, or
+/// a subject's faces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    Named,
+    ToName,
+    Small,
+    Hidden,
+    Faces,
+}
+
+/// Who holds crops in the cache: the page's own (`refresh_crops`), or
+/// another page's few (the search field's names).
+pub type Holder = &'static str;
+const PAGE: Holder = "page";
+const ELSEWHERE: Holder = "elsewhere";
+
 /// Decoded crops, the least recently wanted dropped first past the cap.
+/// What a page wants now is held: never dropped, whatever the cap.
 pub struct Crops {
     map: HashMap<CropKey, (Option<Handle>, (u32, u32), usize, u64)>,
     bytes: usize,
+    /// The cap now, and the least it can be.
     cap: usize,
+    floor: usize,
     pending: HashSet<CropKey>,
     tick: u64,
+    /// The crops wanted now, by who wants them: kept past the cap.
+    held: HashMap<Holder, HashSet<CropKey>>,
+    /// The tiles of each section on screen or a screen away, as the
+    /// page last drew them.
+    seen: HashMap<Section, HashSet<CropKey>>,
 }
 
 /// The sizes crops are drawn at, in pixels: a wanted size takes the next
@@ -228,7 +302,46 @@ pub fn bucket(px: f32) -> u32 {
 
 impl Crops {
     pub fn new(cap: usize) -> Crops {
-        Crops { map: HashMap::new(), bytes: 0, cap, pending: HashSet::new(), tick: 0 }
+        Crops { map: HashMap::new(), bytes: 0, cap, floor: cap, pending: HashSet::new(), tick: 0, held: HashMap::new(), seen: HashMap::new() }
+    }
+
+    /// What a crop of this key takes decoded, at most.
+    fn weight(k: &CropKey) -> usize {
+        (k.1 as usize).pow(2) * 4
+    }
+
+    /// `who` wants these crops now (instead of what it wanted before):
+    /// they are kept past the cap, and the cap grows to hold them with
+    /// room to spare.
+    pub fn hold(&mut self, who: Holder, keys: HashSet<CropKey>) {
+        self.held.insert(who, keys);
+        let wanted: usize = self.held.values().flatten().map(Crops::weight).sum();
+        self.cap = self.floor.max(wanted * CROP_CACHE_ROOM);
+        self.evict();
+    }
+
+    fn is_held(&self, k: &CropKey) -> bool {
+        self.held.values().any(|h| h.contains(k))
+    }
+
+    /// The tiles of `section` the page draws near the screen now.  True
+    /// when that changed.
+    pub fn saw(&mut self, section: Section, keys: Vec<CropKey>) -> bool {
+        let keys: HashSet<CropKey> = keys.into_iter().collect();
+        if self.seen.get(&section) == Some(&keys) {
+            return false;
+        }
+        self.seen.insert(section, keys);
+        true
+    }
+
+    /// Is this tile of `section` on screen, or a screen away?
+    pub fn is_seen(&self, section: Section, k: &CropKey) -> bool {
+        self.seen.get(&section).is_some_and(|s| s.contains(k))
+    }
+
+    pub fn cap(&self) -> usize {
+        self.cap
     }
 
     pub fn key(face: &FaceRef, px: u32, framing: Framing) -> CropKey {
@@ -280,8 +393,21 @@ impl Crops {
             }
             self.bytes += bytes;
         }
-        while self.bytes > self.cap {
-            let Some((&k, _)) = self.map.iter().min_by_key(|(_, e)| e.3) else { break };
+        self.evict();
+    }
+
+    /// Past the cap, drop the least recently wanted of the crops no one
+    /// holds: never one shown or about to be.
+    fn evict(&mut self) {
+        if self.bytes <= self.cap {
+            return;
+        }
+        let mut old: Vec<(u64, CropKey)> = self.map.iter().filter(|(k, _)| !self.is_held(k)).map(|(k, e)| (e.3, *k)).collect();
+        old.sort_unstable_by_key(|e| e.0);
+        for (_, k) in old {
+            if self.bytes <= self.cap {
+                break;
+            }
             if let Some(e) = self.map.remove(&k) {
                 self.bytes -= e.2;
             }
@@ -304,9 +430,18 @@ impl Crops {
     }
 }
 
-/// Draw the crops `wanted` that aren't decoded yet, on workers.
+/// Draw the crops `wanted` that aren't decoded yet, on workers, for
+/// another page (the search field's names): held while it wants them.
 pub fn fetch(app: &mut App, wanted: Vec<(Face, u32, Framing)>) -> Task<Message> {
-    let missing = app.subjects.crops.missing(wanted);
+    fetch_held(app, ELSEWHERE, wanted)
+}
+
+/// Draw the crops `who` wants now that aren't decoded yet, on workers;
+/// they are held until it wants others.
+fn fetch_held(app: &mut App, who: Holder, wanted: Vec<(Face, u32, Framing)>) -> Task<Message> {
+    let crops = &mut app.subjects.crops;
+    crops.hold(who, wanted.iter().map(|(f, px, fr)| Crops::key(&f.face, *px, *fr)).collect());
+    let missing = crops.missing(wanted);
     if missing.is_empty() {
         return Task::none();
     }
@@ -335,34 +470,51 @@ pub fn px(app: &App, logical: f32) -> u32 {
     bucket(logical * app.scale_factor.max(1.0))
 }
 
-/// The crops the page shows now.
+/// The crops the page shows now: on the tab, the tiles on screen or a
+/// screen away (as the page last drew them), never every group's.
 fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
-    match s.page() {
+    let v = match s.page() {
         Page::Overview => {
             let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
             let (big, small) = (px(app, tile::TILE_CROP), px(app, tile::SMALL_CROP));
-            let mut v: Vec<(Face, u32, Framing)> = a.named.iter().chain(&a.to_name).map(|g| (g.cover.clone(), big, Framing::Face)).collect();
+            let near = |section: Section, groups: &[&Group], px: u32| -> Vec<(Face, u32, Framing)> {
+                groups.iter().filter(|g| s.crops.is_seen(section, &Crops::key(&g.cover.face, px, Framing::Face))).map(|g| (g.cover.clone(), px, Framing::Face)).collect()
+            };
+            let mut v = near(Section::Named, &a.named, big);
+            v.extend(near(Section::ToName, &a.to_name, big));
             if s.small_open {
-                v.extend(a.small.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
+                v.extend(near(Section::Small, &a.small, small));
             }
             if s.hidden_open {
-                v.extend(a.hidden.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
+                v.extend(near(Section::Hidden, &a.hidden, small));
             }
-            if let Some(mg) = &s.merge {
-                v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, 40.0), Framing::Face)));
+            if s.tab == Kind::Fursuit {
+                v.extend(super::subjects_merge::wanted_tab(app));
             }
             v
         }
-        Page::Person => person::wanted(app),
+        Page::Person => {
+            let mut v = person::wanted(app);
+            v.extend(super::subjects_merge::wanted_similar(app));
+            v
+        }
         Page::Review => review::wanted(app),
+        Page::Merges => super::subjects_merge::wanted(app),
+    };
+    // The merge dialog, over any page.
+    let mut v = v;
+    if let Some(mg) = &s.merge {
+        let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
+        v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
     }
+    v
 }
 
-/// Fetch what the page shows now and isn't decoded.
+/// Fetch what the page shows now and isn't decoded; hold it all.
 pub fn refresh_crops(app: &mut App) -> Task<Message> {
     let w = wanted(app);
-    fetch(app, w)
+    fetch_held(app, PAGE, w)
 }
 
 // ── messages ────────────────────────────────────────────────────────────────
@@ -380,11 +532,20 @@ pub enum Msg {
     Hidden(bool),
     Unhide(GroupId),
     MergeAsk,
+    /// A tile's drag: it started, the pointer entered or left a tile, the
+    /// button came up (the dialog asks before anything merges).
+    DragStart(GroupId),
+    DragEnter(GroupId),
+    DragLeave(GroupId),
+    DragDrop,
     MergeKeep(GroupId),
     MergeGo,
     MergeCancel,
     HidePicked,
     Cropped(Vec<(CropKey, Option<(u32, u32, Vec<u8>)>)>),
+    /// The tiles of a section near the screen changed (a scroll, a
+    /// resize, the list changing).
+    InView(Section, Vec<CropKey>),
     /// The catch-up: find faces in the library indexed before.
     FindFaces,
     OpenPrefs,
@@ -395,6 +556,7 @@ pub enum Msg {
     ForgetGo,
     Person(person::Msg),
     Review(review::Msg),
+    Merges(super::subjects_merge::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -414,6 +576,7 @@ pub fn open(app: &mut App) -> Task<Message> {
 /// The view is switching to the page.
 pub fn arriving(app: &mut App) -> Task<Message> {
     app.calendar.want_index();
+    super::subjects_merge::ask_tab(app);
     let mut tasks = vec![refresh_crops(app)];
     // A person's page left for Open day comes back as it was; an empty one
     // asks again.
@@ -429,10 +592,12 @@ pub fn to_overview(app: &mut App) -> Task<Message> {
     let from = s.person.as_ref().map(|p| p.group.clone());
     s.review = None;
     s.person = None;
+    s.merges = None;
     if from.is_some() {
         s.focus = from;
     }
     app.quicklook = None;
+    super::subjects_merge::ask_tab(app);
     refresh_crops(app)
 }
 
@@ -498,7 +663,14 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
             s.merge = None;
         }
     }
+    if s.drag.as_ref().is_some_and(|d| all.group(&d.from).is_none()) {
+        s.drag = None;
+    }
+    if let Some(d) = s.drag.as_mut().filter(|d| d.over.as_ref().is_some_and(|o| all.group(o).is_none())) {
+        d.over = None;
+    }
     let t = person::on_subjects(app);
+    super::subjects_merge::on_subjects(app);
     Task::batch([t, refresh_crops(app)])
 }
 
@@ -559,12 +731,42 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::MergeAsk => {
             let s = &mut app.subjects;
             let groups: Vec<GroupId> = s.picked.iter().filter(|id| s.all.group(id).is_some_and(|g| g.kind == s.tab)).cloned().collect();
-            if groups.len() < 2 {
+            // The named one keeps its name by default.
+            let Some(ask) = MergeAsk::new(&s.all, groups, None) else { return Task::none() };
+            s.merge = Some(ask);
+            refresh_crops(app)
+        }
+        Msg::DragStart(id) => {
+            let s = &mut app.subjects;
+            if s.page() == Page::Overview && s.merge.is_none() && s.group(&id).is_some_and(|g| g.kind == s.tab && !g.hidden) {
+                s.drag = Some(Drag { from: id, over: None });
+            }
+            Task::none()
+        }
+        Msg::DragEnter(id) => {
+            if let Some(d) = app.subjects.drag.as_mut() {
+                d.over = (d.from != id).then_some(id);
+            }
+            Task::none()
+        }
+        Msg::DragLeave(id) => {
+            if let Some(d) = app.subjects.drag.as_mut().filter(|d| d.over.as_ref() == Some(&id)) {
+                d.over = None;
+            }
+            Task::none()
+        }
+        Msg::DragDrop => {
+            let s = &mut app.subjects;
+            let Some(Drag { from, over: Some(to) }) = s.drag.take() else { return Task::none() };
+            // One kind only, the tab's; never a hidden group.
+            let ok = |id: &GroupId| s.all.group(id).is_some_and(|g| g.kind == s.tab && !g.hidden);
+            if !ok(&from) || !ok(&to) {
                 return Task::none();
             }
-            // The named one keeps its name by default.
-            let keep = groups.iter().find(|id| s.all.group(id).is_some_and(|g| g.name.is_some())).unwrap_or(&groups[0]).clone();
-            s.merge = Some(MergeAsk { groups, keep });
+            // The tile dropped onto is kept, unless only the dragged one
+            // has a name.
+            s.merge = MergeAsk::new(&s.all, vec![to.clone(), from], Some(&to));
+            s.focus = Some(to);
             refresh_crops(app)
         }
         Msg::MergeKeep(id) => {
@@ -575,6 +777,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::MergeCancel => {
             app.subjects.merge = None;
+            super::subjects_merge::dialog_cancelled(app);
             Task::none()
         }
         Msg::MergeGo => {
@@ -589,8 +792,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             s.picked.clear();
             s.select_mode = false;
             s.focus = Some(mg.keep.clone());
+            // A fursuit's page merged away follows the group kept.
+            if app.subjects.person.as_ref().is_some_and(|p| p.group != mg.keep && mg.groups.contains(&p.group)) {
+                person::follow(app, &mg.keep);
+            }
             app.search.link.merge(&mg.keep, &others);
-            app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo))
+            let review = super::subjects_merge::merged_by_dialog(app);
+            let said = app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo));
+            Task::batch([review, said])
         }
         Msg::HidePicked => {
             let s = &mut app.subjects;
@@ -611,6 +820,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Cropped(batch) => {
             app.subjects.crops.put(batch);
+            // Anything shown that went missing meanwhile is asked for again
+            // (once: what failed stays a placeholder).
+            if app.view == View::Subjects { refresh_crops(app) } else { Task::none() }
+        }
+        Msg::InView(section, keys) => {
+            if app.subjects.crops.saw(section, keys) {
+                return refresh_crops(app);
+            }
             Task::none()
         }
         Msg::FindFaces => find_faces(app),
@@ -634,6 +851,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Person(msg) => person::update(app, msg),
         Msg::Review(msg) => review::update(app, msg),
+        Msg::Merges(msg) => super::subjects_merge::update(app, msg),
     }
 }
 
@@ -667,6 +885,9 @@ pub fn select_mode(app: &mut App) {
 pub fn undo(app: &mut App) -> Task<Message> {
     if app.subjects.page() == Page::Review {
         return review::take_back(app);
+    }
+    if app.subjects.page() == Page::Merges {
+        return super::subjects_merge::take_back(app);
     }
     app.search.link.undo_subjects();
     Task::none()
@@ -702,11 +923,17 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.merge.take().is_some() || s.forget.take().is_some() {
+    if s.drag.take().is_some() || s.forget.take().is_some() {
         return Task::none();
     }
+    if s.merge.take().is_some() {
+        super::subjects_merge::dialog_cancelled(app);
+        return Task::none();
+    }
+    let s = &mut app.subjects;
     match s.page() {
         Page::Review => review::update(app, review::Msg::Done),
+        Page::Merges => super::subjects_merge::update(app, super::subjects_merge::Msg::Done),
         Page::Person => person::escape(app),
         Page::Overview => {
             if !s.picked.is_empty() || s.select_mode {
@@ -734,6 +961,7 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     }
     match app.subjects.page() {
         Page::Review => review::on_key(app, key, mods),
+        Page::Merges => super::subjects_merge::on_key(app, key, mods),
         Page::Person => person::on_key(app, key, mods),
         Page::Overview => overview_key(app, key, mods),
     }
@@ -770,6 +998,18 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
             Some(id) => person::open(app, &id, true),
             None => Task::none(),
         },
+        // M: merge the groups picked (the one confirmation asks first).
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("m") && !mods.shift() => {
+            if s.picked.len() >= 2 {
+                return update(app, Msg::MergeAsk);
+            }
+            if !s.picked.is_empty() || s.select_mode {
+                return app.show_status("Pick two or more groups to merge them.", 3000);
+            }
+            Task::none()
+        }
+        // Y on the Fursuits tab: review the pairs that may be one suit.
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("y") && !mods.shift() && s.tab == Kind::Fursuit && !s.select_mode => super::subjects_merge::tab_key(app).unwrap_or_else(Task::none),
         Key::Named(Named::Space) if s.select_mode => {
             if let Some(id) = s.focus.clone() {
                 toggle_pick(&mut app.subjects, id);
@@ -785,6 +1025,7 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
 pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     match app.subjects.page() {
         Page::Review => review::view(app),
+        Page::Merges => super::subjects_merge::view(app),
         Page::Person => person::view(app, keyboard_ok),
         Page::Overview => overview(app),
     }
@@ -1130,24 +1371,52 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let name = if small && !g.hidden { None } else { g.name.clone() };
     let count = if g.hidden { "Show".to_string() } else { util::plural(g.photos as u64, "photo") };
     let on = if g.hidden { m(Msg::Unhide(g.id.clone())) } else { m(Msg::Tile(g.id.clone())) };
-    let picked = s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
+    let drag = s.drag.as_ref();
+    let target = drag.is_some_and(|d| d.over.as_ref() == Some(&g.id));
+    let source = drag.is_some_and(|d| d.from == g.id);
+    let picked = target || s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
     let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge: g.hidden.then_some(Glyph::Hide), on }.into();
-    let hint = if g.hidden {
-        "Show it on the tab again".to_string()
-    } else if g.name.is_none() {
-        format!("Open to name this {} (F2)", g.kind.one())
+    if g.hidden {
+        return tip(el, "Show it on the tab again", true);
+    }
+    let width = if small { tile::SMALL_W } else { tile::TILE_W };
+    // While dragged: the tile left behind is veiled; the one under the
+    // pointer says what letting go does.
+    let el: Element<'a, Message> = if source {
+        stack![el, container(Space::new()).width(width).height(Length::Fill).style(|_| container::Style { background: Some(Background::Color(t::alpha(t::PHOTO_GROUND, 0.6))), border: iced::Border { radius: t::R_CELL.into(), ..iced::Border::default() }, ..Default::default() })].into()
+    } else if target {
+        let pill = container(row![icons::view(Glyph::Merge, 12.0, t::ON_SIGNAL), text("Merge here").size(t::T_SMALL).font(paint::MEDIUM).color(t::ON_SIGNAL)].spacing(4).align_y(Alignment::Center))
+            .padding(Padding::from([2.0, 7.0]))
+            .style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: iced::Border { radius: 9.0.into(), ..iced::Border::default() }, ..Default::default() });
+        stack![el, container(pill).width(width).align_x(iced::alignment::Horizontal::Center).padding(Padding { top: 6.0, ..Padding::ZERO })].into()
     } else {
-        format!("{}: {}", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
+        el
+    };
+    let messages = crate::ui::drag::DragMessages { start: m(Msg::DragStart(g.id.clone())), enter: m(Msg::DragEnter(g.id.clone())), leave: m(Msg::DragLeave(g.id.clone())), drop: m(Msg::DragDrop) };
+    let ghost = s.crops.get(&g.cover.face, px(app, size), Framing::Face);
+    // The same widgets whether or not a drag is under way, so the dragged
+    // tile keeps its place in the tree (and its drag) as the page redraws.
+    let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, drag.is_some()).ghost(ghost, shape(g.kind).radius(64.0)).into();
+    let hint = if g.name.is_none() {
+        format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
+    } else {
+        format!("{}: {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
     };
     tip(el, hint, true)
 }
 
-fn tiles<'a>(app: &'a App, groups: &[&'a Group], small: bool) -> Element<'a, Message> {
+/// A section's tiles; their crops are drawn as they come near the screen.
+fn tiles<'a>(app: &'a App, groups: &[&'a Group], section: Section) -> Element<'a, Message> {
+    let small = matches!(section, Section::Small | Section::Hidden);
+    let size = px(app, if small { tile::SMALL_CROP } else { tile::TILE_CROP });
     let mut r = row![].spacing(8);
+    let mut keys = Vec::with_capacity(groups.len());
     for g in groups {
+        keys.push(Crops::key(&g.cover.face, size, Framing::Face));
         r = r.push(group_tile(app, g, small));
     }
-    container(r.wrap().vertical_spacing(8)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 10.0 }).into()
+    let watched = InView::new(r.wrap().vertical_spacing(8), keys, move |keys| m(Msg::InView(section, keys)));
+    container(watched).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 10.0 }).into()
 }
 
 /// A disclosure: › Smaller groups 412.
@@ -1181,14 +1450,19 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     if let Some(p) = progress_strip(app, s.tab) {
         col = col.push(p);
     }
+    if s.tab == Kind::Fursuit {
+        if let Some(pairs) = super::subjects_merge::tab_section(app) {
+            col = col.push(pairs);
+        }
+    }
     if !a.named.is_empty() {
         col = col.push(heading("Named", util::thousands(a.named.len() as u64)));
-        col = col.push(tiles(app, &a.named, false));
+        col = col.push(tiles(app, &a.named, Section::Named));
     }
     if !a.to_name.is_empty() {
         let note = format!("{}, largest first", util::thousands(a.to_name.len() as u64));
         col = col.push(heading("Groups to name", note));
-        col = col.push(tiles(app, &a.to_name, false));
+        col = col.push(tiles(app, &a.to_name, Section::ToName));
     }
     let mut folds = row![].spacing(6);
     let mut any = false;
@@ -1208,23 +1482,23 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(container(folds).padding(Padding { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }));
     }
     if s.small_open && !a.small.is_empty() {
-        col = col.push(tiles(app, &a.small, true));
+        col = col.push(tiles(app, &a.small, Section::Small));
     }
     if s.hidden_open && !a.hidden.is_empty() {
         col = col.push(container(text("Hidden: kept off this tab and out of the search field's suggestions. Their photos still come up when searched for by name.").size(t::T_SMALL).color(t::PHOTO_INK2)).padding(Padding { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 }));
-        col = col.push(tiles(app, &a.hidden, true));
+        col = col.push(tiles(app, &a.hidden, Section::Hidden));
     }
     if a.named.is_empty() && a.to_name.is_empty() && !a.small.is_empty() && !s.small_open {
         col = col.push(container(text("Every group found so far is small. Open Smaller groups to see them.").size(t::T_SMALL).color(t::PHOTO_INK3)).padding(Padding::from([8.0, 16.0])));
     }
-    container(scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
+    container(scrollable(col).id(GROUPS_SCROLL).style(style::scroll).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
 /// Under the header while groups are picked: how many, and what to do.
 fn pick_strip(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let n = s.picked.len();
-    let merge = kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk)));
+    let merge = tip(kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk))), "Merge the picked groups into one  (M)", true);
     let hide = kit::icon_text_btn(Glyph::Hide, "Hide", t::INK2, style::ghost(), (n >= 1).then(|| m(Msg::HidePicked)));
     let close = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::ClearPicks))), "Stop picking  (Esc)", true);
     let words = if n == 0 { "Click groups to pick them".to_string() } else { format!("{n} picked") };
@@ -1235,7 +1509,72 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
     column![container(r).width(Length::Fill).style(style::fill(t::alpha(t::SIGNAL, 0.08))), container(Space::new().width(Length::Fill).height(1)).style(style::fill(t::alpha(t::SIGNAL, 0.3)))].into()
 }
 
+/// The crop size of the two-group merge dialog's cards.
+const PAIR_CROP: f32 = 112.0;
+
+/// Two groups to merge (a drop, or two picked): both side by side, large,
+/// so the eye can check them; when both are named, a click on one keeps
+/// its name.
+fn merge_pair_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
+    let s = &app.subjects;
+    let one = s.tab.one();
+    let asks = mg.asks_name(&s.all);
+    let card = |id: &'a GroupId| -> Element<'a, Message> {
+        let Some(g) = s.group(id) else { return Space::new().into() };
+        let kept = *id == mg.keep && g.name.is_some();
+        let crop = tile::crop(s.crops.get(&g.cover.face, px(app, PAIR_CROP), Framing::Face), PAIR_CROP, shape(g.kind));
+        let mut col = column![
+            crop,
+            text(g.name.clone().unwrap_or_else(|| "Unnamed group".into())).size(t::T_BODY).font(paint::MEDIUM).color(if g.name.is_some() { t::INK } else { t::INK2 }),
+            text(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"))).size(t::T_SMALL).color(t::INK3),
+        ]
+        .spacing(6)
+        .width(Length::Fill)
+        .align_x(Alignment::Center);
+        if asks {
+            let line = if kept { "Its name stays" } else { "Keep this name instead" };
+            col = col.push(text(line).size(t::T_SMALL).font(paint::MEDIUM).color(if kept { t::SIGNAL } else { t::INK3 }));
+        }
+        let b = button(col).width(196).padding(Padding { top: 14.0, bottom: 12.0, left: 10.0, right: 10.0 }).style(move |_t, status| {
+            let hot = asks && matches!(status, button::Status::Hovered | button::Status::Pressed);
+            button::Style {
+                background: Some(Background::Color(if hot { t::RAISED } else { t::DEEP })),
+                text_color: t::INK,
+                border: style::border(if kept { t::SIGNAL } else { t::LINE }, if kept { 2.0 } else { 1.0 }, t::R_CELL),
+                ..button::Style::default()
+            }
+        });
+        if asks { b.on_press(m(Msg::MergeKeep(id.clone()))).into() } else { b.into() }
+    };
+    let (a, b) = (&mg.groups[0], &mg.groups[1]);
+    let join = container(icons::view(Glyph::Merge, 20.0, t::INK3)).width(36).center_x(36);
+    let cards = row![card(a), join, card(b)].align_y(Alignment::Center);
+    let keep = s.group(&mg.keep).and_then(|g| g.name.clone());
+    let says = match (&keep, asks) {
+        (Some(_), true) => "Both have a name. Click the one to keep.".to_string(),
+        (Some(n), false) => format!("It keeps the name {n}."),
+        (None, _) => format!("Neither is named yet, so the merged {one} stays unnamed."),
+    };
+    let go = match &keep {
+        Some(n) => format!("Merge into {n}"),
+        None => "Merge".to_string(),
+    };
+    let content = column![
+        super::dialogs::header(format!("Merge these two groups into one {one}?"), None),
+        kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. {says}")),
+        container(cards).width(Length::Fill).center_x(Length::Fill).padding(Padding::from([t::S2, 0.0])),
+        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
+        Space::new().height(t::S1),
+        super::dialogs::footer(vec![], vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::MergeCancel))).into(), kit::btn(go, style::primary(), Some(m(Msg::MergeGo))).into()]),
+    ]
+    .spacing(t::S3);
+    super::dialogs::backdrop(super::dialogs::frame_fit(content.into(), 520f32.min(app.window_size_width() - 48.0)))
+}
+
 fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
+    if mg.groups.len() == 2 {
+        return merge_pair_dialog(app, mg);
+    }
     let s = &app.subjects;
     let one = s.tab.one();
     let mut list = column![].spacing(2).padding(4);
@@ -1277,7 +1616,11 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
     };
     let content = column![
         super::dialogs::header(format!("Merge {} groups into one {one}?", mg.groups.len()), None),
-        kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. Which name should it keep?")),
+        kit::secondary(match (&keep, mg.asks_name(&s.all)) {
+            (_, true) => format!("Their photos become one {one}, and suggestions come from all of them. Which name should it keep?"),
+            (Some(n), false) => format!("Their photos become one {one}, and suggestions come from all of them. It keeps the name {n}."),
+            (None, false) => format!("Their photos become one {one}, and suggestions come from all of them. None is named yet, so it stays unnamed."),
+        }),
         container(list).width(Length::Fill).style(style::group()),
         kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
         Space::new().height(t::S1),
@@ -1328,7 +1671,7 @@ pub fn debug_state(app: &App) -> String {
     let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", people::short(&g.id), g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
     let kinds: HashSet<Kind> = a.named.iter().chain(&a.to_name).chain(&a.small).chain(&a.hidden).map(|g| g.kind).collect();
     format!(
-        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB) {} {}",
+        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
         app.view,
         s.page(),
         s.tab,
@@ -1358,9 +1701,10 @@ pub fn debug_state(app: &App) -> String {
         app.search.status.pass,
         s.crops.len(),
         s.crops.bytes() / 1024,
+        s.crops.cap() / 1024,
         person::debug_state(app),
         review::debug_state(app),
-    )
+    ) + " " + &super::subjects_merge::debug_state(app)
 }
 
 #[cfg(test)]
@@ -1428,6 +1772,32 @@ mod tests {
         assert_eq!(arrange(&f, Kind::Pet, 5).to_name.len(), 1);
     }
 
+    /// The merge dialog's name: the named group keeps its name whichever
+    /// tile was dragged onto which; two named ones ask, the one dropped
+    /// onto chosen to start; none named, the one dropped onto.
+    #[test]
+    fn a_merge_keeps_the_name_and_asks_only_between_two() {
+        let mut f = found();
+        f.groups.push(group(8, Kind::Fursuit, None, 12, false));
+        f.groups.push(group(9, Kind::Fursuit, Some("Fursuit 2"), 30, false));
+        f.groups.push(group(10, Kind::Fursuit, None, 7, false));
+        let (named, other_named, a, b) = (GroupId::Cluster(5), GroupId::Cluster(9), GroupId::Cluster(8), GroupId::Cluster(10));
+        // An unnamed group dropped onto a named one, and the other way.
+        let ask = MergeAsk::new(&f, vec![named.clone(), a.clone()], Some(&named)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (named.clone(), false));
+        let ask = MergeAsk::new(&f, vec![a.clone(), named.clone()], Some(&a)).unwrap();
+        assert_eq!(ask.keep, named, "dropped onto the unnamed one, the name still stays");
+        // Two named: asks; starts on the one dropped onto.
+        let ask = MergeAsk::new(&f, vec![other_named.clone(), named.clone()], Some(&other_named)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (other_named, true));
+        // None named: the one dropped onto.
+        let ask = MergeAsk::new(&f, vec![b.clone(), a.clone()], Some(&b)).unwrap();
+        assert_eq!((ask.keep.clone(), ask.asks_name(&f)), (b, false));
+        // Picked (S, then M): the first named, else the first picked.
+        assert_eq!(MergeAsk::new(&f, vec![a.clone(), named.clone(), GroupId::Cluster(10)], None).unwrap().keep, named);
+        assert!(MergeAsk::new(&f, vec![a], None).is_none(), "one group is nothing to merge");
+    }
+
     #[test]
     fn completions_offer_named_people_only() {
         let f = found();
@@ -1461,5 +1831,103 @@ mod tests {
         assert_eq!(bucket(100.0), 128);
         assert_eq!(bucket(10.0), 64);
         assert_eq!(bucket(5000.0), 640);
+    }
+
+    const ONE: usize = 64 * 64 * 4;
+
+    fn pixels() -> Option<(u32, u32, Vec<u8>)> {
+        Some((64, 64, vec![0u8; ONE]))
+    }
+
+    #[test]
+    fn crops_held_are_never_dropped_whatever_arrives() {
+        // Room for three; the page holds two (on screen), so the cap is
+        // twice them: four.
+        let mut c = Crops::new(3 * ONE);
+        let all: Vec<Face> = (0..8).map(face).collect();
+        let key = |i: usize| Crops::key(&all[i].face, 64, Framing::Face);
+        c.hold(PAGE, [key(0), key(1)].into());
+        assert_eq!(c.cap(), 4 * ONE);
+        // Asked for in one go; the held ones land first (the oldest), the
+        // screens around after them, in batches.
+        let missing = c.missing(all.iter().map(|f| (f.clone(), 64, Framing::Face)));
+        assert_eq!(missing.len(), 8);
+        c.put(missing[..2].iter().map(|(k, _)| (*k, pixels())).collect());
+        c.put(missing[2..5].iter().map(|(k, _)| (*k, pixels())).collect());
+        c.put(missing[5..].iter().map(|(k, _)| (*k, pixels())).collect());
+        assert!(c.bytes() <= c.cap(), "{} over {}", c.bytes(), c.cap());
+        for i in [0, 1] {
+            assert!(c.get(&all[i].face, 64, Framing::Face).is_some(), "held crop {i} was dropped");
+        }
+        // The rest go least recently wanted first.
+        assert!(c.get(&all[7].face, 64, Framing::Face).is_some());
+        assert!(c.get(&all[2].face, 64, Framing::Face).is_none());
+        // Held, even a batch over the cap keeps every one of them.
+        let mut c = Crops::new(ONE);
+        let keys: HashSet<CropKey> = (0..6).map(key).collect();
+        c.hold(PAGE, keys.clone());
+        let missing = c.missing(all[..6].iter().map(|f| (f.clone(), 64, Framing::Face)));
+        c.put(missing.iter().map(|(k, _)| (*k, pixels())).collect());
+        assert_eq!(c.len(), 6);
+        // Another page's few are held beside the page's.
+        c.hold(ELSEWHERE, [key(7)].into());
+        let m = c.missing([(all[7].clone(), 64, Framing::Face)]);
+        c.put(vec![(m[0].0, pixels())]);
+        assert_eq!(c.len(), 7);
+    }
+
+    #[test]
+    fn crops_dropped_are_asked_for_again_once_failures_never() {
+        let mut c = Crops::new(2 * ONE);
+        let all: Vec<Face> = (0..4).map(face).collect();
+        let want = |i: usize| (all[i].clone(), 64, Framing::Face);
+        let m = c.missing((0..4).map(want));
+        c.put(m.iter().map(|(k, _)| (*k, pixels())).collect());
+        assert!(c.get(&all[0].face, 64, Framing::Face).is_none(), "dropped past the cap");
+        // Scrolled back to it: asked for again, once.
+        let again = c.missing([want(0)]);
+        assert_eq!(again.len(), 1);
+        assert!(c.missing([want(0)]).is_empty(), "on its way: not asked twice");
+        // A photo that's gone lands as nothing: its placeholder stays, and
+        // it is not asked for again, however often the page refreshes.
+        c.put(vec![(again[0].0, None)]);
+        for _ in 0..3 {
+            assert!(c.missing([want(0)]).is_empty());
+        }
+        assert!(c.get(&all[0].face, 64, Framing::Face).is_none());
+    }
+
+    #[test]
+    fn crops_cap_grows_with_the_screen_and_its_scale() {
+        let floor = 48 * 1024 * 1024;
+        let all: Vec<Face> = (0..200).map(face).collect();
+        let held = |px: u32, n: usize| -> HashSet<CropKey> { all[..n].iter().map(|f| Crops::key(&f.face, px, Framing::Face)).collect() };
+        let mut c = Crops::new(floor);
+        // A few tiles at 1x: the floor.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP), 20));
+        assert_eq!(c.cap(), floor);
+        // Three screens of tiles at 2x (256 px crops, 256 KB each):
+        // twice them.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP * 2.0), 200));
+        assert_eq!(c.cap(), 2 * 200 * 256 * 256 * 4);
+        // At 3x and more, the crops are larger: so is the cap.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP * 3.0), 200));
+        assert_eq!(c.cap(), 2 * 200 * 384 * 384 * 4);
+        // Back to a few: the cap falls to the floor again.
+        c.hold(PAGE, HashSet::new());
+        assert_eq!(c.cap(), floor);
+    }
+
+    #[test]
+    fn crops_seen_changes_only_when_the_tiles_near_the_screen_do() {
+        let mut c = Crops::new(ONE);
+        let k = |n: u8| Crops::key(&face(n).face, 64, Framing::Face);
+        assert!(!c.is_seen(Section::ToName, &k(1)));
+        assert!(c.saw(Section::ToName, vec![k(1), k(2)]));
+        assert!(!c.saw(Section::ToName, vec![k(2), k(1)]), "the same tiles: nothing to do");
+        assert!(c.is_seen(Section::ToName, &k(1)));
+        assert!(!c.is_seen(Section::Named, &k(1)), "per section");
+        assert!(c.saw(Section::ToName, vec![k(3)]));
+        assert!(!c.is_seen(Section::ToName, &k(1)));
     }
 }

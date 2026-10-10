@@ -204,12 +204,22 @@ pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     let naming = p.naming.is_some();
     app.subjects.person = Some(p);
     app.subjects.review = None;
+    app.subjects.merges = None;
     app.quicklook = None;
+    super::subjects_merge::ask_similar(app);
     let mut tasks = vec![search(app, false), subj::refresh_crops(app)];
     if naming {
         tasks.push(focus_name());
     }
     Task::batch(tasks)
+}
+
+/// The page's group is being merged into `into` (kept): the page follows
+/// it there once the groups change.
+pub(super) fn follow(app: &mut App, into: &GroupId) {
+    if let Some(p) = app.subjects.person.as_mut() {
+        p.merged_into = Some(into.clone());
+    }
 }
 
 fn focus_name() -> Task<Message> {
@@ -362,7 +372,8 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     if p.show == Show::Faces {
         if let Some(faces) = &p.faces {
             let small = subj::px(app, tile::SMALL_CROP);
-            v.extend(faces.iter().take(p.faces_shown).map(|f| (f.clone(), small, Framing::Face)));
+            // Those on screen or a screen away, as the page last drew them.
+            v.extend(faces.iter().take(p.faces_shown).filter(|f| s.crops.is_seen(subj::Section::Faces, &subj::Crops::key(&f.face, small, Framing::Face))).map(|f| (f.clone(), small, Framing::Face)));
         }
     }
     if matches!(p.menu, Some(Menu::MergeInto | Menu::MoveTo)) || p.naming.is_some() {
@@ -690,6 +701,10 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Space::new().into() };
     let mut col = column![header(app, p), kit::hairline(), band(app, p), kit::hairline()].width(Length::Fill).height(Length::Fill);
+    // A fursuit's nearest groups, to merge with one click.
+    if let Some(similar) = super::subjects_merge::similar_row(app, &p.group) {
+        col = col.push(similar).push(kit::hairline());
+    }
     if p.show == Show::Faces && !p.picked.is_empty() {
         col = col.push(faces_strip(app, p));
     }
@@ -1066,12 +1081,15 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let mut col = column![subj::heading(p.kind.crops(), format!("{}, clearest first. Pick the ones that aren't them.", util::thousands(faces.len() as u64)))];
     let small = subj::px(app, tile::SMALL_CROP);
     let mut r = row![].spacing(8);
+    let mut keys = Vec::with_capacity(p.faces_shown.min(faces.len()));
     for f in faces.iter().take(p.faces_shown) {
+        keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, subj::shape(p.kind));
         let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: None, on: pm(Msg::FacePick(f.face)) }.into();
         r = r.push(tip(el, format!("{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }), true));
     }
-    col = col.push(container(r.wrap().vertical_spacing(8)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 12.0 }));
+    let watched = crate::ui::in_view::InView::new(r.wrap().vertical_spacing(8), keys, |keys| subj::m(subj::Msg::InView(subj::Section::Faces, keys)));
+    col = col.push(container(watched).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 12.0 }));
     if faces.len() > p.faces_shown {
         let more = faces.len() - p.faces_shown;
         col = col.push(container(kit::btn(format!("Show {} more", util::thousands(more.min(FACES_PAGE) as u64)), style::secondary(), Some(pm(Msg::FacesMore)))).padding(Padding { left: 16.0, bottom: 24.0, ..Padding::ZERO }));

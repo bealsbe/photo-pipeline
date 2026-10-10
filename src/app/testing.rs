@@ -98,6 +98,8 @@
 //! prefs search-rebuild|search-clear|models-delete|models-open
 //! prefs find-faces|keep-faces|forget-faces|face-model|forget-people
 //! prefs smallest 3            # Smallest group to show: 3, 5 or 10
+//! prefs rail-subjects         # Show People and fursuits in the sidebar, on or off
+//!                             #   (show-people: Preferences at that row)
 //! prefs facepick 1|facego|facecancel   # the face model dialog
 //!                             # Preferences ▸ Search and its Storage rows
 //! prefs closeness 4.5         # set how close matches must be (the slider)
@@ -135,7 +137,9 @@
 //!                             # selfcheck, nocard, away [share],
 //!                             # restarted, waiting [n], mismatch, offline,
 //!                             # models (all in place, nothing indexed),
-//!                             # search-model (only search's in place)
+//!                             # search-model (only search's in place),
+//!                             # download-rate 38 (MB a second by the
+//!                             # clock; pause stalls the download)
 //! search wait 5000            # wait (up to 5 s) for the query in flight
 //! search dump                 # print the page's state
 //! search fake people          # the stand-in's people: people (two named),
@@ -144,6 +148,8 @@
 //!                             # faces-running [n]
 //! search fake fursuits        # the stand-in's fursuits: fursuits (two
 //!                             # named), fursuits-first (none named),
+//!                             # fursuits-many [n] (n more made-up groups,
+//!                             # 800 by default: a tab of many tiles),
 //!                             # heads-catchup (indexed before heads),
 //!                             # heads-off, heads-running [n],
 //!                             # heads-asking [photos] [first|export|resume],
@@ -171,8 +177,16 @@
 //! subjects click 2 [ctrl]     # the 3rd group tile in the tab's order
 //!                             # (opens it; ctrl picks it)
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
+//! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
+//! merges open [2]             # "Possibly the same fursuit": the review (at
+//!                             # the tab's 3rd pair)
+//! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
+//! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
+//! merges dump                 # print the lists and the review
+//! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
+//!                             # (and let go; dragto holds it there)
 //! subjects hide|unhide 0      # hide the picked; show a hidden one again
 //! subjects undo               # Ctrl+Z on the page
 //! subjects forgetgo|forgetcancel
@@ -381,6 +395,34 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
                 other => {
                     eprintln!("[script] unknown judge action {other}");
+                    Task::none()
+                }
+            }
+        }
+        "merges" => {
+            use super::subjects_merge::{Msg as G, debug_state};
+            let g = |x: G| Message::Subjects(super::subjects::Msg::Merges(x));
+            let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
+            let n: usize = rest.split_whitespace().last().and_then(|x| x.parse().ok()).unwrap_or(0);
+            match what {
+                "open" => app.update(g(G::Review(rest.trim().parse().ok()))),
+                "y" => app.update(g(G::Answer(true))),
+                "n" => app.update(g(G::Answer(false))),
+                "next" => app.update(g(G::Step(1))),
+                "prev" => app.update(g(G::Step(-1))),
+                "at" => app.update(g(G::At(n))),
+                "undo" => app.update(g(G::TakeBack)),
+                "done" => app.update(g(G::Done)),
+                "showleftout" => app.update(g(G::ShowLeftOut)),
+                "checkmore" => app.update(g(G::CheckMore)),
+                "similar" if rest.starts_with("merge") => app.update(g(G::SimilarMerge(n))),
+                "similar" if rest.starts_with("notsame") => app.update(g(G::SimilarNotSame(n))),
+                "dump" => {
+                    eprintln!("[merges] {}", debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown merges action {other}");
                     Task::none()
                 }
             }
@@ -1057,6 +1099,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "forget-faces" => Some(Control::ForgetFaces),
         "face-model" => Some(Control::FaceModel),
         "forget-people" => Some(Control::ForgetPeople),
+        "rail-subjects" => Some(Control::RailSubjects),
         "smallest" => Some(Control::SmallestGroup(rest.parse().unwrap_or(5))),
         "close-button" => Some(Control::Close),
         _ => None,
@@ -1096,6 +1139,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
             Task::batch([t, app.update(Message::Prefs(Msg::ClosenessDone))])
         }
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
+        "show-people" => super::preferences::open_at(app, Control::RailSubjects),
         "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
@@ -1325,6 +1369,28 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "merge" => app.update(s(Msg::MergeAsk)),
         "mergego" => app.update(s(Msg::MergeGo)),
         "mergecancel" => app.update(s(Msg::MergeCancel)),
+        // A drag as the tiles report it: `drag 3 0` drags the 4th tile onto
+        // the 1st and lets go; `dragto 3 0` holds it there (a screenshot);
+        // `dragdrop` lets go.
+        "drag" | "dragto" => {
+            let ids = order(app);
+            let mut nums = rest.split_whitespace().filter_map(|x| x.parse::<usize>().ok());
+            let (a, b) = (nums.next().and_then(|i| ids.get(i).cloned()), nums.next().and_then(|i| ids.get(i).cloned()));
+            match (a, b) {
+                (Some(a), Some(b)) => {
+                    let mut t = vec![app.update(s(Msg::DragStart(a.clone()))), app.update(s(Msg::DragEnter(a.clone()))), app.update(s(Msg::DragLeave(a))), app.update(s(Msg::DragEnter(b)))];
+                    if what == "drag" {
+                        t.push(app.update(s(Msg::DragDrop)));
+                    }
+                    Task::batch(t)
+                }
+                _ => {
+                    println!("subjects drag: no such tiles ({rest})");
+                    Task::none()
+                }
+            }
+        }
+        "dragdrop" => app.update(s(Msg::DragDrop)),
         "keep" => match app.subjects.merge.as_ref().and_then(|mg| mg.groups.get(n).cloned()) {
             Some(id) => app.update(s(Msg::MergeKeep(id))),
             None => Task::none(),
@@ -1410,6 +1476,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             }
             Task::none()
         }
+        "scroll" => iced::widget::operation::scroll_to(subjects::GROUPS_SCROLL, iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(n as f32) }),
         "dump" => {
             eprintln!("[subjects] {} {}", subjects::debug_state(app), super::subjects_fursuits::debug_state(app));
             Task::none()

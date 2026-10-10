@@ -78,22 +78,31 @@ pub fn execute(ids: &[ModelId], cancel: &AtomicBool, emit: &mut dyn FnMut(BgEven
     for (i, &id) in ids.iter().enumerate() {
         let total = models::info(id).bytes();
         if i > 0 {
-            emit(BgEvent::ModelDownload { model: id, done: 0, total, state: DownloadState::Waiting });
+            emit(BgEvent::ModelDownload { model: id, done: 0, fetched: 0, total, state: DownloadState::Waiting });
         }
-        let state = download_model(id, cancel, &mut |done, state| emit(BgEvent::ModelDownload { model: id, done, total, state }));
+        let mut last = 0;
+        let state = download_model(id, cancel, &mut |done, fetched, state| {
+            last = fetched;
+            emit(BgEvent::ModelDownload { model: id, done, fetched, total, state })
+        });
         if state == DownloadState::Checked {
             ok.push(id);
         }
-        emit(BgEvent::ModelDownload { model: id, done: if state == DownloadState::Checked { total } else { 0 }, total, state });
+        let done = if state == DownloadState::Checked { total } else { 0 };
+        emit(BgEvent::ModelDownload { model: id, done, fetched: last, total, state });
     }
     ok
 }
 
-/// One model's files, in order; `report(done bytes, state)` as it goes.
-fn download_model(id: ModelId, cancel: &AtomicBool, report: &mut dyn FnMut(u64, DownloadState)) -> DownloadState {
+/// One model's files, in order; `report(done, fetched, state)` as it goes.
+/// `done` counts the files found in place too; `fetched` only the bytes
+/// that came over the network, which the speed shown is worked out from
+/// (so a file found in place doesn't read as a burst).
+fn download_model(id: ModelId, cancel: &AtomicBool, report: &mut dyn FnMut(u64, u64, DownloadState)) -> DownloadState {
     let info = models::info(id);
     let Some(dir) = models::model_dir(id) else { return DownloadState::Failed("no home folder for the models".into()) };
     let mut done = 0u64;
+    let mut fetched = 0u64;
     for f in info.files {
         if cancel.load(Ordering::Relaxed) {
             return DownloadState::Cancelled;
@@ -101,18 +110,19 @@ fn download_model(id: ModelId, cancel: &AtomicBool, report: &mut dyn FnMut(u64, 
         let dest = dir.join(f.file);
         if std::fs::metadata(&dest).is_ok_and(|m| m.len() == f.bytes) {
             done += f.download_bytes();
-            report(done, DownloadState::Downloading);
+            report(done, fetched, DownloadState::Downloading);
             continue;
         }
-        let base = done;
+        let (base, net) = (done, fetched);
         let state = fetch(f, &dest, cancel, &mut |step| match step {
-            Step::Bytes(n) => report(base + n, DownloadState::Downloading),
-            Step::Checking => report(base + f.download_bytes(), DownloadState::Checking),
+            Step::Bytes(n) => report(base + n, net + n, DownloadState::Downloading),
+            Step::Checking => report(base + f.download_bytes(), net + f.download_bytes(), DownloadState::Checking),
         });
         if state != DownloadState::Checked {
             return state;
         }
         done += f.download_bytes();
+        fetched += f.download_bytes();
     }
     DownloadState::Checked
 }

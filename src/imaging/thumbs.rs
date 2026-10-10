@@ -307,14 +307,23 @@ impl ThumbWorkers {
     }
 }
 
-/// Byte-bounded LRU of decoded thumbnails for one owner.
+/// What one thumbnail takes decoded, at most (a square, its levels
+/// within the slack of the square's corners).
+const THUMB_BYTES_MAX: usize = (GENERATION_SIZE * GENERATION_SIZE * 4) as usize;
+
+/// Byte-bounded LRU of decoded thumbnails for one owner.  An owner that
+/// says what is on screen and near it ([`ThumbCache::hold`]) never has
+/// those dropped, and the cap grows to hold them twice over.
 pub struct ThumbCache {
     owner: OwnerId,
     max_bytes: usize,
+    /// The least `max_bytes` can be.
+    floor: usize,
     map: HashMap<PathBuf, Arc<Thumb>>,
     order: VecDeque<PathBuf>,
     bytes: usize,
     queued: HashSet<PathBuf>,
+    held: HashSet<PathBuf>,
 }
 
 impl ThumbCache {
@@ -322,11 +331,30 @@ impl ThumbCache {
         Self {
             owner,
             max_bytes,
+            floor: max_bytes,
             map: HashMap::new(),
             order: VecDeque::new(),
             bytes: 0,
             queued: HashSet::new(),
+            held: HashSet::new(),
         }
+    }
+
+    /// These thumbnails are on screen or near it: never dropped while
+    /// held.  `again` replaces what was held; else they are added (the
+    /// grid scrolling on before it settles).  The cap grows to twice what
+    /// is held, never below what it was made with.
+    pub fn hold(&mut self, paths: impl IntoIterator<Item = PathBuf>, again: bool) {
+        if again {
+            self.held.clear();
+        }
+        self.held.extend(paths);
+        let each = if self.map.is_empty() { THUMB_BYTES_MAX } else { (self.bytes / self.map.len()).max(1) };
+        self.max_bytes = self.floor.max(self.held.len() * each * 2);
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.max_bytes
     }
 
     pub fn get(&self, path: &Path) -> Option<&Arc<Thumb>> {
@@ -363,6 +391,7 @@ impl ThumbCache {
         self.map.clear();
         self.order.clear();
         self.bytes = 0;
+        self.held.clear();
     }
 
     /// A worker finished.  Returns true if the thumbnail was stored.
@@ -375,9 +404,11 @@ impl ThumbCache {
         self.bytes += thumb.bytes;
         self.map.insert(path.clone(), thumb);
         self.order.push_back(path);
-        // Always keep the most recent entry, however large.
-        while self.bytes > self.max_bytes && self.order.len() > 1 {
-            if let Some(old) = self.order.pop_front() {
+        // Always keep the most recent entry, however large, and the held.
+        while self.bytes > self.max_bytes {
+            let last = self.order.len().saturating_sub(1);
+            let Some(at) = self.order.iter().take(last).position(|p| !self.held.contains(p)) else { break };
+            if let Some(old) = self.order.remove(at) {
                 if let Some(t) = self.map.remove(&old) {
                     self.bytes -= t.bytes;
                 }
@@ -436,5 +467,64 @@ mod tests {
         // hashlib.md5(b"/tmp/a.jpg:1700000000.25:1234:300").hexdigest()
         let dc = DiskCache { dir: PathBuf::from("/tmp"), size: 300 };
         assert_eq!(dc.digest(Path::new("/tmp/a.jpg"), 1_700_000_000.25, 1234), "5b5d3eccecdf560552d5e0cc5eec3fca");
+    }
+
+    /// A one-level thumbnail of 4 KB.
+    fn small() -> Arc<Thumb> {
+        Arc::new(Thumb::from_pixels(Pixels { width: 32, height: 32, channels: 3, data: vec![0; 32 * 32 * 3] }, true))
+    }
+
+    fn p(n: usize) -> PathBuf {
+        PathBuf::from(format!("/mnt/nas/library/2026/07/24/shot-{n:03}.jpg"))
+    }
+
+    #[test]
+    fn held_thumbnails_stay_while_the_screens_around_arrive() {
+        let one = small().bytes;
+        let mut c = ThumbCache::new(OWNER_SEARCH, 3 * one);
+        // On screen: two, arrived first.
+        c.deliver(p(0), small());
+        c.deliver(p(1), small());
+        c.hold([p(0), p(1)], true);
+        assert_eq!(c.max_bytes(), 4 * one, "twice what is held");
+        // The screens around arrive after them, more than the cap holds.
+        for n in 2..8 {
+            c.deliver(p(n), small());
+        }
+        assert!(c.get(&p(0)).is_some() && c.get(&p(1)).is_some(), "on screen, and dropped");
+        assert!(c.get(&p(7)).is_some(), "the newest stays");
+        assert!(c.get(&p(2)).is_none(), "the oldest not held goes");
+        assert!(c.bytes <= c.max_bytes());
+        // Scrolled on before it settled: added to what is held.
+        c.hold([p(7)], false);
+        for n in 8..12 {
+            c.deliver(p(n), small());
+        }
+        assert!(c.get(&p(0)).is_some() && c.get(&p(7)).is_some());
+        // Settled elsewhere: what was held before can go.
+        c.hold([p(11)], true);
+        for n in 12..20 {
+            c.deliver(p(n), small());
+        }
+        assert!(c.get(&p(0)).is_none());
+        assert!(c.get(&p(11)).is_some());
+    }
+
+    #[test]
+    fn the_thumbnail_cap_grows_with_what_is_on_screen() {
+        let one = small().bytes;
+        let mut c = ThumbCache::new(OWNER_SEARCH, 8 * one);
+        c.deliver(p(0), small());
+        c.hold((0..2).map(p), true);
+        assert_eq!(c.max_bytes(), 8 * one, "never below what it was made with");
+        // Three screens of small tiles on a large window.
+        c.hold((0..300).map(p), true);
+        assert_eq!(c.max_bytes(), 300 * one * 2);
+        c.hold([], true);
+        assert_eq!(c.max_bytes(), 8 * one);
+        // Before any arrived, a full-size estimate.
+        let mut e = ThumbCache::new(OWNER_SEARCH, 1);
+        e.hold((0..10).map(p), true);
+        assert_eq!(e.max_bytes(), 10 * THUMB_BYTES_MAX * 2);
     }
 }

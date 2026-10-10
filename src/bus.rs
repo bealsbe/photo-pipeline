@@ -151,13 +151,35 @@ pub enum BgEvent {
         /// *Find more*) judges them.  The same on every event of a request.
         beyond: usize,
     },
+    /// Pairs of fursuit groups that may be one suit
+    /// (`Engine::merge_suggestions`), nearest first: those offered now
+    /// (by distance, or with verdicts already kept).  `focus`: the group
+    /// asked about (its page's *Similar groups*), else the whole tab.
+    /// `judging`: close pairs are being compared by the judge, and
+    /// `MergeJudged` follows.  Fursuits only.
+    MergeSuggestions { seq: u64, focus: Option<crate::model::subjects::GroupId>, list: Arc<Vec<crate::search::merging::GroupPair>>, judging: bool },
+    /// The judge's verdicts on the pairs of groups of request `seq`, as
+    /// they land: pairs it thinks are one suit (`offered`), and those it
+    /// doesn't (`left_out`, with what it saw); `done` of `total` pairs;
+    /// `beyond`: pairs past the cap, for the next request.  The last has
+    /// `done == total`.
+    MergeJudged {
+        seq: u64,
+        offered: Arc<Vec<crate::search::merging::GroupPair>>,
+        left_out: Arc<Vec<crate::search::merging::GroupPair>>,
+        done: usize,
+        total: usize,
+        beyond: usize,
+    },
     /// *Things in your photos*: the hidden tags' objects and scenes with
     /// their photo counts, most first; sent when the index loads and
     /// whenever the tags change (`crate::search::Engine::things` reads
     /// the latest at any time).
     SearchThings(Arc<Vec<crate::search::Thing>>),
-    /// A model download's progress (`crate::ml::download`).
-    ModelDownload { model: crate::ml::models::ModelId, done: u64, total: u64, state: crate::ml::download::DownloadState },
+    /// A model download's progress (`crate::ml::download`): `done` bytes of
+    /// `total`, of which `fetched` came over the network in this download
+    /// (files already in place count in `done` only).
+    ModelDownload { model: crate::ml::models::ModelId, done: u64, fetched: u64, total: u64, state: crate::ml::download::DownloadState },
 }
 
 /// (moved or already in place: (id, new path)), (failed: (id, filename, error)).
@@ -204,6 +226,8 @@ impl BgEvent {
             BgEvent::PhotoLabels { .. } => "PhotoLabels",
             BgEvent::Suggestions { .. } => "Suggestions",
             BgEvent::Judged { .. } => "Judged",
+            BgEvent::MergeSuggestions { .. } => "MergeSuggestions",
+            BgEvent::MergeJudged { .. } => "MergeJudged",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }
     }

@@ -78,6 +78,7 @@ src/app/               the application: state, update, views
   search_results.rs    results from hits (no I/O), burst stacks, the fursuits' list,
                        completions, recent searches
   search_setup.rs      the download dialog, indexing in the status bar, banners
+  download_speed.rs    a download's speed and time left, from its progress events
   search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
   quality.rs           the analysis as the app holds it (runs on request)
@@ -92,6 +93,7 @@ src/ui/                custom widgets: grid, image stage, burst sheet,
                        plates (the analysis' marks on photos)
   theme.rs             the design tokens: colours, type, spacing, motion
   motion.rs, tags.rs   entrance animation, activity bar, file-type tags
+  drag.rs              dragging a group's tile onto another (to merge)
 src/model/             records, collection & pairing, filters, crops,
                        sidecars, library index and its saved tree
 src/ops/               file operations: export, sort, trash, edit copy,
@@ -304,7 +306,8 @@ gathers the settings on one page: advance after marking, whether All and
 Marked show pruned photos (the filter bar's old *Show pruned*), file names
 and thumbnail size, the viewer's filmstrip, remembered size and whether a
 burst shows all its frames first, the library and
-edit-copy folders, search (see "Library search" below), and whether to use
+edit-copy folders, search (see "Library search" below), people and fursuits
+(including whether the side rail shows their button), and whether to use
 the KDE global menu (a change there takes effect at the next start;
 `PP_NO_GLOBAL_MENU=1` still forces the in-window menus).  Changes apply at
 once and are saved; the menus and the viewer's toggles stay in step with
@@ -439,8 +442,13 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   read from the library, how long it takes, what is downloaded and kept)
   and offers *Index the library…*.  A dialog asks once: it lists each model
   with its size, its licence in plain words and its publisher, with the
-  sources and SHA-256 checksums a click away, then shows the download.  A
-  file that doesn't match its checksum is deleted and the dialog says so.
+  sources and SHA-256 checksums a click away, then shows the download.
+  Wherever a download's progress shows (the dialog, the status bar, the
+  search page, Preferences' judge), so does its speed ("4.2 of 9.9 GB ·
+  38 MB/s"), averaged over a few seconds, with the time left; it says
+  "starting…" until there is enough to go on, and "waiting for the
+  network" when no byte has come for a few seconds.  A file that doesn't
+  match its checksum is deleted and the dialog says so.
   *Find people's faces* is ticked there by default, with the face model to
   pick (see *People* below); untick it and only the search model is
   fetched.
@@ -464,15 +472,17 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   the recent searches.  **Preferences ▸ People:** *Find people's faces*
   (on by default; turning it off asks whether to keep or forget the faces
   already found), *Face model* with *Change…*, *Smallest group to show*
-  (3, 5 or 10 photos) and *Forget all…*.
+  (3, 5 or 10 photos), *Forget all…*, and *Show People and fursuits in the
+  sidebar* (on by default; off hides only the rail's button, and Ctrl+4 and
+  the View menu still open the page).
 - **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
   explaining itself.
 
 ### People
 
 **People and fursuits** (Ctrl+4, on the side rail under Search, or in
-the View menu) is where the faces found while indexing are grouped, so you
-can name the people you want to find, and where fursuit heads are grouped
+the View menu; Preferences ▸ People can hide its rail button) is where the
+faces found while indexing are grouped, so you can name the people you want to find, and where fursuit heads are grouped
 the same way (*Fursuits*, below).  Its header has *People | Fursuits*.
 Pets are on hold: there is no Pets tab, and a saved choice of it opens
 People (the model keeps the kind, so a tab can return).  A tab shows one kind only, so a
@@ -486,10 +496,17 @@ for you.
   stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
   move between groups, Enter opens one, F2 names it.
 - **Picking several:** *Select* (S), or Ctrl+click, picks groups; a strip
-  says how many with *Merge…* and *Hide*.  Merging asks which name to
-  keep (the named one by default).  Ctrl+Z takes back the last change to
-  people (a name, a merge, a move, an answer), and the status bar says
-  what it undid.
+  says how many with *Merge…* (M) and *Hide*.  Merging asks once, in one
+  dialog: a named group keeps its name whichever way round, and when more
+  than one is named it asks which name to keep (the first named, or the
+  one dropped onto, to start).  Ctrl+Z takes back the last change to
+  people (a name, a merge, a move, an answer), one step per merge, and
+  the status bar says what it undid.
+- **Dragging** a group's tile onto another merges the two: the dragged
+  tile's crop follows the pointer, the tile under it says *Merge here*,
+  and letting go opens the same dialog with both groups side by side,
+  large, to check.  A press that barely moves stays a click; Esc while
+  dragging cancels.
 - **A person's page is a search for them.**  Their chip sits in the
   field, so words typed beside it rank their photos best first; with no
   words, their photos come clearest first, in the results grid with dates
@@ -541,10 +558,39 @@ never shown, merged, suggested or completed together with people or pets.
 
 - **The tab** lists named fursuits, then *Groups to name*, largest first,
   as rounded-square head crops (people are round), with *Smaller groups*,
-  *Hidden*, picking, merging and hiding as on People.  A fursuit's page,
+  *Hidden*, picking, merging (S then M, or a tile dragged onto another)
+  and hiding as on People.  Groups are tight by design (below), so one
+  suit often sits in several groups: merging them is the quick way to
+  join them.  A fursuit's page,
   its *Heads* (to split a group), naming and "Same fursuit?" (the review,
   Y and N in the keep and prune colours, one answer per burst, Ctrl+Z to
   take an answer back) are the same pages as a person's.
+- **Possibly the same fursuit.**  Over the groups, a row of pairs of
+  groups that may be one suit, nearest first (each card two covers, their
+  names and sizes); a click, or Y on the tab, opens the review: the two
+  groups side by side, their covers large with a few more heads under
+  them; **Y** merges them (a named group keeps its name; two named ask
+  which name to keep), **N** says they are not the same, ← → step, **Z**
+  (or Ctrl+Z) takes the last answer back, Esc stops.  "Not the same" is
+  remembered by the groups' heads in the user's file, so the pair isn't
+  offered again after a regroup.  Each answer is one undo step; nothing
+  merges without Y or a click.  A pair is two groups whose members are
+  close on average (the distance the groups are built with, in the same
+  space and cut-offs the head step uses now: raw below 8 000 heads,
+  whitened from there); groups folded under *Smaller groups* and hidden
+  ones are left out.
+- **With a close-call judge on**, the review has the judge compare the
+  pairs up to the band's far end, nearest first, on three views each
+  (the covers, the heads where the groups look most alike, the second
+  clearest): pairs most views call one suit join the end of the list as
+  they come; the rest are counted ("7 compared and left out") and *Show
+  them* adds them, marked.  A view the judge couldn't look at counts as
+  a no.  A pair under sure-yes is offered at once unless a cover is too
+  dim to trust.  Sixty views a request (twenty pairs), with *Compare the
+  next 20*; card only, one judge at a time, as everywhere.
+- **Similar groups** on a fursuit's page: its nearest groups, each with
+  *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
+  and × (not the same).
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
@@ -776,6 +822,21 @@ cut-offs were chosen on even days of the labels and held on the odd ones
 (`docs/library-search-plan.md`, "As built — fursuit matching v2"); the
 nearest-centroid grouping people use chained the library's fursuit heads
 into one group and is not used for this kind.
+
+**Groups that may be one suit** (merge suggestions) are measured the way
+groups are built: the mean distance between their members, which for
+unit vectors is exactly `1 − mean_a · mean_b`, so it costs groups², not
+heads², in the space and cut-offs the head step uses (raw or
+whitened).  On the labels, 236 of 421 same-suit pairs sit in different
+groups; between groups of at least 5 photos, 103 pairs of groups hold
+one (whitened).  Under the suggest cut the list finds 46 of the 103,
+with 46 labelled the same suit and 2 different; with the judge comparing
+the band, about 70.  Grouped raw, as a library under 8 000 heads is:
+39 of 91 by distance (3 different), about 72 with the judge; on the
+newest 7 276 heads alone, 14 of 30, about 23 with the judge
+(`docs/library-search-plan.md`, "As built — easier fursuit merging,
+stage 2").  The closest pair of heads was measured too: as many found,
+with 163 different.
 
 **The close-call judge** (Preferences ▸ Fursuits ▸ *Close-call judge*:
 *Off*, the default, *Qwen3-VL-Reranker* or *Gemma 4*) looks at the candidates the vectors
@@ -1051,7 +1112,8 @@ These are deliberate:
   stand-in in the search engine's place: made-up hits from the library
   index (with the query's dates and `-word`s applied, and a share of an
   animal word's hits handed back as fursuits left out), made-up Things,
-  downloads and indexing on a timer, and every failure the page shows on
+  downloads and indexing on a timer (`search fake download-rate 38` for a
+  known speed, `pause` for a stall), and every failure the page shows on
   request (`search fake …`).  It downloads, reads and writes nothing.
   `search complete`, `search things` and `search fursuits show|hide`
   drive and print the completions, the start page's Things and the
