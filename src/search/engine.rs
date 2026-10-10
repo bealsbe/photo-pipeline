@@ -1430,8 +1430,8 @@ impl Worker {
     /// the judge (`judge` asked and able to run) every pair up to sure-no
     /// is in play: a sure pair (under sure-yes, both covers clear enough)
     /// is offered at once, the rest are compared on up to three head pairs
-    /// each, nearest first, at most `MAX_CLOSE_CALLS` head pairs a
-    /// request; without it, the suggest cut alone.
+    /// each, nearest first, at most `merging::MAX_PAIRS` pairs of groups
+    /// a request; without it, the suggest cut alone.
     fn send_merge_suggestions(&mut self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
         use super::merging::{self, GroupPair};
         self.ensure_resolver();
@@ -1503,7 +1503,7 @@ impl Worker {
         // Verdicts kept answer at once; the rest wait for the judge, the
         // nearest first, up to the cap in head pairs.
         let (mut left_out, mut pending) = (Vec::new(), Vec::new());
-        let (mut done, mut total, mut asked, mut beyond) = (0, 0, 0usize, 0);
+        let (mut done, mut total) = (0, 0);
         let choice = self.judge_choice;
         for (ci, call) in calls.iter_mut().enumerate() {
             for (qi, &(x, y)) in call.questions.iter().enumerate() {
@@ -1519,15 +1519,12 @@ impl Worker {
                 if v.same() { offered.push(call.pair.clone()) } else { left_out.push(call.pair.clone()) }
                 continue;
             }
-            let need = call.answers.iter().filter(|a| a.is_none()).count();
-            if asked + need > judging::MAX_CLOSE_CALLS {
-                beyond += 1;
-                continue;
-            }
-            asked += need;
-            total += 1;
             pending.push(ci);
         }
+        // The nearest pairs of groups only; the rest wait for the next request.
+        let (now, beyond) = merging::batch(pending.len());
+        pending.truncate(now);
+        total += now;
         let _ = self.bus.unbounded_send(BgEvent::MergeSuggestions { seq, focus, list: Arc::new(offered), judging: true });
         let _ = self.bus.unbounded_send(BgEvent::MergeJudged { seq, offered: Arc::new(Vec::new()), left_out: Arc::new(left_out), done, total, beyond });
         self.forget_judging();

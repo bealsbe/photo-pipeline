@@ -902,9 +902,8 @@ impl Fake {
             if !active {
                 (BgEvent::MergeSuggestions { seq, focus: focus.cloned(), list: Arc::new(sure), judging: false }, None)
             } else {
-                let cap = crate::search::judging::MAX_CLOSE_CALLS / crate::search::merging::QUESTIONS;
-                let beyond = close.len().saturating_sub(cap);
-                close.truncate(cap);
+                let (now, beyond) = crate::search::merging::batch(close.len());
+                close.truncate(now);
                 let total = close.len();
                 s.judge_run = None;
                 s.merge_run = (total > 0).then(|| MergeRun { seq, todo: close, done: 0, total, beyond });

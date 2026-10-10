@@ -2838,8 +2838,11 @@ comparing groups when one is on.
   the judge couldn't look at (a photo gone, an unreadable file) counts as
   a no, so a tie and an unseen pair are never offered.  Verdicts are the
   judge's kept per head pair (`judged-<model>.bin`), so asking again is
-  free.  Sixty head pairs a request (`MAX_CLOSE_CALLS`, about twenty
-  pairs of groups), nearest first; *Compare the next 20* asks for more.
+  free.  A hundred pairs of groups a request (`merging::MAX_PAIRS`, the
+  user's choice: up to 300 head pairs, about 4 to 5 minutes with Qwen;
+  the review keeps its sixty close calls), nearest first; × stops it and
+  *Compare the next 100* asks for more, its tooltip saying how long from
+  the judge's measured seconds a head pair.
   One judge at a time, never while a pass or head scan holds the card
   (`MergeJudging` beside the review's `Judging`; starting either drops
   the other's queue).
@@ -2878,7 +2881,7 @@ Groups of at least 5 photos (the tab's default).
   mean of the 3 closest, 101 and 134; each member's nearest in the other
   group averaged, 92 and 58.  Average linkage: 46 and 2.
 - Cost: a full raw library's band holds about 1 100 pairs of groups,
-  about 56 requests of twenty at 1 to 3 head pairs each (Qwen: about
+  about 11 requests of a hundred at 1 to 3 head pairs each (Qwen: about
   0.8 s a head pair on a free card; 10 s a pair in the real run below,
   with the user's own indexing holding the card).
 
@@ -2905,7 +2908,7 @@ Groups of at least 5 photos (the tab's default).
   - the review (`MergeReview`): Y merges through the existing merge,
     the named group kept, two named asking in the merge dialog; N is
     `not_same`; ← → step; Z or Ctrl+Z take the last answer back; the
-    judge's line, strip tail, *Show them*, *Compare the next 20*;
+    judge's line, strip tail, *Show them*, *Compare the next 100*;
   - a fursuit page's *Similar groups* row (`similar_row`).
 - After a merge, pairs naming a group that went are asked for again; the
   answered pairs keep their places (`refreshed`).

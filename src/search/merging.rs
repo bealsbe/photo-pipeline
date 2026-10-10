@@ -39,6 +39,28 @@ use crate::model::subjects::{Face, FaceRef, GroupId, Rows};
 /// Head pairs asked of the judge for one pair of groups, at most.
 pub const QUESTIONS: usize = 3;
 
+/// Pairs of groups compared for one request of merge suggestions, at
+/// most, nearest first (the user's choice, 2026-10-09: bigger batches than
+/// the review's `judging::MAX_CLOSE_CALLS`, since a library's band holds
+/// hundreds of pairs of groups): up to 300 head pairs, about 4 to 5
+/// minutes with Qwen3-VL-Reranker; × stops it, *Compare the next 100*
+/// asks for more.
+pub const MAX_PAIRS: usize = 100;
+
+/// Of `n` pairs of groups waiting for the judge, nearest first: how many
+/// one request compares, and how many wait for the next.
+pub fn batch(n: usize) -> (usize, usize) {
+    let now = n.min(MAX_PAIRS);
+    (now, n - now)
+}
+
+/// Seconds the judge takes to compare `pairs` pairs of groups, at most
+/// (every pair asked its [`QUESTIONS`] head pairs), from its seconds a
+/// head pair.
+pub fn compare_seconds(pairs: usize, seconds_per_head_pair: f64) -> f64 {
+    pairs as f64 * QUESTIONS as f64 * seconds_per_head_pair
+}
+
 /// One group as the suggestions see it.
 #[derive(Debug, Clone)]
 pub struct Candidate {
@@ -266,6 +288,14 @@ mod tests {
         assert!(verdict(&[Some(true)]).same());
         assert!(!verdict(&[None, None, None]).same(), "nothing seen: never offered");
         assert_eq!(verdict(&[Some(true), None, Some(false)]), GroupVerdict { yes: 1, no: 1, unjudged: 1 });
+        // A request compares at most MAX_PAIRS pairs of groups, more than
+        // the review's sixty close calls; the rest wait for the next.
+        assert_eq!(batch(0), (0, 0));
+        assert_eq!(batch(MAX_PAIRS - 1), (MAX_PAIRS - 1, 0));
+        assert_eq!(batch(MAX_PAIRS + 37), (MAX_PAIRS, 37));
+        assert_eq!(MAX_PAIRS, 100);
+        assert_eq!(crate::search::judging::MAX_CLOSE_CALLS, 60, "the review keeps its sixty");
+        assert!((compare_seconds(100, 0.8) - 240.0).abs() < 1e-9, "100 pairs, 300 head pairs at 0.8 s: four minutes");
         // A pair of ids is one whichever way round.
         assert_eq!(order(GroupId::Cluster(2), GroupId::Cluster(1)), order(GroupId::Cluster(1), GroupId::Cluster(2)));
     }

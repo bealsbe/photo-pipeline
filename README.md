@@ -583,8 +583,9 @@ never shown, merged, suggested or completed together with people or pets.
   they come; the rest are counted ("7 compared and left out") and *Show
   them* adds them, marked.  A view the judge couldn't look at counts as
   a no.  A pair under sure-yes is offered at once unless a cover is too
-  dim to trust.  Sixty views a request (twenty pairs), with *Compare the
-  next 20*; card only, one judge at a time, as everywhere.
+  dim to trust.  A hundred pairs a request (up to 300 views, about 4 to 5
+  minutes with Qwen3-VL-Reranker, × to stop), with *Compare the next
+  100*; card only, one judge at a time, as everywhere.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).

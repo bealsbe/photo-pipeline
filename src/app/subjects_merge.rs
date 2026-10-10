@@ -427,7 +427,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 return Task::none();
             }
             refresh(app);
-            app.show_status("Comparing the next possible merges.", 4000)
+            app.show_status(format!("Comparing the next {} possible merges, nearest first.", merging::MAX_PAIRS), 4000)
         }
         Msg::SimilarMerge(i) => similar_merge(app, i),
         Msg::SimilarNotSame(i) => similar_not_same(app, i),
@@ -979,12 +979,14 @@ fn judge_line<'a>(app: &'a App, r: &'a MergeReview) -> Option<Element<'a, Messag
             };
             line = line.push(text(said).size(t::T_SMALL).color(t::PHOTO_INK2));
             if run.beyond > 0 || run.dropped {
-                let n = run.beyond.min(crate::search::judging::MAX_CLOSE_CALLS / merging::QUESTIONS);
+                let n = merging::batch(run.beyond).0;
                 let label = if run.dropped { "Compare again".to_string() } else { format!("Compare the next {n}") };
                 if run.beyond > 0 {
                     line = line.push(text(format!("{} more can be compared.", util::thousands(run.beyond as u64))).size(t::T_SMALL).color(t::PHOTO_INK3));
                 }
-                line = line.push(super::fursuit_judge::link_btn(label, m(Msg::CheckMore)));
+                let takes = crate::search::estimate::describe_seconds(merging::compare_seconds(n.max(1), super::fursuits::judge_call_seconds(j.choice)));
+                let hint = format!("Up to {takes} with the graphics card; × stops it. Pairs the judge thinks are one fursuit join the end of this list.");
+                line = line.push(tip(super::fursuit_judge::link_btn(label, m(Msg::CheckMore)), super::search_setup::capital(&hint), false));
             }
         }
     }
