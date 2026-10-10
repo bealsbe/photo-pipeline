@@ -16,6 +16,17 @@
 //! sheet pick 3                # Ctrl+click it (pick it to compare)
 //! sheet back                  # the wheel zooming out past fit on a frame
 //! sdump                       # print the viewer's burst sheet state
+//! labels pick 0|none          # the viewer's labels (L): click the 1st box,
+//!                             # or beside every box
+//! labels draw 0.1 0.2 0.15 0.2   # draw a box (fractions of the photo)
+//! labels name Person C|enter|take 0   # type a name, Enter, the 1st offered
+//! labels unnamed|swap|remove|deselect # the picked box's buttons
+//! labels kind person|fursuit|add|cancel   # a drawn box's choices
+//! labels dump                 # print the labels' state
+//! labels-wait 30000           # wait (up to 30 s) for drawn boxes being
+//!                             # matched on the card
+//! engine-wait 600000          # wait (up to 10 min) for the search engine
+//!                             # to be idle (no pass, no head scan)
 //! bursts                      # print the working folder's bursts
 //! analyse [cached|cancel]     # start the quality analysis (or show the
 //!                             # cache only, or stop it)
@@ -319,6 +330,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "AdvanceAfterMark" => Some(Cmd::AdvanceAfterMark),
                 "PrevBurst" => Some(Cmd::PrevBurst),
                 "NextBurst" => Some(Cmd::NextBurst),
+                "LabelFaces" => Some(Cmd::LabelFaces),
                 "Analyse" => Some(Cmd::Analyse),
                 "KeepThisPruneRest" => Some(Cmd::KeepThisPruneRest),
                 "PruneSoft" => Some(Cmd::PruneSoft),
@@ -457,6 +469,46 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 None => Task::none(),
             }
         }
+        "labels" => {
+            use super::viewer_labels::{LMsg, debug_state, offered_at};
+            use crate::ui::image_stage::StageEvent;
+            let stage = |e: StageEvent| Message::Viewer(super::viewer::Msg::Stage(e));
+            let lm = |m: LMsg| Message::Viewer(super::viewer::Msg::Labels(m));
+            let mut a = arg.split_whitespace();
+            let what = a.next().unwrap_or("");
+            let rest: Vec<&str> = a.collect();
+            match what {
+                "pick" => app.update(stage(StageEvent::LabelPick(rest.first().and_then(|n| n.parse().ok())))),
+                "draw" => {
+                    let v: Vec<f32> = rest.iter().filter_map(|x| x.parse().ok()).collect();
+                    match v.as_slice() {
+                        [x, y, w, h] => app.update(stage(StageEvent::LabelDraw([*x, *y, *w, *h]))),
+                        _ => Task::none(),
+                    }
+                }
+                "name" => app.update(lm(LMsg::Name(rest.join(" ")))),
+                "enter" => app.update(lm(LMsg::Submit)),
+                "take" => match offered_at(app, rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)) {
+                    Some(m) => app.update(lm(m)),
+                    None => Task::none(),
+                },
+                "unnamed" => app.update(lm(LMsg::Unnamed)),
+                "swap" => app.update(lm(LMsg::SwapKind)),
+                "remove" => app.update(lm(LMsg::Remove)),
+                "deselect" => app.update(lm(LMsg::Deselect)),
+                "add" => app.update(lm(LMsg::Add)),
+                "cancel" => app.update(lm(LMsg::Cancel)),
+                "kind" => app.update(lm(LMsg::DraftKind(if rest.first() == Some(&"fursuit") { crate::model::subjects::Kind::Fursuit } else { crate::model::subjects::Kind::Person }))),
+                "dump" => {
+                    eprintln!("[labels] {}", debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown labels action {other}");
+                    Task::none()
+                }
+            }
+        }
         "sdump" => {
             match app.viewer.as_ref() {
                 Some(v) => eprintln!("[sdump] {}", super::viewer_burst::debug_state(app, v)),
@@ -517,6 +569,33 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
             }
             eprintln!("[analysis] scan done: scanning={} records={}", app.scanning, app.coll.len());
+            Task::none()
+        }
+        "engine-wait" => {
+            // Poll until the search engine is idle: no pass, no head scan,
+            // and something indexed once the first index was asked for.
+            let left: u64 = arg.parse().unwrap_or(600_000);
+            let s = app.search.link.status();
+            let busy = s.pass.is_some() || s.heads.scanning() || (s.first_index_asked && s.indexed_shots == 0 && s.stopped.is_none());
+            if busy && left > 0 {
+                app.script[i] = format!("engine-wait {}", left.saturating_sub(500));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(500)), move |_| Message::Script(i));
+            }
+            eprintln!(
+                "[engine] idle: indexed={} faces found={} heads found={} stopped={:?} device={:?}",
+                s.indexed_shots, s.faces.found, s.heads.found, s.stopped, s.device.name
+            );
+            Task::none()
+        }
+        "labels-wait" => {
+            // Poll until the viewer's labels have no box being matched.
+            let left: u64 = arg.parse().unwrap_or(30_000);
+            let matching = app.viewer.as_ref().and_then(|v| v.labels.labels.as_ref()).is_some_and(|l| l.pending == Some(crate::model::subjects::PendingWhy::Matching));
+            if matching && left > 0 {
+                app.script[i] = format!("labels-wait {}", left.saturating_sub(200));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
+            }
+            eprintln!("[labels] wait done: {}", super::viewer_labels::debug_state(app));
             Task::none()
         }
         "analyse-wait" => {

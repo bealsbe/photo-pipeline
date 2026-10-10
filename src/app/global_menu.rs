@@ -257,6 +257,7 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies => "dialog-cancel",
         Cmd::PrevBurst => "go-previous",
         Cmd::NextBurst => "go-next",
+        Cmd::LabelFaces => "tag",
     }
 }
 

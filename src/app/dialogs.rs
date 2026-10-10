@@ -1786,6 +1786,18 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Scroll", "Zoom"),
             ("Double-click", "Switch between fit and actual size"),
             ("Esc", "Leave full screen, or close the viewer"),
+            ("L", "Label the faces and fursuit heads in the photo"),
+        ],
+    ),
+    (
+        "Labels in the viewer",
+        &[
+            ("L  or  Esc", "Show or hide the labels"),
+            ("Click a box", "Name it, change it to the other kind, or remove it"),
+            ("Drag on the photo", "Add a face or fursuit head that was missed"),
+            ("Enter", "Give the name typed"),
+            ("Esc", "Done with the box (or the box drawn)"),
+            ("Ctrl+Z", "Take back the last change to the labels"),
         ],
     ),
     (

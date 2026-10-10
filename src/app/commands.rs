@@ -58,6 +58,9 @@ pub enum Cmd {
     /// Shift+→ in the viewer: on to the next burst's first frame, else
     /// the next photo.  Viewer only.
     NextBurst,
+    /// L in the viewer: show the faces and fursuit heads found in the
+    /// photo, to name, change, add or remove.  Viewer only.
+    LabelFaces,
 }
 
 impl Cmd {
@@ -99,6 +102,7 @@ impl Cmd {
             Cmd::ProblemsOnly => "Show only possible problems",
             Cmd::PrevBurst => "Previous burst",
             Cmd::NextBurst => "Next burst",
+            Cmd::LabelFaces => "Label faces and fursuits",
         }
     }
 
@@ -139,6 +143,7 @@ impl Cmd {
             Cmd::Analyse | Cmd::KeepThisPruneRest | Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly => "",
             Cmd::PrevBurst => "Shift+←",
             Cmd::NextBurst => "Shift+→",
+            Cmd::LabelFaces => "L",
         }
     }
 
@@ -175,6 +180,7 @@ impl Cmd {
             Cmd::ProblemsOnly => "Show only photos that look out of focus or accidental, and copies",
             Cmd::PrevBurst => "In the viewer, back to the first frame of this burst, or of the burst before",
             Cmd::NextBurst => "In the viewer, on to the first frame of the next burst",
+            Cmd::LabelFaces => "In the viewer, show the faces and fursuit heads found in the photo: name them, add one that was missed, or remove one",
             _ => "",
         }
     }
@@ -201,6 +207,7 @@ impl Cmd {
             Cmd::AdvanceAfterMark => Glyph::Skip,
             Cmd::Preferences => Glyph::Settings,
             Cmd::Analyse => Glyph::Analyse,
+            Cmd::LabelFaces => Glyph::Label,
             _ => return None,
         })
     }
@@ -209,7 +216,7 @@ impl Cmd {
     /// their keys through to its own use of them (Shift+arrows extend the
     /// grid's selection).
     pub fn viewer_only(self) -> bool {
-        matches!(self, Cmd::PrevBurst | Cmd::NextBurst)
+        matches!(self, Cmd::PrevBurst | Cmd::NextBurst | Cmd::LabelFaces)
     }
 
     /// Match a key press against the command shortcuts.
@@ -249,6 +256,7 @@ impl Cmd {
                     (false, true, "g") => Some(Cmd::StackBursts),
                     (false, true, "a") => Some(Cmd::PrevBurst),
                     (false, true, "d") => Some(Cmd::NextBurst),
+                    (false, false, "l") => Some(Cmd::LabelFaces),
                     (false, _, "?") => Some(Cmd::Shortcuts),
                     _ => None,
                 }
@@ -371,6 +379,21 @@ mod tests {
         assert_eq!(Cmd::from_key(&key(Named::ArrowRight), Modifiers::CTRL | Modifiers::SHIFT), None);
         assert_eq!(Cmd::from_key(&key(Named::ArrowRight), Modifiers::ALT | Modifiers::SHIFT), None);
         assert_eq!(Cmd::from_key(&ch("G"), Modifiers::SHIFT), Some(Cmd::StackBursts));
+    }
+
+    /// L labels faces and fursuits in the viewer, and nothing else has it:
+    /// not with Shift or Ctrl, not in the main window.
+    #[test]
+    fn l_labels_faces_in_the_viewer_only() {
+        assert_eq!(Cmd::from_key(&ch("l"), Modifiers::empty()), Some(Cmd::LabelFaces));
+        assert_eq!(Cmd::from_key(&ch("L"), Modifiers::SHIFT), None);
+        assert_eq!(Cmd::from_key(&ch("l"), Modifiers::CTRL), None);
+        assert!(Cmd::LabelFaces.viewer_only());
+        assert_eq!((Cmd::LabelFaces.label(), Cmd::LabelFaces.shortcut()), ("Label faces and fursuits", "L"));
+        // Bound once: no other command answers to L.
+        let all = [Cmd::Open, Cmd::SelectMode, Cmd::Compare, Cmd::ReviewBurst, Cmd::StackBurst, Cmd::Shortcuts, Cmd::QuickLook];
+        assert!(all.iter().all(|c| c.shortcut() != "L"));
+        assert!(MENUS.iter().all(|(_, _, items)| !items.contains(&Some(Cmd::LabelFaces))), "the viewer has no menus");
     }
 
     #[test]

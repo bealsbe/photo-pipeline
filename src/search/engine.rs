@@ -40,7 +40,20 @@ use crate::model::bursts::Bursts;
 use crate::model::collection::Collection;
 use crate::model::library_index::LibraryIndex;
 use crate::model::record::{FileType, PhotoRecord};
-use crate::model::subjects::{Face, FaceRef, Framing, GroupId, Kind, Refused, SubjectId, Subjects};
+use crate::model::subjects::{Face, FaceRef, Framing, GroupId, Kind, LabelBox, LabelEdit, LabelTarget, PendingWhy, PhotoLabels, Refused, SubjectId, Subjects};
+
+/// What a worker brought back for drawn boxes: per photo, the faces
+/// recognised (with their landmarks and tiles) and the heads embedded;
+/// or the card's failure, which stops the work and leaves them pending.
+#[derive(Default)]
+pub struct DrawnDone {
+    faces: Vec<(Key, Vec<crate::ml::client::FaceFound>)>,
+    heads: Vec<(Key, Vec<crate::ml::heads::Head>)>,
+    card: Option<CardFailure>,
+    /// A helper or file error, in words (the boxes stay pending and are
+    /// tried at the next chance).
+    error: Option<String>,
+}
 
 /// What the engine's thread is asked.
 enum Cmd {
@@ -72,6 +85,16 @@ enum Cmd {
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool> },
     Suggestions { seq: u64, group: GroupId },
     Undo,
+    // The viewer's labels.
+    PhotoLabels { seq: u64, target: LabelTarget },
+    /// A photo's content keys, read on a worker (JPG first): answer
+    /// `seq` with the first the index holds.
+    Keyed { seq: u64, keys: Vec<Key> },
+    Label(LabelEdit),
+    /// Match drawn boxes now (sent to itself after a label edit).
+    StartDrawn,
+    /// Drawn boxes matched (or not) on the card, from their worker.
+    Drawn(Box<DrawnDone>),
     /// A regroup finished on its worker (either kind; `kind` says).
     Regrouped(Box<super::step::Regrouped>),
     // Fursuits (phase 4, decision 11).  Sent by the fursuit API, which
@@ -104,6 +127,64 @@ enum Cmd {
     /// A whitening fit finished on its worker (`None`: too few heads).
     Whitened(Option<Box<super::whiten::Whitening>>),
     Shutdown,
+}
+
+/// Match drawn boxes through the helper (on a worker): the faces through
+/// the face model (their landmarks looked for in the box), the heads
+/// through the search model on the head crop.  A restarted helper is
+/// asked once more; a failing card stops the rest.
+fn match_drawn(embedder: &dyn Embedder, faces: &[(Key, PathBuf, Vec<[f32; 4]>)], heads: &[crate::ml::heads::KnownHeads]) -> DrawnDone {
+    use crate::ml::client::DrawnFaces;
+    let mut done = DrawnDone::default();
+    let fail = |done: &mut DrawnDone, e: HelperError| match e {
+        HelperError::Card(f) => done.card = Some(f),
+        HelperError::Restarted => done.error = Some("the helper started again".into()),
+        HelperError::Broken(m) => done.error = Some(m),
+    };
+    if !faces.is_empty() {
+        let files: Vec<(PathBuf, FileType)> = faces.iter().map(|(_, p, _)| (p.clone(), FileType::from_path(p).unwrap_or(FileType::Jpg))).collect();
+        let want = Want::drawn(faces.iter().map(|(_, p, b)| DrawnFaces { path: p.clone(), boxes: b.clone() }).collect());
+        let mut r = embedder.embed_images(&files, &want);
+        if matches!(r, Err(HelperError::Restarted)) {
+            r = embedder.embed_images(&files, &want);
+        }
+        match r {
+            Ok(results) => {
+                for ((key, _, _), res) in faces.iter().zip(results) {
+                    match res.result {
+                        // The file changed since it was indexed: its boxes
+                        // wait for the next index.
+                        Ok(e) if e.key == *key => done.faces.push((*key, e.faces)),
+                        Ok(_) => {}
+                        Err(e) => done.error = Some(e.message),
+                    }
+                }
+            }
+            Err(e) => {
+                fail(&mut done, e);
+                return done;
+            }
+        }
+    }
+    if !heads.is_empty() {
+        let mut r = embedder.embed_heads(heads);
+        if matches!(r, Err(HelperError::Restarted)) {
+            r = embedder.embed_heads(heads);
+        }
+        match r {
+            Ok(results) => {
+                for (job, res) in heads.iter().zip(results) {
+                    match res.result {
+                        Ok(p) if p.key == job.key => done.heads.push((job.key, p.heads)),
+                        Ok(_) => {}
+                        Err(e) => done.error = Some(e.message),
+                    }
+                }
+            }
+            Err(e) => fail(&mut done, e),
+        }
+    }
+    done
 }
 
 /// Sizes Preferences ▸ Storage shows (measured by walking folders:
@@ -259,6 +340,8 @@ impl Engine {
                     judging: None,
                     merge_judging: None,
                     judge_token: 0,
+                    embedder_has_faces: false,
+                    drawn_running: false,
                 }
                 .run()
             })
@@ -386,6 +469,24 @@ impl Engine {
     /// `BgEvent::Subjects`.
     pub fn undo(&self) {
         self.send(Cmd::Undo);
+    }
+
+    /// The viewer's labels for a photo: `BgEvent::PhotoLabels { seq, .. }`
+    /// with its faces and fursuit heads, named or not.  A photo whose key
+    /// the index doesn't hold answers with no key (nothing was looked for
+    /// in it: decision 14).  A library file's key comes from the path
+    /// map; any other file's head is read on a worker, never here.
+    pub fn photo_labels(&self, seq: u64, target: LabelTarget) {
+        self.send(Cmd::PhotoLabels { seq, target });
+    }
+
+    /// A change on a box of the viewer's labels: name it, change its
+    /// kind, draw one, remove one.  One undo step each ([`Engine::undo`]);
+    /// refused, with nothing changed, when it would mix kinds.  A drawn
+    /// box's vector is made on the graphics card only; until then it is
+    /// kept and listed as pending.  A fresh `BgEvent::Subjects` follows.
+    pub fn label(&self, edit: LabelEdit) {
+        self.send(Cmd::Label(edit));
     }
 
     /// A face's or head's pixels for a tile or the review, `px`×`px`
@@ -654,6 +755,9 @@ struct Resolver {
     library_ptr: usize,
     paths_len: usize,
     shots: HashMap<Key, Shot>,
+    /// Each indexed shot's files (JPG and RAW) → its key: the viewer's
+    /// labels find a library photo's key without reading it.
+    by_path: HashMap<PathBuf, Key>,
 }
 
 struct Shot {
@@ -750,6 +854,10 @@ struct Worker {
     /// the same time as a review's close calls.
     merge_judging: Option<MergeJudging>,
     judge_token: u64,
+    /// The running helper was started with the face models.
+    embedder_has_faces: bool,
+    /// Drawn boxes are being matched on a worker (one batch at a time).
+    drawn_running: bool,
 }
 
 /// One pair of groups the judge compares: its head pairs and their
@@ -904,6 +1012,7 @@ impl Worker {
                         self.publish_judge();
                     }
                     self.resume_pass();
+                    self.start_drawn();
                 }
                 Cmd::SetDevice(d) => {
                     if d != self.device {
@@ -931,6 +1040,7 @@ impl Worker {
                         if was_running || stopped_by_card {
                             self.resume_pass();
                         }
+                        self.start_drawn();
                     }
                 }
                 Cmd::SetIndexExports(on) => {
@@ -1086,6 +1196,29 @@ impl Worker {
                     self.after_edit(r.map(|_| ()));
                 }
                 Cmd::Suggestions { seq, group } => self.send_suggestions(seq, group, false),
+                Cmd::PhotoLabels { seq, target } => self.photo_labels(seq, target),
+                Cmd::Keyed { seq, keys } => {
+                    let key = keys.into_iter().find(|k| self.indexed(k));
+                    self.send_labels(seq, key);
+                }
+                Cmd::Label(edit) => {
+                    let draws = matches!(edit, LabelEdit::Add { .. } | LabelEdit::Kind { .. });
+                    let r = self.people.label(&edit);
+                    if let Ok(what) = &r {
+                        if std::env::var_os("PP_PROFILE").is_some() {
+                            eprintln!("labels: {what}");
+                        }
+                    }
+                    self.after_edit(r.map(|_| ()));
+                    // After what is queued (the page asking for the labels
+                    // again): starting the helper takes seconds, and the
+                    // box should show, pending, at once.
+                    if draws {
+                        let _ = self.me.send(Cmd::StartDrawn);
+                    }
+                }
+                Cmd::StartDrawn => self.start_drawn(),
+                Cmd::Drawn(done) => self.on_drawn(*done),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
                 Cmd::MergeSuggestions { seq, focus, min_photos, judge } => self.send_merge_suggestions(seq, focus, min_photos, judge),
                 Cmd::NotSame { a, b, a_heads, b_heads } => {
@@ -1316,6 +1449,235 @@ impl Worker {
         let _ = self.bus.unbounded_send(BgEvent::Suggestions { seq, group, list: Arc::new(list) });
     }
 
+    // ---- the viewer's labels ----
+
+    /// The index holds this photo (its faces and heads were looked for
+    /// there, decision 14).
+    fn indexed(&self, key: &Key) -> bool {
+        self.index.as_ref().is_some_and(|ix| ix.vectors.contains(key))
+    }
+
+    /// Find the photo's key and answer with its labels: a library file's
+    /// from the path map at once; any other file's by reading its head on
+    /// a worker (`Cmd::Keyed` brings it back).
+    fn photo_labels(&mut self, seq: u64, target: LabelTarget) {
+        let (jpg, raw) = match target {
+            LabelTarget::Key(k) => {
+                let key = self.indexed(&k).then_some(k);
+                return self.send_labels(seq, key);
+            }
+            LabelTarget::Files { jpg, raw } => (jpg, raw),
+        };
+        if self.index.as_ref().is_none_or(|ix| ix.is_empty()) {
+            return self.send_labels(seq, None);
+        }
+        self.ensure_resolver();
+        let known = self.resolver.as_ref().and_then(|r| jpg.iter().chain(raw.iter()).find_map(|p| r.by_path.get(p).copied()));
+        if let Some(k) = known {
+            return self.send_labels(seq, Some(k));
+        }
+        // Not a library file the index knows: a copy of one has the same
+        // content key.  Read it off this thread.
+        let me = self.me.clone();
+        std::thread::Builder::new()
+            .name("labels-key".into())
+            .spawn(move || {
+                let keys: Vec<Key> = jpg.iter().chain(raw.iter()).filter_map(|p| Key::read(p).ok()).collect();
+                let _ = me.send(Cmd::Keyed { seq, keys });
+            })
+            .expect("spawn labels-key");
+    }
+
+    fn send_labels(&mut self, seq: u64, key: Option<Key>) {
+        let labels = match key {
+            Some(k) => self.labels_of(k),
+            None => PhotoLabels::default(),
+        };
+        let _ = self.bus.unbounded_send(BgEvent::PhotoLabels { seq, labels: Arc::new(labels) });
+    }
+
+    /// A photo's boxes: the faces found and drawn (less those removed),
+    /// then the fursuit heads found and drawn, each with its name.
+    fn labels_of(&self, key: Key) -> PhotoLabels {
+        let file = &self.people.file;
+        let mut boxes: Vec<LabelBox> = Vec::new();
+        let named = |kind: Kind, face: &FaceRef| -> (Option<SubjectId>, Option<String>) {
+            match file.member_of(kind, face) {
+                Some(s) => (Some(s.id.clone()), s.name.clone()),
+                None => (None, None),
+            }
+        };
+        for kind in [Kind::Person, Kind::Fursuit] {
+            let removed = file.removed_index(kind);
+            let found: Vec<FaceRef> = match kind {
+                Kind::Person => self.people.store.as_ref().map(|s| s.faces_of(&key).iter().map(|d| d.face_ref(key)).collect()).unwrap_or_default(),
+                _ => self.fursuits.store.as_ref().map(|s| s.heads_of(&key).iter().map(|d| d.head_ref(key)).collect()).unwrap_or_default(),
+            };
+            for face in found.into_iter().filter(|f| !removed.covers(f)) {
+                if boxes.iter().any(|b| b.face == face && b.kind == kind) {
+                    continue;
+                }
+                let (subject, name) = named(kind, &face);
+                boxes.push(LabelBox { face, kind, subject, name, drawn: false, pending: false });
+            }
+            for face in file.added_of(kind).filter(|f| f.key == key).copied().collect::<Vec<_>>() {
+                boxes.retain(|b| !(b.face == face && b.kind == kind));
+                let matched = match kind {
+                    Kind::Person => self.people.store.as_ref().is_some_and(|s| s.is_drawn(&face) && s.has_vector(&face)),
+                    _ => self.fursuits.store.as_ref().is_some_and(|s| s.is_drawn(&face) && s.has_vector(&face)),
+                };
+                let (subject, name) = named(kind, &face);
+                boxes.push(LabelBox { face, kind, subject, name, drawn: true, pending: !matched });
+            }
+        }
+        let pending = boxes.iter().any(|b| b.pending).then(|| self.pending_why(boxes.iter().any(|b| b.pending && b.kind == Kind::Person)));
+        PhotoLabels { key: Some(key), boxes, pending }
+    }
+
+    /// Why drawn boxes wait: the first thing in the way.
+    fn pending_why(&self, faces: bool) -> PendingWhy {
+        if self.device != Device::Gpu {
+            PendingWhy::ProcessorChosen
+        } else if matches!(self.shared.status.lock().stopped, Some(Stopped::Card(_))) {
+            PendingWhy::NoCard
+        } else if !self.models_ready() {
+            PendingWhy::NoSearchModel
+        } else if faces && !self.faces_ready() {
+            PendingWhy::NoFaceModel
+        } else {
+            PendingWhy::Matching
+        }
+    }
+
+    /// Match the drawn boxes that have no vector yet, on the graphics card
+    /// only (the user's rule for this work: a processor chosen, or a card
+    /// that failed, leaves them pending, never on the processor).  One
+    /// batch at a time on a worker; `Cmd::Drawn` brings the results.
+    fn start_drawn(&mut self) {
+        if self.drawn_running || self.device != Device::Gpu || !self.models_ready() {
+            return;
+        }
+        if matches!(self.shared.status.lock().stopped, Some(Stopped::Card(_))) {
+            return;
+        }
+        self.ensure_resolver();
+        let Some(r) = &self.resolver else { return };
+        let file = &self.people.file;
+        // Per photo: the boxes still to match, with the shot's file.
+        let mut faces: HashMap<Key, (PathBuf, Vec<[f32; 4]>)> = HashMap::new();
+        let mut heads: HashMap<Key, (PathBuf, FileType, Vec<[f32; 4]>)> = HashMap::new();
+        if self.faces_ready() {
+            for f in file.added_of(Kind::Person) {
+                if self.people.store.as_ref().is_some_and(|s| s.is_drawn(f) && s.has_vector(f)) || self.people.store.is_none() {
+                    continue;
+                }
+                let Some(shot) = r.shots.get(&f.key) else { continue };
+                let Some(path) = shot.jpg.clone().or_else(|| shot.raw.clone()) else { continue };
+                faces.entry(f.key).or_insert_with(|| (path, Vec::new())).1.push(f.bbox);
+            }
+        }
+        for f in file.added_of(Kind::Fursuit) {
+            if self.fursuits.store.as_ref().is_none_or(|s| s.is_drawn(f) && s.has_vector(f)) {
+                continue;
+            }
+            let Some(shot) = r.shots.get(&f.key) else { continue };
+            let (path, ft) = match (&shot.jpg, &shot.raw) {
+                (Some(j), _) => (j.clone(), FileType::Jpg),
+                (None, Some(raw)) => (raw.clone(), FileType::Raw),
+                _ => continue,
+            };
+            heads.entry(f.key).or_insert_with(|| (path, ft, Vec::new())).2.push(f.bbox);
+        }
+        if faces.is_empty() && heads.is_empty() {
+            return;
+        }
+        // Faces need a helper with the face models: start one again when
+        // the running one has none, unless a pass or a scan is using it
+        // (their end comes back here).
+        if !faces.is_empty() && self.embedder.is_some() && !self.embedder_has_faces {
+            if self.pass.is_some() || self.scan.is_some() {
+                faces.clear();
+                if heads.is_empty() {
+                    return;
+                }
+            } else {
+                self.drop_embedder();
+            }
+        }
+        let Some(embedder) = self.image_embedder() else { return };
+        if !self.embedder_has_faces {
+            faces.clear();
+        }
+        if faces.is_empty() && heads.is_empty() {
+            return;
+        }
+        self.drawn_running = true;
+        let me = self.me.clone();
+        let face_jobs: Vec<(Key, PathBuf, Vec<[f32; 4]>)> = faces.into_iter().map(|(k, (p, b))| (k, p, b)).collect();
+        let head_jobs: Vec<crate::ml::heads::KnownHeads> = heads.into_iter().map(|(key, (path, file_type, boxes))| crate::ml::heads::KnownHeads { path, file_type, key, boxes }).collect();
+        std::thread::Builder::new()
+            .name("labels-drawn".into())
+            .spawn(move || {
+                let _t = crate::profile::span("labels", "drawn boxes");
+                let done = match_drawn(embedder.as_ref(), &face_jobs, &head_jobs);
+                let _ = me.send(Cmd::Drawn(Box::new(done)));
+            })
+            .expect("spawn labels-drawn");
+    }
+
+    /// Drawn boxes matched: their detections, vectors and tiles go into
+    /// the caches (only boxes the user's file still lists), then both
+    /// kinds group again.  A failing card stops here, as any card work.
+    fn on_drawn(&mut self, done: DrawnDone) {
+        self.drawn_running = false;
+        let mut changed = false;
+        if let Some(store) = &mut self.people.store {
+            for (key, found) in &done.faces {
+                let keep: Vec<crate::ml::client::FaceFound> = found.iter().filter(|f| self.people.file.is_added(Kind::Person, &FaceRef::new(*key, f.bbox)) && !f.vector.is_empty()).cloned().collect();
+                if keep.is_empty() {
+                    continue;
+                }
+                match store.add_drawn(*key, &keep) {
+                    Ok(()) => changed = true,
+                    Err(e) => eprintln!("labels: couldn't keep a drawn face: {e}"),
+                }
+            }
+        }
+        if let Some(store) = &mut self.fursuits.store {
+            for (key, found) in &done.heads {
+                let keep: Vec<crate::ml::heads::Head> = found.iter().filter(|h| self.people.file.is_added(Kind::Fursuit, &FaceRef::new(*key, h.bbox)) && !h.vector.is_empty()).cloned().collect();
+                if keep.is_empty() {
+                    continue;
+                }
+                match store.add_drawn(*key, &keep) {
+                    Ok(()) => changed = true,
+                    Err(e) => eprintln!("labels: couldn't keep a drawn head: {e}"),
+                }
+            }
+        }
+        if let Some(e) = &done.error {
+            eprintln!("labels: drawn boxes not matched yet: {e}");
+        }
+        let failed = done.card.is_some() || done.error.is_some();
+        if let Some(f) = done.card {
+            self.drop_embedder();
+            self.card_failed(f);
+        }
+        if changed {
+            self.people.assign_new();
+            self.start_regroup();
+            self.start_heads_regroup();
+            self.refresh_counts();
+        }
+        // Subjects (and with it the viewer's labels) follow either way:
+        // a box may have stopped waiting, or a card failed.
+        self.publish_subjects();
+        // Boxes drawn meanwhile.
+        if changed && !failed {
+            self.start_drawn();
+        }
+    }
+
     /// Nothing asked for a while: built memory that fursuit work no
     /// longer needs is let go (the user's choice: freed after use).
     fn idle_tick(&mut self) {
@@ -1448,8 +1810,12 @@ impl Worker {
         {
             let Some(store) = self.fursuits.store.as_ref() else { return empty(self) };
             let by_ref: HashMap<FaceRef, usize> = store.refs().iter().enumerate().map(|(i, r)| (*r, i)).collect();
+            // Heads the user removed in the viewer ("Not a fursuit
+            // head"), or drew and took back, are in no pair, even if a
+            // subject still lists one (found again after a rebuild).
+            let out = super::step::Exclusion::new(&self.people.file, Kind::Fursuit);
             for (id, members, named, cover) in groups {
-                let mut faces: Vec<Face> = members.iter().filter(|f| by_ref.contains_key(f)).filter_map(|f| self.resolve_face(f)).collect();
+                let mut faces: Vec<Face> = members.iter().filter(|f| by_ref.contains_key(f) && !out.excludes(store, f)).filter_map(|f| self.resolve_face(f)).collect();
                 let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
                 if faces.is_empty() || (!named && photos < min_photos) {
                     continue;
@@ -1868,6 +2234,7 @@ impl Worker {
             self.publish_subjects();
             self.start_heads_regroup();
             self.maybe_index_new();
+            self.start_drawn();
             self.judge_resume();
         } else {
             self.publish_heads();
@@ -2083,6 +2450,9 @@ impl Worker {
         self.fursuits.count_tagged(&self.tags);
         self.publish_heads();
         self.maybe_index_new();
+        if root_changed {
+            self.start_drawn();
+        }
     }
 
     /// Bring the hidden tags up to the index (new rows tagged, a cleared
@@ -2351,9 +2721,13 @@ impl Worker {
             return Some(e.clone());
         }
         let with_heads = self.find_heads && self.heads_ready();
-        match (self.factory)(Spec::images(self.device, self.find_faces.then_some(self.face_model)).with_heads(with_heads)) {
+        // Faces drawn in the viewer need the face model too, when it is
+        // in place, even with *Find people's faces* off.
+        let with_faces = self.find_faces || (self.faces_ready() && self.people.file.added_of(Kind::Person).next().is_some());
+        match (self.factory)(Spec::images(self.device, with_faces.then_some(self.face_model)).with_heads(with_heads)) {
             Ok(e) => {
                 self.embedder_has_heads = with_heads;
+                self.embedder_has_faces = with_faces;
                 let (name, check) = e.device_report();
                 self.update(|s| {
                     s.device.name = name;
@@ -2478,6 +2852,9 @@ impl Worker {
                     PassKind::Rebuild | PassKind::Faces => {}
                 }
             }
+            // Boxes the user drew that lost their vectors (a rebuild, a
+            // clear) or waited for the card are matched now.
+            self.start_drawn();
             self.judge_resume();
         } else {
             self.update(|s| {
@@ -2810,6 +3187,7 @@ impl Worker {
         }
         let _t = crate::profile::span("search", "resolver");
         let mut shots: HashMap<Key, Shot> = HashMap::with_capacity(ix.vectors.len());
+        let mut by_path: HashMap<PathBuf, Key> = HashMap::with_capacity(ix.vectors.len());
         let mut coll = Collection::new();
         let mut key_of_record = Vec::new();
         for day in lib.days.values() {
@@ -2830,6 +3208,9 @@ impl Worker {
                 pr.shot = rec.meta;
                 let id = coll.add(pr);
                 key_of_record.push((id, key));
+                for p in jpg.iter().chain(raw.iter()) {
+                    by_path.insert(p.clone(), key);
+                }
                 shots.insert(key, Shot { day: day.date, jpg, raw, mtime: fe.mtime.local, burst: None });
             }
         }
@@ -2839,7 +3220,7 @@ impl Worker {
                 s.burst = Some(b as u64);
             }
         }
-        self.resolver = Some(Resolver { library_ptr: ptr, paths_len: ix.paths.entries.len(), shots });
+        self.resolver = Some(Resolver { library_ptr: ptr, paths_len: ix.paths.entries.len(), shots, by_path });
     }
 }
 
@@ -3808,6 +4189,60 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A head removed in the viewer ("Not a fursuit head") is in no merge
+    /// suggestion: not as an automatic group, and not as a subject that
+    /// still lists it (the removal recorded a thousandth off, as a
+    /// rebuild finds a box again).  Taken back, the pair comes back.
+    #[test]
+    fn a_removed_head_is_never_in_a_merge_suggestion() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0; B 0.699 from it: one pair under the suggest cut.
+        let specs = [(1, 0), (2, Suits::at(0.699)), (3, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("merges-removed", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 3 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let groups = fursuit_groups(&e, 3);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        let pair_keys = |l: &[super::super::merging::GroupPair]| -> Vec<(GroupId, GroupId)> { l.iter().map(|p| p.key()).collect() };
+        e.merge_suggestions(1, None, 1, false);
+        assert_eq!(pair_keys(&merges(&mut ev, 1, Duration::from_secs(2)).0.unwrap()), [super::super::merging::order(id(1), id(2))]);
+        // B's group named: a subject that lists B's head.
+        e.name_group(id(2), "Other".into());
+        let started = Instant::now();
+        while !e.subjects().groups.iter().any(|g| g.name.as_deref() == Some("Other")) {
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // Removed a thousandth off: the subject still lists the exact box.
+        let b_off = FaceRef::new(key_of(2), [0.301, 0.2, 0.3, 0.4]);
+        e.label(LabelEdit::Remove { face: b_off, kind: Kind::Fursuit });
+        std::thread::sleep(Duration::from_millis(300));
+        e.merge_suggestions(2, None, 1, false);
+        assert!(merges(&mut ev, 2, Duration::from_secs(2)).0.unwrap().is_empty(), "the removed head is in no pair");
+        // The other way round: A removed exactly (its automatic group goes).
+        e.undo();
+        std::thread::sleep(Duration::from_millis(300));
+        e.merge_suggestions(3, None, 1, false);
+        assert_eq!(merges(&mut ev, 3, Duration::from_secs(2)).0.unwrap().len(), 1, "taken back: the pair again");
+        e.label(LabelEdit::Remove { face: FaceRef::new(key_of(1), [0.3, 0.2, 0.3, 0.4]), kind: Kind::Fursuit });
+        let _ = fursuit_groups(&e, 2);
+        e.merge_suggestions(4, None, 1, false);
+        assert!(merges(&mut ev, 4, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// With the judge on, a pair under sure-yes is offered at once only
     /// when both covers are clear enough (`judging::CLARITY_MIN`): a dim,
     /// doubtful head is shown to the judge however close (the vectors
@@ -4425,6 +4860,264 @@ mod tests {
         }
         assert!(e2.things().is_empty());
         e2.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- the viewer's labels ----
+
+    /// Faces for the labels' tests: a file named `…-face…` has one face
+    /// at [0.3, 0.2, 0.2, 0.3] (its vector from the name); a drawn face is
+    /// recognised at its own box (its vector from the box); a drawn head
+    /// gets a vector from its box.  Search vectors as [`Axes`].  Counts
+    /// the drawn work, and can fail as a card does.
+    struct Labeller {
+        drawn_faces: std::sync::atomic::AtomicUsize,
+        drawn_heads: std::sync::atomic::AtomicUsize,
+        card_fails: bool,
+    }
+
+    const FOUND: [f32; 4] = [0.3, 0.2, 0.2, 0.3];
+
+    impl Labeller {
+        fn new(card_fails: bool) -> Labeller {
+            Labeller { drawn_faces: Default::default(), drawn_heads: Default::default(), card_fails }
+        }
+
+        fn vector(seed: f32) -> Vec<f32> {
+            let v = [seed.cos(), seed.sin(), 0.3];
+            let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+            v.iter().map(|x| x / n).collect()
+        }
+
+        fn face(bbox: [f32; 4], seed: f32) -> crate::ml::client::FaceFound {
+            crate::ml::client::FaceFound { bbox, landmarks: [[bbox[0] + 0.05, bbox[1] + 0.1]; 5], score: 0.95, size_px: 200.0, sharpness: 300.0, vector: Labeller::vector(seed), tile: vec![0xff, 0xd8] }
+        }
+    }
+
+    impl Embedder for Labeller {
+        fn device_report(&self) -> (Option<String>, SelfCheck) {
+            Axes.device_report()
+        }
+        fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<crate::ml::client::ImageResult>, HelperError> {
+            use crate::ml::client::FaceAsk;
+            if self.card_fails {
+                return Err(HelperError::Card(CardFailure::Crashed));
+            }
+            let mut out = Axes.embed_images(files, want)?;
+            for r in &mut out {
+                let Ok(e) = &mut r.result else { continue };
+                if !want.search {
+                    e.vector.clear();
+                }
+                e.faces = match &want.faces {
+                    FaceAsk::Detect if crate::util::stem(&r.path).contains("face") => vec![Labeller::face(FOUND, 0.1)],
+                    FaceAsk::Drawn { files } => {
+                        self.drawn_faces.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        files.iter().filter(|d| d.path == r.path).flat_map(|d| d.boxes.iter().map(|b| Labeller::face(*b, b[0] * 10.0))).collect()
+                    }
+                    _ => Vec::new(),
+                };
+            }
+            Ok(out)
+        }
+        fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError> {
+            Axes.encode_text(texts)
+        }
+        fn embed_heads(&self, files: &[crate::ml::heads::KnownHeads]) -> Result<Vec<crate::ml::heads::HeadsResult>, HelperError> {
+            if self.card_fails {
+                return Err(HelperError::Card(CardFailure::Crashed));
+            }
+            self.drawn_heads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(files
+                .iter()
+                .map(|j| {
+                    let heads = j.boxes.iter().map(|b| crate::ml::heads::Head { bbox: *b, score: 0.0, size: 300, sharpness: 0.2, vector: Labeller::vector(b[1] * 10.0), tile: Vec::new() }).collect();
+                    crate::ml::heads::HeadsResult { path: j.path.clone(), result: Ok(crate::ml::heads::PhotoHeads { key: j.key, heads }) }
+                })
+                .collect())
+        }
+    }
+
+    impl Events {
+        /// The labels answering request `seq`.
+        fn labels(&mut self, seq: u64) -> PhotoLabels {
+            let stream = &mut self.stream;
+            self.rt.block_on(async {
+                use iced::futures::StreamExt;
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while Instant::now() < deadline {
+                    let Ok(Some(batch)) = tokio::time::timeout(Duration::from_millis(100), stream.next()).await else { continue };
+                    for ev in batch {
+                        if let BgEvent::PhotoLabels { seq: s, labels } = ev {
+                            if s == seq {
+                                return (*labels).clone();
+                            }
+                        }
+                    }
+                }
+                panic!("no labels for request {seq}");
+            })
+        }
+    }
+
+    /// Ask for a photo's labels until `ok` holds (a drawn box's vector
+    /// comes back from its worker a moment later).
+    fn labels_until(e: &Engine, ev: &mut Events, seq: &mut u64, target: LabelTarget, what: &str, ok: impl Fn(&PhotoLabels) -> bool) -> PhotoLabels {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            *seq += 1;
+            e.photo_labels(*seq, target.clone());
+            let l = ev.labels(*seq);
+            if ok(&l) {
+                return l;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}: {l:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn labels_library(name: &str) -> (Arc<LibraryIndex>, PathBuf, Vec<PathBuf>) {
+        let files = [("2025/Mar-2025/12-Mar-2025", "0001-face.JPG"), ("2025/Mar-2025/12-Mar-2025", "0002-face.JPG"), ("2025/Mar-2025/12-Mar-2025", "0003-plain.JPG")];
+        let (lib, d) = library_of(name, &files);
+        let paths = files.iter().map(|(day, f)| lib_path(&d, &(day.to_string(), f.to_string()))).collect();
+        (lib, d, paths)
+    }
+
+    /// The viewer's labels through the engine, on the card: a photo's
+    /// faces come by its path; one removed stays removed; a face and a
+    /// fursuit head drawn on a photo with none are matched on the card
+    /// (pending until then) and join their kinds' groups; Rebuild clears
+    /// the caches but keeps every label: the removed face is not found
+    /// again, the drawn boxes are matched again at the pass's end; a
+    /// photo the index doesn't hold says so; undo takes changes back one
+    /// at a time; nothing is ever written beside the photos.
+    #[test]
+    fn labels_are_kept_through_a_rebuild_and_drawn_boxes_are_matched_on_the_card() {
+        let (lib, d, paths) = labels_library("labels-rebuild");
+        let fake = Arc::new(Labeller::new(false));
+        let f2 = fake.clone();
+        let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let factory: EmbedderFactory = Box::new(move |spec: Spec| {
+            log.lock().push((spec.device, spec.face_model.is_some()));
+            Ok(f2.clone() as Arc<dyn Embedder>)
+        });
+        let subjects = d.join("data/subjects.json");
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(subjects.clone()), downloader: no_downloads() };
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let e = Engine::with_config(bus, Device::Gpu, true, true, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Yunet, ModelId::AuraFace]);
+        wait_for(&e, "the first index with faces", |s| s.indexed_shots == 3 && s.pass.is_none() && s.faces.found == 2);
+        let mut seq = 0;
+        let files = |p: &PathBuf| LabelTarget::Files { jpg: Some(p.clone()), raw: None };
+        // A photo's face, by its path; unnamed.
+        let l = labels_until(&e, &mut ev, &mut seq, files(&paths[0]), "the face", |l| l.boxes.len() == 1);
+        let key1 = l.key.expect("in the library");
+        assert_eq!((l.boxes[0].kind, l.boxes[0].name.clone(), l.boxes[0].drawn, l.pending), (Kind::Person, None, false, None));
+        let found = l.boxes[0].face;
+        // Named, then removed.
+        e.label(LabelEdit::Name { face: found, kind: Kind::Person, to: crate::model::subjects::NameTo::New("Someone".into()) });
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key1), "the name", |l| l.boxes.first().is_some_and(|b| b.name.as_deref() == Some("Someone")));
+        assert!(l.boxes[0].subject.is_some());
+        e.label(LabelEdit::Remove { face: found, kind: Kind::Person });
+        labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key1), "the removal", |l| l.boxes.is_empty());
+        // Drawn on the plain photo: a face and a fursuit head.
+        let l = labels_until(&e, &mut ev, &mut seq, files(&paths[2]), "the plain photo", |l| l.key.is_some());
+        let key3 = l.key.unwrap();
+        assert!(l.boxes.is_empty());
+        let drawn_face = FaceRef::new(key3, [0.1, 0.1, 0.2, 0.25]);
+        let drawn_head = FaceRef::new(key3, [0.55, 0.15, 0.3, 0.35]);
+        e.label(LabelEdit::Add { face: drawn_face, kind: Kind::Person, name: Some(crate::model::subjects::NameTo::New("Someone".into())) });
+        e.label(LabelEdit::Add { face: drawn_head, kind: Kind::Fursuit, name: Some(crate::model::subjects::NameTo::New("Suit".into())) });
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key3), "the drawn boxes matched", |l| l.boxes.len() == 2 && l.boxes.iter().all(|b| b.drawn && !b.pending));
+        assert_eq!(l.boxes.iter().map(|b| (b.kind, b.name.clone().unwrap())).collect::<Vec<_>>(), [(Kind::Person, "Someone".to_string()), (Kind::Fursuit, "Suit".to_string())]);
+        assert!(fake.drawn_faces.load(std::sync::atomic::Ordering::Relaxed) >= 1 && fake.drawn_heads.load(std::sync::atomic::Ordering::Relaxed) >= 1);
+        assert!(asked.lock().iter().all(|(d, _)| *d == Device::Gpu), "the card only: {:?}", asked.lock());
+        // The kinds never mix: the person is a person, the suit a fursuit.
+        let all = e.subjects();
+        assert!(all.groups.iter().any(|g| g.kind == Kind::Person && g.name.as_deref() == Some("Someone")));
+        assert!(all.groups.iter().any(|g| g.kind == Kind::Fursuit && g.name.as_deref() == Some("Suit")));
+        // The user's file holds the labels (version 2); nothing beside the photos.
+        let saved = crate::model::subjects::SubjectsFile::load(&subjects);
+        assert_eq!((saved.version, saved.added.len(), saved.removed.len()), (crate::model::subjects::FILE_VERSION, 2, 1));
+        let beside: Vec<_> = std::fs::read_dir(paths[0].parent().unwrap()).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(beside.len(), 3, "only the photos: {beside:?}");
+        // Rebuild: the caches go, the labels stay.
+        let drawn_before = fake.drawn_faces.load(std::sync::atomic::Ordering::Relaxed);
+        e.rebuild_index();
+        wait_for(&e, "the rebuild", |s| s.indexed_shots == 3 && s.pass.is_none());
+        labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key1), "the removed face still removed", |l| l.key.is_some() && l.boxes.is_empty());
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key3), "the drawn boxes matched again", |l| l.boxes.len() == 2 && l.boxes.iter().all(|b| !b.pending));
+        assert!(l.boxes.iter().all(|b| b.drawn && b.name.is_some()));
+        assert!(fake.drawn_faces.load(std::sync::atomic::Ordering::Relaxed) > drawn_before, "matched again after the rebuild");
+        // The other face photo still has its face (not removed).
+        let l = labels_until(&e, &mut ev, &mut seq, files(&paths[1]), "the other face", |l| l.boxes.len() == 1);
+        assert_eq!(l.boxes[0].face.bbox, FaceRef::new(key3, FOUND).bbox);
+        // A photo the index doesn't hold.
+        let elsewhere = d.join("elsewhere.JPG");
+        std::fs::write(&elsewhere, "not in the library").unwrap();
+        let l = labels_until(&e, &mut ev, &mut seq, files(&elsewhere), "a stranger", |_| true);
+        assert_eq!(l, PhotoLabels::default(), "not in the library: nothing looked for");
+        // Undo: the head drawn, then the face drawn, then the removal.
+        e.undo();
+        labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key3), "the head taken back", |l| l.boxes.len() == 1 && l.boxes[0].kind == Kind::Person);
+        e.undo();
+        e.undo();
+        labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key1), "the removal taken back", |l| l.boxes.len() == 1 && l.boxes[0].name.as_deref() == Some("Someone"));
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A drawn box needs the card: with the processor chosen it is kept
+    /// and waits (no helper asked for it), and a card that fails leaves it
+    /// waiting and says so; never the processor.  A kind change waits the
+    /// same way, and leaves its old kind at once.
+    #[test]
+    fn a_drawn_box_waits_for_the_card_and_never_goes_to_the_processor() {
+        let (lib, d, paths) = labels_library("labels-card");
+        let fake = Arc::new(Labeller::new(false));
+        let broken = Arc::new(Labeller::new(true));
+        let asked: Arc<Mutex<Vec<(Device, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+        let log = asked.clone();
+        let (f2, b2) = (fake.clone(), broken.clone());
+        let factory: EmbedderFactory = Box::new(move |spec: Spec| {
+            log.lock().push((spec.device, spec.text_only));
+            // The processor works; the card fails once chosen.
+            Ok(if spec.device == Device::Cpu { f2.clone() as Arc<dyn Embedder> } else { b2.clone() as Arc<dyn Embedder> })
+        });
+        let config = Config { factory, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let e = Engine::with_config(bus, Device::Cpu, true, true, ModelId::AuraFace, false, config);
+        e.on_library(lib.clone());
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Yunet, ModelId::AuraFace]);
+        wait_for(&e, "the first index on the processor", |s| s.indexed_shots == 3 && s.pass.is_none() && s.faces.found == 2);
+        let mut seq = 0;
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Files { jpg: Some(paths[2].clone()), raw: None }, "the plain photo", |l| l.key.is_some());
+        let key3 = l.key.unwrap();
+        let before = asked.lock().len();
+        e.label(LabelEdit::Add { face: FaceRef::new(key3, [0.1, 0.1, 0.2, 0.25]), kind: Kind::Person, name: None });
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key3), "the drawn face", |l| l.boxes.len() == 1);
+        assert!(l.boxes[0].pending && l.boxes[0].drawn);
+        assert_eq!(l.pending, Some(PendingWhy::ProcessorChosen));
+        // A kind change on a found face: out of people at once, a pending head.
+        let l1 = labels_until(&e, &mut ev, &mut seq, LabelTarget::Files { jpg: Some(paths[0].clone()), raw: None }, "the face", |l| l.boxes.len() == 1);
+        e.label(LabelEdit::Kind { face: l1.boxes[0].face, from: Kind::Person, to: Kind::Fursuit, name: None });
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(l1.key.unwrap()), "the kind change", |l| l.boxes.len() == 1 && l.boxes[0].kind == Kind::Fursuit);
+        assert!(l.boxes[0].pending);
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(asked.lock().len(), before, "nothing started for the drawn boxes on the processor");
+        assert_eq!(fake.drawn_faces.load(std::sync::atomic::Ordering::Relaxed) + fake.drawn_heads.load(std::sync::atomic::Ordering::Relaxed), 0);
+        // The card chosen, and failing: still waiting, the failure said.
+        e.set_device(Device::Gpu);
+        wait_for(&e, "the card's failure", |s| matches!(s.stopped, Some(Stopped::Card(_))));
+        let l = labels_until(&e, &mut ev, &mut seq, LabelTarget::Key(key3), "still waiting", |l| l.pending == Some(PendingWhy::NoCard));
+        assert!(l.boxes[0].pending);
+        assert_eq!(fake.drawn_faces.load(std::sync::atomic::Ordering::Relaxed), 0, "never on the processor");
+        assert!(asked.lock()[before..].iter().all(|(d, text_only)| *d == Device::Gpu || *text_only), "no processor helper for image work: {:?}", asked.lock());
+        e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }
 }

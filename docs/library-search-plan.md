@@ -2769,6 +2769,211 @@ The fake engine runs them a tick at a time. It waits while a pass, the head step
 
 `search fake judge-on|judge-off|judge-notinstalled|judge-wait|judge-free|judge-cardcrash|judge-broken|heads-vectors [n|all]` set its states.
 
+## As built — viewer labels (UI and backend)
+
+The user asked (2026-10-09) for another way to label: in the viewer, a
+key shows a box round every face and fursuit head in the photo, and a
+box can be renamed, given the other kind, drawn where the finder missed
+one, or removed.  People and fursuits only (pets are on hold).
+
+### The data (`model/subjects.rs`)
+
+- **Two optional lists in `subjects.json`.**
+  - `added`: boxes the user drew.
+  - `removed`: "Not a face" / "Not a fursuit head".
+  - Each entry is `{kind, key, box}` (a `Labelled`).
+  - Both lists are `#[serde(default)]` and skipped when empty.
+  - **Versioning**, the rule shared with the other optional lists:
+    `FILE_VERSION` 2 means "may hold optional lists added after v1",
+    and it is written only when one of them holds something.  A v1 file
+    loads and saves back byte for byte (`an_old_file_loads_and_saves_back_unchanged`).
+    An older build ignores the lists, and drops them if it saves.
+- **A kind change** is a removal of the old kind plus a drawn box of the
+  new kind, on the same box, in one undo step.  No subject of one kind
+  ever holds it as the other, and a name given with it must be of the
+  new kind, else the whole change is refused (`Refused::MixedKinds`).
+- **"Unnamed"** rejects the box for the subject it was in, so it is not
+  suggested back.
+- **Removals match by overlap.**  A detection is removed when its box
+  meets a removed one at IoU ≥ 0.6 on the same key
+  (`SubjectsFile::removed_index`, `Removed::covers`), so a rebuild that
+  finds the same face a thousandth off still leaves it out.
+- **`People::label`** applies a `LabelEdit` (`Name`, `Kind`, `Add`,
+  `Remove`, with `NameTo::{Subject, New, Unnamed}`).  It is one
+  checkpoint, saved at once, and undone by the subjects undo.  A typed
+  name the kind already has is that subject (any case); another kind's
+  subject of that name is never used.
+- *Forget all* of a kind forgets its labels too.
+
+### The grouping (`search/step.rs`)
+
+- **`Exclusion`** keeps rows out of a kind's grouping:
+  - detections the user removed;
+  - drawn boxes whose drawing was taken back (their vectors stay in the
+    cache, so an undo needs no card).
+- It is computed on the engine's thread into `RegroupJob.excluded`, and
+  applied by `assign_new` and by the suggestion and close-call pools of
+  both kinds.
+- The merge suggestions ("Possibly the same fursuit") apply it too: a
+  removed head is in no group pair, even when a subject still lists it
+  because the removal matched it by overlap
+  (`a_removed_head_is_never_in_a_merge_suggestion`).
+- One version rule for every optional list (`not_same`, `added`,
+  `removed`): `SubjectsFile::written_version` (2 while any holds
+  something), with `is_empty` and `forget_kind` covering all three
+  (`the_three_optional_lists_share_one_version_rule`).
+- With no labels nothing is excluded, and people's grouping is what it
+  was (`removed_faces_take_no_part_and_no_labels_change_nothing`, with
+  the pinned grouping test).
+
+### Drawn boxes: matched on the card only
+
+- **Faces.**  `FaceAsk::Drawn` carries the boxes.
+  - The helper cuts a square 2.2× the box round it, scales it to 512 px
+    and runs YuNet with a lower gate (0.5: the user says a face is
+    there).
+  - The landmarks of the detection that best overlaps the box
+    (IoU ≥ 0.3) align it.  With none, the ArcFace template is fitted to
+    the box.
+  - The box stays the user's.  The chosen face model recognises it, and
+    it gets a tile like any face.
+- **Heads.**  The v2 catch-up's `embed_heads` (known boxes) gives the
+  raw SigLIP2 vector of the head crop, which the store whitens as it
+  does every head.
+- **Cache, not user data.**  `FaceStore.drawn` (`faces-drawn.bin`) and
+  `HeadStore.drawn` (`heads-drawn.bin`) live beside the index, private;
+  the vectors and tiles go in the usual files.  *Clear*, *Rebuild* and
+  *Forget all* drop them.
+- **When they are matched.**  `Engine::start_drawn` matches the drawn
+  boxes whose vectors are missing, on a worker thread, through the
+  image helper.  It runs:
+  - after an edit (sent to itself, so the page's request for the labels
+    is answered first and the box shows at once, dashed);
+  - at a pass's or a head scan's end;
+  - on *Try the card again*, on a switch of device, and when a library
+    opens.
+- **Never the processor.**  With the processor chosen, or the card
+  stopped, nothing starts: the box is kept and listed as pending with
+  the reason (`PendingWhy`).  A failing card during the work stops it as
+  any card work does (`a_drawn_box_waits_for_the_card_and_never_goes_to_the_processor`).
+  A face box with *Find people's faces* off starts the helper with the
+  face model when it is in place, and never downloads it unasked.
+
+### The engine's API
+
+- `Engine::photo_labels(seq, LabelTarget)` answers
+  `BgEvent::PhotoLabels`: the photo's key, its boxes (faces then heads,
+  less those removed, plus the drawn ones), each name, and why pending
+  boxes wait.
+  - A library file's key comes from the resolver's path map (no I/O).
+  - Any other file has its head read on a spawned thread (JPG, then
+    RAW), so a working-folder copy of a library photo finds its labels.
+  - A key the index doesn't hold answers "not in the library".
+- `Engine::label(LabelEdit)`: then the usual regroup of both kinds on
+  their workers, and a fresh `Subjects` (the viewer asks for its labels
+  again on each).
+
+### The viewer (`app/viewer_labels.rs`, `ui/image_stage.rs`)
+
+- **L** (`Cmd::LabelFaces`, viewer only, bound once; the main window
+  lets it through) or *Labels* in the top bar.
+  - The burst sheet hides it; the crop tool and the labels are one at a
+    time.
+  - Read-only viewers label too.  Nothing in the path prunes or marks:
+    P, M and U behave as before.
+- **The overlay** is drawn by the stage itself, in its over-the-photo
+  layer (`LabelProps`), from its own transform.  It follows zoom, pan,
+  resizes and slides with no round trip, a few quads and tags a frame
+  (`PP_PROFILE` showed no slow draw).
+  - People are teal (`LABEL_PERSON`), fursuits peach (`LABEL_FURSUIT`).
+  - Each box is a hollow outline with a dark keyline, and a tag hanging
+    off its top edge, pulled inside at the stage's edges: solid when
+    named, hollow when "Unnamed".
+  - The picked box is heavier, the others quieter; pending and drawing
+    boxes are dashed.  The photo is never tinted.
+- **Input.**  While the labels show, a click picks a box (the smallest
+  under the pointer, or its tag) and a drag on the photo draws one.  The
+  wheel still zooms and pans.
+- **The bar** takes the crop bar's slot:
+  - nothing picked: counts and how to start, then the last change or
+    Ctrl+Z's undo, and why drawn boxes wait;
+  - a box picked: its kind and name, a name field with the kind's names
+    offered (prefix first, then contains; most photos first; never the
+    other kind), *Unnamed*, *It's a fursuit* / *It's a person*, and
+    *Not a face* / *Not a fursuit head*;
+  - a box drawn: *Face | Fursuit head*, an optional name, *Cancel*,
+    *Add*.
+- **Keys.**  Esc steps back (the field, the drawn box, the labels), and
+  Enter gives the name.  While a field is open, letters and arrows are
+  the field's.  Ctrl+Z goes to the subjects undo while the labels show,
+  and never to the marks.  The shortcuts list has a *Labels in the
+  viewer* section.
+- **Glyph** `Label`: a luggage tag.
+
+### The stand-in
+
+- `FakeLabels` takes the made-up people's and fursuits' boxes for a
+  library photo (by path), with its own undo in the stand-in's edit
+  order.
+- `PP_ML_FAKE_CARD` makes drawn boxes pending.
+- A working-folder photo is never in its library, since its keys are
+  made up.
+
+### Checked
+
+- **Tests.**
+  - Every edit type, its undo words and its one step each.
+  - Kinds never mix, including a kind change and names typed across
+    kinds.
+  - Removals and drawn boxes survive a rebuild through the engine,
+    matched again at the pass's end.
+  - A v1 file round-trips.
+  - The card-only rule (processor chosen, card failing).
+  - People's grouping is unchanged with no labels.
+  - The drawn-face geometry; the helper's request.
+  - The stand-in.
+  - The key's binding.
+- **The stand-in, headless.**  Screenshots of the overlay, a box picked,
+  typing with names offered, naming, a kind change, drawing, adding,
+  removing, undo, zoom, a photo with none, a working-folder photo, and
+  pending boxes with a failed card.
+- **The real engine**, through the card lock, on the night-day library
+  (550 shots, read-only symlinks) in a throwaway home with the models
+  linked read-only:
+  - The first index with faces and heads found 16 faces and 455 heads
+    on the card.  The viewer's boxes sat on the faces and heads.
+  - A face named.  A head named.
+  - A missed head drawn and named: matched on the card in 30–250 ms.
+  - A missed (half-hidden) face drawn: matched in about 3.5 s, the
+    helper finding its landmarks in the box.
+  - A detected face removed.
+  - A head changed to a face: pending at once, matched on the card,
+    then undone.
+  - The drawn face, named "Test person", joined the person found
+    elsewhere: the People tab shows 2 photos, with the drawn face as
+    the cover.
+  - Rebuild:
+    - the removed face stayed out;
+    - both drawn boxes were matched again at the pass's end;
+    - the names stayed;
+    - after the fursuit catch-up, the named head came back with its
+      name.
+  - Nothing under the library changed (`find -newer`), and
+    `subjects.json` is version 2, mode 0600.
+  - `PP_PROFILE=1`: the only slow updates were the test driver's.
+- **Found, not changed here.**  A Rebuild doesn't start the fursuit head
+  scan at its end (`on_batch`: `PassKind::Rebuild => {}`).  The heads
+  come back only when *Find fursuit heads* is asked for.
+
+### Open
+
+- Detection for working-folder photos that aren't in the library: not
+  built (decision 14), and its cost goes to the user.
+- *Not a face* on the subjects pages' *Faces* view: a possible
+  follow-up.
+- While the labels show, a drag draws rather than pans (the wheel and
+  the scrollbars still pan).
+
 ## As built — easier fursuit merging, stage 1: merging by hand
 
 The user (2026-10-09): "Make it easier to merge fursuit groups together.

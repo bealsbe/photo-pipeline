@@ -35,6 +35,7 @@ use parking_lot::Mutex;
 
 use super::fursuits::{self, FakeFursuits};
 use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Kind, Subjects};
+use crate::model::subjects::{LabelEdit, LabelTarget};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
@@ -266,7 +267,8 @@ impl Link {
             Link::Engine(e) => e.forget_kind(Kind::Person),
             Link::Fake(f) => f.change(|s| {
                 s.people.forget_all();
-                s.edits.retain(|k| *k != Kind::Person);
+                s.labels.forget_kind(Kind::Person);
+                s.edits.retain(|k| *k != Some(Kind::Person));
                 s.status.faces.looked_at = 0;
                 if s.status.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
                     s.status.pass = None;
@@ -355,6 +357,51 @@ impl Link {
         }
     }
 
+    /// The viewer's labels for a photo (`BgEvent::PhotoLabels`).  The
+    /// stand-in finds library photos by path only (its keys are made up),
+    /// so a working folder's photo is never in its library.
+    pub fn photo_labels(&self, seq: u64, target: LabelTarget) {
+        match self {
+            Link::Engine(e) => e.photo_labels(seq, target),
+            Link::Fake(f) => {
+                let labels = {
+                    let s = f.state.lock();
+                    let key = match &target {
+                        LabelTarget::Key(k) => Some(*k).filter(|k| s.people.has_shot(k)),
+                        LabelTarget::Files { jpg, raw } => jpg.iter().chain(raw.iter()).find_map(|p| s.people.key_of_path(p)),
+                    };
+                    // Nothing indexed yet: nothing looked for.
+                    let key = key.filter(|_| s.status.indexed_shots > 0);
+                    match key {
+                        Some(k) => s.labels.labels(k, s.fake_label_base(&k), s.drawn_pending()),
+                        None => crate::model::subjects::PhotoLabels::default(),
+                    }
+                };
+                let _ = f.bus.unbounded_send(BgEvent::PhotoLabels { seq, labels: Arc::new(labels) });
+            }
+        }
+    }
+
+    /// A change on a box of the viewer's labels (one undo step).
+    pub fn label(&self, edit: LabelEdit) {
+        match self {
+            Link::Engine(e) => e.label(edit),
+            Link::Fake(f) => f.change(|s| {
+                let key = edit.face().key;
+                let base = s.fake_label_base(&key);
+                let pending = s.drawn_pending().is_some();
+                let subjects = s.subjects.clone();
+                match s.labels.edit(&edit, base, &subjects, pending) {
+                    Ok(what) => {
+                        eprintln!("[labels] {what}");
+                        s.edits.push(None);
+                    }
+                    Err(e) => eprintln!("[labels] refused: {e}"),
+                }
+            }),
+        }
+    }
+
     /// *Possibly the same fursuit*: pairs of fursuit groups to merge or
     /// tell apart (`BgEvent::MergeSuggestions`, then with `judge` and a
     /// judge that can run, `BgEvent::MergeJudged`).  `focus`: one group's
@@ -385,7 +432,9 @@ impl Link {
                     let mut s = f.state.lock();
                     // The newest edit, whichever kind it changed.
                     let what = match s.edits.pop() {
-                        Some(Kind::Fursuit) => s.fursuits.undo(),
+                        Some(Some(Kind::Fursuit)) => s.fursuits.undo(),
+                        // A change made in the viewer's labels.
+                        Some(None) => s.labels.undo(),
                         _ => s.people.undo(),
                     };
                     s.refresh_people();
@@ -515,7 +564,8 @@ impl Link {
             Link::Engine(e) => e.forget_kind(Kind::Fursuit),
             Link::Fake(f) => f.change(|s| {
                 s.fursuits.forget_all();
-                s.edits.retain(|k| *k != Kind::Fursuit);
+                s.labels.forget_kind(Kind::Fursuit);
+                s.edits.retain(|k| *k != Some(Kind::Fursuit));
                 s.status.heads.step = fursuits::Step::Idle;
                 s.status.heads.skipped = 0;
                 s.refresh_people();
@@ -672,9 +722,11 @@ struct FakeState {
     people: FakePeople,
     /// Made-up fursuits on the same shots (their status is `status.heads`).
     fursuits: FakeFursuits,
-    /// Which kind each edit changed, newest last: Ctrl+Z takes back the
-    /// newest, whichever kind.
-    edits: Vec<Kind>,
+    /// Which kind each edit changed (`None`: the viewer's labels), newest
+    /// last: Ctrl+Z takes back the newest, whichever kind.
+    edits: Vec<Option<Kind>>,
+    /// The viewer's labels as the stand-in keeps them.
+    labels: super::viewer_labels::FakeLabels,
     subjects: Arc<Subjects>,
     /// The generation of the groups last sent (sent again on a change).
     sent_people: Option<u64>,
@@ -781,6 +833,41 @@ impl FakeState {
         }
         self.refresh_people();
         Some(ev)
+    }
+
+    /// The boxes the stand-in found on a shot: its person's face and its
+    /// fursuit heads, with their groups' names.
+    fn fake_label_base(&self, key: &Key) -> Vec<crate::model::subjects::LabelBox> {
+        use crate::model::subjects::LabelBox;
+        let subject = |g: &GroupId| match g {
+            GroupId::Subject(s) => Some(s.clone()),
+            GroupId::Cluster(_) => None,
+        };
+        let mut out = Vec::new();
+        if let Some((face, g, name)) = self.people.found_on(key) {
+            out.push(LabelBox { face, kind: Kind::Person, subject: name.as_ref().and(subject(&g)), name, drawn: false, pending: false });
+        }
+        for (face, g) in self.fursuits.found_on(key) {
+            let (sid, name) = match g {
+                Some((g, name)) => (name.as_ref().and(subject(&g)), name),
+                None => (None, None),
+            };
+            out.push(LabelBox { face, kind: Kind::Fursuit, subject: sid, name, drawn: false, pending: false });
+        }
+        out
+    }
+
+    /// Why drawn boxes would wait here: the processor chosen, or the card
+    /// failed (`PP_ML_FAKE_CARD`).
+    fn drawn_pending(&self) -> Option<crate::model::subjects::PendingWhy> {
+        use crate::model::subjects::PendingWhy;
+        if self.status.device.chosen != Device::Gpu {
+            Some(PendingWhy::ProcessorChosen)
+        } else if matches!(self.status.stopped, Some(Stopped::Card(_))) {
+            Some(PendingWhy::NoCard)
+        } else {
+            None
+        }
     }
 
     /// One tick of the judge comparing pairs of groups: wait for the card,
@@ -997,6 +1084,7 @@ impl Fake {
             people,
             fursuits: FakeFursuits::new(true),
             edits: Vec::new(),
+            labels: Default::default(),
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
             judge_run: None,
@@ -1035,8 +1123,8 @@ impl Fake {
             let done = if fursuit { fursuits(&mut s.fursuits, &snap) } else { people(&mut s.people, &snap) };
             match done {
                 Err(e) => eprintln!("[people] refused: {e}"),
-                Ok(()) if fursuit && s.fursuits.undo_depth() > before => s.edits.push(Kind::Fursuit),
-                Ok(()) if !fursuit => s.edits.push(Kind::Person),
+                Ok(()) if fursuit && s.fursuits.undo_depth() > before => s.edits.push(Some(Kind::Fursuit)),
+                Ok(()) if !fursuit => s.edits.push(Some(Kind::Person)),
                 Ok(()) => {}
             }
             s.refresh_people();

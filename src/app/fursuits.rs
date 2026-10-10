@@ -817,6 +817,19 @@ impl FakeFursuits {
         }
         heads_of(s).into_iter().find(|(_, f)| f == face).map(|(suit, _)| suit)
     }
+
+    /// The heads the stand-in found on a shot (once it was scanned), each
+    /// with its group and that group's name, if it is in one.
+    pub fn found_on(&self, key: &Key) -> Vec<(FaceRef, Option<(GroupId, Option<String>)>)> {
+        let Some(&i) = self.by_key.get(key) else { return Vec::new() };
+        if !self.tagged[..self.scanned].contains(&i) {
+            return Vec::new();
+        }
+        heads_of(&self.shots[i])
+            .into_iter()
+            .map(|(_, f)| (f, self.groups.iter().find(|g| g.members.contains(&f)).map(|g| (g.id.clone(), g.name.clone()))))
+            .collect()
+    }
 }
 
 /// The made-up groups' keys: a marker, then the number.

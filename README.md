@@ -72,6 +72,7 @@ src/app/               the application: state, update, views
   mod.rs               App, Message, routing, sidecar saving, scanning
   main_view.rs         menu bar, side rail, folder bar, filter bar, status bar
   viewer.rs            the image viewer window (crop tool, EXIF panel)
+  viewer_labels.rs     its labels (L): faces and fursuit heads over the photo
   calendar.rs          library calendar state and views
   search.rs            the search page: field, start page, results, Open day
   search_results.rs    results from hits (no I/O), burst stacks, the fursuits' list,
@@ -282,7 +283,9 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   moves on after a short beat; clearing a mark, or marking the last photo,
   stays put.  The viewer window reopens at the size and maximised state you
   left it in (and position, on X11 — Wayland doesn't tell apps where their
-  windows are).  F11 toggles full screen.
+  windows are).  F11 toggles full screen.  L shows the faces and fursuit
+  heads found in the photo, to name them, add one or remove one (*Labels
+  in the viewer*, under Library search).
 - **Undo.** Ctrl+Z undoes and Ctrl+Shift+Z (or Ctrl+Y) redoes, from the main
   window or the viewer (Edit menu).  It covers prune and export marks and
   crops however they were made, Sort, and Prune Review's move to the Trash;
@@ -658,6 +661,53 @@ never shown, merged, suggested or completed together with people or pets.
   muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
   cartoon heads, never a photo.
 
+### Labels in the viewer
+
+**L** in the viewer (or *Labels* in its top bar) shows every face and
+fursuit head found in the photo as a hollow box: people in teal,
+fursuits in peach, each with a tag hanging off its top edge, solid with
+the name, hollow with "Unnamed".  The boxes follow zoom and pan.  A
+bar under the top bar does the editing; L, *Done* or Esc hides them.
+
+- **Change a label.**  Click a box.  Type a name (names of the same
+  kind are offered as you type, most photos first; Enter gives the
+  typed one, a new person or fursuit if nobody has it), click one
+  offered, or take it out of its person (*Unnamed*, and it isn't
+  suggested for them again).  *It's a fursuit* (on a face) or *It's a
+  person* (on a head) moves it to the other kind entirely: it leaves
+  the old kind's groups and is a head (or face) from then on; a name
+  typed first goes with it, of the new kind.
+- **Add a missing label.**  Drag on the photo to draw a box, choose
+  *Face* or *Fursuit head*, give a name if you like, then *Add*.  The
+  box is matched on the graphics card: a face through the face model
+  (its eyes and mouth found inside the box, so it is aligned as the
+  found ones are), a head through the search model as v2's heads are.
+  Until then it is dashed, and the bar says why it waits; with the
+  processor chosen, or the card unavailable, it is kept and matched
+  when the card is (never on the processor).
+- **Remove a label.**  *Not a face* (or *Not a fursuit head*) removes
+  the box and takes it out of its group; the answer is kept, so
+  looking at the library again (Rebuild) doesn't bring it back.
+- **Ctrl+Z** takes back the last change, one at a time, as on the
+  subjects pages (while the labels show it doesn't touch marks).
+- **Which photos.**  Faces and heads are found in the library only
+  (decision 14): a library photo shows its boxes, and so does a
+  working-folder photo identical to a library copy (the same content
+  key); any other says "No faces or fursuits found yet: this photo isn't
+  in your library".  Read-only viewers (search, the calendar) label
+  too: labels aren't marks, and nothing here prunes or marks.
+- **Where it is kept.**  Names, removed boxes and drawn boxes are the
+  user's own, in `subjects.json` (the drawn and removed boxes as two
+  lists, `added` and `removed`, each a kind, a content key and a box;
+  the file says version 2 only when one of them holds something, so a
+  file never labelled keeps version 1's shape).  A drawn box's
+  landmarks, vector and tile are cache beside the index
+  (`faces-drawn.bin`, `heads-drawn.bin`, with the other face and head
+  files): *Clear* and *Rebuild* drop them and the boxes are matched
+  again; *Forget all* of a kind forgets its labels too.  Nothing is
+  written into photos or sidecars.  An older build reading a version 2
+  file ignores the two lists, and drops them if it saves the file.
+
 ### How it works
 
 - **The first index is asked for**, from the search page; after that each
@@ -879,14 +929,19 @@ the engine does underneath (`src/search/faces.rs`, `src/search/step.rs`,
   under the minimum (Preferences ▸ People ▸ *Smallest group to show*: 3, 5
   or 10 photos) fold under *Smaller groups*.
 - **The user's decisions** — names, merges, splits, hides, "not this
-  person" — point at detections (a photo's content key and the face's box
+  person", and the viewer's labels (boxes drawn, boxes removed as "not a
+  face", a face changed to a fursuit head) — point at detections (a photo's content key and the face's box
   in thousandths), not at group numbers, so they survive a regroup, a
   face-model change and a rebuild.  They live in
   `~/.local/share/photo-pipeline/subjects.json`, apart from the caches;
   Ctrl+Z takes the last one back.  Suggestions for a person are the faces
   within the cut-off of its confirmed members, not confirmed elsewhere and
   not rejected for it, nearest first, one per burst; answering Yes adds
-  them, No makes sure they are never suggested again.
+  them, No makes sure they are never suggested again.  A removed box
+  matches a detection found again by overlap (intersection over union
+  0.6 or more), so a rebuild that finds it a thousandth off still
+  leaves it out; removed boxes, and drawn ones whose drawing was taken
+  back, take no part in the groups, the suggestions or the close calls.
 - **A person's photos** come clearest first: half how clear the face is
   (its size, sharpness and detection score), half how sure its membership
   is, so doubtful ones sink to the bottom.  `@Name` in a search narrows

@@ -80,6 +80,8 @@ pub struct Viewer {
     /// The move under way is a burst skip (Shift+← →), this way: its
     /// preload looks ahead instead of back over the frames skipped.
     pub(super) skipping: Option<i32>,
+    /// The faces and fursuit heads over the photo (L), and their editing.
+    pub(super) labels: super::viewer_labels::LabelsUi,
 }
 
 /// The status while a photo decodes.
@@ -124,6 +126,8 @@ pub enum Msg {
     Leave(i32),
     /// The sheet's Compare button.
     CompareFrames,
+    /// The faces and fursuit heads over the photo (L).
+    Labels(super::viewer_labels::LMsg),
 }
 
 impl std::fmt::Debug for Viewer {
@@ -132,7 +136,7 @@ impl std::fmt::Debug for Viewer {
     }
 }
 
-fn coll<'a>(app: &'a App, v: &'a Viewer) -> &'a Collection {
+pub(super) fn coll<'a>(app: &'a App, v: &'a Viewer) -> &'a Collection {
     match &v.source {
         Source::Working => &app.coll,
         Source::Library(c) => c,
@@ -240,6 +244,7 @@ pub fn open_as(app: &mut App, source: Source, items: Vec<RecordId>, index: usize
         burst_of,
         sheet: SheetUi::default(),
         skipping: None,
+        labels: Default::default(),
     });
     if let Some(v) = app.viewer.as_mut() {
         viewer_burst::arrive(v, index, land, None, pref);
@@ -285,6 +290,7 @@ pub(super) fn show_record(app: &mut App) -> Task<Message> {
         None => return Task::none(),
     };
     show_path(app, &path, ft);
+    super::viewer_labels::on_photo(app);
     preload_adjacent(app);
     populate_exif(app);
     viewer_burst::want_previews(app);
@@ -402,6 +408,8 @@ fn enter_crop(app: &mut App) {
     if v.crop_mode || v.read_only {
         return;
     }
+    // The crop tool and the labels share the photo's pointer: one at a time.
+    v.labels = super::viewer_labels::LabelsUi::default();
     if v.image.is_none() {
         // Still decoding: arm the tool, it opens when the pixels arrive.
         v.crop_pending = true;
@@ -432,6 +440,11 @@ fn select_aspect(v: &mut Viewer, ratio: AspectRatio) {
         }
     }
     v.ratio_sel = ratio;
+}
+
+/// Leave the crop tool without keeping its change (the labels came up).
+pub(super) fn leave_crop(v: &mut Viewer) {
+    exit_crop(v, false);
 }
 
 /// Leave crop mode.  Returns the record whose crop should be applied.
@@ -754,7 +767,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 return allocate_current(app);
             }
             StageEvent::Sheet(ev) => return viewer_burst::on_stage(app, ev),
+            StageEvent::LabelPick(i) => return super::viewer_labels::on_pick(app, i),
+            StageEvent::LabelDraw(b) => return super::viewer_labels::on_draw(app, b),
         },
+        Msg::Labels(m) => return super::viewer_labels::update(app, m),
         Msg::Allocated(path, Ok(allocation)) => app.loader.hold_allocation(&path, allocation),
         Msg::Allocated(_, Err(_)) => {}
         Msg::Advance(seq) => return viewer_advance::on_beat(app, seq),
@@ -784,8 +800,24 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
         if v.crop_mode {
             return Task::none();
         }
+        // With the labels showing, Ctrl+Z takes back the last change to
+        // them (or to people and fursuits), as on the subjects pages; it
+        // never touches marks then.
+        if v.labels.on {
+            if cmd == super::commands::Cmd::Undo {
+                app.search.link.undo_subjects();
+            }
+            return Task::none();
+        }
         return app.update(Message::Cmd(cmd));
     }
+    // The labels' own keys (Esc steps back; a name field takes the rest).
+    if !mods.control() && !mods.alt() {
+        if let Some(t) = super::viewer_labels::on_key(app, &key, c) {
+            return t;
+        }
+    }
+    let Some(v) = app.viewer.as_ref() else { return Task::none() };
     // Window-wide keys, also while cropping.
     if key == Key::Named(Named::F11) && !mods.control() && !mods.alt() {
         return viewer_window::toggle_fullscreen(app);
@@ -804,6 +836,7 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
         match super::commands::Cmd::from_key(&key, mods) {
             Some(super::commands::Cmd::PrevBurst) => return viewer_burst::skip(app, -1),
             Some(super::commands::Cmd::NextBurst) => return viewer_burst::skip(app, 1),
+            Some(super::commands::Cmd::LabelFaces) => return super::viewer_labels::toggle(app),
             _ => {}
         }
         if let Some(t) = viewer_burst::on_key(app, &key, c) {
@@ -1063,6 +1096,18 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
             true,
         ));
     }
+    if !on_sheet {
+        // Faces and fursuit heads: shown over the photo to name, change,
+        // add or remove (read-only viewers too: labels aren't marks).
+        let on = v.labels.on;
+        let look = if on { style::toggle(true, t::SIGNAL) } else { style::ghost() };
+        let b = if v.win.width >= 1100.0 || on {
+            kit::icon_text_btn(Glyph::Label, "Labels", if on { t::SIGNAL } else { t::INK2 }, look, vmsg(Msg::Labels(super::viewer_labels::LMsg::Toggle)))
+        } else {
+            kit::icon_btn(Glyph::Label, if on { t::SIGNAL } else { t::INK2 }, look, vmsg(Msg::Labels(super::viewer_labels::LMsg::Toggle)))
+        };
+        top = top.push(kit::tip(b, "Label faces and fursuits: name them, add one that was missed, or remove one  (L)", true));
+    }
     top = top.push(kit::tip(kit::icon_btn(Glyph::Folder, t::INK2, style::ghost(), vmsg(Msg::ShowInFolder)), "Show in folder", true));
     if !v.read_only {
         let marked = record.is_some_and(|r| r.is_marked);
@@ -1104,7 +1149,13 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     // The crop bar and the prune banner come and go in slots of their own,
     // so the photo keeps its place in the widget tree: its zoom, a slide or
     // the burst sheet's zoom carry on when either appears.
-    body = body.push(if v.crop_mode { crop_bar(v) } else { Space::new().height(0).into() });
+    body = body.push(if v.crop_mode {
+        crop_bar(v)
+    } else if v.labels.on && !on_sheet {
+        super::viewer_labels::view(app, &v.labels)
+    } else {
+        Space::new().height(0).into()
+    });
     // Held back while auto-advance is about to move on, so the layout
     // doesn't jump twice; the stamp says what happened instead.
     // (Not on the sheet: its tiles say so, and the banner coming and going
@@ -1149,7 +1200,8 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         app.scale_factor,
         |e| Message::Viewer(Msg::Stage(e)),
     )
-    .sheet(sheet);
+    .sheet(sheet)
+    .labels(if on_sheet { None } else { super::viewer_labels::stage_props(&v.labels) });
     // The stamp floats over the photo; the filmstrip runs under it.
     let mut photo = column![stack![stage, viewer_advance::stamp(v)]].height(Length::Fill);
     if app.settings.viewer_filmstrip {

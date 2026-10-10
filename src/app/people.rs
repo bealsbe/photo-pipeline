@@ -637,6 +637,30 @@ impl FakePeople {
         }
     }
 
+    /// A shot of the stand-in's library has this key.
+    pub fn has_shot(&self, key: &Key) -> bool {
+        self.by_key.contains_key(key)
+    }
+
+    /// The shot a library file belongs to (the viewer's labels).
+    pub fn key_of_path(&self, p: &std::path::Path) -> Option<Key> {
+        self.shots.iter().find(|s| s.jpg.as_deref() == Some(p) || s.raw.as_deref() == Some(p)).map(|s| s.key)
+    }
+
+    /// The face the stand-in found on a shot (once faces were looked for
+    /// there), with its group and that group's name.
+    pub fn found_on(&self, key: &Key) -> Option<(FaceRef, GroupId, Option<String>)> {
+        let &i = self.by_key.get(key)?;
+        if i >= self.looked_at {
+            return None;
+        }
+        let s = &self.shots[i];
+        true_person(&s.key, s.burst)?;
+        let face = self.face_of(*key, false)?.face;
+        let g = self.groups.iter().find(|g| g.members.contains(key))?;
+        Some((face, g.id.clone(), g.name.clone()))
+    }
+
     /// The person a face shows, for its silhouette.
     pub fn look_of(&self, face: &FaceRef) -> usize {
         self.by_key.get(&face.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)).unwrap_or((hash64(&face.key) % PEOPLE as u64) as usize)

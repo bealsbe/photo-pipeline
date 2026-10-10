@@ -85,6 +85,32 @@ pub struct CropProps {
     pub ratio: Option<f64>,
 }
 
+/// The viewer's labels over the photo: boxes (fractions of the image, as
+/// the detections are kept), the one selected, and a box being drawn.
+/// While they are shown a drag on the photo draws a box and a click
+/// picks one; the wheel still pans and zooms.
+#[derive(Debug, Clone, Default)]
+pub struct LabelProps {
+    pub boxes: Vec<StageBox>,
+    pub selected: Option<usize>,
+    /// A drawn box waiting for its kind, and the colour it would take.
+    pub draft: Option<([f32; 4], Color)>,
+}
+
+/// One label box as the stage draws it.
+#[derive(Debug, Clone)]
+pub struct StageBox {
+    /// `[x, y, w, h]`, fractions of the image.
+    pub bbox: [f32; 4],
+    pub color: Color,
+    /// Its tag: the name, or "Unnamed".
+    pub tag: String,
+    /// Named: a solid tag; unnamed: a hollow one.
+    pub named: bool,
+    /// Drawn and not matched yet: a dashed outline.
+    pub dashed: bool,
+}
+
 #[derive(Debug, Clone)]
 pub enum StageEvent {
     Zoom(f32),
@@ -92,6 +118,10 @@ pub enum StageEvent {
     Swipe(i32),
     Viewport(Size),
     Sheet(SheetEvent),
+    /// A label box was clicked (or the photo, away from every box).
+    LabelPick(Option<usize>),
+    /// A box was drawn on the photo (fractions of the image).
+    LabelDraw([f32; 4]),
 }
 
 /// What the burst sheet reports.
@@ -118,6 +148,8 @@ pub struct ImageStage<'a, Message> {
     scale_factor: f32,
     /// The burst the photo belongs to, as a sheet (shown or not).
     sheet: Option<Sheet>,
+    /// The viewer's labels, while shown.
+    labels: Option<LabelProps>,
     on: Box<dyn Fn(StageEvent) -> Message + 'a>,
 }
 
@@ -134,7 +166,13 @@ impl<'a, Message> ImageStage<'a, Message> {
         scale_factor: f32,
         on: impl Fn(StageEvent) -> Message + 'a,
     ) -> Self {
-        Self { key, image, status, transition, cmd, crop, neighbors, scale_factor, sheet: None, on: Box::new(on) }
+        Self { key, image, status, transition, cmd, crop, neighbors, scale_factor, sheet: None, labels: None, on: Box::new(on) }
+    }
+
+    /// The viewer's labels over the photo (`None`: not shown).
+    pub fn labels(mut self, labels: Option<LabelProps>) -> Self {
+        self.labels = labels;
+        self
     }
 
     /// The photo is a frame of a burst: its sheet, on screen when
@@ -260,6 +298,12 @@ struct State {
     tile_hover_prev: Option<(usize, Instant)>,
     /// The wheel going between the sheet and a frame.
     level: LevelWheel,
+    /// A press on the photo while labels show: where (stage and image
+    /// fractions) and where the pointer is now (image fractions).  A
+    /// short one is a click; a longer one draws a box.
+    label_drag: Option<(Point, (f64, f64), (f64, f64))>,
+    /// The label box under the pointer.
+    label_hover: Option<usize>,
 }
 
 /// The wheel's part in changing level between a burst's sheet and one of
@@ -608,6 +652,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             tile_hover: None,
             tile_hover_prev: None,
             level: LevelWheel::default(),
+            label_drag: None,
+            label_hover: None,
         })
     }
 
@@ -632,6 +678,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             st.zoom = None;
             st.pan = None;
             st.crop_drag = None;
+            st.label_drag = None;
+            st.label_hover = None;
             st.sheet_zoom = None;
             st.ring_from = None;
             match self.transition {
@@ -962,6 +1010,12 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 st.last_click = Some(click);
                 let double = click.kind() == amouse::click::Kind::Double;
 
+                // Labels: a press picks a box or starts drawing one.
+                if let (Some(_), Some(l)) = (&self.labels, st.live.clone()) {
+                    let ip = norm_point(st, &l, p, now);
+                    st.label_drag = Some((p, ip, ip));
+                    return;
+                }
                 if let (Some(cp), Some(l)) = (&self.crop, st.live.clone()) {
                     if double {
                         shell.publish((self.on)(StageEvent::Crop(crop_math::reset(&cp.crop, cp.ratio))));
@@ -1036,6 +1090,22 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                     }
                     return;
                 }
+                if let Some((p0, ip0, _)) = st.label_drag {
+                    if let Some(l) = st.live.clone() {
+                        let ip = norm_point(st, &l, p, now);
+                        st.label_drag = Some((p0, ip0, ip));
+                        shell.request_redraw();
+                    }
+                    return;
+                }
+                if let (Some(lp), Some(l)) = (&self.labels, st.live.clone()) {
+                    let (s, off) = st.transform_at(&l, now);
+                    let over = label_hit(&l, s, off, lp, p, vp.width);
+                    if over != st.label_hover {
+                        st.label_hover = over;
+                        shell.request_redraw();
+                    }
+                }
                 if let Some((origin, off0)) = st.pan {
                     if let Some(l) = st.live.as_mut() {
                         l.off = clamp_off(&l.img, l.scale, off0 + (p - origin), vp);
@@ -1052,6 +1122,16 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 st.pan = None;
                 st.crop_drag = None;
                 st.sb_drag = None;
+                if let (Some((p0, a, z)), Some(lp), Some(l)) = (st.label_drag.take(), &self.labels, st.live.clone()) {
+                    let p = cursor.position().map(local).unwrap_or(p0);
+                    if (p.x - p0.x).abs() < LABEL_CLICK && (p.y - p0.y).abs() < LABEL_CLICK {
+                        let (s, off) = st.transform_at(&l, now);
+                        shell.publish((self.on)(StageEvent::LabelPick(label_hit(&l, s, off, lp, p0, vp.width))));
+                    } else if let Some(b) = drawn_box(a, z) {
+                        shell.publish((self.on)(StageEvent::LabelDraw(b)));
+                    }
+                    shell.request_redraw();
+                }
             }
 
             Event::Touch(te) => {
@@ -1077,6 +1157,9 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
         if st.sheet_visible() {
             let over = st.sheet_zoom.is_none() && burst_sheet::hit(&st.sheet_cells(), p).is_some();
             return if over { mouse::Interaction::Pointer } else { mouse::Interaction::Idle };
+        }
+        if self.labels.is_some() && st.live.is_some() {
+            return if st.label_drag.is_none() && st.label_hover.is_some() { mouse::Interaction::Pointer } else { mouse::Interaction::Crosshair };
         }
         if self.crop.is_some() {
             let region = st.crop_drag.as_ref().map(|d| d.0).unwrap_or(st.hover_region);
@@ -1166,6 +1249,11 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 }
                 if let Some(cp) = &self.crop {
                     draw_crop(r, b, l, s, off, &cp.crop);
+                }
+                if let Some(lp) = &self.labels {
+                    let _t = crate::profile::span("draw", "labels");
+                    let drag = st.label_drag.and_then(|(p0, a, z)| drawn_box(a, z).filter(|_| st.live.is_some()).map(|bx| (bx, p0)));
+                    draw_labels(r, b, l, s, off, lp, st.label_hover, drag.map(|d| d.0));
                 }
             }
             if let Some(status) = &self.status {
@@ -1405,6 +1493,116 @@ fn draw_crop(r: &mut Renderer, b: Rectangle, l: &Live, s: f32, off: Vector, c: &
     paint::fill(r, rect(mx - grip / 2.0, y1 - th, grip, th), orange);
     paint::fill(r, rect(x0, my - grip / 2.0, th, grip), orange);
     paint::fill(r, rect(x1 - th, my - grip / 2.0, th, grip), orange);
+}
+
+// ── the viewer's labels ─────────────────────────────────────────────────────
+
+/// A press that moves less than this (pixels) is a click, not a drawing.
+const LABEL_CLICK: f32 = 5.0;
+/// A label's tag: its height and side padding.
+const TAG_H: f32 = 18.0;
+const TAG_PAD: f32 = 6.0;
+
+/// A box (fractions of the image) on the stage, local coordinates.
+fn label_rect(l: &Live, s: f32, off: Vector, b: &[f32; 4]) -> Rectangle {
+    let (w, h) = (l.img.width as f32 * s, l.img.height as f32 * s);
+    rect(off.x + b[0] * w, off.y + b[1] * h, b[2] * w, b[3] * h)
+}
+
+/// Where a box's tag sits: above its top-left corner, or just inside it
+/// when the box touches the top of the stage; pulled left when it would
+/// run off the stage's right edge (`top`, `right`: the stage's).
+fn tag_rect(bx: Rectangle, tag: &str, top: f32, right: f32) -> Rectangle {
+    let w = (paint::text_width(tag, t::T_SMALL, paint::SEMIBOLD) + 2.0 * TAG_PAD).ceil();
+    let y = if bx.y - TAG_H >= top { bx.y - TAG_H } else { bx.y };
+    rect(bx.x.min(right - w), y, w, TAG_H)
+}
+
+/// The box under `p` (local): the smallest whose outline or tag holds it.
+fn label_hit(l: &Live, s: f32, off: Vector, lp: &LabelProps, p: Point, width: f32) -> Option<usize> {
+    lp.boxes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let r = label_rect(l, s, off, &b.bbox);
+            let grown = rect(r.x - 3.0, r.y - 3.0, r.width + 6.0, r.height + 6.0);
+            (grown.contains(p) || tag_rect(r, &b.tag, 0.0, width).contains(p)).then_some((i, r.width * r.height))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// A drawn box from two corners (image fractions), clamped to the image;
+/// none when it is too small to be a face.
+fn drawn_box(a: (f64, f64), z: (f64, f64)) -> Option<[f32; 4]> {
+    let (x0, x1) = (a.0.min(z.0).clamp(0.0, 1.0), a.0.max(z.0).clamp(0.0, 1.0));
+    let (y0, y1) = (a.1.min(z.1).clamp(0.0, 1.0), a.1.max(z.1).clamp(0.0, 1.0));
+    (x1 - x0 >= 0.005 && y1 - y0 >= 0.005).then(|| [x0 as f32, y0 as f32, (x1 - x0) as f32, (y1 - y0) as f32])
+}
+
+/// A rectangle's outline in dashes (a box drawn and not matched yet, or
+/// one being drawn).
+fn dashed(r: &mut Renderer, bx: Rectangle, width: f32, color: Color) {
+    const DASH: f32 = 7.0;
+    const GAP: f32 = 5.0;
+    let mut segs = Vec::new();
+    let mut side = |a: Point, b: Point| {
+        let len = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
+        let mut d = 0.0;
+        while d < len {
+            let e = (d + DASH).min(len);
+            let at = |t: f32| Point::new(a.x + (b.x - a.x) * t / len, a.y + (b.y - a.y) * t / len);
+            segs.push((at(d), at(e)));
+            d += DASH + GAP;
+        }
+    };
+    let (x0, y0, x1, y1) = (bx.x, bx.y, bx.x + bx.width, bx.y + bx.height);
+    side(Point::new(x0, y0), Point::new(x1, y0));
+    side(Point::new(x1, y0), Point::new(x1, y1));
+    side(Point::new(x1, y1), Point::new(x0, y1));
+    side(Point::new(x0, y1), Point::new(x0, y0));
+    paint::strokes(r, &segs, width, color, false);
+}
+
+/// The labels over the photo: each box a hollow outline in its kind's
+/// colour with a tag hanging off its top edge (solid when named, hollow
+/// when not), a dark keyline under both so they read on any photo; the
+/// selected box heavier and the rest quieter; the box being drawn dashed.
+#[allow(clippy::too_many_arguments)]
+fn draw_labels(r: &mut Renderer, b: Rectangle, l: &Live, s: f32, off: Vector, lp: &LabelProps, hover: Option<usize>, drawing: Option<[f32; 4]>) {
+    let keyline = t::alpha(t::PHOTO_GROUND, 0.55);
+    let order: Vec<usize> = (0..lp.boxes.len()).filter(|&i| Some(i) != lp.selected).chain(lp.selected).collect();
+    for i in order {
+        let bx_def = &lp.boxes[i];
+        let local = label_rect(l, s, off, &bx_def.bbox);
+        let bx = rect(local.x + b.x, local.y + b.y, local.width, local.height);
+        let selected = lp.selected == Some(i);
+        let quiet = lp.selected.is_some() && !selected && hover != Some(i);
+        let color = if quiet { t::alpha(bx_def.color, 0.55) } else { bx_def.color };
+        let width = if selected { 3.0 } else { 2.0 };
+        // The keyline: a dark hairline just outside the outline.
+        paint::framed(r, rect(bx.x - 1.0, bx.y - 1.0, bx.width + 2.0, bx.height + 2.0), 0.0, Color::TRANSPARENT, keyline, 1.0);
+        if bx_def.dashed {
+            dashed(r, bx, width, color);
+        } else {
+            paint::framed(r, bx, 0.0, Color::TRANSPARENT, color, width);
+        }
+        let tag = tag_rect(bx, &bx_def.tag, b.y, b.x + b.width);
+        if bx_def.named {
+            paint::rounded(r, tag, 2.0, color);
+            paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, t::alpha(t::ON_SIGNAL, if quiet { 0.7 } else { 1.0 }), HAlign::Left, b);
+        } else {
+            paint::framed(r, tag, 2.0, t::alpha(t::PHOTO_GROUND, 0.82), color, 1.0);
+            paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, color, HAlign::Left, b);
+        }
+    }
+    let draft = drawing.map(|d| (d, lp.draft.map_or(t::PHOTO_INK, |(_, c)| c))).or(lp.draft);
+    if let Some((d, color)) = draft {
+        let local = label_rect(l, s, off, &d);
+        let bx = rect(local.x + b.x, local.y + b.y, local.width, local.height);
+        paint::framed(r, rect(bx.x - 1.0, bx.y - 1.0, bx.width + 2.0, bx.height + 2.0), 0.0, Color::TRANSPARENT, keyline, 1.0);
+        dashed(r, bx, 2.0, color);
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

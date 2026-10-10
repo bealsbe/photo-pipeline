@@ -107,8 +107,16 @@ pub struct Level<'a> {
 }
 
 /// Decode the three levels' outputs for one `DET_SIZE` canvas: scored,
-/// gated, merged, best first.
+/// gated, merged, best first.  (The helper calls
+/// [`decode_levels_gated`] with its gate.)
+#[cfg(test)]
 pub fn decode_levels(levels: &[Level<'_>]) -> Vec<Detected> {
+    decode_levels_gated(levels, MIN_SCORE)
+}
+
+/// As [`decode_levels`], with the score gate given (a face the user drew
+/// is looked for with a lower one: they say it is there).
+pub fn decode_levels_gated(levels: &[Level<'_>], min_score: f32) -> Vec<Detected> {
     let mut found = Vec::new();
     for l in levels {
         let cols = (DET_SIZE / l.stride) as usize;
@@ -116,7 +124,7 @@ pub fn decode_levels(levels: &[Level<'_>]) -> Vec<Detected> {
         for idx in 0..rows * cols {
             let (Some(&c), Some(&o)) = (l.cls.get(idx), l.obj.get(idx)) else { break };
             let score = (c.clamp(0.0, 1.0) * o.clamp(0.0, 1.0)).sqrt();
-            if score < MIN_SCORE {
+            if score < min_score {
                 continue;
             }
             let (Some(b), Some(k)) = (l.bbox.get(idx * 4..idx * 4 + 4), l.kps.get(idx * 10..idx * 10 + 10)) else { break };
@@ -194,6 +202,61 @@ pub fn place(found: &[Detected], scale: f32, width: u32, height: u32) -> Vec<Pla
             Some(Placed { bbox, landmarks, score: d.score, size_px })
         })
         .collect()
+}
+
+// ---- faces the user drew (the viewer's labels) ----------------------------
+
+/// A drawn face is looked for on a square cut around it, scaled to this
+/// edge (the face then spans a few hundred pixels of the detector's
+/// canvas, where YuNet is surest).
+pub const DRAWN_EDGE: u32 = 512;
+/// The cut is this many times the drawn box's longer side.
+pub const DRAWN_CONTEXT: f32 = 2.2;
+/// The score gate for a drawn face: the user says a face is there, so a
+/// weak detection inside the box is still the best guide to its
+/// landmarks.
+pub const DRAWN_MIN_SCORE: f32 = 0.5;
+/// A detection counts as the drawn face when they overlap this much.
+pub const DRAWN_MIN_IOU: f32 = 0.3;
+
+/// The square cut (in preview pixels: x, y, side) around a drawn box
+/// (`bbox` as fractions of a `w`×`h` preview), inside the preview.
+pub fn drawn_region(bbox: &[f32; 4], w: u32, h: u32) -> (u32, u32, u32) {
+    let (fw, fh) = (w.max(1) as f32, h.max(1) as f32);
+    let long = (bbox[2] * fw).max(bbox[3] * fh).max(8.0);
+    let side = (long * DRAWN_CONTEXT).min(fw).min(fh).max(1.0);
+    let (cx, cy) = ((bbox[0] + bbox[2] / 2.0) * fw, (bbox[1] + bbox[3] / 2.0) * fh);
+    let x = (cx - side / 2.0).clamp(0.0, fw - side);
+    let y = (cy - side / 2.0).clamp(0.0, fh - side);
+    let side = side.floor() as u32;
+    (x.floor() as u32, y.floor() as u32, side.min(w.saturating_sub(x.floor() as u32)).min(h.saturating_sub(y.floor() as u32)).max(1))
+}
+
+/// The ArcFace template fitted into a box (preview pixels `[x, y, w,
+/// h]`): the landmarks a drawn face gets when the detector finds nothing
+/// in it, so it is still aligned the way the models expect.
+pub fn template_landmarks(b: &[f32; 4]) -> [[f32; 2]; 5] {
+    TEMPLATE.map(|[tx, ty]| [b[0] + tx / ALIGNED as f32 * b[2], b[1] + ty / ALIGNED as f32 * b[3]])
+}
+
+/// The landmarks of a drawn face: of the detection on the cut that best
+/// matches the drawn box (`drawn`, preview pixels), mapped back onto the
+/// preview, with its score; `None` when none overlaps it enough.
+/// `region` is the cut ([`drawn_region`]) and the detections are in the
+/// pixels of the cut scaled to [`DRAWN_EDGE`].
+pub fn pick_drawn(found: &[Detected], region: (u32, u32, u32), drawn: &[f32; 4]) -> Option<([[f32; 2]; 5], f32)> {
+    let s = region.2 as f32 / DRAWN_EDGE as f32;
+    let (ox, oy) = (region.0 as f32, region.1 as f32);
+    found
+        .iter()
+        .map(|d| {
+            let b = [ox + d.bbox[0] * s, oy + d.bbox[1] * s, d.bbox[2] * s, d.bbox[3] * s];
+            let lm = d.landmarks.map(|[x, y]| [ox + x * s, oy + y * s]);
+            (iou(&b, drawn), lm, d.score)
+        })
+        .filter(|(o, _, _)| *o >= DRAWN_MIN_IOU)
+        .max_by(|a, b| (a.0 * a.2).total_cmp(&(b.0 * b.2)))
+        .map(|(_, lm, score)| (lm, score))
 }
 
 /// The similarity transform (scale, rotation, translation) that best maps
@@ -444,6 +507,45 @@ mod tests {
         // Landmarks off the picture: a black crop, no panic.
         let off = align(&px, &TEMPLATE.map(|[x, y]| [x + 5000.0, y + 5000.0]));
         assert!(off.data.iter().all(|&v| v == 0));
+    }
+
+    /// A drawn face: the cut around it stays inside the preview and holds
+    /// the box; a detection over the box gives its landmarks back on the
+    /// preview; none (or one elsewhere) leaves the template fitted to the
+    /// box; the gate for drawn faces is lower than the pass's.
+    #[test]
+    fn a_drawn_face_finds_its_landmarks_or_takes_the_template() {
+        let bbox = [0.5, 0.4, 0.05, 0.08]; // 80 × 80 px on a 1600 × 1000 preview
+        let (x, y, side) = drawn_region(&bbox, 1600, 1000);
+        assert!(x + side <= 1600 && y + side <= 1000);
+        assert!(x as f32 <= 800.0 && (x + side) as f32 >= 880.0 && y as f32 <= 400.0 && (y + side) as f32 >= 480.0, "{x} {y} {side}");
+        assert_eq!(side, (80.0 * DRAWN_CONTEXT) as u32);
+        // At a corner the cut is pushed inside; a huge box is capped.
+        let (x, y, side) = drawn_region(&[0.0, 0.0, 0.05, 0.05], 1600, 1000);
+        assert_eq!((x, y), (0, 0));
+        assert!(side > 0);
+        let (_, _, side) = drawn_region(&[0.0, 0.0, 1.0, 1.0], 1600, 1000);
+        assert_eq!(side, 1000);
+        // A detection over the drawn box, in the cut's scaled pixels.
+        let region = drawn_region(&bbox, 1600, 1000);
+        let s = region.2 as f32 / DRAWN_EDGE as f32;
+        let drawn_px = [800.0, 400.0, 80.0, 80.0];
+        let to_cut = |px: f32, o: u32| (px - o as f32) / s;
+        let det = Detected {
+            bbox: [to_cut(802.0, region.0), to_cut(402.0, region.1), 76.0 / s, 78.0 / s],
+            landmarks: [[to_cut(820.0, region.0), to_cut(420.0, region.1)]; 5],
+            score: 0.6,
+        };
+        let far = Detected { bbox: [0.0, 0.0, 10.0, 10.0], landmarks: [[1.0, 1.0]; 5], score: 0.99 };
+        let (lm, score) = pick_drawn(&[far.clone(), det], region, &drawn_px).expect("the face over the box");
+        assert!((lm[0][0] - 820.0).abs() < 0.5 && (lm[0][1] - 420.0).abs() < 0.5, "{lm:?}");
+        assert_eq!(score, 0.6);
+        assert!(pick_drawn(&[far], region, &drawn_px).is_none(), "nothing over the box");
+        // The template fitted to the box: eyes in its upper half.
+        let t = template_landmarks(&drawn_px);
+        assert!(t.iter().all(|[x, y]| *x > 800.0 && *x < 880.0 && *y > 400.0 && *y < 480.0));
+        assert!(t[0][1] < 400.0 + 40.0 && t[3][1] > 400.0 + 40.0, "eyes above the middle, mouth below");
+        assert!(DRAWN_MIN_SCORE < MIN_SCORE);
     }
 
     /// Print each face model's inputs and outputs: `PP_MODEL_ROOT=<models
