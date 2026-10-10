@@ -23,6 +23,10 @@
 //! labels unnamed|swap|remove|deselect # the picked box's buttons
 //! labels kind person|fursuit|add|cancel   # a drawn box's choices
 //! labels dump                 # print the labels' state
+//! labels-wait 30000           # wait (up to 30 s) for drawn boxes being
+//!                             # matched on the card
+//! engine-wait 600000          # wait (up to 10 min) for the search engine
+//!                             # to be idle (no pass, no head scan)
 //! bursts                      # print the working folder's bursts
 //! analyse [cached|cancel]     # start the quality analysis (or show the
 //!                             # cache only, or stop it)
@@ -443,7 +447,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "name" => app.update(lm(LMsg::Name(rest.join(" ")))),
                 "enter" => app.update(lm(LMsg::Submit)),
                 "take" => match offered_at(app, rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)) {
-                    Some(id) => app.update(lm(LMsg::Pick(id))),
+                    Some(m) => app.update(lm(m)),
                     None => Task::none(),
                 },
                 "unnamed" => app.update(lm(LMsg::Unnamed)),
@@ -523,6 +527,33 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
             }
             eprintln!("[analysis] scan done: scanning={} records={}", app.scanning, app.coll.len());
+            Task::none()
+        }
+        "engine-wait" => {
+            // Poll until the search engine is idle: no pass, no head scan,
+            // and something indexed once the first index was asked for.
+            let left: u64 = arg.parse().unwrap_or(600_000);
+            let s = app.search.link.status();
+            let busy = s.pass.is_some() || s.heads.scanning() || (s.first_index_asked && s.indexed_shots == 0 && s.stopped.is_none());
+            if busy && left > 0 {
+                app.script[i] = format!("engine-wait {}", left.saturating_sub(500));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(500)), move |_| Message::Script(i));
+            }
+            eprintln!(
+                "[engine] idle: indexed={} faces found={} heads found={} stopped={:?} device={:?}",
+                s.indexed_shots, s.faces.found, s.heads.found, s.stopped, s.device.name
+            );
+            Task::none()
+        }
+        "labels-wait" => {
+            // Poll until the viewer's labels have no box being matched.
+            let left: u64 = arg.parse().unwrap_or(30_000);
+            let matching = app.viewer.as_ref().and_then(|v| v.labels.labels.as_ref()).is_some_and(|l| l.pending == Some(crate::model::subjects::PendingWhy::Matching));
+            if matching && left > 0 {
+                app.script[i] = format!("labels-wait {}", left.saturating_sub(200));
+                return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
+            }
+            eprintln!("[labels] wait done: {}", super::viewer_labels::debug_state(app));
             Task::none()
         }
         "analyse-wait" => {

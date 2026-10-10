@@ -90,6 +90,8 @@ enum Cmd {
     /// `seq` with the first the index holds.
     Keyed { seq: u64, keys: Vec<Key> },
     Label(LabelEdit),
+    /// Match drawn boxes now (sent to itself after a label edit).
+    StartDrawn,
     /// Drawn boxes matched (or not) on the card, from their worker.
     Drawn(Box<DrawnDone>),
     /// A regroup finished on its worker (either kind; `kind` says).
@@ -1159,10 +1161,14 @@ impl Worker {
                         }
                     }
                     self.after_edit(r.map(|_| ()));
+                    // After what is queued (the page asking for the labels
+                    // again): starting the helper takes seconds, and the
+                    // box should show, pending, at once.
                     if draws {
-                        self.start_drawn();
+                        let _ = self.me.send(Cmd::StartDrawn);
                     }
                 }
+                Cmd::StartDrawn => self.start_drawn(),
                 Cmd::Drawn(done) => self.on_drawn(*done),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
                 Cmd::SetFindHeads(on) => {

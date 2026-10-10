@@ -1100,7 +1100,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 }
                 if let (Some(lp), Some(l)) = (&self.labels, st.live.clone()) {
                     let (s, off) = st.transform_at(&l, now);
-                    let over = label_hit(&l, s, off, lp, p);
+                    let over = label_hit(&l, s, off, lp, p, vp.width);
                     if over != st.label_hover {
                         st.label_hover = over;
                         shell.request_redraw();
@@ -1126,7 +1126,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                     let p = cursor.position().map(local).unwrap_or(p0);
                     if (p.x - p0.x).abs() < LABEL_CLICK && (p.y - p0.y).abs() < LABEL_CLICK {
                         let (s, off) = st.transform_at(&l, now);
-                        shell.publish((self.on)(StageEvent::LabelPick(label_hit(&l, s, off, lp, p0))));
+                        shell.publish((self.on)(StageEvent::LabelPick(label_hit(&l, s, off, lp, p0, vp.width))));
                     } else if let Some(b) = drawn_box(a, z) {
                         shell.publish((self.on)(StageEvent::LabelDraw(b)));
                     }
@@ -1510,22 +1510,23 @@ fn label_rect(l: &Live, s: f32, off: Vector, b: &[f32; 4]) -> Rectangle {
 }
 
 /// Where a box's tag sits: above its top-left corner, or just inside it
-/// when the box touches the top of the stage.
-fn tag_rect(bx: Rectangle, tag: &str, top: f32) -> Rectangle {
+/// when the box touches the top of the stage; pulled left when it would
+/// run off the stage's right edge (`top`, `right`: the stage's).
+fn tag_rect(bx: Rectangle, tag: &str, top: f32, right: f32) -> Rectangle {
     let w = (paint::text_width(tag, t::T_SMALL, paint::SEMIBOLD) + 2.0 * TAG_PAD).ceil();
     let y = if bx.y - TAG_H >= top { bx.y - TAG_H } else { bx.y };
-    rect(bx.x, y, w, TAG_H)
+    rect(bx.x.min(right - w), y, w, TAG_H)
 }
 
 /// The box under `p` (local): the smallest whose outline or tag holds it.
-fn label_hit(l: &Live, s: f32, off: Vector, lp: &LabelProps, p: Point) -> Option<usize> {
+fn label_hit(l: &Live, s: f32, off: Vector, lp: &LabelProps, p: Point, width: f32) -> Option<usize> {
     lp.boxes
         .iter()
         .enumerate()
         .filter_map(|(i, b)| {
             let r = label_rect(l, s, off, &b.bbox);
             let grown = rect(r.x - 3.0, r.y - 3.0, r.width + 6.0, r.height + 6.0);
-            (grown.contains(p) || tag_rect(r, &b.tag, 0.0).contains(p)).then_some((i, r.width * r.height))
+            (grown.contains(p) || tag_rect(r, &b.tag, 0.0, width).contains(p)).then_some((i, r.width * r.height))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
@@ -1586,7 +1587,7 @@ fn draw_labels(r: &mut Renderer, b: Rectangle, l: &Live, s: f32, off: Vector, lp
         } else {
             paint::framed(r, bx, 0.0, Color::TRANSPARENT, color, width);
         }
-        let tag = tag_rect(bx, &bx_def.tag, b.y);
+        let tag = tag_rect(bx, &bx_def.tag, b.y, b.x + b.width);
         if bx_def.named {
             paint::rounded(r, tag, 2.0, color);
             paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, t::alpha(t::ON_SIGNAL, if quiet { 0.7 } else { 1.0 }), HAlign::Left, b);

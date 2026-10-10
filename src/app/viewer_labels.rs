@@ -611,8 +611,10 @@ fn draft_row<'a>(all: &'a Subjects, ui: &'a LabelsUi) -> Element<'a, Message> {
 
 // ── the test driver ─────────────────────────────────────────────────────────
 
-/// The `n`th name offered under the field (the test driver's `take`).
-pub fn offered_at(app: &App, n: usize) -> Option<SubjectId> {
+/// What clicking the `n`th name offered under the field sends (the test
+/// driver's `take`): for a picked box the name; for a drawn one, the
+/// name into the field.
+pub fn offered_at(app: &App, n: usize) -> Option<LMsg> {
     let ui = &app.viewer.as_ref()?.labels;
     let kind = match (ui.draft, ui.picked_box()) {
         (Some(_), _) => ui.draft_kind,
@@ -620,7 +622,8 @@ pub fn offered_at(app: &App, n: usize) -> Option<SubjectId> {
         _ => return None,
     };
     let own = ui.picked_box().and_then(|b| b.subject.as_ref());
-    offered(&app.subjects.all, kind, &ui.name, own).get(n).map(|x| x.0.clone())
+    let (id, name) = offered(&app.subjects.all, kind, &ui.name, own).get(n).map(|x| (x.0.clone(), x.1.to_string()))?;
+    Some(if ui.draft.is_some() { LMsg::Name(name) } else { LMsg::Pick(id) })
 }
 
 /// The overlay's state, for the test driver's dumps.

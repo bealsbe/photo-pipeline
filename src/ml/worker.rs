@@ -1036,6 +1036,12 @@ mod tests {
         let known = FaceAsk::Known { files: vec![super::super::client::KnownFaces { path: PathBuf::from("/x/a.JPG"), faces: vec![super::super::client::FaceSpot { bbox: [0.1, 0.1, 0.2, 0.2], landmarks: [[0.15, 0.15]; 5], score: 0.95 }] }] };
         let req = Request::EmbedImages { id: 8, files: vec![(PathBuf::from("/x/a.JPG"), FileType::Jpg)], want: Want { search: false, faces: known } };
         assert_eq!(serde_json::from_str::<Request>(&serde_json::to_string(&req).unwrap()).unwrap(), req);
+        // Faces the user drew: boxes only, no landmarks.
+        let want = Want::drawn(vec![super::super::client::DrawnFaces { path: PathBuf::from("/x/a.JPG"), boxes: vec![[0.1, 0.1, 0.2, 0.2]] }]);
+        let req = Request::EmbedImages { id: 9, files: vec![(PathBuf::from("/x/a.JPG"), FileType::Jpg)], want };
+        let line = serde_json::to_string(&req).unwrap();
+        assert!(line.contains(r#""faces":"drawn""#), "{line}");
+        assert_eq!(serde_json::from_str::<Request>(&line).unwrap(), req);
     }
 
     #[test]
