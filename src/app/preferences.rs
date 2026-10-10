@@ -93,6 +93,8 @@ pub enum Control {
     ForgetPeople,
     /// *Find fursuit heads*.
     FindHeads,
+    /// *Show People and fursuits in the sidebar*.
+    RailSubjects,
     /// Look at the fursuit photos not looked at yet (the catch-up).
     FindHeadsNow,
     /// *Forget all…* (fursuits).
@@ -147,6 +149,7 @@ impl Control {
             Control::SmallestGroup(_) => "pref-smallest-5",
             Control::ForgetPeople => "pref-forget-people",
             Control::FindHeads => "pref-find-heads",
+            Control::RailSubjects => "pref-rail-subjects",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
             Control::Judge(JudgeChoice::Off) => "pref-judge-off",
@@ -662,6 +665,11 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
                 app.show_status("Finding fursuit heads is off. The heads found and the names you gave are kept.", 5000)
             }
         }
+        Control::RailSubjects => {
+            app.settings.rail_subjects = !app.settings.rail_subjects;
+            app.settings.save_in_background();
+            Task::none()
+        }
         Control::FindHeadsNow => {
             if !heads_catch_up(app) {
                 return Task::none();
@@ -893,6 +901,7 @@ fn controls(app: &App) -> Vec<Control> {
     if people_to_forget(app) {
         v.push(Control::ForgetPeople);
     }
+    v.push(Control::RailSubjects);
     v.push(Control::FindHeads);
     if heads_catch_up(app) {
         v.push(Control::FindHeadsNow);
@@ -1611,6 +1620,11 @@ fn people_section(app: &App) -> Element<'_, Message> {
                 "People found",
                 about(format!("{kept} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
                 forget,
+            ),
+            setting(
+                "Show People and fursuits in the sidebar",
+                about("Hides only the sidebar button. Ctrl+4 and View ▸ People and fursuits still open the page."),
+                switch(p, Control::RailSubjects, s.rail_subjects, true),
             ),
         ],
     );

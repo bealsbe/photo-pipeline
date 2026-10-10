@@ -105,6 +105,9 @@ pub struct Settings {
     /// photos the index tags as fursuits, after the search step.  With the
     /// processor chosen every scan asks first, whatever this says.
     pub find_heads: bool,
+    /// *Show People and fursuits in the sidebar* (on by default): off hides
+    /// the rail's button only; Ctrl+4 and the View menu still open the page.
+    pub rail_subjects: bool,
     /// *Close-call judge* (fursuit matching v2): off by default; a judge
     /// looks at the close calls *Find more* and the review would
     /// otherwise leave out, and offers those it judges the same fursuit.
@@ -170,6 +173,7 @@ impl Default for Settings {
             find_faces: true,
             face_model: crate::ml::models::FACE_MODEL_DEFAULT,
             find_heads: true,
+            rail_subjects: true,
             fursuit_judge: crate::ml::judge::JudgeChoice::Off,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
@@ -475,6 +479,20 @@ mod tests {
         assert!(old.find_heads);
         let off = serde_json::to_string(&Settings { find_heads: false, ..Settings::default() }).unwrap();
         assert!(!serde_json::from_str::<Settings>(&off).unwrap().find_heads);
+    }
+
+    /// The rail shows People and fursuits unless asked not to; a file from
+    /// before the option keeps it.
+    #[test]
+    fn the_rail_shows_people_and_fursuits_by_default() {
+        assert!(Settings::default().rail_subjects);
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).unwrap();
+        assert!(old.rail_subjects);
+        let off = serde_json::to_string(&Settings { rail_subjects: false, ..Settings::default() }).unwrap();
+        assert!(off.contains(r#""rail_subjects":false"#), "{off}");
+        assert!(!serde_json::from_str::<Settings>(&off).unwrap().rail_subjects);
+        let on = serde_json::to_string(&Settings::default()).unwrap();
+        assert!(serde_json::from_str::<Settings>(&on).unwrap().rail_subjects);
     }
 
     #[test]

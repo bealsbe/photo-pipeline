@@ -303,7 +303,8 @@ gathers the settings on one page: advance after marking, whether All and
 Marked show pruned photos (the filter bar's old *Show pruned*), file names
 and thumbnail size, the viewer's filmstrip, remembered size and whether a
 burst shows all its frames first, the library and
-edit-copy folders, search (see "Library search" below), and whether to use
+edit-copy folders, search (see "Library search" below), people and fursuits
+(including whether the side rail shows their button), and whether to use
 the KDE global menu (a change there takes effect at the next start;
 `PP_NO_GLOBAL_MENU=1` still forces the in-window menus).  Changes apply at
 once and are saved; the menus and the viewer's toggles stay in step with
@@ -468,15 +469,17 @@ computer; nothing about your photos is sent anywhere.  The plan behind it is
   the recent searches.  **Preferences ▸ People:** *Find people's faces*
   (on by default; turning it off asks whether to keep or forget the faces
   already found), *Face model* with *Change…*, *Smallest group to show*
-  (3, 5 or 10 photos) and *Forget all…*.
+  (3, 5 or 10 photos), *Forget all…*, and *Show People and fursuits in the
+  sidebar* (on by default; off hides only the rail's button, and Ctrl+4 and
+  the View menu still open the page).
 - **Pointed out quietly:** only the rail, the View menu, Ctrl+F and the page
   explaining itself.
 
 ### People
 
 **People and fursuits** (Ctrl+4, on the side rail under Search, or in
-the View menu) is where the faces found while indexing are grouped, so you
-can name the people you want to find, and where fursuit heads are grouped
+the View menu; Preferences ▸ People can hide its rail button) is where the
+faces found while indexing are grouped, so you can name the people you want to find, and where fursuit heads are grouped
 the same way (*Fursuits*, below).  Its header has *People | Fursuits*.
 Pets are on hold: there is no Pets tab, and a saved choice of it opens
 People (the model keeps the kind, so a tab can return).  A tab shows one kind only, so a
