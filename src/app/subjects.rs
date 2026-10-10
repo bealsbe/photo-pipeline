@@ -1680,7 +1680,7 @@ pub fn debug_state(app: &App) -> String {
     let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", people::short(&g.id), g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
     let kinds: HashSet<Kind> = a.named.iter().chain(&a.to_name).chain(&a.small).chain(&a.hidden).map(|g| g.kind).collect();
     format!(
-        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
+        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} to_name_n={} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
         app.view,
         s.page(),
         s.tab,
@@ -1691,6 +1691,7 @@ pub fn debug_state(app: &App) -> String {
         },
         names(&a.named),
         names(&a.to_name).into_iter().take(8).collect::<Vec<_>>(),
+        a.to_name.len(),
         a.small.len(),
         names(&a.hidden),
         s.picked.iter().map(people::short).collect::<Vec<_>>(),

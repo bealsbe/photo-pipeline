@@ -112,6 +112,10 @@ pub struct Settings {
     /// looks at the close calls *Find more* and the review would
     /// otherwise leave out, and offers those it judges the same fursuit.
     pub fursuit_judge: crate::ml::judge::JudgeChoice,
+    /// *Grouping* (Preferences ▸ Fursuits): how tight the automatic
+    /// fursuit groups are.  Balanced by default; a settings file from
+    /// before the choice loads as Balanced.
+    pub fursuit_grouping: crate::search::heads::Grouping,
     /// *Smallest group to show*: clusters with fewer photos fold under
     /// *Smaller groups* (3, 5 or 10; §10 says 5).
     pub people_min_photos: usize,
@@ -175,6 +179,7 @@ impl Default for Settings {
             find_heads: true,
             rail_subjects: true,
             fursuit_judge: crate::ml::judge::JudgeChoice::Off,
+            fursuit_grouping: crate::search::heads::Grouping::Balanced,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
         }
     }
@@ -366,6 +371,19 @@ fn unquote(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Fursuit grouping: Balanced by default, and a settings file from
+    /// before the choice loads as Balanced; a saved choice comes back.
+    #[test]
+    fn fursuit_grouping_defaults_to_balanced_and_old_files_load() {
+        assert_eq!(Settings::default().fursuit_grouping, crate::search::heads::Grouping::Balanced);
+        let old: Settings = serde_json::from_str(r#"{"find_heads": true, "fursuit_judge": "off"}"#).unwrap();
+        assert_eq!(old.fursuit_grouping, crate::search::heads::Grouping::Balanced);
+        let mut s = Settings::default();
+        s.fursuit_grouping = crate::search::heads::Grouping::Looser;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.fursuit_grouping, crate::search::heads::Grouping::Looser);
+    }
 
     #[test]
     fn defaults_cover_every_preference() {

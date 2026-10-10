@@ -3230,3 +3230,85 @@ as different suits; the heads marked bad.  Groups of 5+ photos.
   undone; *Split into a new group* and undo; the largest group's heads
   least alike first; "Check this group" farthest first.  `PP_PROFILE=1`:
   no slow update but the driver's.
+
+## As built — a choice of fursuit grouping (2026-10-10)
+
+The user: "I think we are a bit too tight with the thresholds. I see the
+same suiters in a bunch of smaller groups."  Preferences ▸ Fursuits ▸
+*Grouping*: Tighter / Balanced / Looser, Balanced by default (a settings
+file from before loads as Balanced).
+
+### The sweep (the research's 10 826 heads, the user's 978 labelled pairs)
+
+Groups of 5+ photos; "two heads, 1 photo": groups holding two
+non-overlapping heads of one photo (two suits for sure); "small": heads in
+groups under 5 photos (folded away).
+
+| Raw cut | Same together (of 421) | Different together (of 557) | Two heads, 1 photo | Small |
+|---|---|---|---|---|
+| 0.094 (Tighter) | 187 | 7 | 8 | 31.2 % |
+| 0.104 | 213 | 4 | 19 | 26.6 % |
+| **0.110 (Balanced)** | 238 | 6 | 23 | 24.2 % |
+| **0.115 (Looser)** | 242 | 10 | 28 | 21.6 % |
+| 0.120 | 246 | 15 | 29 | 19.7 % |
+
+| Whitened cut | Same together (of 421) | Different together (of 557) | Two heads, 1 photo | Small |
+|---|---|---|---|---|
+| 0.69 (Tighter) | 185 | 5 | 25 | 15.9 % |
+| **0.72 (Balanced)** | 213 | 12 | 36 | 12.5 % |
+| **0.75 (Looser)** | 233 | 11 | 44 | 8.3 % |
+| 0.78 | 227 | 19 | 55 | 4.2 % |
+
+The curves aren't smooth (the grouping depends on order; the labelled
+sample is small).  Past 0.115 raw and 0.76 whitened, mixing climbs with no
+more same pairs.
+
+### The cut-offs per choice (`heads::GroupingCuts::of`)
+
+The merge suggestions' cut stays above the group cut by the margin it had
+(raw +0.003, whitened +0.02), and the judge's far end moves with the
+group cut (raw +0.030, whitened +0.096); measured per choice on the labels
+(split group pairs between groups of 5+ photos found by distance alone,
+with the labelled same / different group pairs among the offered):
+
+| Choice | Space | Group | Merge suggest | Found by distance (precision) | Judge far end | Found up to it (precision before the judge) |
+|---|---|---|---|---|---|---|
+| Tighter | raw | 0.094 | 0.097 | 39 of 91 (39 / 3) | 0.124 | 72 of 91 (72 / 36) |
+| Balanced | raw | 0.110 | 0.113 | 34 of 62 (34 / 6) | 0.140 | 51 of 62 (51 / 86) |
+| Looser | raw | 0.115 | 0.118 | 31 of 59 (31 / 10) | 0.145 | 48 of 59 (48 / 110) |
+| Tighter | whitened | 0.69 | 0.711 | 46 of 103 (46 / 2) | 0.786 | 73 of 103 (73 / 14) |
+| Balanced | whitened | 0.72 | 0.74 | 35 of 103 (35 / 0) | 0.816 | 73 of 103 (73 / 17) |
+| Looser | whitened | 0.75 | 0.77 | 31 of 70 (31 / 4) | 0.846 | 46 of 70 (46 / 29) |
+
+Fewer split group pairs remain to find as the grouping loosens (it
+joined them).  The judge's band grows looser too (raw Balanced: 2 348
+pairs of groups up to its far end, against 1 125 for Tighter): with a
+judge on, more to compare, a hundred pairs a request.  Unchanged: the
+review's and *Find more*'s per-head cut-offs, and the judge's sure-yes.
+
+### As built
+
+- `heads::Grouping` (saved by name) and `GroupingCuts`; `HeadStore`'s
+  group cut follows the choice; `Fursuits::{set_grouping, cuts}`;
+  `Engine::set_fursuit_grouping` regroups on the worker,
+  `HeadsStatus.{grouping, regrouping}`.  **The cut-offs in force**:
+  `Status.heads.cuts()` (a `GroupingCuts`: choice, space, group, merge
+  suggest, merge sure, merge far end), for the decision record.
+- Preferences ▸ Fursuits ▸ *Grouping*, a choice list in plain words, and
+  a calm line (there and on the tab's caption) while the groups are made
+  again.  Names, answers, "not the same" and labels point at heads and
+  stay.
+- The stand-in: Tighter splits more suits, Looser none.
+
+### Checked
+
+- Tests: the cuts per choice and space and their order; Balanced by
+  default; an old settings file loads as Balanced, a saved choice comes
+  back; through the engine, Tighter → Balanced joins two heads 0.70
+  apart and back, the name staying.  The tests written for the old cuts
+  pin Tighter.
+- Stand-in: groups to name (and smaller) Balanced 13 (2), Tighter 13 (3),
+  Looser 9 (1).
+- Real night-day library (455 heads, raw, under the card lock): groups
+  to name (and smaller groups) Tighter 18 (186), Balanced 22 (144),
+  Looser 24 (132).
