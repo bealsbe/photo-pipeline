@@ -388,6 +388,27 @@ impl FakePeople {
         self.groups.iter().filter(|g| g.name.is_some()).count()
     }
 
+    /// The group holding a face (by its photo), if any.
+    pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
+        self.groups.iter().find(|g| g.members.contains(&f.key)).map(|g| g.id.clone())
+    }
+
+    /// A group's faces farthest from the rest first: those of another
+    /// person than the group's look first, then the rest by clarity.
+    pub fn far_order(&self, id: &GroupId) -> Option<Vec<(FaceRef, f32)>> {
+        let g = self.group(id)?;
+        let mut v: Vec<(FaceRef, f32)> = self
+            .faces(id)
+            .into_iter()
+            .map(|f| {
+                let other = self.by_key.get(&f.face.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)) != Some(g.person);
+                (f.face, if other { 0.8 } else { 0.3 } + 0.1 * (1.0 - f.clarity))
+            })
+            .collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        Some(v)
+    }
+
     /// A group's faces, clearest first.
     pub fn faces(&self, id: &GroupId) -> Vec<Face> {
         let Some(g) = self.group(id) else { return Vec::new() };

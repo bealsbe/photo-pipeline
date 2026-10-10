@@ -805,6 +805,42 @@ impl People {
         }
     }
 
+    /// A person's group's faces farthest from the group first (the two
+    /// groups side by side order both kinds so), without the faces the
+    /// viewer's labels keep out.  `None` for anything but a person's group.
+    pub fn far_order(&self, id: &GroupId) -> Option<Vec<(FaceRef, f32)>> {
+        let (kind, members) = self.members(id).ok()?;
+        if kind != Kind::Person {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let out = step::Exclusion::new(&self.file, Kind::Person);
+        let refs = store.refs();
+        let by_ref: HashMap<FaceRef, usize> = refs.iter().enumerate().map(|(i, r)| (*r, i)).collect();
+        let rows: Vec<usize> = members.iter().filter(|f| !out.excludes(store, f)).filter_map(|f| by_ref.get(f).copied()).collect();
+        Some(crate::search::splitting::far_order(&store.rows(), &rows).into_iter().map(|(r, d)| (refs[r], d)).collect())
+    }
+
+    /// The group of `kind` holding a face or head now: the subject it is
+    /// confirmed to, else the automatic group it sits in.  (A move into an
+    /// automatic group makes a subject of it, with a new id: the two groups
+    /// side by side follow their heads.)
+    pub fn group_of(&self, kind: Kind, f: &FaceRef) -> Option<GroupId> {
+        if let Some(s) = self.file.member_of(kind, f) {
+            return Some(GroupId::Subject(s.id.clone()));
+        }
+        if let Some((id, _)) = self.other_clusters.iter().find(|(_, (k, m))| *k == kind && m.contains(f)) {
+            return Some(GroupId::Cluster(*id));
+        }
+        if kind != Kind::Person {
+            return None;
+        }
+        let store = self.store.as_ref()?;
+        let row = store.refs().iter().position(|r| r == f)?;
+        let i = self.grouped.clusters.iter().position(|c| c.members.contains(&row))?;
+        self.grouped.ids.get(i).map(|&c| GroupId::Cluster(c))
+    }
+
     /// Name a group: a subject is renamed; a cluster becomes a subject
     /// with the cluster's faces as its members.
     pub fn name_group(&mut self, id: &GroupId, name: String) -> Result<SubjectId, Refused> {
@@ -1639,6 +1675,38 @@ mod tests {
         assert_eq!(p.file.not_same.len(), 1, "people's forget leaves the fursuits' answers");
         p.forget_kind(Kind::Fursuit);
         assert!(p.file.not_same.is_empty());
+    }
+
+    /// Two groups side by side: a person's faces come least like the rest
+    /// first (never another kind's group); and after a move into an
+    /// automatic group (which makes a subject of it, a new id) the group
+    /// holding a face is found again, of its own kind only.
+    #[test]
+    fn faces_far_first_and_a_moved_face_is_found_again() {
+        let d = std::env::temp_dir().join(format!("pp-people-pair-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let mut p = People::load(None);
+        let mut store = FaceStore::load(&d, ModelId::AuraFace);
+        for (n, v) in [(1u8, [1.0f32, 0.0]), (2, [0.99, 0.14]), (3, [0.98, -0.2]), (4, [0.0, 1.0])] {
+            store.add(Key([n; 16]), &[found(0.1, 80.0, &v)]).unwrap();
+        }
+        p.store = Some(store);
+        let f = |n: u8| p.store.as_ref().unwrap().faces_of(&Key([n; 16]))[0].face_ref(Key([n; 16]));
+        let (f1, f2, f3, f4) = (f(1), f(2), f(3), f(4));
+        let sid = GroupId::Subject(p.file.create(Kind::Person, None, vec![f1, f2, f3, f4]));
+        let far = p.far_order(&sid).unwrap();
+        assert_eq!(far[0].0, f4, "the stray first: {far:?}");
+        let suit = GroupId::Subject(p.file.create(Kind::Fursuit, None, vec![FaceRef::new(Key([9; 16]), [0.1, 0.1, 0.2, 0.2])]));
+        assert!(p.far_order(&suit).is_none(), "a fursuit's group is not a person's");
+        // A cluster published for fursuits never answers for a person.
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])])]);
+        assert_eq!(p.group_of(Kind::Fursuit, &FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])), Some(GroupId::Cluster(7)));
+        assert_eq!(p.group_of(Kind::Person, &FaceRef::new(Key([8; 16]), [0.1, 0.1, 0.2, 0.2])), None);
+        // Moved into a new group: found there.
+        let to = p.move_faces(&sid, vec![f4], None).unwrap();
+        assert_eq!(p.group_of(Kind::Person, &f4), Some(GroupId::Subject(to)));
+        assert_eq!(p.group_of(Kind::Person, &f1), Some(sid));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -107,6 +107,7 @@ enum Cmd {
     // Fursuit merging, stage 2.
     MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
     GroupCheck { seq: u64, group: GroupId },
+    Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef> },
     // Fursuit matching v2.
     CatchUpHeadVectors,
@@ -579,6 +580,13 @@ impl Engine {
     /// Suggestions only: nothing is merged.
     pub fn merge_suggestions(&self, seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool) {
         self.send(Cmd::MergeSuggestions { seq, focus, min_photos, judge });
+    }
+
+    /// Which group of `kind` holds each of `heads` now
+    /// (`BgEvent::Located`): the two groups side by side follow their
+    /// heads when a move gives a group a new id.
+    pub fn locate(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
+        self.send(Cmd::Locate { seq, kind, heads });
     }
 
     /// A fursuit group's split check (stage 3): `BgEvent::GroupCheck`
@@ -1230,9 +1238,18 @@ impl Worker {
                 Cmd::Drawn(done) => self.on_drawn(*done),
                 Cmd::FindMore { seq, group } => self.send_suggestions(seq, group, true),
                 Cmd::MergeSuggestions { seq, focus, min_photos, judge } => self.send_merge_suggestions(seq, focus, min_photos, judge),
+                Cmd::Locate { seq, kind, heads } => {
+                    let groups: Vec<Option<GroupId>> = heads.iter().map(|h| self.people.group_of(kind, h)).collect();
+                    let _ = self.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
+                }
                 Cmd::GroupCheck { seq, group } => {
                     self.fursuits.step();
-                    let (far, pairs, split) = self.fursuits.check(&self.people.file, &group).unwrap_or_default();
+                    // A person's group: its faces farthest first (the two
+                    // groups side by side), no photo pairs or proposal.
+                    let (far, pairs, split) = match self.fursuits.check(&self.people.file, &group) {
+                        Some(c) => c,
+                        None => (self.people.far_order(&group).unwrap_or_default(), Vec::new(), None),
+                    };
                     let _ = self.bus.unbounded_send(BgEvent::GroupCheck { seq, group, far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
                 }
                 Cmd::NotSame { a, b, a_heads, b_heads } => {
@@ -4301,7 +4318,17 @@ mod tests {
         };
         let b_ref = FaceRef::new(key_of(2), [0.3, 0.2, 0.3, 0.4]);
         e.move_faces(suit.clone(), vec![b_ref], None);
-        let groups = fursuit_groups(&e, 3);
+        // Three groups, B's of its own: a listing from before the move
+        // landed can hold three groups too, so wait for B's.
+        let started = Instant::now();
+        let groups = loop {
+            let g = fursuit_groups(&e, 3);
+            if [2, 3].iter().all(|&n| g.iter().any(|x| x.1 == key_of(n))) {
+                break g;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{g:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        };
         let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
         let k = |x: &GroupId, y: &GroupId| super::super::merging::order(x.clone(), y.clone());
         e.set_judge(JudgeChoice::Gemma4);
