@@ -885,7 +885,7 @@ mod tests {
         use crate::app::people::{Face, FaceRef, Group, Subjects};
         let day = NaiveDate::from_ymd_opt(2024, 6, 8).unwrap();
         let cover = Face { face: FaceRef::new(crate::search::index::Key([1; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
-        let g = |id, kind, name: Option<&str>, hidden, photos| Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden, photos, days: 1, cover: cover.clone(), suggestions: 0 };
+        let g = |id, kind, name: Option<&str>, hidden, photos| Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden, photos, bursts: photos, days: 1, cover: cover.clone(), suggestions: 0 };
         let all = Subjects {
             generation: 1,
             groups: vec![g(1, SKind::Person, Some("B"), false, 3), g(2, SKind::Person, Some("A"), false, 30), g(3, SKind::Person, None, false, 90), g(4, SKind::Person, Some("H"), true, 9), g(5, SKind::Fursuit, Some("F"), false, 9)],

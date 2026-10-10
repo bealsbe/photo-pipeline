@@ -188,8 +188,14 @@ fn split_suit(suit: usize) -> bool {
 
 /// Which of its suit's groups a head falls in: 1 for about a third of the
 /// presses of a split suit, else 0.
-fn part_of(s: &Shot, suit: usize) -> u8 {
-    (split_suit(suit) && unit(&(press_seed(s), "part")) < 0.35) as u8
+fn part_of(s: &Shot, suit: usize, grouping: Grouping) -> u8 {
+    // Tighter splits more suits, more often; Looser joins the parts.
+    let (share, any) = match grouping {
+        Grouping::Tighter => (0.45, suit % 2 == 1),
+        Grouping::Balanced => (0.35, false),
+        Grouping::Looser => (0.0, false),
+    };
+    ((split_suit(suit) || any) && unit(&(press_seed(s), "part")) < share) as u8
 }
 
 fn placed(face: &FaceRef, suit: usize) -> Placed {
@@ -245,6 +251,8 @@ pub struct FakeFursuits {
     pub judge_on: bool,
     /// Nothing is sure: every candidate is a close call (`judge-nosure`).
     pub no_sure: bool,
+    /// Preferences ▸ Fursuits ▸ *Grouping*: how often a suit is split.
+    pub grouping: Grouping,
     /// Made-up groups of their own beside the suits (`fursuits-many n`),
     /// for a tab of many tiles: covers only, not backed by photos.
     pub many: usize,
@@ -294,7 +302,8 @@ impl FakeFursuits {
 
     /// The scanned heads with the group part each falls in.
     fn heads_parted(&self) -> impl Iterator<Item = (usize, u8, FaceRef)> + '_ {
-        self.tagged[..self.scanned].iter().flat_map(|&i| {
+        let grouping = self.grouping;
+        self.tagged[..self.scanned].iter().flat_map(move |&i| {
             let s = &self.shots[i];
             let heads = heads_of(s);
             // A crowded press now and then: the second suit's head lands in
@@ -303,9 +312,17 @@ impl FakeFursuits {
             let main = heads[0].0;
             heads.into_iter().enumerate().map(move |(k, (suit, f))| {
                 let grouped = if crowded && k > 0 { main } else { suit };
-                (grouped, part_of(s, grouped), f)
+                (grouped, part_of(s, grouped, grouping), f)
             })
         })
+    }
+
+    /// The grouping choice changed: group afresh (names and answers stay).
+    pub fn regroup_now(&mut self) {
+        // The automatic groups start over; the named and those the user
+        // made keep their heads.
+        self.groups.retain(|g| g.name.is_some() || is_made(&g.id));
+        self.regroup();
     }
 
     fn regroup(&mut self) {
@@ -382,7 +399,7 @@ impl FakeFursuits {
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
             let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
-            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), days: days.len(), cover, suggestions });
+            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
         }
         out.extend((0..self.many).map(many_group));
         out
@@ -895,7 +912,7 @@ fn many_group(i: usize) -> Group {
         clarity: 0.9,
         confirmed: false,
     };
-    Group { id: GroupId::Cluster(ID_BASE + 2_000_000_000 + i as u64), kind: Kind::Fursuit, name: None, hidden: false, photos: 400usize.saturating_sub(i / 3).max(5), days: 1, cover, suggestions: 0 }
+    Group { id: GroupId::Cluster(ID_BASE + 2_000_000_000 + i as u64), kind: Kind::Fursuit, name: None, hidden: false, photos: 400usize.saturating_sub(i / 3).max(5), bursts: 400usize.saturating_sub(i / 3).max(5) / 3, days: 1, cover, suggestions: 0 }
 }
 
 /// Clusters the user made by moving heads out: their own id range.

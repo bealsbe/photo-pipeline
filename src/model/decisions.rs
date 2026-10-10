@@ -7,7 +7,7 @@
 //! - **User data, not cache.**  `~/.local/share/photo-pipeline/
 //!   decisions.jsonl`, beside `subjects.json`: *Clear* and *Rebuild* keep
 //!   it; *Forget all* of a kind takes that kind's entries out; Preferences
-//!   ▸ Fursuits deletes it on request.  Readable by the user alone (0600
+//!   ▸ Storage deletes it on request.  Readable by the user alone (0600
 //!   in a 0700 folder).  Nothing here is ever written into photos,
 //!   sidecars or the repository.
 //! - **Each entry stands alone** ([`Entry`]): the heads involved as
@@ -112,6 +112,14 @@ pub fn heads(faces: impl IntoIterator<Item = FaceRef>) -> Vec<Head> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Side {
     pub n: usize,
+    /// Its photos, bursts (a photo on its own counting as one) and days,
+    /// as the tab showed the group, when it was on the tab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub photos: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bursts: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub days: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,7 +135,15 @@ impl Side {
     pub fn new(n: usize, name: Option<String>, sid: Option<String>, clearest: impl IntoIterator<Item = FaceRef>) -> Side {
         let mut seen = HashSet::new();
         let heads = clearest.into_iter().filter(|f| seen.insert(*f)).take(SIDE_HEADS).map(Head).collect();
-        Side { n, name, sid, d: None, heads }
+        Side { n, name, sid, d: None, heads, ..Side::default() }
+    }
+
+    /// With the counts the tab showed for the group.
+    pub fn counted(self, group: Option<&super::subjects::Group>) -> Side {
+        match group {
+            Some(g) => Side { photos: Some(g.photos), bursts: Some(g.bursts), days: Some(g.days), ..self },
+            None => self,
+        }
     }
 }
 
@@ -337,15 +353,26 @@ impl How {
 /// The cut-offs in force (cosine distances in [`Lib`]'s space).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct Cuts {
+    /// The automatic groups' cut (for fursuits, the grouping choice's).
     pub group: f32,
+    /// A head offered for a subject in the review, and *Find more*'s.
     pub suggest: f32,
     pub strict: f32,
-    /// The judge's band (fursuits): offered at once under `sure_yes`,
-    /// asked of the judge up to `sure_no`.
+    /// The review's judge band (fursuits): offered at once under
+    /// `sure_yes`, asked of the judge up to `sure_no`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sure_yes: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sure_no: Option<f32>,
+    /// Pairs of groups ("Possibly the same fursuit"), by the grouping
+    /// choice: offered by distance under `merge_suggest`; with the judge,
+    /// offered at once under `merge_sure` and compared up to `merge_far`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_suggest: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_sure: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_far: Option<f32>,
 }
 
 /// The library's state when the decision was made.
@@ -357,6 +384,10 @@ pub struct Lib {
     pub white: bool,
     /// The vectors' model folder (`siglip2-b16-256`, `auraface-v1`, …).
     pub model: String,
+    /// Preferences ▸ Fursuits ▸ *Grouping* in force (`tighter`,
+    /// `balanced`, `looser`); fursuits only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grouping: Option<crate::search::heads::Grouping>,
     pub cuts: Cuts,
 }
 
@@ -636,12 +667,97 @@ fn export(path: &Path, into: &Path) -> io::Result<(PathBuf, usize)> {
         }
     }
     private_dir(&dir);
+    let (entries, _) = parse(&String::from_utf8_lossy(&bytes));
+    let text: String = without_names(entries.clone()).iter().map(Entry::line).collect();
     let copy = dir.join(FILE_NAME);
-    crate::ops::fsutil::atomic_write(&copy, &bytes, false)?;
+    crate::ops::fsutil::atomic_write(&copy, text.as_bytes(), false)?;
     private_file(&copy);
     crate::ops::fsutil::atomic_write(&dir.join("README.md"), README.as_bytes(), false)?;
-    let entries = bytes.split(|&b| b == b'\n').filter(|l| !l.is_empty()).count();
-    Ok((dir, entries))
+    Ok((dir, entries.len()))
+}
+
+/// The entries with every name and subject id replaced by a stable code
+/// (`fursuit-12`, `person-7`): one code per subject throughout, whether
+/// an entry names it by id, by name or both.  An export carries no names
+/// (the user's choice); the record on this computer keeps them.
+pub fn without_names(mut entries: Vec<Entry>) -> Vec<Entry> {
+    #[derive(Default)]
+    struct Codes {
+        by_sid: HashMap<String, String>,
+        by_name: HashMap<(Kind, String), String>,
+        next: HashMap<Kind, usize>,
+    }
+    impl Codes {
+        fn fresh(&mut self, kind: Kind) -> String {
+            let n = self.next.entry(kind).or_insert(0);
+            *n += 1;
+            format!("{}-{n}", kind.noun().replace(' ', "-"))
+        }
+        /// The code of a subject known by `sid`, `name` or both.
+        fn code(&mut self, kind: Kind, sid: Option<&str>, name: Option<&str>) -> Option<String> {
+            let name_key = name.map(|n| (kind, n.to_lowercase()));
+            let known = sid.and_then(|s| self.by_sid.get(s)).or_else(|| name_key.as_ref().and_then(|k| self.by_name.get(k))).cloned();
+            if sid.is_none() && name.is_none() {
+                return None;
+            }
+            let code = known.unwrap_or_else(|| self.fresh(kind));
+            if let Some(s) = sid {
+                self.by_sid.insert(s.to_string(), code.clone());
+            }
+            if let Some(k) = name_key {
+                self.by_name.insert(k, code.clone());
+            }
+            Some(code)
+        }
+        fn side(&mut self, kind: Kind, side: &mut Side) {
+            let code = self.code(kind, side.sid.as_deref(), side.name.as_deref());
+            side.name = code.clone();
+            side.sid = code;
+        }
+        fn name(&mut self, kind: Kind, name: &mut Option<String>) {
+            if let Some(n) = name.take() {
+                *name = self.code(kind, None, Some(&n));
+            }
+        }
+    }
+    let mut c = Codes::default();
+    for e in &mut entries {
+        let k = e.kind;
+        match &mut e.act {
+            Act::Merge { groups } | Act::NotSame { groups } => groups.iter_mut().for_each(|g| c.side(k, g)),
+            Act::Split { from, .. } => c.side(k, from),
+            Act::Move { from, to, .. } => {
+                c.side(k, from);
+                c.side(k, to);
+            }
+            Act::Answer { group, .. } => c.side(k, group),
+            Act::Name { name, group, from, .. } => {
+                // A head named into a subject: its name and the subject's
+                // are one, so they share the code.
+                if let Some(g) = group {
+                    if g.name.is_none() {
+                        g.name = name.clone();
+                    }
+                    c.side(k, g);
+                    if name.is_some() {
+                        *name = g.name.clone();
+                    }
+                } else {
+                    c.name(k, name);
+                }
+                if let Some(f) = from {
+                    c.side(k, f);
+                }
+            }
+            Act::KindChange { to, name, .. } => {
+                let to = *to;
+                c.name(to, name);
+            }
+            Act::Draw { name, .. } => c.name(k, name),
+            Act::Remove { .. } | Act::Undo { .. } => {}
+        }
+    }
+    entries
 }
 
 enum Job {
@@ -661,9 +777,10 @@ pub struct Recorder {
     on: Arc<AtomicBool>,
     path: Option<PathBuf>,
     memory: Arc<Mutex<Vec<String>>>,
-    /// What each entry recorded this session was (its act), so an undo
-    /// can say what it took back without reading the file.
-    acts: Arc<Mutex<HashMap<String, &'static str>>>,
+    /// The entries recorded this session and still in the record: what
+    /// each was (its act) and the kinds it is about, so an undo can say
+    /// what it took back, and is written even while off.
+    acts: Arc<Mutex<HashMap<String, (&'static str, Kind, Option<Kind>)>>>,
 }
 
 impl Recorder {
@@ -699,28 +816,42 @@ impl Recorder {
         if !self.is_on() {
             return None;
         }
+        self.append_entry(entry)
+    }
+
+    fn append_entry(&self, entry: Entry) -> Option<String> {
         let id = entry.id.clone();
-        let act = entry.act.name();
+        let to = match &entry.act {
+            Act::KindChange { to, .. } => Some(*to),
+            _ => None,
+        };
+        let about = (entry.act.name(), entry.kind, to);
         self.tx.send(Job::Append(entry.line())).ok()?;
-        self.acts.lock().insert(id.clone(), act);
+        self.acts.lock().insert(id.clone(), about);
         Some(id)
     }
 
     /// An undo of the entry `undone` (its id and kind), naming it and
-    /// what it was; nothing while off.  Returns the undo's own id.
+    /// what it was.  Written even while off when that entry is in the
+    /// record (the user's choice: the record never shows a correction
+    /// that was taken back as still in force); an entry the record
+    /// doesn't hold (made while off, forgotten, deleted) gets none.
+    /// Returns the undo's own id.
     pub fn record_undo(&self, undone: (String, Kind)) -> Option<String> {
         let (id, kind) = undone;
-        let of = self.acts.lock().get(&id).copied().unwrap_or("unknown");
-        self.record(Entry::new(kind, Act::Undo { undoes: id, of: of.to_string() }, None, None))
+        let of = self.acts.lock().get(&id).map(|a| a.0)?;
+        self.append_entry(Entry::new(kind, Act::Undo { undoes: id, of: of.to_string() }, None, None))
     }
 
     /// *Forget all* of a kind: its entries leave the record.
     pub fn forget_kind(&self, kind: Kind) {
+        self.acts.lock().retain(|_, (_, k, to)| *k != kind && *to != Some(kind));
         let _ = self.tx.send(Job::ForgetKind(kind));
     }
 
     /// *Delete the record…*: the file goes.
     pub fn delete_all(&self) {
+        self.acts.lock().clear();
         let _ = self.tx.send(Job::DeleteAll);
     }
 
@@ -842,8 +973,13 @@ pub const README: &str = r#"# Photo Pipeline: a record of grouping corrections
 
 `decisions.jsonl` holds the corrections made by hand to the People and
 Fursuits groups in Photo Pipeline, one JSON object a line, oldest first.
-It is the user's own data: it names people and fursuits as the user named
-them, and points at photos by content key.  Keep it private.
+It is the user's own data and points at photos by content key.  Keep it
+private.
+
+**No names.**  In this export every name and subject id is replaced by a
+code, `person-7` or `fursuit-12`: the same code for the same person or
+fursuit throughout the file, whether an entry named it or gave its id.
+The record on the user's computer keeps the names.
 
 ## Reading it
 
@@ -855,9 +991,10 @@ them, and points at photos by content key.  Keep it private.
   digits: MD5 of the file size, as 8 little-endian bytes, then its first
   64 KB) and the box in thousandths of the oriented embedded preview.
 - Groups are recorded by their heads, never by group numbers.  A group
-  (`Side`) is `{"n": heads in it, "name", "sid" (the subject id in
-  subjects.json), "d" (average-linkage cosine distance to the entry's
-  first group, in `lib`'s space), "heads": its clearest heads, at most 16}`.
+  (`Side`) is `{"n": heads in it, "photos", "bursts", "days" (as the tab
+  counted the group), "name", "sid" (the subject id in subjects.json), "d"
+  (average-linkage cosine distance to the entry's first group, in `lib`'s
+  space), "heads": its clearest heads, at most 16}`.
 
 ## Every entry
 
@@ -870,7 +1007,7 @@ them, and points at photos by content key.  Keep it private.
 | `kind` | `person` or `fursuit`.  Kinds never mix. |
 | `act` | What was decided (below). |
 | `how` | How it was reached (below).  Absent on `undo`. |
-| `lib` | `{"heads": with vectors, "white": whitened, "model": the vectors' model, "cuts": {"group", "suggest", "strict", "sure_yes", "sure_no"}}`: the cut-offs in force. |
+| `lib` | `{"heads": with vectors, "white": whitened, "model": the vectors' model, "grouping": "tighter" / "balanced" / "looser" (fursuits), "cuts": {"group", "suggest", "strict", "sure_yes", "sure_no", "merge_suggest", "merge_sure", "merge_far"}}`: the setting and cut-offs in force. |
 
 ## Acts
 
@@ -918,7 +1055,14 @@ mod tests {
     }
 
     fn lib() -> Lib {
-        Lib { heads: 9000, white: true, model: "siglip2-b16-256".into(), cuts: Cuts { group: 0.69, suggest: 0.711, strict: 0.671, sure_yes: Some(0.639), sure_no: Some(0.786) } }
+        let g = crate::search::heads::GroupingCuts::of(crate::search::heads::Grouping::Balanced, true);
+        Lib {
+            heads: 9000,
+            white: true,
+            model: "siglip2-b16-256".into(),
+            grouping: Some(g.grouping),
+            cuts: Cuts { group: g.group, suggest: 0.711, strict: 0.671, sure_yes: Some(0.639), sure_no: Some(0.786), merge_suggest: Some(g.merge_suggest), merge_sure: Some(g.merge_sure), merge_far: Some(g.merge_far) },
+        }
     }
 
     fn tmp(name: &str) -> PathBuf {
@@ -1063,7 +1207,7 @@ mod tests {
         fs::create_dir_all(&out).unwrap();
         let (dir, n) = r.export(&out).unwrap();
         assert_eq!(n, 1);
-        assert_eq!(fs::read(dir.join(FILE_NAME)).unwrap(), fs::read(&p).unwrap());
+        assert_eq!(fs::read(dir.join(FILE_NAME)).unwrap(), fs::read(&p).unwrap(), "nothing named: copied as is");
         assert!(fs::read_to_string(dir.join("README.md")).unwrap().contains("not_same"));
         let (dir2, _) = r.export(&out).unwrap();
         assert_ne!(dir, dir2, "never over an earlier export");
@@ -1071,6 +1215,72 @@ mod tests {
         r.flush();
         assert!(!p.exists(), "nothing left: the file goes");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// An export carries no name and no subject id: each subject has one
+    /// code throughout, whether named, given by id or both; the record
+    /// itself keeps the names.
+    #[test]
+    fn an_export_has_codes_for_names() {
+        let d = tmp("export-names");
+        let p = d.join(FILE_NAME);
+        let r = Recorder::new(Some(p.clone()));
+        let named = |sid: &str, name: &str, n: u8| Side { sid: Some(sid.into()), name: Some(name.into()), ..side(n, 2) };
+        let entries = vec![
+            Entry::new(Kind::Fursuit, Act::Merge { groups: vec![named("aaaa", "Sparky Dragon", 1), side(2, 2)] }, None, None),
+            Entry::new(Kind::Fursuit, Act::NotSame { groups: vec![named("aaaa", "Sparky Dragon", 1), named("bbbb", "Mossy Wolf", 3)] }, None, None),
+            Entry::new(Kind::Fursuit, Act::Name { head: Some(Head(head(4, 0))), name: Some("mossy wolf".into()), group: None, from: None }, None, None),
+            Entry::new(Kind::Person, Act::Name { head: None, name: Some("Jane Example".into()), group: Some(named("cccc", "Jane Example", 5)), from: None }, None, None),
+            Entry::new(Kind::Fursuit, Act::KindChange { head: Head(head(6, 0)), to: Kind::Person, name: Some("Jane Example".into()) }, None, None),
+        ];
+        for e in &entries {
+            r.record(e.clone());
+        }
+        let out = d.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let (dir, n) = r.export(&out).unwrap();
+        assert_eq!(n, 5);
+        let text = fs::read_to_string(dir.join(FILE_NAME)).unwrap();
+        for secret in ["Sparky", "Mossy", "mossy", "Jane", "aaaa", "bbbb", "cccc"] {
+            assert!(!text.contains(secret), "{secret} in the export: {text}");
+        }
+        let (got, bad) = parse(&text);
+        assert_eq!((got.len(), bad), (5, 0));
+        let code = |i: usize, g: usize| match &got[i].act {
+            Act::Merge { groups } | Act::NotSame { groups } => groups[g].name.clone().unwrap(),
+            _ => unreachable!(),
+        };
+        assert_eq!(code(0, 0), "fursuit-1");
+        assert_eq!(code(1, 0), "fursuit-1", "the same subject, the same code");
+        assert_eq!(code(1, 1), "fursuit-2");
+        assert!(matches!(&got[0].act, Act::Merge { groups } if groups[1].name.is_none() && groups[0].sid.as_deref() == Some("fursuit-1")));
+        assert!(matches!(&got[2].act, Act::Name { name: Some(n), .. } if n == "fursuit-2"), "a name typed in another case is the same subject");
+        assert!(matches!(&got[3].act, Act::Name { name: Some(n), group: Some(g), .. } if n == "person-1" && g.name.as_deref() == Some("person-1")));
+        assert!(matches!(&got[4].act, Act::KindChange { name: Some(n), .. } if n == "person-1"), "coded in the kind it became");
+        assert!(fs::read_to_string(&p).unwrap().contains("Sparky Dragon"), "the record keeps the names");
+        assert!(fs::read_to_string(dir.join("README.md")).unwrap().contains("No names"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Off: nothing new is recorded, but an undo of an entry the record
+    /// holds still is (so the record never shows a correction taken back
+    /// as in force); an undo of one it doesn't hold isn't.
+    #[test]
+    fn off_still_records_undos_of_entries_in_the_record() {
+        let r = Recorder::new(None);
+        let kept = r.record(Entry::new(Kind::Fursuit, Act::Remove { head: Head(head(1, 0)) }, None, None)).unwrap();
+        r.set_on(false);
+        assert_eq!(r.record(Entry::new(Kind::Fursuit, Act::Remove { head: Head(head(2, 0)) }, None, None)), None, "nothing new while off");
+        assert_eq!(r.record_undo(("0000000000000000".into(), Kind::Fursuit)), None, "not in the record: no undo");
+        let undo = r.record_undo((kept.clone(), Kind::Fursuit)).expect("in the record: its undo is written");
+        // Its undo can be undone in turn (Ctrl+Z, then Ctrl+Z on the undo step).
+        assert!(r.record_undo((undo.clone(), Kind::Fursuit)).is_some());
+        let got = r.entries();
+        assert_eq!(got.len(), 3);
+        assert!(matches!(&got[1].act, Act::Undo { undoes, of } if *undoes == kept && of == "remove"));
+        // Forgotten or deleted entries are no longer in the record.
+        r.forget_kind(Kind::Fursuit);
+        assert_eq!(r.record_undo((kept, Kind::Fursuit)), None);
     }
 
     /// Off records nothing; on again records.
@@ -1096,13 +1306,14 @@ mod tests {
     /// with the judge, a label edit.
     #[test]
     fn entries_stay_compact() {
-        let full = |n: u8| Side { n: 40, name: Some("Some name".into()), sid: Some("0123456789abcdef0123456789abcdef".into()), d: Some(0.0841), heads: (0..SIDE_HEADS as u16).map(|i| Head(head(n, i * 37))).collect() };
+        let full = |n: u8| Side { n: 40, photos: Some(38), bursts: Some(21), days: Some(3), name: Some("Some name".into()), sid: Some("0123456789abcdef0123456789abcdef".into()), d: Some(0.0841), heads: (0..SIDE_HEADS as u16).map(|i| Head(head(n, i * 37))).collect() };
         let how = How { by: "judge".into(), at: Some(At::MergeReview), d: Some(0.0912), judge: Some("qwen3-vl-reranker-8b".into()), judge_cut: Some(0.5), yes: Some(2), no: Some(1), unseen: Some(0), ..How::default() };
         let merge = Entry::new(Kind::Fursuit, Act::Merge { groups: vec![full(1), full(2)] }, Some(how), Some(lib())).line().len();
         let review = How { by: "judge".into(), at: Some(At::Review), d: Some(0.104), judge: Some("qwen3-vl-reranker-8b".into()), judge_cut: Some(0.5), p: Some(0.8312), offered: Some(true), pair: Some([Head(head(9, 0)), Head(head(1, 0))]), ..How::default() };
         let answer = Entry::new(Kind::Fursuit, Act::Answer { yes: true, group: full(1), heads: heads([head(9, 0), head(9, 1)]) }, Some(review), Some(lib())).line().len();
         let label = Entry::new(Kind::Fursuit, Act::Remove { head: Head(head(1, 0)) }, Some(How::hand(At::Viewer)), Some(lib())).line().len();
         eprintln!("bytes: merge {merge}, answer {answer}, label {label}");
-        assert!(merge < 2600 && answer < 1800 && label < 400, "merge {merge}, answer {answer}, label {label}");
+        assert!(merge < 2800 && answer < 1900 && label < 500, "merge {merge}, answer {answer}, label {label}");
+        assert!(Entry::new(Kind::Fursuit, Act::Remove { head: Head(head(1, 0)) }, None, Some(lib())).line().contains(r#""grouping":"balanced""#));
     }
 }

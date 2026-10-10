@@ -3231,6 +3231,88 @@ as different suits; the heads marked bad.  Groups of 5+ photos.
   least alike first; "Check this group" farthest first.  `PP_PROFILE=1`:
   no slow update but the driver's.
 
+## As built — a choice of fursuit grouping (2026-10-10)
+
+The user: "I think we are a bit too tight with the thresholds. I see the
+same suiters in a bunch of smaller groups."  Preferences ▸ Fursuits ▸
+*Grouping*: Tighter / Balanced / Looser, Balanced by default (a settings
+file from before loads as Balanced).
+
+### The sweep (the research's 10 826 heads, the user's 978 labelled pairs)
+
+Groups of 5+ photos; "two heads, 1 photo": groups holding two
+non-overlapping heads of one photo (two suits for sure); "small": heads in
+groups under 5 photos (folded away).
+
+| Raw cut | Same together (of 421) | Different together (of 557) | Two heads, 1 photo | Small |
+|---|---|---|---|---|
+| 0.094 (Tighter) | 187 | 7 | 8 | 31.2 % |
+| 0.104 | 213 | 4 | 19 | 26.6 % |
+| **0.110 (Balanced)** | 238 | 6 | 23 | 24.2 % |
+| **0.115 (Looser)** | 242 | 10 | 28 | 21.6 % |
+| 0.120 | 246 | 15 | 29 | 19.7 % |
+
+| Whitened cut | Same together (of 421) | Different together (of 557) | Two heads, 1 photo | Small |
+|---|---|---|---|---|
+| 0.69 (Tighter) | 185 | 5 | 25 | 15.9 % |
+| **0.72 (Balanced)** | 213 | 12 | 36 | 12.5 % |
+| **0.75 (Looser)** | 233 | 11 | 44 | 8.3 % |
+| 0.78 | 227 | 19 | 55 | 4.2 % |
+
+The curves aren't smooth (the grouping depends on order; the labelled
+sample is small).  Past 0.115 raw and 0.76 whitened, mixing climbs with no
+more same pairs.
+
+### The cut-offs per choice (`heads::GroupingCuts::of`)
+
+The merge suggestions' cut stays above the group cut by the margin it had
+(raw +0.003, whitened +0.02), and the judge's far end moves with the
+group cut (raw +0.030, whitened +0.096); measured per choice on the labels
+(split group pairs between groups of 5+ photos found by distance alone,
+with the labelled same / different group pairs among the offered):
+
+| Choice | Space | Group | Merge suggest | Found by distance (precision) | Judge far end | Found up to it (precision before the judge) |
+|---|---|---|---|---|---|---|
+| Tighter | raw | 0.094 | 0.097 | 39 of 91 (39 / 3) | 0.124 | 72 of 91 (72 / 36) |
+| Balanced | raw | 0.110 | 0.113 | 34 of 62 (34 / 6) | 0.140 | 51 of 62 (51 / 86) |
+| Looser | raw | 0.115 | 0.118 | 31 of 59 (31 / 10) | 0.145 | 48 of 59 (48 / 110) |
+| Tighter | whitened | 0.69 | 0.711 | 46 of 103 (46 / 2) | 0.786 | 73 of 103 (73 / 14) |
+| Balanced | whitened | 0.72 | 0.74 | 35 of 103 (35 / 0) | 0.816 | 73 of 103 (73 / 17) |
+| Looser | whitened | 0.75 | 0.77 | 31 of 70 (31 / 4) | 0.846 | 46 of 70 (46 / 29) |
+
+Fewer split group pairs remain to find as the grouping loosens (it
+joined them).  The judge's band grows looser too (raw Balanced: 2 348
+pairs of groups up to its far end, against 1 125 for Tighter): with a
+judge on, more to compare, a hundred pairs a request.  Unchanged: the
+review's and *Find more*'s per-head cut-offs, and the judge's sure-yes.
+
+### As built
+
+- `heads::Grouping` (saved by name) and `GroupingCuts`; `HeadStore`'s
+  group cut follows the choice; `Fursuits::{set_grouping, cuts}`;
+  `Engine::set_fursuit_grouping` regroups on the worker,
+  `HeadsStatus.{grouping, regrouping}`.  **The cut-offs in force**:
+  `Status.heads.cuts()` (a `GroupingCuts`: choice, space, group, merge
+  suggest, merge sure, merge far end), for the decision record.
+- Preferences ▸ Fursuits ▸ *Grouping*, a choice list in plain words, and
+  a calm line (there and on the tab's caption) while the groups are made
+  again.  Names, answers, "not the same" and labels point at heads and
+  stay.
+- The stand-in: Tighter splits more suits, Looser none.
+
+### Checked
+
+- Tests: the cuts per choice and space and their order; Balanced by
+  default; an old settings file loads as Balanced, a saved choice comes
+  back; through the engine, Tighter → Balanced joins two heads 0.70
+  apart and back, the name staying.  The tests written for the old cuts
+  pin Tighter.
+- Stand-in: groups to name (and smaller) Balanced 13 (2), Tighter 13 (3),
+  Looser 9 (1).
+- Real night-day library (455 heads, raw, under the card lock): groups
+  to name (and smaller groups) Tighter 18 (186), Balanced 22 (144),
+  Looser 24 (132).
+
 ## As built — the record of corrections
 
 The user (2026-10-09): "Is it possible for you to keep track of all the
@@ -3270,9 +3352,12 @@ and box, never by group number.
   made-up groups into `decisions-stand-in.jsonl`, never the real file, so
   a stand-in run under a real home can't mix made-up heads into the
   record.
-- **Off** (*Keep a record of my corrections*, Preferences ▸ Fursuits, on
-  by default): nothing is appended, not even an undo of an entry recorded
-  while on; what is kept stays.
+- **Off** (*Keep a record of my corrections*, Preferences ▸ Storage, on
+  by default, people and fursuits alike): nothing new is appended, but an
+  undo of an entry the record holds still is (the user's choice, so the
+  record never shows a correction taken back as in force); what is kept
+  stays.  The recorder knows which entries the record holds this session
+  (*Forget all* and *Delete* take theirs out).
 
 ### Schema, version 1
 
@@ -3288,11 +3373,13 @@ whose `v` is newer.
 | `kind` | `person` or `fursuit` (for `kind_change`, the kind left). |
 | `act` | Below. |
 | `how` | `{by, at, d, sure, judge, judge_cut, p, yes, no, unseen, offered, pair}`, the fields that apply; absent on `undo`. |
-| `lib` | `{heads, white, model, cuts: {group, suggest, strict, sure_yes, sure_no}}`: heads of the kind, whitened or raw, the vectors' model folder, and the cut-offs in force when it was decided. |
+| `lib` | `{heads, white, model, grouping, cuts: {group, suggest, strict, sure_yes, sure_no, merge_suggest, merge_sure, merge_far}}`: heads of the kind, whitened or raw, the vectors' model folder, the fursuit grouping choice in force (`tighter`, `balanced`, `looser`), and the cut-offs in force when it was decided: the group and merge cuts from the choice (`GroupingCuts`, read where the grouping reads them, `Fursuits::cuts`), the review's own suggest, strict and judge band. |
 
 A head is `["<32 hex key>", x, y, w, h]`, the box in thousandths (the
-identity `subjects.json` uses).  A group (`Side`) is `{n, name, sid, d,
-heads}`: its size, name and subject id when it has them, its
+identity `subjects.json` uses).  A group (`Side`) is `{n, photos,
+bursts, days, name, sid, d, heads}`: its size; its photos, bursts (a
+photo on its own counting as one) and days as the tab counted the group
+(from the snapshot, so free); name and subject id when it has them; its
 average-linkage distance to the entry's first group (the step's space;
 `Worker::record_side`, `linkage`), and its clearest heads, at most 16
 (`SIDE_HEADS`; heads shown on the page first for "not the same").
@@ -3345,12 +3432,17 @@ way) they are a training or tuning set.
 
 ### Export
 
-Preferences ▸ Fursuits ▸ *Record of corrections* ▸ *Export…* picks a
+Preferences ▸ Storage ▸ *Record of corrections* ▸ *Export…* picks a
 folder; the record's thread makes `photo-pipeline-corrections-<date>`
-there (numbered if taken, never over anything), copies the record (0600)
-and writes `README.md` (`decisions::README`: the schema above).  It reads
-nothing else and writes nowhere else.  The script driver: `prefs
-export-to <dir>`, `decisions print|pairs`.
+there (numbered if taken, never over anything), writes the record's copy
+(0600) and `README.md` (`decisions::README`: the schema above).  **No
+names** (the user's choice): in the copy every name and subject id is a
+code, `person-7` or `fursuit-12`, one per subject throughout the file
+whether an entry named it, gave its id, or both, a name in another case
+being the same subject (`decisions::without_names`,
+`an_export_has_codes_for_names`).  The record on the computer keeps the
+names.  It reads nothing else and writes nowhere else.  The script
+driver: `prefs export-to <dir>`, `decisions print|pairs`.
 
 ### Checked
 
@@ -3359,14 +3451,16 @@ export-to <dir>`, `decisions print|pairs`.
   undo and undo of undo; labelled pairs rebuilt from a sample record;
   *Forget all* of a kind filters it (and a kind change into it, and the
   undo of a removed entry), nothing left removes the file; the switch off
-  writes nothing; export never overwrites; sizes; the setting's default
+  writes nothing new but still the undo of an entry the record holds;
+  the export has codes for names and never overwrites; sizes; the
+  grouping choice in `lib`; the setting's default
   and an old settings file; and through the engine (whitened, a fake
   helper): a merge offered by distance with its measured linkage, its
   undo, "not the same" by the judge's majority, a split from the
   proposal, a review answer with its nearest member, its taking back,
   a name and a removal in the viewer, every entry with the library and
-  the cut-offs in force, 0600, Clear and Rebuild byte for byte, off, and
-  *Forget all fursuits*.
+  the grouping choice and cut-offs in force, 0600, Clear and Rebuild byte
+  for byte, off (and an undo while off), and *Forget all fursuits*.
 - Headless, stand-in (a made-up library of 90 grey JPGs, a throwaway
   home): "not the same" in the pairs review, a merge by dragging a tile,
   *Split into a new group* on *Heads*, a Yes in the review and Ctrl+Z, a
@@ -3375,13 +3469,21 @@ export-to <dir>`, `decisions print|pairs`.
   export, the delete and *Forget all fursuits* confirmations, the switch
   off.
 
+### The user's choices (2026-10-10)
+
+- Hiding a group and *Forget this person* are not recorded: grouping
+  decisions only.
+- Off still records undos of corrections already in the record.
+- The switch and the record's row are in Preferences ▸ Storage, with the
+  user's other data (*Marks waiting to be saved*), for people and
+  fursuits alike.
+- Exports carry codes, not names.
+
 ### Open
 
-- Hiding and *Forget this person* aren't recorded (not grouping
-  decisions).  Say if they should be.
 - Group-level "Not fursuit heads" (another branch) should append one
-  `remove` entry per head, or one entry listing them; the hook is the
-  engine's handler, as for `LabelEdit::Remove`.
-- The fursuit grouping strictness (another branch) should be added to
-  `lib` (`grouping`, an optional field: the schema stays version 1) in
-  `Worker::record_lib`, the one place the cut-offs are read.
+  entry listing the heads removed (`remove_many`: `heads`, `removed`,
+  `group` when one group), from its engine handler as for
+  `LabelEdit::Remove`.
+- The side-by-side view's moves pass `Via::Hand(At::Drag)` (or an `At`
+  of their own) at its one `move_faces` call.

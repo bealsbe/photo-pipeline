@@ -142,9 +142,19 @@ pub struct HeadsStatus {
     /// A whitening is fitted: fursuits can be grouped and suggested.
     /// None until [`whiten::MIN_HEADS`] heads have vectors.
     pub whitened: bool,
+    /// Preferences ▸ Fursuits ▸ *Grouping*.
+    pub grouping: Grouping,
+    /// The groups are being made again (the choice changed), on a worker.
+    pub regrouping: bool,
 }
 
 impl HeadsStatus {
+    /// The fursuit cut-offs in force now: the grouping choice in the space
+    /// the step groups in (raw or whitened).
+    pub fn cuts(&self) -> GroupingCuts {
+        GroupingCuts::of(self.grouping, self.whitened)
+    }
+
     /// Fursuit photos not looked at for heads (indexed before, or skipped):
     /// the tab and Preferences offer them, with their cost.
     pub fn unscanned(&self) -> usize {
@@ -185,6 +195,36 @@ pub fn starts_unasked(device: Device) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The grouping choice's cuts, per space: the group cut swept on the
+    /// labels, the merge suggestions' cut above it by the old margin, the
+    /// judge's far end moved with it; Tighter is the cuts from before the
+    /// choice; Balanced is the default.
+    #[test]
+    fn the_grouping_choices_cuts_per_space() {
+        assert_eq!(Grouping::default(), Grouping::Balanced);
+        let g = |c, w| {
+            let x = GroupingCuts::of(c, w);
+            (x.group, x.merge_suggest, x.merge_far)
+        };
+        assert_eq!(g(Grouping::Tighter, true), (CUTOFFS.group, 0.711, super::super::judging::SURE_NO));
+        assert_eq!(g(Grouping::Tighter, false), (RAW_CUTOFFS.group, 0.097, super::super::judging::RAW_SURE_NO));
+        assert_eq!(g(Grouping::Balanced, true), (0.72, 0.74, 0.816));
+        assert_eq!(g(Grouping::Balanced, false), (0.110, 0.113, 0.140));
+        assert_eq!(g(Grouping::Looser, true), (0.75, 0.77, 0.846));
+        assert_eq!(g(Grouping::Looser, false), (0.115, 0.118, 0.145));
+        for c in Grouping::ALL {
+            for w in [false, true] {
+                let x = GroupingCuts::of(c, w);
+                assert!(x.merge_sure < x.group && x.group < x.merge_suggest && x.merge_suggest < x.merge_far, "{x:?}");
+            }
+        }
+        // The status says what is in force.
+        let st = HeadsStatus { grouping: Grouping::Looser, whitened: false, ..HeadsStatus::default() };
+        assert_eq!(st.cuts().group, 0.115);
+        // Saved by name.
+        assert_eq!(serde_json::to_string(&Grouping::Balanced).unwrap(), "\"balanced\"");
+    }
 
     #[test]
     fn the_costs_match_the_measurements() {
@@ -275,6 +315,75 @@ pub const CUTOFFS: Cutoffs = Cutoffs { group: 0.69, suggest: 0.711, strict: 0.67
 /// group 92.5 %, suggest 90 %) and held on odd days at 91 %, 89 % and
 /// 89 %.
 pub const RAW_CUTOFFS: Cutoffs = Cutoffs { group: 0.094, suggest: 0.097, strict: 0.0885 };
+
+/// How tight the automatic fursuit groups are: Preferences ▸ Fursuits ▸
+/// *Grouping* (the user's choice, 2026-10-10: Balanced by default).  The
+/// cuts were swept on the user's labels (`docs/library-search-plan.md`,
+/// "As built — a choice of fursuit grouping"): looser groups split a suit
+/// less often and mix a little more, and the merge suggestions and split
+/// tools make either kind of mistake cheap to fix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Grouping {
+    /// More, smaller groups; rarely mixes suits (the cuts before
+    /// 2026-10-10).
+    Tighter,
+    /// Fewer split-up suits.
+    #[default]
+    Balanced,
+    /// The fewest small groups; check groups for strays.
+    Looser,
+}
+
+impl Grouping {
+    pub const ALL: [Grouping; 3] = [Grouping::Tighter, Grouping::Balanced, Grouping::Looser];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Grouping::Tighter => "Tighter",
+            Grouping::Balanced => "Balanced",
+            Grouping::Looser => "Looser",
+        }
+    }
+}
+
+/// The cut-offs in force for a grouping choice in one space (raw below
+/// `whiten::MIN_HEADS` heads, whitened from there): the automatic groups'
+/// cut, and the merge suggestions' (offered by distance alone under
+/// `merge_suggest`; with a judge, offered at once under `merge_sure` when
+/// clear, compared up to `merge_far`).  The review's and *Find more*'s
+/// per-head cut-offs (`CUTOFFS.suggest`, `.strict`) don't depend on the
+/// grouping.  This is what a record of a decision reads
+/// ([`HeadsStatus::cuts`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct GroupingCuts {
+    pub grouping: Grouping,
+    pub whitened: bool,
+    pub group: f32,
+    pub merge_suggest: f32,
+    pub merge_sure: f32,
+    pub merge_far: f32,
+}
+
+impl GroupingCuts {
+    /// The cuts of `grouping` in the raw or the whitened space.  The
+    /// merge suggestions' cut sits above the group cut by the margin it
+    /// had before the choice (raw +0.003, whitened +0.02), and the judge's
+    /// far end moves with the group cut; measured per choice on the labels
+    /// (the plan doc's table).
+    pub fn of(grouping: Grouping, whitened: bool) -> GroupingCuts {
+        let (group, merge_suggest, merge_far) = match (grouping, whitened) {
+            (Grouping::Tighter, false) => (0.094, 0.097, super::judging::RAW_SURE_NO),
+            (Grouping::Balanced, false) => (0.110, 0.113, 0.140),
+            (Grouping::Looser, false) => (0.115, 0.118, 0.145),
+            (Grouping::Tighter, true) => (0.69, 0.711, super::judging::SURE_NO),
+            (Grouping::Balanced, true) => (0.72, 0.74, 0.816),
+            (Grouping::Looser, true) => (0.75, 0.77, 0.846),
+        };
+        let merge_sure = if whitened { super::judging::SURE_YES } else { super::judging::RAW_SURE_YES };
+        GroupingCuts { grouping, whitened, group, merge_suggest, merge_far, merge_sure }
+    }
+}
 
 /// A head as the detector found it, kept per photo.
 #[derive(Debug, Clone, PartialEq)]
@@ -446,6 +555,8 @@ pub struct HeadStore {
     with_vectors: HashSet<FaceRef>,
     whitening: Option<Arc<Whitening>>,
     tiles: Arc<Mutex<HeadTiles>>,
+    /// Preferences ▸ Fursuits ▸ *Grouping*: the group cut it uses.
+    pub grouping: Grouping,
 }
 
 impl HeadStore {
@@ -500,6 +611,7 @@ impl HeadStore {
             with_vectors: HashSet::new(),
             whitening,
             tiles: Arc::new(Mutex::new(HeadTiles { path: Self::tiles_file(dir), offsets: HashMap::new() })),
+            grouping: Grouping::default(),
         };
         store.load_tiles();
         store.with_vectors = Self::read_vector_refs(dir);
@@ -1006,8 +1118,11 @@ impl KindStep for HeadStore {
         self.detection(r).map_or(0.0, HeadDetection::clarity)
     }
 
+    /// The per-head cut-offs of the space, with the group cut of the
+    /// grouping choice (the review's and *Find more*'s stay as they are).
     fn cutoffs(&self) -> Cutoffs {
-        if self.whitening.is_some() { CUTOFFS } else { RAW_CUTOFFS }
+        let base = if self.whitening.is_some() { CUTOFFS } else { RAW_CUTOFFS };
+        Cutoffs { group: GroupingCuts::of(self.grouping, self.whitening.is_some()).group, ..base }
     }
 
     /// Tight groups, no joining step (the user's choice, 2026-10-08,
@@ -1279,7 +1394,9 @@ impl Fursuits {
 
     /// Open the cache in `dir` (the library's index folder).
     pub fn open(&mut self, dir: &Path) {
-        self.store = Some(HeadStore::load(dir));
+        let mut store = HeadStore::load(dir);
+        store.grouping = self.status.grouping;
+        self.store = Some(store);
         self.refresh();
     }
 
@@ -1506,9 +1623,24 @@ impl Fursuits {
 
     /// The step's cut-offs and the judge's band, in the space it groups
     /// in now (raw below `whiten::MIN_HEADS` heads, whitened from there).
-    pub fn cuts(&self) -> Option<(subjects::Cutoffs, (f32, f32))> {
+    pub fn cuts(&self) -> Option<GroupingCuts> {
         let store = self.store.as_ref()?;
-        Some((store.cutoffs(), store.band()))
+        Some(GroupingCuts::of(store.grouping, store.whitening().is_some()))
+    }
+
+    /// Preferences ▸ Fursuits ▸ *Grouping* changed: the groups start over
+    /// (the caller regroups on a worker).  Names, answers, "not the same"
+    /// and labels point at heads, so they survive.  Whether it changed.
+    pub fn set_grouping(&mut self, g: Grouping) -> bool {
+        if self.status.grouping == g {
+            return false;
+        }
+        self.status.grouping = g;
+        if let Some(store) = self.store.as_mut() {
+            store.grouping = g;
+        }
+        self.reset_grouping();
+        true
     }
 
     /// Whether a group is this kind's: a fursuit subject, or one of the
@@ -1534,7 +1666,7 @@ impl Fursuits {
             let Some(cover) = heads.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)) else { continue };
             let photos = heads.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
             let days = heads.iter().map(|f| f.day).collect::<HashSet<_>>().len();
-            s.groups.push(subjects::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: None, hidden: false, photos, days, cover, suggestions: 0 });
+            s.groups.push(subjects::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: None, hidden: false, photos, bursts: subjects::count_bursts(&heads), days, cover, suggestions: 0 });
         }
         s.groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
     }
@@ -2579,6 +2711,8 @@ mod store_tests {
     fn a_library_too_small_to_whiten_groups_its_raw_vectors() {
         let d = scratch("raw");
         let mut f = Fursuits::default();
+        // The cuts before the grouping choice: Tighter.
+        f.set_grouping(Grouping::Tighter);
         f.open(&d);
         for (n, a) in [(1u8, 0.0f32), (2, 0.1), (3, 1.5), (4, 1.6)] {
             f.store.as_mut().unwrap().add(key(n), &[head(0.1, 300, &[a.cos(), a.sin()])]).unwrap();
@@ -2738,6 +2872,7 @@ mod store_tests {
         subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average);
         assert_eq!(live.len(), 2, "{live:?}");
         let mut store = HeadStore::load(&scratch("linkage"));
+        store.grouping = Grouping::Tighter;
         assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
         // Too few heads to whiten: the raw vectors' own cut-offs and band;
         // whitened, the research's.
@@ -2757,6 +2892,7 @@ mod store_tests {
     fn a_fursuit_regroup_sees_its_own_kind_only_and_builds_memory_on_demand() {
         let d = scratch("ownkind");
         let mut f = Fursuits::default();
+        f.set_grouping(Grouping::Tighter);
         f.open(&d);
         {
             let store = f.store.as_mut().unwrap();

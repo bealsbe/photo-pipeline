@@ -3,9 +3,10 @@
 //! phase.  Pets are on hold: no tab, though the model keeps the kind.
 //!
 //! - **The People tab** lists the groups of faces found while indexing:
-//!   the named first, then the groups to name, largest first, each a face
-//!   crop with its name (or "Unnamed") and how many photos.  Groups under
-//!   the smallest size to show (5 photos by default) fold away under
+//!   the named first, then the groups to name, most bursts first, each a face
+//!   crop with its name (or "Unnamed") and how many photos
+//!   and bursts.  Groups under
+//!   the smallest size to show (5 photos by default, a burst counting as one) fold away under
 //!   *Smaller groups*, so an event's strangers stay out of sight; hidden
 //!   ones wait under *Hidden*.  Nothing is ever named for the user.
 //! - **Picking several** (S, or Ctrl+click) gives a strip with *Merge…*
@@ -209,9 +210,9 @@ impl Subjects {
 /// The groups of one kind as its tab lays them out.
 #[derive(Debug, Default)]
 pub struct Arranged<'a> {
-    /// Named, most photos first.
+    /// Named, most bursts first.
     pub named: Vec<&'a Group>,
-    /// Unnamed, at least the smallest size to show, largest first.
+    /// Unnamed, at least the smallest size to show, most bursts first.
     pub to_name: Vec<&'a Group>,
     /// Unnamed and smaller: folded away under *Smaller groups*.
     pub small: Vec<&'a Group>,
@@ -220,7 +221,10 @@ pub struct Arranged<'a> {
 }
 
 /// Lay out `kind`'s groups: everything else is left out, so a tab never
-/// shows another kind.
+/// shows another kind.  Size is counted in bursts (a burst is one moment,
+/// a photo on its own is one), so a long burst can neither put a group
+/// first nor lift it out of *Smaller groups*; ties go to the photo count,
+/// then the cover's capture time.
 pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
     let mut a = Arranged::default();
     for g in all.groups.iter().filter(|g| g.kind == kind) {
@@ -228,13 +232,13 @@ pub fn arrange(all: &Found, kind: Kind, smallest: usize) -> Arranged<'_> {
             a.hidden.push(g);
         } else if g.name.is_some() {
             a.named.push(g);
-        } else if g.photos >= smallest {
+        } else if g.bursts >= smallest {
             a.to_name.push(g);
         } else {
             a.small.push(g);
         }
     }
-    let by_size = |x: &&Group, y: &&Group| y.photos.cmp(&x.photos).then(x.cover.capture.cmp(&y.cover.capture));
+    let by_size = |x: &&Group, y: &&Group| y.bursts.cmp(&x.bursts).then(y.photos.cmp(&x.photos)).then(x.cover.capture.cmp(&y.cover.capture));
     a.named.sort_by(by_size);
     a.to_name.sort_by(by_size);
     a.small.sort_by(by_size);
@@ -1369,6 +1373,12 @@ pub fn heading<'a>(label: &str, note: String) -> Element<'a, Message> {
     container(r).height(crate::ui::grid::HEADER_H).center_y(crate::ui::grid::HEADER_H).padding(Padding::from([0.0, 16.0])).width(Length::Fill).into()
 }
 
+/// A group's two counts, one to a line: its photos, then the bursts they
+/// fall in.
+fn counts(g: &Group) -> String {
+    format!("{}\n{}", util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
+}
+
 /// A group's tile on its tab.
 fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Message> {
     let s = &app.subjects;
@@ -1376,7 +1386,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let handle = s.crops.get(&g.cover.face, px(app, size), Framing::Face);
     let crop = tile::crop(handle, size, shape(g.kind));
     let name = if small && !g.hidden { None } else { g.name.clone() };
-    let count = if g.hidden { "Show".to_string() } else { util::plural(g.photos as u64, "photo") };
+    let count = if g.hidden { "Show".to_string() } else { counts(g) };
     let on = if g.hidden { m(Msg::Unhide(g.id.clone())) } else { m(Msg::Tile(g.id.clone())) };
     let drag = s.drag.as_ref();
     let target = drag.is_some_and(|d| d.over.as_ref() == Some(&g.id));
@@ -1410,7 +1420,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let mut hint = if g.name.is_none() {
         format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
     } else {
-        format!("{}: {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"))
+        format!("{}: {} in {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.photos as u64, "photo"), util::plural(g.bursts as u64, "burst"))
     };
     if together {
         hint.push_str(" Two of its heads are in one photo, so it holds at least two fursuits: open it to split it.");
@@ -1473,7 +1483,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(tiles(app, &a.named, Section::Named));
     }
     if !a.to_name.is_empty() {
-        let note = format!("{}, largest first", util::thousands(a.to_name.len() as u64));
+        let note = format!("{}, most bursts first", util::thousands(a.to_name.len() as u64));
         col = col.push(heading("Groups to name", note));
         col = col.push(tiles(app, &a.to_name, Section::ToName));
     }
@@ -1482,7 +1492,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     if !a.small.is_empty() {
         folds = folds.push(tip(
             disclose("Smaller groups", a.small.len(), s.small_open, m(Msg::Small(!s.small_open))),
-            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. Preferences ▸ People sets the size.", app.settings.people_min_photos()),
+            format!("Groups of fewer than {} photos, folded away so strangers stay out of sight. A burst counts as one photo. Preferences ▸ People sets the size.", app.settings.people_min_photos()),
             true,
         ));
         any = true;
@@ -1684,7 +1694,7 @@ pub fn debug_state(app: &App) -> String {
     let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", people::short(&g.id), g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
     let kinds: HashSet<Kind> = a.named.iter().chain(&a.to_name).chain(&a.small).chain(&a.hidden).map(|g| g.kind).collect();
     format!(
-        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
+        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} to_name_n={} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
         app.view,
         s.page(),
         s.tab,
@@ -1695,6 +1705,7 @@ pub fn debug_state(app: &App) -> String {
         },
         names(&a.named),
         names(&a.to_name).into_iter().take(8).collect::<Vec<_>>(),
+        a.to_name.len(),
         a.small.len(),
         names(&a.hidden),
         s.picked.iter().map(people::short).collect::<Vec<_>>(),
@@ -1742,7 +1753,12 @@ mod tests {
     }
 
     fn group(id: u64, kind: Kind, name: Option<&str>, photos: usize, hidden: bool) -> Group {
-        Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden, photos, days: 1, cover: face(id as u8), suggestions: 0 }
+        Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden, photos, bursts: photos, days: 1, cover: face(id as u8), suggestions: 0 }
+    }
+
+    /// A group of `photos` photos that fall in `bursts` bursts.
+    fn in_bursts(id: u64, kind: Kind, name: Option<&str>, photos: usize, bursts: usize) -> Group {
+        Group { bursts, ..group(id, kind, name, photos, false) }
     }
 
     fn found() -> Found {
@@ -1783,6 +1799,48 @@ mod tests {
         // Other tabs, other kinds.
         assert_eq!(arrange(&f, Kind::Fursuit, 5).named.len(), 1);
         assert_eq!(arrange(&f, Kind::Pet, 5).to_name.len(), 1);
+    }
+
+    /// Groups are ordered and folded by the bursts they appear in, so a
+    /// long burst of one suit does not outrank a suit seen again and
+    /// again; ties go to the photo count, then the cover's capture.
+    #[test]
+    fn groups_are_ordered_and_folded_by_bursts() {
+        let f = Found {
+            generation: 1,
+            groups: vec![
+                // Forty photos, but all one burst: small, and last.
+                in_bursts(1, Kind::Fursuit, None, 40, 1),
+                // Six photos, six moments.
+                in_bursts(2, Kind::Fursuit, None, 6, 6),
+                // Twelve photos in six bursts: ties the one above, and wins on photos.
+                in_bursts(3, Kind::Fursuit, None, 12, 6),
+                in_bursts(4, Kind::Fursuit, None, 30, 9),
+                in_bursts(5, Kind::Fursuit, None, 20, 4),
+                // Named groups sort the same way, and never fold.
+                in_bursts(6, Kind::Fursuit, Some("A"), 50, 2),
+                in_bursts(7, Kind::Fursuit, Some("B"), 10, 8),
+                in_bursts(8, Kind::Person, None, 99, 99),
+            ],
+            faces_found: 0,
+            undoable: None,
+            seen_together: Default::default(),
+        };
+        let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
+        let c = GroupId::Cluster;
+        let a = arrange(&f, Kind::Fursuit, 5);
+        assert_eq!(ids(&a.to_name), [c(4), c(3), c(2)], "most bursts first, then most photos");
+        assert_eq!(ids(&a.small), [c(5), c(1)], "under five bursts: folded away, whatever the photos");
+        assert_eq!(ids(&a.named), [c(7), c(6)]);
+        assert_eq!(a.order(true, false), [c(7), c(6), c(4), c(3), c(2), c(5), c(1)]);
+        // The size to show counts bursts too.
+        assert_eq!(arrange(&f, Kind::Fursuit, 1).small.len(), 0);
+        assert_eq!(ids(&arrange(&f, Kind::Fursuit, 7).to_name), [c(4)]);
+        // Never another kind's.
+        assert_eq!(ids(&arrange(&f, Kind::Person, 5).to_name), [c(8)]);
+        // The tile says both counts.
+        assert_eq!(counts(&f.groups[2]), "12 photos\n6 bursts");
+        assert_eq!(counts(&in_bursts(9, Kind::Person, None, 1, 1)), "1 photo\n1 burst");
     }
 
     /// The merge dialog's name: the named group keeps its name whichever

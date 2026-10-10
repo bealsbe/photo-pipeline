@@ -123,6 +123,9 @@ pub fn state(app: &App) -> State {
 
 /// The tab header's caption.
 pub fn caption(app: &App) -> String {
+    if app.search.status.heads.regrouping {
+        return format!("Grouping the fursuits again ({}). Names and answers stay.", app.search.status.heads.grouping.label());
+    }
     let s = &app.subjects;
     let a = subj::arrange(&s.all, Kind::Fursuit, app.settings.people_min_photos());
     let looking = app.search.status.heads.scanning();

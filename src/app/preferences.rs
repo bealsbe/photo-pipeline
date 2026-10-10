@@ -104,6 +104,8 @@ pub enum Control {
     /// The record: *Export…* and *Delete the record…*.
     ExportCorrections,
     DeleteCorrections,
+    /// *Grouping*: Tighter, Balanced or Looser.
+    Grouping(crate::search::heads::Grouping),
     /// *Close-call judge*: one of the choices.
     Judge(JudgeChoice),
     /// Download the chosen judge (chosen, not in place).
@@ -160,6 +162,9 @@ impl Control {
             Control::KeepCorrections => "pref-keep-corrections",
             Control::ExportCorrections => "pref-export-corrections",
             Control::DeleteCorrections => "pref-delete-corrections",
+            Control::Grouping(crate::search::heads::Grouping::Tighter) => "pref-grouping-tighter",
+            Control::Grouping(crate::search::heads::Grouping::Balanced) => "pref-grouping-balanced",
+            Control::Grouping(crate::search::heads::Grouping::Looser) => "pref-grouping-looser",
             Control::Judge(JudgeChoice::Off) => "pref-judge-off",
             Control::Judge(JudgeChoice::Gemma4) => "pref-judge-gemma4",
             Control::Judge(JudgeChoice::Qwen3VlReranker) => "pref-judge-qwen",
@@ -738,6 +743,7 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::Grouping(g) => choose_grouping(app, g),
         Control::Judge(c) => choose_judge(app, c),
         Control::JudgeDownload => {
             let c = app.settings.fursuit_judge;
@@ -850,6 +856,73 @@ fn not_looked_at(n: usize, skipped: usize) -> String {
 /// running or waiting: Preferences offers them, with their cost.
 fn heads_catch_up(app: &App) -> bool {
     app.settings.find_heads && app.search.status.heads.catch_up_wanted() && app.search.status.indexed_shots > 0
+}
+
+/// A grouping was picked: the fursuits are grouped again on the engine's
+/// worker; the tab says so meanwhile.  Names and answers stay.
+fn choose_grouping(app: &mut App, g: crate::search::heads::Grouping) -> Task<Message> {
+    if app.settings.fursuit_grouping == g {
+        return Task::none();
+    }
+    app.settings.fursuit_grouping = g;
+    app.settings.save_in_background();
+    app.search.link.set_fursuit_grouping(g);
+    app.show_status(format!("Fursuit grouping: {}. The groups are made again; names, answers and labels stay.", g.label()), 6000)
+}
+
+/// What a grouping choice means, in plain words.
+pub fn grouping_words(g: crate::search::heads::Grouping) -> &'static str {
+    match g {
+        crate::search::heads::Grouping::Tighter => "More, smaller groups; rarely mixes suits.",
+        crate::search::heads::Grouping::Balanced => "Fewer split-up suits; now and then a stray to move out.",
+        crate::search::heads::Grouping::Looser => "The fewest small groups; check groups for strays.",
+    }
+}
+
+/// Preferences ▸ Fursuits ▸ *Grouping*: Tighter, Balanced (the default),
+/// Looser, and a calm line while the groups are made again.
+fn grouping_setting(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let chosen = app.settings.fursuit_grouping;
+    let mut list = column![].spacing(2).padding(2);
+    for g in crate::search::heads::Grouping::ALL {
+        let on = g == chosen;
+        let mut top = row![text(g.label()).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
+        if g == crate::search::heads::Grouping::default() {
+            top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
+        }
+        let body = column![top, text(grouping_words(g)).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill);
+        let dot = container(if on {
+            Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() }))
+        } else {
+            Space::new().into()
+        })
+        .width(16)
+        .height(16)
+        .center(16)
+        .style(move |_| container::Style { background: Some(Background::Color(t::DEEP)), border: style::border(if on { t::SIGNAL } else { t::LINE_HI }, 1.0, 8.0), ..Default::default() });
+        let b = iced::widget::button(row![container(dot).padding(Padding { top: 1.0, ..Padding::ZERO }), body].spacing(t::S3))
+            .width(Length::Fill)
+            .padding(Padding::from([7.0, 12.0]))
+            .style(move |_t, status| {
+                let hot = matches!(status, iced::widget::button::Status::Hovered | iced::widget::button::Status::Pressed);
+                iced::widget::button::Style { background: (on || hot).then_some(Background::Color(t::RAISED)), text_color: t::INK, border: Border { radius: t::R_CONTROL.into(), ..Border::default() }, ..iced::widget::button::Style::default() }
+            })
+            .on_press(m(Msg::Press(Control::Grouping(g))));
+        list = list.push(focusable(p, Control::Grouping(g), b));
+    }
+    let mut col = column![
+        text("Grouping").size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
+        about("How readily heads that look alike are grouped together. Tighter keeps one suit at one event per group; looser joins more of a suit, and now and then a look-alike. Possibly the same fursuit and Split into a new group fix either kind of mistake."),
+        Space::new().height(t::S1),
+        container(list).width(Length::Fill).style(style::group()),
+    ]
+    .spacing(3);
+    if app.search.status.heads.regrouping {
+        col = col.push(Space::new().height(t::S1));
+        col = col.push(row![icons::view(Glyph::Info, 13.0, t::INK3), text("Grouping the fursuits again. Names, answers and labels stay.").size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center));
+    }
+    container(col).padding(Padding::from([t::S3, t::S4])).width(Length::Fill).into()
 }
 
 /// A close-call judge was picked: Off at once; a judge in place at once;
@@ -975,16 +1048,13 @@ fn controls(app: &App) -> Vec<Control> {
     if heads_to_update(app) {
         v.push(Control::UpdateHeads);
     }
+    v.extend(crate::search::heads::Grouping::ALL.iter().map(|&g| Control::Grouping(g)));
     v.extend(JudgeChoice::ALL.iter().map(|&c| Control::Judge(c)));
     if judge_wants_download(app) {
         v.push(Control::JudgeDownload);
     }
     if fursuits_to_forget(app) {
         v.push(Control::ForgetFursuits);
-    }
-    v.push(Control::KeepCorrections);
-    if corrections_kept(p) {
-        v.extend([Control::ExportCorrections, Control::DeleteCorrections]);
     }
     if !settings::global_menu_forced_off() {
         v.push(Control::GlobalMenu);
@@ -1015,6 +1085,10 @@ fn controls(app: &App) -> Vec<Control> {
     }
     if p.survey.as_ref().is_some_and(|s| s.journal.exists) {
         v.push(Control::OpenUnsaved);
+    }
+    v.push(Control::KeepCorrections);
+    if corrections_kept(p) {
+        v.extend([Control::ExportCorrections, Control::DeleteCorrections]);
     }
     v.push(Control::Close);
     v
@@ -1394,6 +1468,8 @@ fn storage_section(app: &App) -> Element<'_, Message> {
             judge_rows(app),
             models_row(app),
             unsaved_row(app),
+            corrections_switch(app),
+            corrections_row(app),
         ],
     )
 }
@@ -1636,7 +1712,7 @@ fn people_section(app: &App) -> Element<'_, Message> {
     let f = &app.search.status.faces;
     let on = s.find_faces;
     let mut find = column![about(format!(
-        "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight.",
+        "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight. A burst counts as one photo.",
         s.people_min_photos()
     ))]
     .spacing(t::S2);
@@ -1740,6 +1816,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
             go,
         ));
     }
+    rows.push(grouping_setting(app));
     rows.push(judge_setting(app));
     if heads_catch_up(app) {
         let n = h.unscanned();
@@ -1757,44 +1834,50 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
         about(format!("{found} Kept on this computer, readable only by you, and never written into your photos. Not a cache: it asks first.")),
         forget,
     ));
-    rows.extend(corrections_rows(app));
     let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people."), rows);
     container(sec).id("pref-section-fursuits").width(Length::Fill).into()
 }
 
-/// *Keep a record of my corrections*: the switch, what it keeps and how
-/// big it is; then, once something is kept, where it is with *Export…*
-/// and *Delete the record…*.  People and fursuits both; shown with
-/// Fursuits, where most corrections are made.
-fn corrections_rows(app: &App) -> Vec<Element<'_, Message>> {
+/// Storage ▸ *Keep a record of my corrections*: the switch, for people
+/// and fursuits alike, with what it keeps.  The record is the user's, not
+/// a cache, so it sits with *Marks waiting to be saved*.
+fn corrections_switch(app: &App) -> Element<'_, Message> {
     let p = &app.prefs;
-    let on = app.settings.keep_corrections;
-    let (bytes, entries) = p.survey.as_ref().map(|s| s.decisions).unwrap_or_default();
-    let size = match (p.survey.is_some(), entries) {
-        (false, _) => "Counting…".to_string(),
-        (true, 0) => "Nothing recorded yet.".to_string(),
-        (true, n) => format!("{} so far, {}.", util::plural(n as u64, "correction"), util::fmt_bytes(bytes)),
-    };
-    let large = if bytes > crate::model::decisions::LARGE_BYTES { " That's a lot: export it, then delete it to start a new one." } else { "" };
-    let mut rows = vec![setting(
+    setting(
         "Keep a record of my corrections, to improve matching later",
-        about(format!(
-            "Each merge, split, review answer and label change to people and fursuits, with the heads it was about and how it was suggested. Stays on this computer, readable only by you; never written into your photos, and Clear and Rebuild keep it. {size}{large}"
-        )),
-        switch(p, Control::KeepCorrections, on, true),
-    )];
-    if bytes > 0 {
-        let path = app.search.link.decisions().path().map(Path::to_path_buf);
-        let mut words = column![path_about(path.as_deref(), "Kept in memory only.")].spacing(3);
-        words = words.push(about(match &p.exported {
-            Some(done) => done.clone(),
-            None => "Export copies it into a folder you choose, with a README that describes its format.".to_string(),
-        }));
-        let export = focusable(p, Control::ExportCorrections, kit::btn("Export…", style::secondary(), Some(m(Msg::Press(Control::ExportCorrections)))));
-        let delete = focusable(p, Control::DeleteCorrections, kit::btn("Delete the record…", style::secondary(), Some(m(Msg::Press(Control::DeleteCorrections)))));
-        rows.push(setting("Record of corrections", words.into(), row![export, delete].spacing(t::S1).align_y(Alignment::Center).into()));
+        about(
+            "Each merge, split, review answer and label change you make to people and fursuits, with the faces or heads it was about and how it was suggested. Stays on this computer, readable only by you; never written into your photos. Clear and Rebuild keep it. Off, nothing new is added, but taking back a correction already recorded still is.",
+        ),
+        switch(p, Control::KeepCorrections, app.settings.keep_corrections, true),
+    )
+}
+
+/// Storage ▸ *Record of corrections*: its size and where it is, with
+/// *Export…* (a copy without names) and *Delete the record…*.
+fn corrections_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let (bytes, entries) = p.survey.as_ref().map(|s| s.decisions).unwrap_or_default();
+    let kept = corrections_kept(p);
+    let (value, sub) = match (p.survey.is_some(), entries) {
+        (false, _) => ("…".to_string(), None),
+        (true, 0) => ("None".to_string(), None),
+        (true, n) => (util::fmt_bytes(bytes), Some(util::plural(n as u64, "correction"))),
+    };
+    let mut words = column![].spacing(3);
+    words = words.push(about(match &p.exported {
+        Some(done) => done.clone(),
+        None if kept => "Export copies it into a folder you choose, with a README describing its format. Names are replaced by codes such as fursuit-12 in the copy.".to_string(),
+        None => "Nothing recorded yet.".to_string(),
+    }));
+    if bytes > crate::model::decisions::LARGE_BYTES {
+        words = words.push(text("That's a lot: export it, then delete it to start a new one.").size(t::T_SMALL).color(t::INK2));
     }
-    rows
+    if let Some(path) = app.search.link.decisions().path() {
+        words = words.push(text(util::elide_path(Path::new(&tilde(path)), 48)).size(t::T_SMALL).color(t::INK4));
+    }
+    let export = focusable(p, Control::ExportCorrections, kit::btn("Export…", style::ghost(), kept.then(|| m(Msg::Press(Control::ExportCorrections)))));
+    let delete = focusable(p, Control::DeleteCorrections, kit::btn("Delete the record…", style::secondary(), kept.then(|| m(Msg::Press(Control::DeleteCorrections)))));
+    setting("Record of corrections", words.into(), row![size_column(value, sub), export, delete].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
 /// The judge's choice wants its download: chosen, not in place, not

@@ -92,7 +92,8 @@ impl Worker {
         let (name, sid) = (subject.and_then(|s| s.name.clone()), subject.map(|s| s.id.0.clone()));
         let shown = first.iter().filter(|f| members.contains(f)).copied();
         let order: Vec<FaceRef> = shown.chain(self.clearest(kind, members.clone())).collect();
-        Some((kind, Side::new(members.len(), name, sid, order), members))
+        let snapshot = self.shared.subjects.lock().clone();
+        Some((kind, Side::new(members.len(), name, sid, order).counted(snapshot.group(id)), members))
     }
 
     /// The library's state for `kind`: its heads, the space, the model
@@ -102,16 +103,30 @@ impl Worker {
             Kind::Person => {
                 let store = self.people.store.as_ref()?;
                 let c = store.cutoffs();
-                Some(Lib { heads: store.found(), white: false, model: self.face_model.dir_name().into(), cuts: Cuts { group: c.group, suggest: c.suggest, strict: c.strict, sure_yes: None, sure_no: None } })
+                Some(Lib { heads: store.found(), white: false, model: self.face_model.dir_name().into(), grouping: None, cuts: Cuts { group: c.group, suggest: c.suggest, strict: c.strict, ..Cuts::default() } })
             }
             Kind::Fursuit => {
-                let (c, (yes, no)) = self.fursuits.cuts()?;
+                // The grouping choice's cuts, from where the grouping and
+                // the merge suggestions read them; the review's own.
+                let g = self.fursuits.cuts()?;
                 let store = self.fursuits.store.as_ref()?;
+                let c = store.cutoffs();
+                let (yes, no) = store.band();
                 Some(Lib {
                     heads: store.found(),
-                    white: store.whitening().is_some(),
+                    white: g.whitened,
                     model: heads::VECTOR_MODEL.dir_name().into(),
-                    cuts: Cuts { group: c.group, suggest: c.suggest, strict: c.strict, sure_yes: Some(yes), sure_no: Some(no) },
+                    grouping: Some(g.grouping),
+                    cuts: Cuts {
+                        group: g.group,
+                        suggest: c.suggest,
+                        strict: c.strict,
+                        sure_yes: Some(yes),
+                        sure_no: Some(no),
+                        merge_suggest: Some(g.merge_suggest),
+                        merge_sure: Some(g.merge_sure),
+                        merge_far: Some(g.merge_far),
+                    },
                 })
             }
             Kind::Pet => None,
@@ -241,7 +256,8 @@ impl Worker {
     fn box_side(&self, kind: Kind, face: &FaceRef) -> Option<Side> {
         let s = self.people.file.member_of(kind, face)?;
         let rest: Vec<FaceRef> = s.members.iter().filter(|m| *m != face).copied().collect();
-        Some(Side::new(rest.len(), s.name.clone(), Some(s.id.0.clone()), self.clearest(kind, rest)))
+        let snapshot = self.shared.subjects.lock().clone();
+        Some(Side::new(rest.len(), s.name.clone(), Some(s.id.0.clone()), self.clearest(kind, rest)).counted(snapshot.group(&GroupId::Subject(s.id.clone()))))
     }
 
     /// A label edit in the viewer, before it is applied: what it changes

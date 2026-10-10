@@ -1130,7 +1130,7 @@ mod tests {
     /// two unnamed, the larger; two named ask.
     #[test]
     fn a_merge_keeps_the_named_group() {
-        let g = |id: u64, name: Option<&str>, photos: usize| super::super::people::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: name.map(str::to_string), hidden: false, photos, days: 1, cover: face(id as u8), suggestions: 0 };
+        let g = |id: u64, name: Option<&str>, photos: usize| super::super::people::Group { id: GroupId::Cluster(id), kind: Kind::Fursuit, name: name.map(str::to_string), hidden: false, photos, bursts: photos, days: 1, cover: face(id as u8), suggestions: 0 };
         assert_eq!(into_of(&g(1, None, 40), &g(2, Some("Suit"), 3)), Some(GroupId::Cluster(2)));
         assert_eq!(into_of(&g(1, Some("Suit"), 3), &g(2, None, 40)), Some(GroupId::Cluster(1)));
         assert_eq!(into_of(&g(1, None, 3), &g(2, None, 40)), Some(GroupId::Cluster(2)));

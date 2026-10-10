@@ -321,7 +321,8 @@ downloaded model deleted, each after a confirmation that says what it costs.
 It also shows any marks waiting to be saved to a
 folder that couldn't be reached.  Those live in
 `~/.local/share/photo-pipeline/unsaved/` and are never cleared from the app:
-they are your marks, not a cache.
+they are your marks, not a cache.  Under them, *Keep a record of my
+corrections* and the record itself (see "A record of your corrections").
 
 ## Library calendar
 
@@ -490,10 +491,13 @@ merge, a move or a suggestion never crosses kinds.  Nothing is ever named
 for you.
 
 - **The People tab** shows the people you named, then *Groups to name*,
-  largest first: each a round face crop with its name (or "Unnamed") and
-  how many photos.  Groups of fewer photos than *Smallest group to show*
-  (5 by default) fold away under *Smaller groups*, so an event's strangers
-  stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
+  most bursts first: each a round face crop with its name (or "Unnamed"),
+  how many photos and how many bursts.  A burst counts as one, and so does
+  a photo on its own, so twenty frames of one moment don't make a group
+  look bigger than one seen at five different moments (ties go to the
+  photo count).  Groups of fewer photos than *Smallest group to show*
+  (5 by default, counted the same way: a burst is one photo) fold away
+  under *Smaller groups*, so an event's strangers stay out of the way; hidden ones wait under *Hidden* with *Show*.  ← →
   move between groups, Enter opens one, F2 names it.
 - **Picking several:** *Select* (S), or Ctrl+click, picks groups; a strip
   says how many with *Merge…* (M) and *Hide*.  Merging asks once, in one
@@ -558,7 +562,9 @@ fursuits, as a step of indexing after search and faces; you name a fursuit
 from one group and confirm its suggestions with Y and N.  Fursuits are
 never shown, merged, suggested or completed together with people or pets.
 
-- **The tab** lists named fursuits, then *Groups to name*, largest first,
+- **The tab** lists named fursuits, then *Groups to name*, most bursts first
+  (as on People: a burst counts once, in the order, the size to show and
+  *Possibly the same fursuit*),
   as rounded-square head crops (people are round), with *Smaller groups*,
   *Hidden*, picking, merging (S then M, or a tile dragged onto another)
   and hiding as on People.  Groups are tight by design (below), so one
@@ -659,7 +665,7 @@ never shown, merged, suggested or completed together with people or pets.
   *Preferences*; nothing moves to the processor.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
-  heads…*, heads to update with *Update them*, *Close-call judge* (a
+  heads…*, heads to update with *Update them*, *Grouping* (*Tighter*: more, smaller groups, rarely mixing suits; *Balanced*, the default: fewer split-up suits; *Looser*: the fewest small groups, check them for strays; a change groups the fursuits again, keeping names and answers), *Close-call judge* (a
   choice list: *Off*, the default; *Qwen3-VL-Reranker*, about 10 GB and
   about 1 second a close call; or *Gemma 4*, about 18 GB and about
   2 seconds; each on the graphics card only, one loaded at a time;
@@ -744,18 +750,25 @@ decision is added to a file, one line each:
   size and its 16 clearest heads; how it was reached (by hand and where,
   or a distance suggestion with its distance, or the judge's verdict with
   the model and its P(yes) or head-pair counts); and the library at the
-  time (heads, whether whitened, the model, the cut-offs in force).  A
-  merge is about 2 KB, an answer 1.5 KB, a label edit 0.35 KB.
+  time (heads, whether whitened, the model, the fursuit *Grouping* choice
+  and the cut-offs in force).  A merge is about 2 KB, an answer 1.5 KB, a
+  label edit 0.4 KB.  Hiding a group and *Forget this person* aren't
+  recorded.
 - **Where.**  `~/.local/share/photo-pipeline/decisions.jsonl`, beside
   `subjects.json`, readable only by you.  It is yours, not a cache:
   *Clear* and *Rebuild* keep it; *Forget all* of a kind takes that kind's
   entries out; nothing goes into photos, sidecars or the library.  Each
   entry is appended on a thread of its own and synced to disk.
-- **Preferences ▸ Fursuits** has the switch, *Keep a record of my
-  corrections, to improve matching later* (on by default), with how many
-  are kept and their size; off, nothing is added and what is kept stays.
-  *Export…* copies the record, with a README describing its format, into
-  a new folder in one you choose; *Delete the record…* asks first.  The
+- **Preferences ▸ Storage** has the switch, *Keep a record of my
+  corrections, to improve matching later* (on by default, people and
+  fursuits alike), and the record's row with its size and how many are
+  kept.  Off, nothing new is added and what is kept stays; taking back a
+  correction already recorded is still noted, so the record never shows
+  it as in force.  *Export…* copies the record, with a README describing
+  its format, into a new folder in one you choose, **without names**:
+  each person or fursuit is a code such as `fursuit-12`, the same one
+  throughout the copy (the record here keeps the names).  *Delete the
+  record…* asks first.  The
   format is in `docs/library-search-plan.md` ("As built — the record of
   corrections") and `src/model/decisions.rs`.
 
@@ -865,8 +878,10 @@ drift from the cut-offs, which raw vectors don't.  Names and answers
 point at heads, not rows, so a refit loses nothing.
 
 Fursuit groups are **tight by design**: a head joins a group only when it
-is close to the group's members on average (average linkage at 0.69 in
-whitened cosine distance), and groups are never merged afterwards; so a
+is close to the group's members on average (average linkage, at 0.72 in
+whitened cosine distance with the default *Balanced* grouping; 0.69
+*Tighter*, 0.75 *Looser*; raw 0.110, 0.094, 0.115), and groups are never
+merged afterwards; so a
 group is one suit at one event, and *Find more* (strict, 0.671: 95 %
 precision on the labels) and the "Same fursuit?" review (0.711: 90 %),
 nearest first, are how a suit is gathered across days and years.  The

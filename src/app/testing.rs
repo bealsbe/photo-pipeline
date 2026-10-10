@@ -106,8 +106,8 @@
 //! prefs show-search           # open Preferences at its Search section
 //! prefs show-fursuits|show-storage   # ... at Fursuits' last row, Storage's
 //!                             # models row
-//! prefs show-corrections|show-record   # ... at Keep a record of my
-//!                             # corrections, or at its Export / Delete row
+//! prefs show-corrections      # ... at Storage's Keep a record of my
+//!                             # corrections (and the record's row)
 //! prefs keep-corrections|export-corrections|delete-corrections
 //!                             # the record's switch and buttons
 //! prefs export-to /path       # as if Export…'s folder picker returned /path
@@ -168,6 +168,7 @@
 //! fursuits updateheads        # the offer to update heads found before v2
 //! judge stop|showleftout|trycard|prefs   # the close-call judge's line
 //! judge dump                  # print the judge's state and its run
+//! prefs grouping-tighter|grouping-balanced|grouping-looser   # Preferences ▸ Fursuits ▸ Grouping
 //! prefs judge-off|judge-qwen|judge-gemma4|judge-download|update-heads
 //! prefs judge-open|judge-delete|show-judge-storage [qwen|gemma4]
 //!                             # Preferences ▸ Fursuits' judge, Storage's row
@@ -1175,6 +1176,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "find-heads" => Some(Control::FindHeads),
         "find-heads-now" => Some(Control::FindHeadsNow),
         "forget-fursuits" => Some(Control::ForgetFursuits),
+        "grouping-tighter" => Some(Control::Grouping(crate::search::heads::Grouping::Tighter)),
+        "grouping-balanced" => Some(Control::Grouping(crate::search::heads::Grouping::Balanced)),
+        "grouping-looser" => Some(Control::Grouping(crate::search::heads::Grouping::Looser)),
         "judge-off" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Off)),
         "judge-gemma4" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "judge-qwen" => Some(Control::Judge(crate::ml::judge::JudgeChoice::Qwen3VlReranker)),
@@ -1245,8 +1249,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
         "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
-        "show-corrections" => super::preferences::open_at(app, Control::KeepCorrections),
-        "show-record" => super::preferences::open_at(app, Control::DeleteCorrections),
+        "show-corrections" => super::preferences::open_at(app, Control::DeleteCorrections),
         "export-to" => app.update(Message::FolderPicked(super::FolderTarget::ExportCorrections, Some(rest.into()))),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),

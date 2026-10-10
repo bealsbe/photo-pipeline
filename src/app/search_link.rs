@@ -667,6 +667,22 @@ impl Link {
 
     /// Preferences ▸ Fursuits ▸ *Close-call judge*.  Off unloads it and
     /// drops a run.
+    /// Preferences ▸ Fursuits ▸ *Grouping*: the fursuits are grouped again
+    /// (names and answers stay).
+    pub fn set_fursuit_grouping(&self, g: fursuits::Grouping) {
+        match self {
+            Link::Engine(e) => e.set_fursuit_grouping(g),
+            Link::Fake(f) => f.change(|s| {
+                s.status.heads.grouping = g;
+                if s.fursuits.grouping != g {
+                    s.fursuits.grouping = g;
+                    s.fursuits.regroup_now();
+                    s.refresh_people();
+                }
+            }),
+        }
+    }
+
     pub fn set_judge(&self, choice: JudgeChoice) {
         match self {
             Link::Engine(e) => e.set_judge(choice),
@@ -2061,21 +2077,39 @@ impl FakeState {
             GroupId::Cluster(_) => None,
         };
         let shown = first.iter().filter(|f| faces.iter().any(|x| x.face == **f)).copied();
-        decisions::Side::new(faces.len(), group.and_then(|g| g.name.clone()), sid, shown.chain(faces.iter().map(|f| f.face)))
+        decisions::Side::new(faces.len(), group.and_then(|g| g.name.clone()), sid, shown.chain(faces.iter().map(|f| f.face))).counted(group)
     }
 
     /// The stand-in's library for the record: made-up heads, raw space,
     /// the cut-offs the engine would use.
     fn lib(&self, kind: Kind) -> decisions::Lib {
-        let (heads, c, band) = match kind {
-            Kind::Fursuit => (self.status.heads.found, crate::search::heads::RAW_CUTOFFS, Some((crate::search::judging::RAW_SURE_YES, crate::search::judging::RAW_SURE_NO))),
-            _ => (self.status.faces.found, crate::model::subjects::cutoff_for(self.status.faces.model.unwrap_or(models::FACE_MODEL_DEFAULT)), None),
-        };
-        decisions::Lib {
-            heads,
-            white: false,
-            model: "stand-in".into(),
-            cuts: decisions::Cuts { group: c.group, suggest: c.suggest, strict: c.strict, sure_yes: band.map(|b| b.0), sure_no: band.map(|b| b.1) },
+        match kind {
+            Kind::Fursuit => {
+                // The grouping choice as the status carries it.
+                let g = self.status.heads.cuts();
+                let c = if g.whitened { crate::search::heads::CUTOFFS } else { crate::search::heads::RAW_CUTOFFS };
+                let band = if g.whitened { (crate::search::judging::SURE_YES, crate::search::judging::SURE_NO) } else { (crate::search::judging::RAW_SURE_YES, crate::search::judging::RAW_SURE_NO) };
+                decisions::Lib {
+                    heads: self.status.heads.found,
+                    white: g.whitened,
+                    model: "stand-in".into(),
+                    grouping: Some(g.grouping),
+                    cuts: decisions::Cuts {
+                        group: g.group,
+                        suggest: c.suggest,
+                        strict: c.strict,
+                        sure_yes: Some(band.0),
+                        sure_no: Some(band.1),
+                        merge_suggest: Some(g.merge_suggest),
+                        merge_sure: Some(g.merge_sure),
+                        merge_far: Some(g.merge_far),
+                    },
+                }
+            }
+            _ => {
+                let c = crate::model::subjects::cutoff_for(self.status.faces.model.unwrap_or(models::FACE_MODEL_DEFAULT));
+                decisions::Lib { heads: self.status.faces.found, white: false, model: "stand-in".into(), grouping: None, cuts: decisions::Cuts { group: c.group, suggest: c.suggest, strict: c.strict, ..decisions::Cuts::default() } }
+            }
         }
     }
 }
