@@ -3659,3 +3659,63 @@ undo step; today's tools fold into the editor; people and fursuits alike.
   *Move to…* menu.
 - **The record:** one `edit` entry per *Apply* (above).
 
+
+## As built — X in the reviews: not a fursuit head (or not a face) (2026-10-10)
+
+The user: "When answering yes or no while labelling, I should be able to
+mark something as not a fursuit, the same as we did on the labelling web
+page."
+
+### "Same fursuit?" / "Same person?" (`app/subjects_review.rs`)
+
+- **X** (or the neutral *Not a fursuit head* / *Not a face* button under
+  Y and N) removes the candidate's box through the removed list, as the
+  viewer's label removal does.  A burst is one entry, and an entry's
+  frames each carry the head that frame was suggested with, so X removes
+  exactly those boxes, one per frame; no matching across frames is
+  needed or done.
+- It counts as answered (`Review::answered`: an answer or an X), moves on
+  with Auto-advance, and takes back a Y or N given first.  Y or N on an
+  X'd entry waits for Z.  The crop and its strip cell show a dimmed
+  neutral ×.
+- **Z / Ctrl+Z** takes it back as one step.  The review's take-backs
+  are new checkpoints, not pops (`answer(None)`), so X's take-back is a
+  targeted restore as well: `Engine::restore_heads` drops the boxes from
+  `removed` and puts back the group memberships they lost, which the
+  engine kept for that X (`Worker::not_heads`).
+- The judge's lists drop the X'd heads (`left_out` filtered at once;
+  later calls covered by `removed` are offered nowhere and counted done,
+  `on_judge_event`).
+
+### "Possibly the same fursuit" (`app/subjects_merge.rs`)
+
+- **X then 1 or 2** (or the small button under each side) removes that
+  side's shown head, its cover.  Esc, or any other key, lets a waiting X
+  go; C (the editor) does too.  One undo step through the ordinary undo;
+  Z takes the newest step back, an X or an answer (`MergeReview::steps`).
+  The pairs are asked again (`refresh`), since that group's cover
+  changes; settled pairs whose shown head is removed count as done.
+
+### The engine and the record
+
+- `Cmd::NotHeads { kind, faces, at }` refuses boxes that aren't
+  detections of the kind (`MixedKinds`), then `People::remove_faces`:
+  one checkpoint, so one undo step.  The record: `remove` for one box,
+  `remove_many` (`groups: []`, every head) for a burst's frames, since one
+  undo step is one entry; `how` is `{by: "hand", at: "review"}` or
+  `"merge-review"`.  The review's take-back appends an `undo` naming it.
+- The stand-ins (`FakePeople::not_faces`, `FakeFursuits::not_heads`)
+  do the same through `Link::not_heads` / `Link::restore_heads`.
+
+### Checked
+
+- Tests: `x_covers_a_burst_counts_as_answered_and_is_taken_back`
+  (review), `x_then_a_side_and_z_takes_the_newest_step_back` (pair
+  review keys and Z order),
+  `x_in_the_reviews_removes_heads_records_them_and_takes_back` (engine:
+  refused other kinds, `remove` at the review, never offered again in the
+  review or the merge suggestions, the take-back's `undo`, a burst's
+  `remove_many`, `merge-review` taken back by the ordinary undo).
+- Stand-in screenshots of both reviews and People; one real run on the
+  card: X in a check of a 46-photo group and X 1 in the pair review,
+  each taken back, the record's entries as above.

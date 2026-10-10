@@ -1200,7 +1200,7 @@ pub fn debug_state(app: &App) -> String {
     let similar = s.lists.similar.as_ref().map(|(g, l)| (short(g), l.len()));
     let review = s.merges.as_ref().map(|r| {
         format!(
-            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={}]",
+            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={} x_pending={} not_heads={}]",
             r.len(),
             r.at,
             r.answers.iter().map(|a| match a {
@@ -1212,7 +1212,9 @@ pub fn debug_state(app: &App) -> String {
             r.run.as_ref().map(|x| (x.offered, x.left_out.len(), x.done, x.total, x.beyond, x.stopped)),
             r.judged.len(),
             r.left_out_shown,
-            r.refreshing
+            r.refreshing,
+            r.x_pending,
+            r.not_heads
         )
     });
     format!("merges=[tab={tab:?} similar={similar:?} review={}]", review.unwrap_or_else(|| "none".into()))

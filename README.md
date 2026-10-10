@@ -535,6 +535,15 @@ for you.
   when it was in.  ← → (A D) step, Enter opens the photo, Ctrl+Z takes the
   last answer back, Esc stops.  An unnamed group can be checked the same
   way (*Check this group*).
+- **X: not a face at all** (*Not a fursuit head* on a fursuit's review),
+  a neutral button under Y and N, never the prune colour.  The box is
+  removed as the viewer's *Not a face* removes one (never grouped,
+  suggested or found again), in every frame of a burst: each frame's own
+  box, the one it was suggested with.  It counts as answered and moves on
+  with *Advance after marking*; a Y or N given before is taken back.  Z
+  (or Ctrl+Z) takes it back as one step, the box restored and its group
+  membership with it.  The record notes it as `remove` (one photo) or
+  `remove_many` (a burst), `how.at` `review`.
 - **Before faces were looked for** (a library indexed before this
   phase), the tab says what finding them costs (what is downloaded, read
   and how long it takes) and runs it only when asked; it goes through the
@@ -589,7 +598,13 @@ never shown, merged, suggested or completed together with people or pets.
   groups side by side, their covers large with a few more heads under
   them; **Y** merges them (a named group keeps its name; two named ask
   which name to keep), **N** says they are not the same, ← → step, **Z**
-  (or Ctrl+Z) takes the last answer back, Esc stops.  "Not the same" is
+  (or Ctrl+Z) takes the last answer back, Esc stops.  **X then 1 or 2**
+  says the big head on that side (the cover the pair is shown by) is not a
+  fursuit head at all (a button under each side does the same; Esc, or
+  any other key, lets the X go): removed as the viewer removes one, one
+  undo step that Z takes back, recorded as `remove` with `how.at`
+  `merge-review`; the pairs are asked again, since that group's cover
+  changes.  "Not the same" is
   remembered by the groups' heads in the user's file, so the pair isn't
   offered again after a regroup.  Each answer is one undo step; nothing
   merges without Y or a click.  A pair is two groups whose members are

@@ -699,7 +699,7 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
         } else {
             style::Look { fg: tone, hover_fg: t::PHOTO_INK, border: alpha(tone, 0.4), hover_border: alpha(tone, 0.7), bg: alpha(tone, 0.06), hover_bg: alpha(tone, 0.14), ..look }
         };
-        button(container(content).center(Length::Fill)).height(38).padding(Padding::from([0.0, 14.0])).style(look.style()).on_press(rm(Msg::NotHead))
+        button(container(content).center(Length::Fill)).width(310).height(38).padding(0).style(look.style()).on_press(rm(Msg::NotHead))
     };
     let not_tip = format!("{}: a mask, a plush, a sign… Removed for good, in every frame of the burst; never grouped, suggested or found again  (X)", not_head_words(r.kind));
     let crop: Element<'a, Message> = if x_done { stack![crop, x_mark(BIG, shape)].into() } else { crop };
