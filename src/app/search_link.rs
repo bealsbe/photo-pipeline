@@ -377,6 +377,46 @@ impl Link {
         }
     }
 
+    /// X in a review: these boxes (a press's frames, or a group's shown
+    /// head) are not heads (or faces) at all: removed, one undo step,
+    /// recorded as made `at` there.  `group`: the review's group (the
+    /// stand-in finds its kind by it).
+    pub fn not_heads(&self, group: &GroupId, kind: Kind, faces: &[FaceRef], at: decisions::At) {
+        match self {
+            Link::Engine(e) => e.not_heads(kind, faces.to_vec(), at),
+            Link::Fake(f) => {
+                let act = |_: &FakeState| match faces {
+                    [one] => Act::Remove { head: decisions::Head(*one) },
+                    many => Act::RemoveMany { groups: Vec::new(), heads: decisions::heads(many.iter().copied()), removed: many.len() },
+                };
+                let before = f.before(act, group);
+                let done = f.edit(
+                    group,
+                    |p, _| if kind == Kind::Person { p.not_faces(faces).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                    |z, _| if kind == Kind::Fursuit { z.not_heads(faces).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                );
+                f.record(done, before, Via::Hand(at), Some(faces));
+            }
+        }
+    }
+
+    /// The "Same …?" review's X taken back (Z): the boxes come back; one
+    /// step, recorded as an undo of the X.
+    pub fn restore_heads(&self, group: &GroupId, kind: Kind, faces: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.restore_heads(kind, faces.to_vec()),
+            Link::Fake(f) => {
+                let done = f.edit(
+                    group,
+                    |p, _| if kind == Kind::Person { p.restore_faces(faces).map(|_| ()) } else { Err("never combined".into()) },
+                    |z, _| if kind == Kind::Fursuit { z.restore_heads(faces).map(|_| ()) } else { Err("never combined".into()) },
+                );
+                let undone = f.state.lock().answered.remove(&fake_sorted(faces));
+                f.record_undo(undone, done.is_some());
+            }
+        }
+    }
+
     /// What the review offers for a group (`BgEvent::Suggestions`).
     pub fn suggestions(&self, seq: u64, id: &GroupId) {
         match self {

@@ -96,6 +96,10 @@ enum Cmd {
     Label(LabelEdit),
     /// Whole groups (or heads picked in them) are not of their kind.
     RemoveBoxes { kind: Kind, targets: Vec<(GroupId, Option<Vec<FaceRef>>)> },
+    /// A review's X: these boxes (a press's frames) are not of `kind`.
+    NotHeads { kind: Kind, faces: Vec<FaceRef>, at: crate::model::decisions::At },
+    /// The review's X taken back (Z).
+    RestoreHeads { kind: Kind, faces: Vec<FaceRef> },
     /// Match drawn boxes now (sent to itself after a label edit).
     StartDrawn,
     /// Drawn boxes matched (or not) on the card, from their worker.
@@ -362,6 +366,7 @@ impl Engine {
                     drawn_running: false,
                     decisions: recorder,
                     answered: HashMap::new(),
+                    not_heads: HashMap::new(),
                 }
                 .run()
             })
@@ -532,6 +537,22 @@ impl Engine {
     /// another kind.  A fresh `BgEvent::Subjects` follows.
     pub fn remove_boxes(&self, kind: Kind, targets: Vec<(GroupId, Option<Vec<FaceRef>>)>) {
         self.send(Cmd::RemoveBoxes { kind, targets });
+    }
+
+    /// X in a review ("Same fursuit?", "Possibly the same fursuit"):
+    /// these boxes of `kind` (the press's frames, or a group's shown head)
+    /// are not heads (or faces) at all.  They go to the removed list, as
+    /// the viewer's removal does, in one undo step, written to the record
+    /// as made `at` there.  Refused, with nothing changed, when a box isn't
+    /// a detection of `kind`.
+    pub fn not_heads(&self, kind: Kind, faces: Vec<FaceRef>, at: crate::model::decisions::At) {
+        self.send(Cmd::NotHeads { kind, faces, at });
+    }
+
+    /// The "Same …?" review's X taken back (Z): the boxes come back, into
+    /// the subjects they were in; one step, recorded as an undo of it.
+    pub fn restore_heads(&self, kind: Kind, faces: Vec<FaceRef>) {
+        self.send(Cmd::RestoreHeads { kind, faces });
     }
 
     /// A face's or head's pixels for a tile or the review, `px`×`px`
@@ -938,6 +959,9 @@ struct Worker {
     /// Review answers recorded this session, by their heads: an answer
     /// taken back names its entry.
     answered: HashMap<Vec<FaceRef>, (String, Kind)>,
+    /// A review's "Not a fursuit head" this session, by its boxes (in
+    /// order): the memberships they lost, for its take back.
+    not_heads: HashMap<Vec<FaceRef>, Vec<(SubjectId, FaceRef)>>,
 }
 
 /// One pair of groups the judge compares: its head pairs and their
@@ -1334,6 +1358,31 @@ impl Worker {
                         let _ = self.me.send(Cmd::StartDrawn);
                     }
                 }
+                Cmd::NotHeads { kind, faces, at } => {
+                    // Only detections of the kind: never a mix.
+                    let all_of_kind = faces.iter().all(|f| self.is_detection(kind, f));
+                    let r = if all_of_kind {
+                        let before = self.before_not_heads(kind, &faces);
+                        let r = self.people.remove_faces(kind, &faces);
+                        if let Ok((_, lost)) = &r {
+                            self.not_heads.insert(faces.clone(), lost.clone());
+                            self.record(before, Via::Hand(at));
+                        }
+                        r.map(|_| ())
+                    } else {
+                        Err(Refused::MixedKinds)
+                    };
+                    self.after_edit(r);
+                }
+                Cmd::RestoreHeads { kind, faces } => {
+                    let lost = self.not_heads.remove(&faces).unwrap_or_default();
+                    let r = self.people.restore_faces(kind, &faces, &lost);
+                    if r.is_ok() {
+                        let undone = self.answered_entry(&faces);
+                        self.record_undo(undone, true);
+                    }
+                    self.after_edit(r.map(|_| ()));
+                }
                 Cmd::RemoveBoxes { kind, targets } => {
                     let before = self.before_remove_boxes(kind, &targets);
                     let r = self.people.remove_boxes(kind, &targets);
@@ -1625,6 +1674,15 @@ impl Worker {
 
     /// The index holds this photo (its faces and heads were looked for
     /// there, decision 14).
+    /// A box is a detection (found or drawn) of `kind`.
+    fn is_detection(&self, kind: Kind, f: &FaceRef) -> bool {
+        match kind {
+            Kind::Person => self.people.store.as_ref().is_some_and(|s| s.detection(f).is_some()),
+            Kind::Fursuit => self.fursuits.store.as_ref().is_some_and(|s| s.detection(f).is_some()),
+            Kind::Pet => false,
+        }
+    }
+
     fn indexed(&self, key: &Key) -> bool {
         self.index.as_ref().is_some_and(|ix| ix.vectors.contains(key))
     }
@@ -2167,8 +2225,13 @@ impl Worker {
     /// (the majority; a head pair that couldn't be judged is a no), sent
     /// as it lands.
     fn settle_merges(&mut self) {
+        // A pair whose shown head was removed since it was asked ("Not a
+        // fursuit head" in the review) is settled nowhere: the review asks
+        // for the pairs again.
+        let out = self.people.file.removed_index(Kind::Fursuit);
         let Some(j) = self.merge_judging.as_mut() else { return };
         let (mut offered, mut left_out) = (Vec::new(), Vec::new());
+        let mut gone = 0;
         let calls = &mut j.calls;
         j.pending.retain(|&ci| {
             let call = &mut calls[ci];
@@ -2177,17 +2240,19 @@ impl Worker {
             }
             let v = super::merging::verdict(&call.answers.iter().map(|a| a.flatten()).collect::<Vec<_>>());
             call.pair.verdict = Some(v);
-            if v.same() {
+            if [call.pair.a_heads.first(), call.pair.b_heads.first()].into_iter().flatten().any(|f| out.covers(&f.face)) {
+                gone += 1;
+            } else if v.same() {
                 offered.push(call.pair.clone());
             } else {
                 left_out.push(call.pair.clone());
             }
             false
         });
-        if offered.is_empty() && left_out.is_empty() {
+        if offered.is_empty() && left_out.is_empty() && gone == 0 {
             return;
         }
-        j.done += offered.len() + left_out.len();
+        j.done += offered.len() + left_out.len() + gone;
         let _ = self.bus.unbounded_send(BgEvent::MergeJudged { seq: j.seq, offered: Arc::new(offered), left_out: Arc::new(left_out), done: j.done, total: j.total, beyond: j.beyond });
         self.judge_state = if j.pending.is_empty() { JudgeState::Idle } else { JudgeState::Comparing { done: j.done, total: j.total } };
     }
@@ -2298,12 +2363,17 @@ impl Worker {
                     self.publish_judge();
                     return;
                 }
+                // Heads removed since the call was asked ("Not a fursuit
+                // head" in the review) are offered nowhere.
+                let out = self.people.file.removed_index(Kind::Fursuit);
                 let Some(j) = self.judging.as_mut().filter(|j| j.token == token) else { return };
                 let Some(pos) = j.pending.iter().position(|&i| PairKey::new(j.calls[i].candidate, j.calls[i].member) == key) else { return };
                 let i = j.pending.remove(pos);
                 j.done += 1;
                 let (mut offered, mut left_out) = (Vec::new(), Vec::new());
+                let removed = j.calls[i].faces.iter().any(|f| out.covers(&f.face));
                 match &result {
+                    _ if removed => {}
                     Ok(v) if v.same(self.judge_choice) => offered.push(j.calls[i].faces.clone()),
                     Ok(_) => left_out.push(j.calls[i].faces.clone()),
                     Err(why) => eprintln!("judge: a close call couldn't be judged: {why}"),
@@ -4364,6 +4434,107 @@ mod tests {
         // Kinds never mix: a person's id is no fursuit group.
         e.merge_suggestions(10, Some(GroupId::Subject(SubjectId("0".repeat(32)))), 1, false);
         assert!(merges(&mut ev, 10, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// X in the reviews through the engine: the heads go to the removed
+    /// list (never offered again, in the review or the merge suggestions),
+    /// one undo step, recorded as `remove` (one head) or `remove_many`
+    /// (a burst's frames) made `at` the review; the review's take back
+    /// restores them and records an undo naming it; X in the pair review
+    /// is taken back by the ordinary undo; a box that isn't a detection of
+    /// the kind is refused, nothing changed, nothing recorded.
+    #[test]
+    fn x_in_the_reviews_removes_heads_records_them_and_takes_back() {
+        use crate::model::decisions::{Act, At, Entry};
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        // A at 0; B 0.699 from it (a suggestion for A); C and D far.
+        let specs = [(1, 0), (2, Suits::at(0.699)), (3, 1800), (4, -1000)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("review-x", &refs);
+        let user = d.join("user").join("subjects.json");
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(user.clone()), downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+        let groups = fursuit_groups(&e, 4);
+        let a = groups.iter().find(|g| g.1 == key_of(1)).unwrap().0.clone();
+        e.name_group(a, "Suit".into());
+        let started = Instant::now();
+        let suit = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let entries = |n: usize| -> Vec<Entry> {
+            let started = Instant::now();
+            loop {
+                let got = e.decisions().entries();
+                if got.len() >= n {
+                    return got;
+                }
+                assert!(started.elapsed() < Duration::from_secs(5), "{} of {n}: {got:?}", got.len());
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let offered = |ev: &mut Events, seq: u64| -> Vec<FaceRef> {
+            e.suggestions(seq, suit.clone());
+            review(ev, seq, Duration::from_secs(2)).0.unwrap_or_default().iter().flatten().map(|f| f.face).collect()
+        };
+        assert_eq!(offered(&mut ev, 1), [head(2)], "B is suggested");
+        let base = e.decisions().entries().len();
+        // A box of another kind (no face is there): refused, nothing kept.
+        e.not_heads(Kind::Person, vec![head(2)], At::Review);
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(e.decisions().entries().len(), base);
+        assert_eq!(offered(&mut ev, 2), [head(2)]);
+        // X on B in the review: gone, recorded as `remove` at the review.
+        e.not_heads(Kind::Fursuit, vec![head(2)], At::Review);
+        let got = entries(base + 1);
+        let x = got.last().unwrap().clone();
+        assert!(matches!(&x.act, Act::Remove { head: h } if h.0 == head(2)), "{x:?}");
+        assert_eq!(x.how.as_ref().unwrap().at, Some(At::Review));
+        assert_eq!(serde_json::to_value(&x).unwrap()["how"]["at"], "review");
+        assert!(offered(&mut ev, 3).is_empty(), "never offered again");
+        let _ = fursuit_groups(&e, 3);
+        e.merge_suggestions(4, None, 1, false);
+        assert!(merges(&mut ev, 4, Duration::from_secs(2)).0.unwrap().is_empty(), "nor in the merge suggestions");
+        // Z in the review: B back, an undo naming the X.
+        e.restore_heads(Kind::Fursuit, vec![head(2)]);
+        let got = entries(base + 2);
+        assert!(matches!(&got.last().unwrap().act, Act::Undo { undoes, of } if *undoes == x.id && of == "remove"), "{:?}", got.last());
+        assert_eq!(offered(&mut ev, 5), [head(2)], "offered again");
+        // A burst's frames: one `remove_many` entry, one step.
+        e.not_heads(Kind::Fursuit, vec![head(3), head(4)], At::Review);
+        let got = entries(base + 3);
+        assert!(matches!(&got.last().unwrap().act, Act::RemoveMany { heads, removed: 2, .. } if heads.len() == 2), "{:?}", got.last());
+        let _ = fursuit_groups(&e, 2);
+        e.restore_heads(Kind::Fursuit, vec![head(3), head(4)]);
+        let _ = fursuit_groups(&e, 4);
+        // X in the pair review: `merge-review`; the ordinary undo takes it
+        // back.
+        e.not_heads(Kind::Fursuit, vec![head(2)], At::MergeReview);
+        let got = entries(base + 5);
+        let x = got.last().unwrap().clone();
+        assert_eq!(serde_json::to_value(&x).unwrap()["how"]["at"], "merge-review");
+        let _ = fursuit_groups(&e, 3);
+        e.undo();
+        let got = entries(base + 6);
+        assert!(matches!(&got.last().unwrap().act, Act::Undo { undoes, .. } if *undoes == x.id), "{:?}", got.last());
+        let _ = fursuit_groups(&e, 4);
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

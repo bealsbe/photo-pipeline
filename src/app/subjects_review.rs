@@ -66,8 +66,12 @@ pub struct Review {
     /// Answers in the order given, for Ctrl+Z.
     order: Vec<usize>,
     beat: u64,
-    /// The answer that started the last move, and when (the stamp).
-    stamp: Option<(bool, Instant)>,
+    /// The answer that started the last move, and when (the stamp):
+    /// `Some(yes)` for Y and N, `None` for X.
+    stamp: Option<(Option<bool>, Instant)>,
+    /// Entries marked "Not a fursuit head" (or "Not a face", X): removed
+    /// for good, counted as answered.
+    pub not_heads: HashSet<usize>,
     /// The close-call judge (fursuits): entries it offered, and those it
     /// left out that the user asked to see, by their first frame.
     pub judged_faces: HashSet<FaceRef>,
@@ -93,6 +97,7 @@ impl Review {
             order: Vec::new(),
             beat: 0,
             stamp: None,
+            not_heads: HashSet::new(),
             judged_faces: HashSet::new(),
             left_out_faces: HashSet::new(),
             left_out_shown: false,
@@ -162,9 +167,28 @@ impl Review {
         self.list.as_ref().map_or(0, |l| l.len())
     }
 
+    /// Entry `i` was answered: Y, N, or X (not a head at all).
+    pub fn answered(&self, i: usize) -> bool {
+        self.answers.get(i).copied().flatten().is_some() || self.not_heads.contains(&i)
+    }
+
     /// The first unanswered suggestion after `i`, or the end.
     pub fn next_open(&self, i: usize) -> usize {
-        (i + 1..self.len()).find(|&j| self.answers[j].is_none()).unwrap_or(self.len())
+        (i + 1..self.len()).find(|&j| !self.answered(j)).unwrap_or(self.len())
+    }
+
+    /// X on the suggestion shown: its faces (every frame of its press, the
+    /// head each frame was suggested with) and the Y or N it had before.
+    pub fn not_head(&mut self) -> Option<(Vec<FaceRef>, Option<bool>)> {
+        let faces: Vec<FaceRef> = self.list.as_ref()?.get(self.at)?.iter().map(|f| f.face).collect();
+        if self.not_heads.contains(&self.at) {
+            return None;
+        }
+        let before = self.answers[self.at].take();
+        self.not_heads.insert(self.at);
+        self.order.retain(|&i| i != self.at);
+        self.order.push(self.at);
+        Some((faces, before))
     }
 
     /// Every suggestion answered: the end page.
@@ -176,25 +200,35 @@ impl Review {
     /// frame of its press) and the answer they had before.
     pub fn answer(&mut self, yes: bool) -> Option<(Vec<FaceRef>, Option<bool>)> {
         let faces: Vec<FaceRef> = self.list.as_ref()?.get(self.at)?.iter().map(|f| f.face).collect();
+        // Not a head at all already: Z takes that back first.
+        if self.not_heads.contains(&self.at) {
+            return None;
+        }
         let before = self.answers[self.at].replace(yes);
         self.order.retain(|&i| i != self.at);
         self.order.push(self.at);
         Some((faces, before))
     }
 
-    /// Take the last answer back: its place and faces.
-    pub fn take_back(&mut self) -> Option<(usize, Vec<FaceRef>)> {
+    /// Take the last answer back: its place, faces, and whether it was an
+    /// X (else a Y or N).
+    pub fn take_back(&mut self) -> Option<(usize, Vec<FaceRef>, bool)> {
         let i = self.order.pop()?;
         self.answers[i] = None;
+        let was_x = self.not_heads.remove(&i);
         self.at = i;
         let faces = self.list.as_ref()?.get(i)?.iter().map(|f| f.face).collect();
-        Some((i, faces))
+        Some((i, faces, was_x))
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Msg {
     Answer(bool),
+    /// X: not a fursuit head (or not a face) at all.
+    NotHead,
+    /// Z: the last answer taken back (as Ctrl+Z).
+    TakeBack,
     Step(i32),
     At(usize),
     /// The beat after an answer is over: move on if still on it.
@@ -245,6 +279,7 @@ pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec
         r.left_out_faces.clear();
         r.answers = vec![None; list.len()];
         r.order.clear();
+        r.not_heads.clear();
         r.at = 0;
         r.list = Some(list);
         return subj::refresh_crops(app);
@@ -260,6 +295,7 @@ pub fn on_suggestions(app: &mut App, seq: u64, group: GroupId, list: Arc<Vec<Vec
     }
     r.answers = vec![None; list.len()];
     r.order.clear();
+    r.not_heads.clear();
     r.at = 0;
     r.list = Some(list);
     subj::refresh_crops(app)
@@ -308,6 +344,8 @@ fn strip_start(r: &Review) -> usize {
 pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     match msg {
         Msg::Answer(yes) => answer(app, yes),
+        Msg::NotHead => not_head(app),
+        Msg::TakeBack => take_back(app),
         Msg::Step(d) => {
             let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
             let max = r.len().saturating_sub(1);
@@ -323,7 +361,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Beat(seq) => {
             let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
-            if r.beat != seq || r.answers.get(r.at).copied().flatten().is_none() {
+            if r.beat != seq || !r.answered(r.at) {
                 return Task::none();
             }
             r.at = r.next_open(r.at);
@@ -373,20 +411,58 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
     if !advance {
         return Task::none();
     }
-    r.stamp = Some((yes, Instant::now()));
+    r.stamp = Some((Some(yes), Instant::now()));
     subj::after(BEAT_MS, rm(Msg::Beat(r.beat)))
 }
 
-/// Ctrl+Z in the review: the last answer, taken back.
+/// X: the suggestion shown is not a fursuit head (or not a face) at all.
+/// Removed as the viewer's "Not a fursuit head" removes one, in every
+/// frame of its press (one answer covers a burst: each frame's head is
+/// the one it was suggested with), one undo step; it counts as answered,
+/// so the review moves on as after Y or N.
+fn not_head(app: &mut App) -> Task<Message> {
+    let advance = app.settings.viewer_advance;
+    let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
+    if r.at_end() {
+        return Task::none();
+    }
+    let (group, kind) = (r.group.clone(), r.kind);
+    let Some((faces, before)) = r.not_head() else { return Task::none() };
+    let via = r.via(&faces);
+    // A Y or N given before is taken back first.
+    if before.is_some() {
+        app.search.link.answer(&group, &faces, None, via);
+    }
+    app.search.link.not_heads(&group, kind, &faces, crate::model::decisions::At::Review);
+    // The judge's left-out list no longer holds them.
+    if let Some(run) = app.subjects.judge.as_mut() {
+        run.left_out.retain(|e| !e.iter().any(|f| faces.contains(&f.face)));
+    }
+    let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
+    r.beat += 1;
+    if !advance {
+        return Task::none();
+    }
+    r.stamp = Some((None, Instant::now()));
+    subj::after(BEAT_MS, rm(Msg::Beat(r.beat)))
+}
+
+/// Ctrl+Z (or Z) in the review: the last answer, taken back (an X's
+/// heads come back).
 pub fn take_back(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
-    let group = r.group.clone();
-    let Some((_, faces)) = r.take_back() else {
+    let (group, kind) = (r.group.clone(), r.kind);
+    let Some((_, faces, was_x)) = r.take_back() else {
         return app.show_status("No answer to take back.", 3000);
     };
     r.beat += 1;
-    let via = r.via(&faces);
-    app.search.link.answer(&group, &faces, None, via);
+    r.stamp = None;
+    if was_x {
+        app.search.link.restore_heads(&group, kind, &faces);
+    } else {
+        let via = r.via(&faces);
+        app.search.link.answer(&group, &faces, None, via);
+    }
     let t = app.show_status("Took the last answer back.", 3000);
     Task::batch([t, subj::refresh_crops(app)])
 }
@@ -396,7 +472,14 @@ fn done(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.review.take() else { return Task::none() };
     let (yes, no) = r.counts();
     let name = subj::label(&app.subjects, &r.group);
+    let x: usize = r.not_heads.iter().filter_map(|&i| r.list.as_ref().and_then(|l| l.get(i)).map(Vec::len)).sum();
+    let removed = match (x, r.kind) {
+        (0, _) => String::new(),
+        (n, Kind::Fursuit) => format!(" Removed {}: not fursuit heads.", util::plural(n as u64, "photo")),
+        (n, _) => format!(" Removed {}: not faces.", util::plural(n as u64, "photo")),
+    };
     let text = match (yes, no, r.checking) {
+        (0, 0, _) if x > 0 => removed.trim_start().to_string(),
         (0, 0, _) => String::new(),
         (y, n, false) => {
             let mut s = format!("Added {} to {name}.", util::plural(y as u64, "photo"));
@@ -410,6 +493,7 @@ fn done(app: &mut App) -> Task<Message> {
         }
         (y, n, true) => format!("Confirmed {} in the group; took {} out.", util::plural(y as u64, "photo"), util::thousands(n as u64)),
     };
+    let text = if text.is_empty() || x == 0 || (yes == 0 && no == 0) { text } else { format!("{text}{removed}") };
     let t = super::subjects_person::after_change(app);
     let refresh = subj::refresh_crops(app);
     if text.is_empty() {
@@ -454,6 +538,8 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     match (key, c.as_deref()) {
         (_, Some("y")) => update(app, Msg::Answer(true)),
         (_, Some("n")) => update(app, Msg::Answer(false)),
+        (_, Some("x")) => update(app, Msg::NotHead),
+        (_, Some("z")) => update(app, Msg::TakeBack),
         (Key::Named(Named::ArrowRight), _) | (_, Some("d")) => update(app, Msg::Step(1)),
         (Key::Named(Named::ArrowLeft), _) | (_, Some("a")) => update(app, Msg::Step(-1)),
         (Key::Named(Named::Enter), _) => update(app, Msg::Open),
@@ -473,9 +559,14 @@ pub fn view(app: &App) -> Element<'_, Message> {
         Some(list) => {
             let main = row![reference(app, r), suggestion(app, r, list), photo(app, r, list)].spacing(40).align_y(Alignment::Center);
             let centre = container(main).width(Length::Fill).height(Length::Fill).center(Length::Fill).padding(Padding { top: 10.0, left: 24.0, right: 24.0, bottom: 0.0 });
-            let stamp = r.stamp.map(|(yes, at)| {
+            let stamp = r.stamp.map(|(ans, at)| {
                 let name = subj::label(s, &r.group);
-                let (g, label, tone) = if yes { (Glyph::Keep, format!("Added to {name}"), t::KEEP) } else { (Glyph::Prune, format!("Not {name}"), t::REJECT) };
+                let (g, label, tone) = match ans {
+                    Some(true) => (Glyph::Keep, format!("Added to {name}"), t::KEEP),
+                    Some(false) => (Glyph::Prune, format!("Not {name}"), t::REJECT),
+                    // Not a head at all: neutral, never the prune pink.
+                    None => (Glyph::Close, not_head_words(r.kind).to_string(), t::PHOTO_INK2),
+                };
                 crate::ui::stamp::Stamp::new(Some(at), g, label, tone)
             });
             let centre: Element<'_, Message> = match stamp {
@@ -519,7 +610,7 @@ fn header<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     } else {
         format!("{} of {}. {yes} added, {no} not.", (r.at + 1).min(n), util::plural(n as u64, "suggestion"))
     };
-    let answered = r.answers.iter().filter(|a| a.is_some()).count();
+    let answered = (0..r.len()).filter(|&i| r.answered(i)).count();
     let frac = if n == 0 { 0.0 } else { answered as f32 / n as f32 };
     let bar = iced::widget::progress_bar(0.0..=1.0, frac).length(160).girth(4).style(|_| iced::widget::progress_bar::Style {
         background: Background::Color(t::RAISED),
@@ -591,6 +682,27 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
         };
         button(container(content).center(Length::Fill)).width(150).height(38).padding(0).style(look.style()).on_press(rm(Msg::Answer(yes))).into()
     };
+    // X: not a head (or face) at all.  Neutral, never the prune pink.
+    let x_done = r.not_heads.contains(&r.at);
+    let not_btn = {
+        let tone = t::PHOTO_INK2;
+        let content = row![
+            icons::view(Glyph::Close, 16.0, tone),
+            text(not_head_words(r.kind)).size(t::T_BODY).font(paint::MEDIUM),
+            container(text("X").size(11).font(paint::MEDIUM).color(alpha(tone, 0.8))).padding(Padding::from([0.0, 4.0])).style(move |_| container::Style { border: style::border(alpha(tone, 0.6), 1.0, 4.0), ..Default::default() })
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center);
+        let look = style::toggle(true, tone);
+        let look = if x_done {
+            style::Look { bg: alpha(tone, 0.25), hover_bg: alpha(tone, 0.3), border: tone, hover_border: tone, fg: t::PHOTO_INK, hover_fg: t::PHOTO_INK, ..look }
+        } else {
+            style::Look { fg: tone, hover_fg: t::PHOTO_INK, border: alpha(tone, 0.4), hover_border: alpha(tone, 0.7), bg: alpha(tone, 0.06), hover_bg: alpha(tone, 0.14), ..look }
+        };
+        button(container(content).center(Length::Fill)).height(38).padding(Padding::from([0.0, 14.0])).style(look.style()).on_press(rm(Msg::NotHead))
+    };
+    let not_tip = format!("{}: a mask, a plush, a sign… Removed for good, in every frame of the burst; never grouped, suggested or found again  (X)", not_head_words(r.kind));
+    let crop: Element<'a, Message> = if x_done { stack![crop, x_mark(BIG, shape)].into() } else { crop };
     let one = r.kind.one();
     let hint_yes = if r.checking { format!("Yes: the same {one} as this group  (Y)") } else { format!("Yes: add it to them  (Y)") };
     let hint_no = format!("No: not this {one}; never suggested again  (N)");
@@ -598,9 +710,34 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
     if let Some(o) = super::fursuit_judge::origin_words(r, &f.face) {
         burst = if burst.is_empty() { o.to_string() } else { format!("{o} {burst}") };
     }
-    column![crop, row![tip(answer_btn(true), hint_yes, false), tip(answer_btn(false), hint_no, false)].spacing(10), text(burst).size(t::T_SMALL).color(t::PHOTO_INK2).height(16)]
+    column![
+        crop,
+        row![tip(answer_btn(true), hint_yes, false), tip(answer_btn(false), hint_no, false)].spacing(10),
+        tip(not_btn, not_tip, false),
+        text(burst).size(t::T_SMALL).color(t::PHOTO_INK2).height(16)
+    ]
         .spacing(14)
         .align_x(Alignment::Center)
+        .into()
+}
+
+/// "Not a fursuit head", "Not a face".
+pub fn not_head_words(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Fursuit => "Not a fursuit head",
+        _ => "Not a face",
+    }
+}
+
+/// An X'd entry's mark over its crop: the crop dimmed, a neutral ×.
+fn x_mark<'a>(size: f32, shape: tile::Shape) -> Element<'a, Message> {
+    let r = shape.radius(size);
+    let glyph = (size * 0.3).clamp(12.0, 64.0);
+    container(icons::view(Glyph::Close, glyph, t::PHOTO_INK))
+        .width(size)
+        .height(size)
+        .center(size)
+        .style(move |_| container::Style { background: Some(Background::Color(alpha(t::PHOTO_GROUND, 0.6))), border: Border { radius: r.into(), ..Border::default() }, ..Default::default() })
         .into()
 }
 
@@ -635,7 +772,7 @@ fn strip<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element<'a, 
     for (i, entry) in list.iter().enumerate().skip(first).take(STRIP_N) {
         let Some(f) = entry.first() else { continue };
         let crop = tile::crop(s.crops.get(&f.face, subj::px(app, STRIP), Framing::Face), STRIP, shape);
-        let mut cell: Element<'a, Message> = tile::stamped(crop, r.answers.get(i).copied().flatten(), STRIP, shape);
+        let mut cell: Element<'a, Message> = if r.not_heads.contains(&i) { stack![crop, x_mark(STRIP, shape)].into() } else { tile::stamped(crop, r.answers.get(i).copied().flatten(), STRIP, shape) };
         if entry.len() > 1 {
             let badge = container(text(entry.len().to_string()).size(10).font(paint::SEMIBOLD).color(t::PHOTO_INK2))
                 .padding(Padding::from([0.0, 4.0]))
@@ -664,7 +801,8 @@ fn footer<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     let name = subj::label(&app.subjects, &r.group);
     let note = if r.checking { "Answers go to this group at once, and Ctrl+Z takes one back. A burst takes one answer.".to_string() } else { format!("Answers go to {name} at once, and Ctrl+Z takes one back. A burst takes one answer.") };
     let key = |k: &'a str, what: &'a str| row![text(k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4);
-    let keys = row![key("Y", "Yes"), key("N", "No"), key("← →", "Step"), key("Enter", "Open photo"), key("Esc", "Done")].spacing(16);
+    let not = if r.kind == Kind::Fursuit { "Not a head" } else { "Not a face" };
+    let keys = row![key("Y", "Yes"), key("N", "No"), key("X", not), key("Z", "Take back"), key("← →", "Step"), key("Enter", "Open photo"), key("Esc", "Done")].spacing(16);
     container(row![text(note).size(t::T_SMALL).color(t::PHOTO_INK3).width(Length::Fill), keys].align_y(Alignment::Center))
         .padding(Padding::from([7.0, 20.0]))
         .width(Length::Fill)
@@ -756,7 +894,8 @@ pub fn debug_state(app: &App) -> String {
         r.checking,
         entries,
         r.at,
-        r.answers.iter().map(|a| match a {
+        r.answers.iter().enumerate().map(|(i, a)| match a {
+            _ if r.not_heads.contains(&i) => 'x',
             Some(true) => 'y',
             Some(false) => 'n',
             None => '.',
@@ -809,6 +948,40 @@ mod tests {
         assert!(r.at_end());
     }
 
+    /// X: not a head (or face) at all.  It covers a burst's frames (the
+    /// head each was suggested with), counts as answered (the review moves
+    /// on past it), takes a Y or N given before back, and Z takes it back
+    /// (said to be an X, so its heads are restored, not an answer undone).
+    /// Y or N on an X'd entry waits for Z.
+    #[test]
+    fn x_covers_a_burst_counts_as_answered_and_is_taken_back() {
+        let mut r = review();
+        r.at = 1;
+        let (faces, before) = r.not_head().unwrap();
+        assert_eq!(faces, [face(2, Some(7)).face, face(3, Some(7)).face, face(4, Some(7)).face], "every frame, its own head");
+        assert_eq!(before, None);
+        assert!(r.answered(1) && r.next_open(0) == 2, "answered: the review moves on");
+        assert!(r.not_head().is_none(), "twice is once");
+        assert!(r.answer(true).is_none(), "Y on an X'd entry waits for Z");
+        assert_eq!(r.counts(), (0, 0), "not a Yes or a No");
+        // A Y given before is taken back by the X.
+        r.at = 2;
+        r.answer(true).unwrap();
+        let (_, before) = r.not_head().unwrap();
+        assert_eq!(before, Some(true));
+        assert_eq!(r.answers[2], None);
+        // Z: the newest first, each said to be an X.
+        let (i, faces, was_x) = r.take_back().unwrap();
+        assert_eq!((i, faces.len(), was_x), (2, 1, true));
+        let (i, _, was_x) = r.take_back().unwrap();
+        assert_eq!((i, was_x), (1, true));
+        assert!(!r.answered(1) && r.at == 1);
+        r.answer(false).unwrap();
+        assert_eq!(r.take_back().map(|t| t.2), Some(false), "a No taken back is an answer");
+        assert_eq!(not_head_words(Kind::Fursuit), "Not a fursuit head");
+        assert_eq!(not_head_words(Kind::Person), "Not a face");
+    }
+
     /// The judge's verdicts join the end of the list, each once, so
     /// nothing on screen moves and every answer stays where it was.
     #[test]
@@ -843,7 +1016,7 @@ mod tests {
         r.answer(true);
         r.at = 2;
         r.answer(false);
-        let (i, faces) = r.take_back().unwrap();
+        let (i, faces, _) = r.take_back().unwrap();
         assert_eq!((i, r.at, faces.len()), (2, 2, 1));
         assert_eq!(r.answers, [Some(true), None, None]);
         // Answering one again moves it to the end of the order.

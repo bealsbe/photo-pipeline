@@ -262,6 +262,9 @@ pub struct FakePeople {
     undo: Vec<(Vec<FakeGroup>, String)>,
     /// Name the two largest people once faces are found.
     pub name_first: bool,
+    /// The review's "Not a face" this session: the groups each press's
+    /// faces were in, for its take back.
+    x_lost: HashMap<Vec<Key>, Vec<(GroupId, Key)>>,
 }
 
 /// The names the stand-in gives (made up, never anyone's).
@@ -617,6 +620,47 @@ impl FakePeople {
             }
         }
         Ok(())
+    }
+
+    /// "Not a face" in the review (X): these faces out of every group and
+    /// never suggested again; one undo step.  The groups they were in are
+    /// kept, for the review's take back.
+    pub fn not_faces(&mut self, faces: &[FaceRef]) -> Result<String, String> {
+        let keys: Vec<Key> = faces.iter().map(|f| f.key).collect();
+        if keys.is_empty() {
+            return Err("nothing to remove".into());
+        }
+        let what = if keys.len() == 1 { "Marked a photo not a face".to_string() } else { format!("Marked {} frames not a face", keys.len()) };
+        self.remember(what.clone());
+        let mut lost = Vec::new();
+        for g in &mut self.groups {
+            for k in &keys {
+                if g.members.contains(k) {
+                    lost.push((g.id.clone(), *k));
+                }
+                g.members.retain(|m| m != k);
+                g.confirmed.remove(k);
+                g.rejected.insert(*k);
+            }
+        }
+        self.x_lost.insert(keys, lost);
+        Ok(what)
+    }
+
+    /// The review's X taken back: the faces back where they were.
+    pub fn restore_faces(&mut self, faces: &[FaceRef]) -> Result<String, String> {
+        let keys: Vec<Key> = faces.iter().map(|f| f.key).collect();
+        let lost = self.x_lost.remove(&keys).unwrap_or_default();
+        self.remember(format!("Took back {} not a face", util::plural(keys.len() as u64, "photo")));
+        for g in &mut self.groups {
+            for k in &keys {
+                g.rejected.remove(k);
+                if lost.iter().any(|(id, x)| *id == g.id && x == k) && !g.members.contains(k) {
+                    g.members.push(*k);
+                }
+            }
+        }
+        Ok("Took back".into())
     }
 
     /// "Not faces": the groups' faces (all, or the picked ones) out of

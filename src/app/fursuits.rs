@@ -256,6 +256,9 @@ pub struct FakeFursuits {
     /// Made-up groups of their own beside the suits (`fursuits-many n`),
     /// for a tab of many tiles: covers only, not backed by photos.
     pub many: usize,
+    /// The reviews' "Not a fursuit head" this session: the groups the
+    /// heads were in, for a take back.
+    x_lost: HashMap<Vec<FaceRef>, Vec<(GroupId, FaceRef)>>,
 }
 
 const NAMES: [&str; 2] = ["Fursuit 1", "Fursuit 2"];
@@ -720,6 +723,44 @@ impl FakeFursuits {
             g.judged.clear();
             g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 100 * g.part as u64 + 1000 * (generation + 1));
         }
+    }
+
+    /// "Not a fursuit head" in a review (X): these heads out of every
+    /// group and never suggested again; one undo step.
+    pub fn not_heads(&mut self, faces: &[FaceRef]) -> Result<String, String> {
+        if faces.is_empty() {
+            return Err("nothing to remove".into());
+        }
+        let what = if faces.len() == 1 { "Marked a photo not a fursuit head".to_string() } else { format!("Marked {} frames not a fursuit head", faces.len()) };
+        self.remember(what.clone());
+        let mut lost = Vec::new();
+        for g in &mut self.groups {
+            for f in faces {
+                if g.members.contains(f) {
+                    lost.push((g.id.clone(), *f));
+                }
+                g.members.retain(|m| m != f);
+                g.confirmed.remove(f);
+                g.rejected.insert(*f);
+            }
+        }
+        self.x_lost.insert(faces.to_vec(), lost);
+        Ok(what)
+    }
+
+    /// The review's X taken back: the heads back where they were.
+    pub fn restore_heads(&mut self, faces: &[FaceRef]) -> Result<String, String> {
+        let lost = self.x_lost.remove(faces).unwrap_or_default();
+        self.remember(format!("Took back {} not a fursuit head", util::plural(faces.len() as u64, "photo")));
+        for g in &mut self.groups {
+            for f in faces {
+                g.rejected.remove(f);
+                if lost.iter().any(|(id, x)| *id == g.id && x == f) && !g.members.contains(f) {
+                    g.members.push(*f);
+                }
+            }
+        }
+        Ok("Took back".into())
     }
 
     /// "Not fursuit heads": the groups' heads (all, or the picked ones)

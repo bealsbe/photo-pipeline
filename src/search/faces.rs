@@ -1138,6 +1138,54 @@ impl People {
         Ok((what, boxes))
     }
 
+    /// "Not a fursuit head" (or "Not a face") in a review: these boxes
+    /// (one per frame of the press answered) go to the removed list, as
+    /// the viewer's removal does, in one undo step.  Returns the words and
+    /// the memberships the boxes lost (subject, box), so a review's take
+    /// back ([`People::restore_faces`]) can put them back.
+    pub fn remove_faces(&mut self, kind: Kind, faces: &[FaceRef]) -> Result<(String, Vec<(SubjectId, FaceRef)>), Refused> {
+        let faces: Vec<FaceRef> = faces.iter().fold(Vec::new(), |mut v, f| {
+            if !v.contains(f) {
+                v.push(*f);
+            }
+            v
+        });
+        if faces.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        let lost: Vec<(SubjectId, FaceRef)> = faces.iter().filter_map(|f| self.file.member_of(kind, f).map(|s| (s.id.clone(), *f))).collect();
+        let n = faces.len();
+        let what = if n == 1 { format!("Marked a {} not a {}", "photo", box_noun(kind)) } else { format!("Marked {n} frames not a {}", box_noun(kind)) };
+        self.checkpoint(what.clone());
+        for f in &faces {
+            let _ = self.file.remove_box(kind, *f);
+        }
+        self.save();
+        Ok((what, lost))
+    }
+
+    /// A review's "Not a fursuit head" taken back (Z): the boxes leave the
+    /// removed list and rejoin the subjects they were in; one step (the
+    /// review takes answers back the same way).
+    pub fn restore_faces(&mut self, kind: Kind, faces: &[FaceRef], lost: &[(SubjectId, FaceRef)]) -> Result<String, Refused> {
+        let before = self.file.removed.len();
+        let gone: Vec<subjects::Labelled> = self.file.removed.iter().filter(|l| l.kind == kind && faces.contains(&l.face)).copied().collect();
+        if gone.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        let what = format!("Took back {} not a {}", util_plural(faces.len(), "photo"), box_noun(kind));
+        self.checkpoint(what.clone());
+        self.file.removed.retain(|l| !gone.contains(l));
+        debug_assert!(self.file.removed.len() < before);
+        for (s, f) in lost {
+            if self.file.get(s).is_some_and(|s| s.kind == kind) {
+                let _ = self.file.add_members(s, vec![*f]);
+            }
+        }
+        self.save();
+        Ok(what)
+    }
+
     /// *Forget all people* (or fursuits, or pets): that kind's subjects
     /// go from the user's file, and for people the face cache too; the
     /// other kinds' names, answers and caches stay untouched.  Beyond
@@ -1346,6 +1394,11 @@ fn name_box(file: &mut SubjectsFile, kind: Kind, face: FaceRef, to: &NameTo) -> 
             Ok(None)
         }
     }
+}
+
+/// "a photo", "3 photos".
+fn util_plural(n: usize, word: &str) -> String {
+    if n == 1 { format!("a {word}") } else { format!("{n} {word}s") }
 }
 
 fn plural(n: usize, word: &str) -> String {

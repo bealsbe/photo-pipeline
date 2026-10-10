@@ -261,6 +261,21 @@ impl Worker {
         Some(Before { kind, act: Act::RemoveMany { groups, heads: Vec::new(), removed: 0 }, answered: None })
     }
 
+    /// "Not a fursuit head" (or "Not a face") in a review: a `remove`
+    /// entry for one box, the press's frames as `remove_many` (one entry,
+    /// one undo step); remembered by its heads, so a take back (Z) names
+    /// it.
+    pub(super) fn before_not_heads(&mut self, kind: Kind, faces: &[FaceRef]) -> Option<Before> {
+        if !self.decisions.is_on() || faces.is_empty() {
+            return None;
+        }
+        let act = match faces {
+            [one] => Act::Remove { head: decisions::Head(*one) },
+            many => Act::RemoveMany { groups: Vec::new(), heads: decisions::heads(many.iter().take(decisions::MOVED_HEADS).copied()), removed: many.len() },
+        };
+        Some(Before { kind, act, answered: Some((Vec::new(), faces.to_vec())) })
+    }
+
     /// The removal's heads, once resolved.
     pub(super) fn removed_heads(before: Option<Before>, removed: &[FaceRef]) -> Option<Before> {
         let mut b = before?;
