@@ -409,8 +409,25 @@ impl Link {
         match self {
             Link::Engine(e) => e.group_check(seq, id.clone()),
             Link::Fake(f) => {
-                let (far, pairs, split) = f.state.lock().fursuits.check(id).unwrap_or_default();
+                let (far, pairs, split) = {
+                    let s = f.state.lock();
+                    s.fursuits.check(id).unwrap_or_else(|| (s.people.far_order(id).unwrap_or_default(), Vec::new(), None))
+                };
                 let _ = f.bus.unbounded_send(BgEvent::GroupCheck { seq, group: id.clone(), far: Arc::new(far), pairs: Arc::new(pairs), split: split.map(Arc::new) });
+            }
+        }
+    }
+
+    /// Which group of `kind` holds each of `heads` now (`BgEvent::Located`).
+    pub fn locate(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.locate(seq, kind, heads.to_vec()),
+            Link::Fake(f) => {
+                let groups: Vec<Option<GroupId>> = {
+                    let s = f.state.lock();
+                    heads.iter().map(|h| if kind == Kind::Fursuit { s.fursuits.group_of(h) } else { s.people.group_of(h) }).collect()
+                };
+                let _ = f.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
             }
         }
     }

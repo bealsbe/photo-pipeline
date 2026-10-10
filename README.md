@@ -607,6 +607,18 @@ never shown, merged, suggested or completed together with people or pets.
   around them (each head with the one it looks more like) for you to
   check, swap and confirm.  Nothing moves until you do; each split is one
   undo step; heads removed in the viewer are in none of it.
+- **Two groups side by side** (people and fursuits alike), to move faces
+  or heads between them: pick two groups on the tab (S, then click) and
+  press C or *Side by side*; or on a group's page ⋯ ▸ *Side by side
+  with…* (C), the side-by-side button on a similar group, or C on a pair
+  in "Same fursuit?".  Each column shows its group least like the rest
+  first, the few farthest marked.  Drag a face (the picked ones with it)
+  onto the other column or onto *New group* below; or click to pick
+  (Shift+click a run) and press ← or → to send them to that side, N for
+  a new group.  Each move is one undo step and names stay with their
+  groups; a group a move turns into a subject is followed.  Two groups of
+  different kinds are never shown together, and faces removed in the
+  viewer are left out.  Esc puts the picks away, then leaves.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).

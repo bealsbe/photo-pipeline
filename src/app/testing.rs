@@ -186,6 +186,11 @@
 //! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
 //! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
 //! merges dump                 # print the lists and the review
+//! pair open 0 3               # two groups (the tab's 1st and 4th) side by side
+//! pair pick 0 2|shiftpick 1 5 # pick a face of the left (0) / right (1) side
+//! pair move left|right|new    # the picked faces to that side / a new group
+//! pair drag 0 2 right|dragto 0 2 new   # drag a face (the picked with it)
+//! pair close|dump
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
@@ -468,6 +473,53 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
                 other => {
                     eprintln!("[script] unknown split action {other}");
+                    Task::none()
+                }
+            }
+        }
+        "pair" => {
+            use super::subjects_pair::{Msg as Pm, Target};
+            let x = |m: Pm| Message::Subjects(super::subjects::Msg::Pair(m));
+            let (what, rest) = arg.trim().split_once(' ').unwrap_or((arg.trim(), ""));
+            let nums: Vec<usize> = rest.split_whitespace().filter_map(|w| w.parse().ok()).collect();
+            let target = |rest: &str| if rest.contains("new") { Target::New } else if rest.contains("left") { Target::Side(0) } else { Target::Side(1) };
+            let face = |app: &App, side: usize, n: usize| app.subjects.pair.as_ref().and_then(|p| p.ordered(side).get(n).map(|f| f.face));
+            match what {
+                // `open 0 3`: the 1st and 4th groups in the tab's order.
+                "open" => {
+                    let st = &app.subjects;
+                    let order = super::subjects::arrange(&st.all, st.tab, app.settings.people_min_photos()).order(st.small_open, st.hidden_open);
+                    match (order.get(nums.first().copied().unwrap_or(0)), order.get(nums.get(1).copied().unwrap_or(1))) {
+                        (Some(a), Some(b)) => app.update(x(Pm::Open(a.clone(), b.clone()))),
+                        _ => Task::none(),
+                    }
+                }
+                // `pick 0 2` / `shiftpick 0 5`: the 3rd / 6th face of the left side.
+                "pick" | "shiftpick" => {
+                    let side = nums.first().copied().unwrap_or(0).min(1);
+                    if let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) {
+                        super::subjects_pair::pick(app, side, f, what == "shiftpick");
+                    }
+                    Task::none()
+                }
+                "move" => app.update(x(Pm::MoveTo(target(rest)))),
+                // `drag 0 2 right`: drag the left side's 3rd face onto the right.
+                "drag" | "dragto" => {
+                    let side = nums.first().copied().unwrap_or(0).min(1);
+                    let Some(f) = face(app, side, nums.get(1).copied().unwrap_or(0)) else { return Task::none() };
+                    let mut t = vec![app.update(x(Pm::DragStart(side, f))), app.update(x(Pm::DragEnter(target(rest))))];
+                    if what == "drag" {
+                        t.push(app.update(x(Pm::DragDrop)));
+                    }
+                    Task::batch(t)
+                }
+                "close" => app.update(x(Pm::Close)),
+                "dump" => {
+                    eprintln!("[pair] {}", super::subjects_pair::debug_state(app));
+                    Task::none()
+                }
+                other => {
+                    eprintln!("[script] unknown pair action {other}");
                     Task::none()
                 }
             }

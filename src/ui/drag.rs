@@ -46,11 +46,20 @@ pub struct DragArea<'a, M> {
     /// The tile's crop, drawn under the pointer while it is dragged.
     ghost: Option<Handle>,
     radius: f32,
+    /// Only a place to drop on: a press here never starts a drag.
+    target_only: bool,
 }
 
 impl<'a, M> DragArea<'a, M> {
     pub fn new(content: impl Into<Element<'a, M, iced::Theme, Renderer>>, messages: DragMessages<M>, dragging: bool) -> Self {
-        DragArea { content: content.into(), messages, dragging, ghost: None, radius: 0.0 }
+        DragArea { content: content.into(), messages, dragging, ghost: None, radius: 0.0, target_only: false }
+    }
+
+    /// Only a drop target (a column, a tray): presses inside it belong to
+    /// what it holds.
+    pub fn target_only(mut self) -> Self {
+        self.target_only = true;
+        self
     }
 
     /// The crop to draw under the pointer, and its corner radius at
@@ -168,7 +177,7 @@ impl<M: Clone> Widget<M, iced::Theme, Renderer> for DragArea<'_, M> {
         let bounds = layout.bounds();
         let st = tree.state.downcast_mut::<State>();
         match event {
-            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => st.press(cursor.position_over(bounds)),
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => st.press(if self.target_only { None } else { cursor.position_over(bounds) }),
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 for said in st.moved(*position, cursor.position(), cursor.is_over(bounds), self.dragging) {
                     shell.publish(match said {

@@ -543,6 +543,11 @@ impl FakeFursuits {
         if self.look_of(f) == Some(g.suit) { 0.25 + 0.2 * u } else { 0.7 + 0.2 * u }
     }
 
+    /// The group holding a head, if any.
+    pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
+        self.groups.iter().find(|g| g.members.contains(f)).map(|g| g.id.clone())
+    }
+
     /// The groups holding two heads of one photo (stage 3's flag).
     pub fn seen_together(&self) -> HashSet<GroupId> {
         self.groups.iter().filter(|g| !crate::search::splitting::photo_pairs(&g.members).is_empty()).map(|g| g.id.clone()).collect()
