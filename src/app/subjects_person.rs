@@ -310,13 +310,40 @@ pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) 
     subj::refresh_crops(app)
 }
 
-/// The groups changed: follow this page's group (named, merged), or go
-/// back to the tab if it went; show its photos again when they changed.
+/// Where an unnamed group went when its id changed: the unnamed group of
+/// the kind whose cover (the head its id follows) is one the page knew
+/// was in it; of several (a split), the largest.  Never another kind's,
+/// never a named one.
+pub fn follow_cluster(all: &people::Subjects, kind: Kind, known: &std::collections::HashSet<FaceRef>) -> Option<GroupId> {
+    all.groups.iter().filter(|g| g.kind == kind && g.name.is_none() && matches!(g.id, GroupId::Cluster(_)) && known.contains(&g.cover.face)).max_by_key(|g| g.photos).map(|g| g.id.clone())
+}
+
+/// The groups changed: follow this page's group (named, merged, or an
+/// unnamed one whose cover changed), or go back to the tab if it went;
+/// show its photos again when they changed.
 pub fn on_subjects(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
     let Some(p) = s.person.as_mut() else { return Task::none() };
     if s.all.group(&p.group).is_none() {
-        let next = p.follow.as_deref().and_then(|n| people::by_name(&s.all, p.kind, n)).map(|g| g.id.clone()).or(p.merged_into.clone().filter(|id| s.all.group(id).is_some()));
+        // An unnamed group's id follows its clearest head (its cover): a
+        // head taken out or removed (X in its check, Not a fursuit head)
+        // that was the cover gives it a new id.  The page follows it to
+        // the group whose cover is one of the heads it knew were there.
+        let known = || {
+            let mut k: std::collections::HashSet<FaceRef> = p.faces.iter().flat_map(|f| f.iter().map(|f| f.face)).collect();
+            if let Some(r) = s.review.as_ref().filter(|r| r.group == p.group) {
+                k.extend(r.list.iter().flat_map(|l| l.iter().flatten().map(|f| f.face)));
+                k.extend(r.refs.iter().map(|f| f.face));
+            }
+            k
+        };
+        let next = p
+            .follow
+            .as_deref()
+            .and_then(|n| people::by_name(&s.all, p.kind, n))
+            .map(|g| g.id.clone())
+            .or(p.merged_into.clone().filter(|id| s.all.group(id).is_some()))
+            .or_else(|| matches!(p.group, GroupId::Cluster(_)).then(|| follow_cluster(&s.all, p.kind, &known())).flatten());
         match next {
             Some(id) => {
                 p.group = id.clone();
@@ -327,8 +354,16 @@ pub fn on_subjects(app: &mut App) -> Task<Message> {
                 }
             }
             None => {
+                // Heads marked not heads in its review stay removed: say
+                // so, and how to bring them back.
+                let x = s.review.as_ref().map_or(0, |r| r.not_heads.len());
                 let t = subj::to_overview(app);
-                let s = app.show_status("That group changed while it was open: here are the groups as they are now.", 6000);
+                let words = if x > 0 {
+                    "That group changed while it was open: here are the groups as they are now. What you marked not a head stays removed; Ctrl+Z brings it back."
+                } else {
+                    "That group changed while it was open: here are the groups as they are now."
+                };
+                let s = if x > 0 { app.show_status_action(words, "Undo", sm(subj::Msg::Undo)) } else { app.show_status(words, 6000) };
                 return Task::batch([t, s]);
             }
         }
@@ -1182,6 +1217,22 @@ mod tests {
             faces_found: 400,
             undoable: None, seen_together: Default::default(),
         }
+    }
+
+    /// An unnamed group whose cover was removed has a new id: the page
+    /// follows it to the group whose cover it knew was there, the largest
+    /// of several, never a named one or another kind's.
+    #[test]
+    fn an_unnamed_group_is_followed_by_the_heads_it_held() {
+        let a = all();
+        let key = |n: u8| FaceRef { key: Key([n; 16]), bbox: [0.0; 4] };
+        let known: std::collections::HashSet<FaceRef> = [key(1), key(3), key(4), key(9)].into_iter().collect();
+        assert_eq!(follow_cluster(&a, Kind::Person, &known), Some(GroupId::Cluster(3)), "the unnamed one, not Person A");
+        assert!(follow_cluster(&a, Kind::Fursuit, &known).is_none(), "Patches is named");
+        let mut b = a.clone();
+        b.groups.push(g(9, Kind::Person, None, 80));
+        assert_eq!(follow_cluster(&b, Kind::Person, &known), Some(GroupId::Cluster(9)), "split: the largest");
+        assert!(follow_cluster(&a, Kind::Person, &Default::default()).is_none());
     }
 
     #[test]

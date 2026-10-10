@@ -1342,7 +1342,7 @@ impl People {
     /// the viewer's removal does, in one undo step.  Returns the words and
     /// the memberships the boxes lost (subject, box), so a review's take
     /// back ([`People::restore_faces`]) can put them back.
-    pub fn remove_faces(&mut self, kind: Kind, faces: &[FaceRef]) -> Result<(String, Vec<(SubjectId, FaceRef)>), Refused> {
+    pub fn remove_faces(&mut self, kind: Kind, faces: &[FaceRef]) -> Result<(String, Taken), Refused> {
         let faces: Vec<FaceRef> = faces.iter().fold(Vec::new(), |mut v, f| {
             if !v.contains(f) {
                 v.push(*f);
@@ -1353,6 +1353,9 @@ impl People {
             return Err(Refused::Nothing);
         }
         let lost: Vec<(SubjectId, FaceRef)> = faces.iter().filter_map(|f| self.file.member_of(kind, f).map(|s| (s.id.clone(), *f))).collect();
+        // A box the user drew just goes (it isn't remembered as removed):
+        // kept here, so taking the X back draws it again.
+        let drawn: Vec<FaceRef> = faces.iter().filter(|f| self.file.added.contains(&subjects::Labelled { kind, face: **f })).copied().collect();
         let n = faces.len();
         let what = if n == 1 { format!("Marked a {} not a {}", "photo", box_noun(kind)) } else { format!("Marked {n} frames not a {}", box_noun(kind)) };
         self.checkpoint(what.clone());
@@ -1360,23 +1363,23 @@ impl People {
             let _ = self.file.remove_box(kind, *f);
         }
         self.save();
-        Ok((what, lost))
+        Ok((what, Taken { lost, drawn }))
     }
 
     /// A review's "Not a fursuit head" taken back (Z): the boxes leave the
-    /// removed list and rejoin the subjects they were in; one step (the
-    /// review takes answers back the same way).
-    pub fn restore_faces(&mut self, kind: Kind, faces: &[FaceRef], lost: &[(SubjectId, FaceRef)]) -> Result<String, Refused> {
-        let before = self.file.removed.len();
+    /// removed list (drawn ones are drawn again) and rejoin the subjects
+    /// they were in; one step (the review takes answers back the same way).
+    pub fn restore_faces(&mut self, kind: Kind, faces: &[FaceRef], taken: &Taken) -> Result<String, Refused> {
         let gone: Vec<subjects::Labelled> = self.file.removed.iter().filter(|l| l.kind == kind && faces.contains(&l.face)).copied().collect();
-        if gone.is_empty() {
+        let redraw: Vec<subjects::Labelled> = taken.drawn.iter().filter(|f| faces.contains(f)).map(|&face| subjects::Labelled { kind, face }).filter(|l| !self.file.added.contains(l)).collect();
+        if gone.is_empty() && redraw.is_empty() {
             return Err(Refused::Nothing);
         }
         let what = format!("Took back {} not a {}", util_plural(faces.len(), "photo"), box_noun(kind));
         self.checkpoint(what.clone());
         self.file.removed.retain(|l| !gone.contains(l));
-        debug_assert!(self.file.removed.len() < before);
-        for (s, f) in lost {
+        self.file.added.extend(redraw);
+        for (s, f) in &taken.lost {
             if self.file.get(s).is_some_and(|s| s.kind == kind) {
                 let _ = self.file.add_members(s, vec![*f]);
             }
@@ -1593,6 +1596,15 @@ fn name_box(file: &mut SubjectsFile, kind: Kind, face: FaceRef, to: &NameTo) -> 
             Ok(None)
         }
     }
+}
+
+/// What a review's X took ([`People::remove_faces`]), so Z can put it
+/// back ([`People::restore_faces`]): the subjects the boxes were members
+/// of, and the boxes the user had drawn (they leave `added` outright).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Taken {
+    pub lost: Vec<(SubjectId, FaceRef)>,
+    pub drawn: Vec<FaceRef>,
 }
 
 /// "a photo", "3 photos".
@@ -2049,6 +2061,31 @@ mod tests {
         p.undo().unwrap();
         assert_eq!(p.file.subjects, before.subjects, "every part back");
         assert!(!p.file.removed_index(k).covers(&h(4)));
+    }
+
+    /// A review's X on a detection and on a box the user drew, then Z: the
+    /// detection leaves the removed list, the drawn box is drawn again
+    /// (it had left `added` outright), and both rejoin the subject they
+    /// were in; each is one step.
+    #[test]
+    fn x_then_z_brings_back_a_detection_and_a_drawn_box() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        p.file.add_box(k, h(2)).unwrap();
+        let a = p.file.create(k, Some("Ash".into()), vec![h(1), h(2), h(3)]);
+        let depth = p.undo.len();
+        let (_, taken) = p.remove_faces(k, &[h(1), h(2)]).unwrap();
+        assert_eq!(p.undo.len(), depth + 1, "one step");
+        assert_eq!(taken.drawn, [h(2)]);
+        assert!(p.file.removed_index(k).covers(&h(1)) && !p.file.added.iter().any(|l| l.face == h(2)));
+        assert_eq!(p.file.get(&a).unwrap().members, [h(3)]);
+        p.restore_faces(k, &[h(1), h(2)], &taken).unwrap();
+        assert!(!p.file.removed_index(k).covers(&h(1)));
+        assert!(p.file.added.contains(&subjects::Labelled { kind: k, face: h(2) }), "drawn again");
+        let mut m = p.file.get(&a).unwrap().members.clone();
+        m.sort_by_key(|f| f.key.0);
+        assert_eq!(m, [h(1), h(2), h(3)]);
+        assert_eq!(p.restore_faces(k, &[h(1), h(2)], &taken), Err(Refused::Nothing), "twice is once");
     }
 
     /// Apply survives a regroup landing while the editor is open: an

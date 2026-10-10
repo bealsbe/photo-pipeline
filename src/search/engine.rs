@@ -971,8 +971,9 @@ struct Worker {
     /// taken back names its entry.
     answered: HashMap<Vec<FaceRef>, (String, Kind)>,
     /// A review's "Not a fursuit head" this session, by its boxes (in
-    /// order): the memberships they lost, for its take back.
-    not_heads: HashMap<Vec<FaceRef>, Vec<(SubjectId, FaceRef)>>,
+    /// order): the memberships they lost and the drawn boxes that went,
+    /// for its take back.
+    not_heads: HashMap<Vec<FaceRef>, super::faces::Taken>,
 }
 
 /// One pair of groups the judge compares: its head pairs and their
@@ -1367,8 +1368,8 @@ impl Worker {
                     let r = if all_of_kind {
                         let before = self.before_not_heads(kind, &faces);
                         let r = self.people.remove_faces(kind, &faces);
-                        if let Ok((_, lost)) = &r {
-                            self.not_heads.insert(faces.clone(), lost.clone());
+                        if let Ok((_, taken)) = &r {
+                            self.not_heads.insert(faces.clone(), taken.clone());
                             self.record(before, Via::Hand(at));
                         }
                         r.map(|_| ())
@@ -1378,8 +1379,10 @@ impl Worker {
                     self.after_edit(r);
                 }
                 Cmd::RestoreHeads { kind, faces } => {
-                    let lost = self.not_heads.remove(&faces).unwrap_or_default();
-                    let r = self.people.restore_faces(kind, &faces, &lost);
+                    // Commands run in order: the X this takes back was
+                    // applied before it, whatever came in between.
+                    let taken = self.not_heads.remove(&faces).unwrap_or_default();
+                    let r = self.people.restore_faces(kind, &faces, &taken);
                     if r.is_ok() {
                         let undone = self.answered_entry(&faces);
                         self.record_undo(undone, true);
@@ -4607,6 +4610,79 @@ mod tests {
         assert!(matches!(&got.last().unwrap().act, Act::Undo { undoes, .. } if *undoes == x.id), "{:?}", got.last());
         let _ = fursuit_groups(&e, 4);
         e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// X on an unnamed group's cover in its check, with the regroup and the
+    /// snapshot landing before Z: the group's id changes (it follows its
+    /// clearest head), the review's page follows it by the heads it knew
+    /// (`subjects_person::follow_cluster`), and Z still restores the head
+    /// and records the undo; the group comes back under its old id, and is
+    /// followed there too.
+    #[test]
+    fn x_on_a_groups_cover_then_a_regroup_then_z_still_restores() {
+        use crate::model::decisions::{Act, At};
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.03)), (3, -Suits::at(0.03)), (4, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("review-x-cover", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, _rx) = crate::bus::channel();
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(d.join("user").join("subjects.json")), downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 4 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+        let known: std::collections::HashSet<FaceRef> = (1..=3).map(head).collect();
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let groups = fursuit_groups(&e, 2);
+        let (old, cover) = groups.iter().find(|g| g.1 != key_of(4)).cloned().unwrap();
+        let cover = (1..=3).map(head).find(|h| h.key == cover).unwrap();
+        // X on the cover; the regroup and its snapshot land.
+        e.not_heads(Kind::Fursuit, vec![cover], At::Review);
+        let started = Instant::now();
+        let moved = loop {
+            let s = e.subjects();
+            if s.group(&old).is_none() && s.groups.iter().filter(|g| g.kind == Kind::Fursuit).count() == 2 {
+                break s;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", s.groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let now = crate::app::subjects_person::follow_cluster(&moved, Kind::Fursuit, &known).expect("followed to its new id");
+        let g = moved.group(&now).unwrap();
+        assert!(g.cover.face != cover && known.contains(&g.cover.face) && g.photos == 2, "{g:?}");
+        assert!(crate::app::subjects_person::follow_cluster(&moved, Kind::Person, &known).is_none(), "never another kind's");
+        // Z: the head is back, the undo recorded, the group back as it was.
+        e.restore_heads(Kind::Fursuit, vec![cover]);
+        let started = Instant::now();
+        let back = loop {
+            let s = e.subjects();
+            if s.group(&old).is_some_and(|g| g.photos == 3) {
+                break s;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{:?}", s.groups);
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(crate::app::subjects_person::follow_cluster(&back, Kind::Fursuit, &known), Some(old));
+        let started = Instant::now();
+        loop {
+            let got = e.decisions().entries();
+            if let [.., x, z] = got.as_slice() {
+                if matches!(&z.act, Act::Undo { undoes, of } if *undoes == x.id && of == "remove") {
+                    break;
+                }
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "{got:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        e.shutdown();
+        let file = crate::model::subjects::SubjectsFile::load(&d.join("user").join("subjects.json"));
+        assert!(!file.removed_index(Kind::Fursuit).covers(&cover), "not left removed");
         let _ = std::fs::remove_dir_all(&d);
     }
 

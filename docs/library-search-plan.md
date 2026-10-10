@@ -3719,3 +3719,35 @@ page."
 - Stand-in screenshots of both reviews and People; one real run on the
   card: X in a check of a 46-photo group and X 1 in the pair review,
   each taken back, the record's entries as above.
+
+### Z after X lost (found in main's check, fixed)
+
+- **The cause:** an unnamed group's id follows its clearest head (its
+  cover).  X on the cover in its check gave the group a new id; when
+  the snapshot landed, the page knew only to follow a new name or a
+  merge, so it went back to the tab ("That group changed while it was
+  open") and took the review, with its X, along.  Z then had no review
+  to act on: the head stayed removed and no `undo` was written.  It
+  depended on which entry was X'd, not on timing: the engine runs
+  commands in order, so Z can never overtake its X.
+- **The fix:** the page follows an unnamed group to the group whose
+  cover is one of the heads it knew were in it, the largest of several,
+  never a named one or another kind's
+  (`subjects_person::follow_cluster`); after Z the head comes back and
+  the page follows it back.  If a group truly goes (its last head X'd),
+  the status says what stays removed and offers Undo.
+- **Found with it:** X on a box the user drew took it out of `added`
+  (drawn boxes aren't remembered as removed), and Z only cleared
+  `removed`, so the drawn box was lost and no `undo` was written.
+  `People::remove_faces` now keeps which boxes were drawn (`Taken`), and
+  `restore_faces` draws them again.
+- **A head already left removed** is brought back from the viewer:
+  L on its photo, draw over it (IoU 0.6 or more with the removed box)
+  as a fursuit head.  That clears the removal, and the box comes back
+  as a drawn one.  The group editor can't do this: its "Removed" column
+  holds only what it removed itself, before Apply.
+- **Tests:** `x_on_a_groups_cover_then_a_regroup_then_z_still_restores`
+  (engine: the id changes, the page follows it there and back, the
+  `undo` is written, nothing is left removed),
+  `an_unnamed_group_is_followed_by_the_heads_it_held`, and
+  `x_then_z_brings_back_a_detection_and_a_drawn_box`.

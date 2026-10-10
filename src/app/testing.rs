@@ -232,6 +232,7 @@
 //! subjects openday|back
 //! subjects review             # Y: start the review
 //! subjects y|n|x|z|next|prev|at 5|done|findmore|advance|open   # x: not a head; z: take back
+//! subjects atcover            # step the review to the entry holding the group's cover
 //! subjects pfindmore          # Find more on a fursuit's band
 //! subjects wait 3000          # wait for the subject's query in flight
 //! subjects dump               # print the page's state
@@ -1688,6 +1689,20 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "y" => app.update(r(R::Answer(true))),
         "n" => app.update(r(R::Answer(false))),
         "x" => app.update(r(R::NotHead)),
+        // Step to the entry holding the group's cover (an unnamed group's
+        // id follows it: X there changes the id).
+        "atcover" => {
+            let s = &app.subjects;
+            let at = s.review.as_ref().and_then(|r| {
+                let cover = s.group(&r.group)?.cover.face;
+                r.list.as_ref()?.iter().position(|e| e.iter().any(|f| f.face == cover))
+            });
+            eprintln!("[subjects] cover at {at:?}");
+            match at {
+                Some(i) => app.update(r(R::At(i))),
+                None => Task::none(),
+            }
+        }
         "z" => app.update(r(R::TakeBack)),
         "next" => app.update(r(R::Step(1))),
         "prev" => app.update(r(R::Step(-1))),
