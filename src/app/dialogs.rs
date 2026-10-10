@@ -1744,6 +1744,7 @@ const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("S  or  Ctrl+click", "Pick several groups"),
             ("M", "Merge the groups picked (asks first)"),
             ("Drag a group", "Onto another to merge the two (asks first)"),
+            ("Shift+click", "On a fursuit's Heads: pick every head from the last one clicked"),
             ("Y", "On a group's page: review its suggestions"),
             ("Y  /  N", "In the review: the same, or not"),
             ("Ctrl+Z", "Take back the last change to the groups"),
