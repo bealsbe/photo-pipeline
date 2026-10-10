@@ -814,7 +814,11 @@ decision is added to a file, one line each:
   it as in force.  *Export…* copies the record, with a README describing
   its format, into a new folder in one you choose, **without names**:
   each person or fursuit is a code such as `fursuit-12`, the same one
-  throughout the copy (the record here keeps the names).  *Delete the
+  throughout the copy (the record here keeps the names).  Beside it,
+  `groups.json` holds your named groups as they are now (by the same
+  codes): their faces or heads, the ones you said aren't them, their
+  counts, the boxes drawn and removed in the viewer, and the matching
+  settings in force; unnamed groups are left out.  *Delete the
   record…* asks first.  The
   format is in `docs/library-search-plan.md` ("As built — the record of
   corrections") and `src/model/decisions.rs`.

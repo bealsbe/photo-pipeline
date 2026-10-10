@@ -114,6 +114,8 @@
 //! prefs export-to /path       # as if Export…'s folder picker returned /path
 //! decisions print|pairs       # print the record of corrections (waits for
 //!                             # its writer), or the labelled pairs in it
+//! decisions export-pairs /dir # the labelled pairs of an export's folder
+//!                             # (its decisions.jsonl and groups.json)
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
@@ -383,6 +385,20 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         "decisions" => {
             let r = app.search.link.decisions();
             match arg.as_str() {
+                a if a.starts_with("export-pairs ") => {
+                    // An export's folder: pairs from its log and its groups.
+                    let dir = std::path::Path::new(a.trim_start_matches("export-pairs ").trim());
+                    match crate::model::group_export::read_export(dir) {
+                        Ok((entries, groups)) => {
+                            let ps = crate::model::group_export::pairs_with_groups(&entries, groups.as_ref(), true);
+                            let same = ps.iter().filter(|p| p.same).count();
+                            let from_groups = ps.iter().filter(|p| p.id.starts_with("groups:")).count();
+                            let named = groups.as_ref().map_or(0, |g| g.groups.len());
+                            eprintln!("[decisions] export: {} entries, {named} named groups, {} labelled pairs ({from_groups} from the groups): {same} same, {} different", entries.len(), ps.len(), ps.len() - same);
+                        }
+                        Err(e) => eprintln!("[decisions] export unreadable: {e}"),
+                    }
+                }
                 "pairs" => {
                     let entries = r.entries();
                     let ps = crate::model::decisions::pairs(&entries);

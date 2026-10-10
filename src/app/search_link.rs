@@ -75,6 +75,24 @@ impl Link {
         }
     }
 
+    /// *Export…*'s work, to run on a worker: the record and the named
+    /// groups as they are now into a new folder in the one given.  The
+    /// engine takes the groups on its thread; the stand-in's are taken
+    /// here (in memory).
+    pub fn exporter(&self) -> Box<dyn FnOnce(&std::path::Path) -> std::io::Result<(PathBuf, usize)> + Send> {
+        match self {
+            Link::Engine(e) => {
+                let e = e.clone();
+                Box::new(move |into| e.export_record(into))
+            }
+            Link::Fake(f) => {
+                let groups = f.state.lock().groups_snapshot();
+                let recorder = f.decisions.clone();
+                Box::new(move |into| recorder.export(into, Some(groups)))
+            }
+        }
+    }
+
     pub fn status(&self) -> Status {
         match self {
             Link::Engine(e) => e.status(),
@@ -2142,6 +2160,23 @@ impl FakeState {
         };
         let shown = first.iter().filter(|f| faces.iter().any(|x| x.face == **f)).copied();
         decisions::Side::new(faces.len(), group.and_then(|g| g.name.clone()), sid, shown.chain(faces.iter().map(|f| f.face))).counted(group)
+    }
+
+    /// The stand-in's named groups for an export (its made-up heads; no
+    /// rejections or viewer boxes kept apart).
+    fn groups_snapshot(&self) -> crate::model::group_export::Snapshot {
+        use crate::model::group_export::{Named, Snapshot};
+        let named = self
+            .subjects
+            .groups
+            .iter()
+            .filter_map(|g| {
+                let (GroupId::Subject(sid), Some(name)) = (&g.id, &g.name) else { return None };
+                let faces = if self.fursuits.owns(&g.id) { self.fursuits.faces(&g.id) } else { self.people.faces(&g.id) };
+                Some(Named { kind: g.kind, sid: sid.0.clone(), name: name.clone(), members: faces.iter().map(|f| f.face).collect(), rejected: Vec::new(), counts: Some((g.photos, g.bursts, g.days)) })
+            })
+            .collect();
+        Snapshot { named, libs: vec![(Kind::Person, self.lib(Kind::Person)), (Kind::Fursuit, self.lib(Kind::Fursuit))], ..Snapshot::default() }
     }
 
     /// The stand-in's library for the record: made-up heads, raw space,
