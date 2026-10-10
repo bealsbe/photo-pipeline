@@ -64,8 +64,9 @@ const PANEL_W: f32 = 300.0;
 const COVER: f32 = 34.0;
 /// Unnamed groups the panel offers (the largest).
 const UNNAMED_N: usize = 12;
-/// Named groups whose heads are read when the panel opens (for the photo
-/// pair check; others are read when a drag first goes over them).
+/// Named groups whose heads are read when the panel opens, with the
+/// unnamed ones shown (for the photo pair check; others are read when a
+/// drag first goes over them, or a move to them waits for it).
 const READ_N: usize = 12;
 /// A column at its narrowest.
 const COL_MIN: f32 = 250.0;
@@ -146,6 +147,9 @@ pub struct Editor {
     /// Orders asked for: seq → column.
     ordering: HashMap<u64, usize>,
     pub note: Option<String>,
+    /// A move to a panel group whose heads are still being read (made
+    /// when they arrive, if the photo pair check allows).
+    pending: Option<cols::Move>,
     /// A named group *Apply* found gone.
     pub gone: Option<GroupId>,
     apply_seq: u64,
@@ -208,6 +212,7 @@ impl Editor {
             asked: HashMap::new(),
             ordering: HashMap::new(),
             note: None,
+            pending: None,
             gone: None,
             apply_seq: 0,
         }
@@ -599,6 +604,17 @@ pub fn on_faces(app: &mut App, seq: u64, faces: &Arc<Vec<Face>>) -> bool {
         }
         order = (0..e.cols.len()).collect();
     }
+    // A move waiting for this group's heads: made now (or refused).
+    if col.is_none() && e.pending.as_ref().is_some_and(|mv| mv.to == Target::Group(group.clone())) {
+        let mv = e.pending.take().expect("checked");
+        match e.apply_move(&mv) {
+            Ok(()) => {
+                e.note = None;
+                order = (0..e.cols.len()).collect();
+            }
+            Err(why) => e.note = why,
+        }
+    }
     let home_first = col == Some(0);
     for i in order {
         ask_order(app, i);
@@ -627,8 +643,8 @@ pub fn on_near(app: &mut App, seq: u64, list: &Arc<Vec<(GroupId, f32)>>) -> bool
         return false;
     }
     e.near = (**list).clone();
-    let named: Vec<GroupId> = app.subjects.editor.as_ref().map(|e| panel_groups(&app.subjects, e)).unwrap_or_default().into_iter().take(READ_N).collect();
-    for g in named {
+    let shown: Vec<GroupId> = app.subjects.editor.as_ref().map(|e| panel_groups(&app.subjects, e).into_iter().take(READ_N).chain(unnamed_groups(&app.subjects, e)).collect()).unwrap_or_default();
+    for g in shown {
         read(app, g, None);
     }
     true
@@ -810,7 +826,14 @@ fn update_cols(app: &mut App, c: ColMsg) -> Task<Message> {
             Task::none()
         }
         Err(None) => {
-            e.note = Some(format!("Still reading that group's {}s: drop again in a moment.", cols::crop_word(e.kind)));
+            // Its heads are being read: the move is made when they arrive.
+            let Target::Group(g) = mv.to.clone() else { return Task::none() };
+            e.note = Some(format!("Reading that group's {}s first…", cols::crop_word(e.kind)));
+            let asked = e.asked.values().any(|(x, _)| *x == g);
+            e.pending = Some(mv);
+            if !asked {
+                read(app, g, None);
+            }
             Task::none()
         }
     }

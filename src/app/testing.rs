@@ -221,9 +221,9 @@
 //! subjects words camera       # type beside the chip, then Enter
 //! subjects photos|faces       # Photos | Faces on a subject's page
 //! subjects facepick 3         # pick the 4th face
-//! subjects moveto new|2       # Move to… a new group / the 3rd group listed
-//! subjects notthis            # "Not Person A"
-//! subjects menu more|merge|move|close
+//! subjects edit               # Edit group (E): the group editor, the picked faces picked
+//! subjects notthis            # "Not Person A" / "Take out of group"
+//! subjects menu more|merge|close
 //! subjects mergeinto 0        # ⋯ ▸ Merge into… the 1st listed
 //! subjects hidethis|forget    # ⋯ ▸ Hide / Forget this person…
 //! subjects pclick 2|pactivate 2   # a photo tile on a subject's page
