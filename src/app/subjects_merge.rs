@@ -68,6 +68,13 @@ pub enum Msg {
     Beat(u64),
     TakeBack,
     Done,
+    /// X: the next 1 or 2 marks that side's shown head.
+    NotHeadAsk,
+    /// 1 or 2 after X (or a side's button): that side's shown head is not
+    /// a fursuit head (0: the left group, 1: the right).
+    NotHead(usize),
+    /// Esc after X.
+    NotHeadCancel,
     /// Show the pairs the judge left out, at the end of the list.
     ShowLeftOut,
     /// Compare the next pairs past the cap.
@@ -135,6 +142,14 @@ pub struct MergeReview {
     /// Two named groups: the merge dialog asks which name to keep for
     /// this pair.
     pending_merge: Option<usize>,
+    /// X was pressed: 1 or 2 says which side's shown head is not a
+    /// fursuit head (Esc cancels).
+    pub x_pending: bool,
+    /// The steps Z takes back, newest last: an answer (its pair in
+    /// `order`) or an X (one undo step of its own).
+    steps: Vec<bool>,
+    /// X's given (heads removed), for the counts.
+    pub not_heads: usize,
 }
 
 impl MergeReview {
@@ -155,6 +170,9 @@ impl MergeReview {
             left_out_shown: false,
             refreshing: false,
             pending_merge: None,
+            x_pending: false,
+            steps: Vec::new(),
+            not_heads: 0,
         }
     }
 
@@ -410,6 +428,21 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::TakeBack => take_back(app),
         Msg::Done => done(app),
+        Msg::NotHeadAsk => {
+            let Some(r) = app.subjects.merges.as_mut() else { return Task::none() };
+            if r.at_end() || r.list.get(r.at).is_none() {
+                return Task::none();
+            }
+            r.x_pending = true;
+            app.show_status("Not a fursuit head: which side? 1 the left, 2 the right. Esc cancels.", 0)
+        }
+        Msg::NotHeadCancel => {
+            if let Some(r) = app.subjects.merges.as_mut() {
+                r.x_pending = false;
+            }
+            app.show_status("", 1)
+        }
+        Msg::NotHead(side) => not_head(app, side),
         Msg::ShowLeftOut => {
             let Some(r) = app.subjects.merges.as_mut() else { return Task::none() };
             let Some(left) = r.run.as_ref().map(|x| x.left_out.clone()) else { return Task::none() };
@@ -527,10 +560,37 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
     record(app, i, what, advance)
 }
 
+/// X then 1 or 2: the shown head of that side (its cover, the head the
+/// pair is shown by) is not a fursuit head.  Removed as the viewer's
+/// "Not a fursuit head" removes one, one undo step; the pair is asked
+/// again, since that group's cover changes.
+fn not_head(app: &mut App, side: usize) -> Task<Message> {
+    let Some(r) = app.subjects.merges.as_mut() else { return Task::none() };
+    r.x_pending = false;
+    if r.at_end() {
+        return Task::none();
+    }
+    let Some(p) = r.list.get(r.at).cloned() else { return Task::none() };
+    let (group, heads) = if side == 0 { (&p.a, &p.a_heads) } else { (&p.b, &p.b_heads) };
+    let Some(head) = heads.first().map(|f| f.face) else { return Task::none() };
+    app.search.link.not_heads(group, Kind::Fursuit, &[head], At::MergeReview);
+    let r = app.subjects.merges.as_mut().expect("the review");
+    r.steps.push(false);
+    r.not_heads += 1;
+    // The judge's left-out pairs shown by that head go.
+    if let Some(run) = r.run.as_mut() {
+        run.left_out.retain(|q| ![q.a_heads.first(), q.b_heads.first()].into_iter().flatten().any(|f| f.face == head));
+    }
+    refresh(app);
+    let side_words = if side == 0 { "left" } else { "right" };
+    app.show_status_action(format!("Not a fursuit head: the {side_words} head is removed, and the pairs are asked again."), "Undo", subj::m(subj::Msg::Undo))
+}
+
 /// An answer given: stamped, and on to the next after the beat.
 fn record(app: &mut App, i: usize, a: Answer, advance: bool) -> Task<Message> {
     let Some(r) = app.subjects.merges.as_mut() else { return Task::none() };
     r.answers[i] = Some(a);
+    r.steps.push(true);
     r.order.retain(|&x| x != i);
     r.order.push(i);
     r.beat += 1;
@@ -555,6 +615,17 @@ pub fn merged_by_dialog(app: &mut App) -> Task<Message> {
     record(app, i, Answer::Merged, advance)
 }
 
+/// Esc on the review: an X waiting for its 1 or 2 is let go first (true).
+pub fn cancel_x(app: &mut App) -> bool {
+    match app.subjects.merges.as_mut().filter(|r| r.x_pending) {
+        Some(r) => {
+            r.x_pending = false;
+            true
+        }
+        None => false,
+    }
+}
+
 /// The merge dialog was put away.
 pub fn dialog_cancelled(app: &mut App) {
     if let Some(r) = app.subjects.merges.as_mut() {
@@ -566,14 +637,39 @@ pub fn dialog_cancelled(app: &mut App) {
 /// undone, or "not the same" forgotten).
 pub fn take_back(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.merges.as_mut() else { return Task::none() };
-    let Some(i) = r.order.pop() else { return app.show_status("No answer to take back.", 3000) };
-    r.answers[i] = None;
-    r.at = i;
-    r.beat += 1;
-    r.stamp = None;
-    app.search.link.undo_subjects();
-    let t = app.show_status("Took the last answer back.", 3000);
-    Task::batch([t, subj::refresh_crops(app)])
+    r.x_pending = false;
+    match r.pop_step() {
+        None => app.show_status("No answer to take back.", 3000),
+        // An X: its head comes back (one undo step); the pairs are asked
+        // again.
+        Some(None) => {
+            app.search.link.undo_subjects();
+            refresh(app);
+            app.show_status("Took back: the head is a fursuit head again.", 3000)
+        }
+        Some(Some(_)) => {
+            app.search.link.undo_subjects();
+            let t = app.show_status("Took the last answer back.", 3000);
+            Task::batch([t, subj::refresh_crops(app)])
+        }
+    }
+}
+
+impl MergeReview {
+    /// Z: the newest step taken back: an X (`Some(None)`), or the answer
+    /// to pair `i` (`Some(Some(i))`, shown again, unanswered).
+    pub fn pop_step(&mut self) -> Option<Option<usize>> {
+        if self.steps.pop() == Some(false) {
+            self.not_heads = self.not_heads.saturating_sub(1);
+            return Some(None);
+        }
+        let i = self.order.pop()?;
+        self.answers[i] = None;
+        self.at = i;
+        self.beat += 1;
+        self.stamp = None;
+        Some(Some(i))
+    }
 }
 
 fn done(app: &mut App) -> Task<Message> {
@@ -647,14 +743,28 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
         Key::Character(c) => Some(c.to_lowercase()),
         _ => None,
     };
-    match (key, c.as_deref()) {
-        (_, Some("y")) => update(app, Msg::Answer(true)),
-        (_, Some("n")) => update(app, Msg::Answer(false)),
-        (_, Some("z")) => update(app, Msg::TakeBack),
-        (Key::Named(Named::ArrowRight), _) | (_, Some("d")) => update(app, Msg::Step(1)),
-        (Key::Named(Named::ArrowLeft), _) | (_, Some("a")) => update(app, Msg::Step(-1)),
-        _ => Task::none(),
+    let pending = app.subjects.merges.as_ref().is_some_and(|r| r.x_pending);
+    match key_msg(pending, key, c.as_deref()) {
+        Some(msg) => update(app, msg),
+        None => Task::none(),
     }
+}
+
+/// The review's keys (pure).  After X, 1 or 2 names the side whose shown
+/// head isn't a fursuit head, and any other key lets the X go.
+fn key_msg(pending: bool, key: &Key, c: Option<&str>) -> Option<Msg> {
+    Some(match (key, c) {
+        (_, Some("1")) if pending => Msg::NotHead(0),
+        (_, Some("2")) if pending => Msg::NotHead(1),
+        _ if pending => Msg::NotHeadCancel,
+        (_, Some("x")) => Msg::NotHeadAsk,
+        (_, Some("y")) => Msg::Answer(true),
+        (_, Some("n")) => Msg::Answer(false),
+        (_, Some("z")) => Msg::TakeBack,
+        (Key::Named(Named::ArrowRight), _) | (_, Some("d")) => Msg::Step(1),
+        (Key::Named(Named::ArrowLeft), _) | (_, Some("a")) => Msg::Step(-1),
+        _ => return None,
+    })
 }
 
 // ── the tab's row ───────────────────────────────────────────────────────────
@@ -774,7 +884,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         end_page(app, r)
     } else {
         let p = &r.list[r.at];
-        let main = row![side(app, r, &p.a, &p.a_heads), container(icons::view(Glyph::Merge, 22.0, t::PHOTO_INK3)).height(BIG).center_y(BIG), side(app, r, &p.b, &p.b_heads)].spacing(28).align_y(Alignment::Start);
+        let main = row![side(app, r, 0, &p.a, &p.a_heads), container(icons::view(Glyph::Merge, 22.0, t::PHOTO_INK3)).height(BIG).center_y(BIG), side(app, r, 1, &p.b, &p.b_heads)].spacing(28).align_y(Alignment::Start);
         let answer = r.answers.get(r.at).copied().flatten();
         let col = column![main, buttons(answer), origin(r, p)].spacing(16).align_x(Alignment::Center);
         let centre = container(col).width(Length::Fill).height(Length::Fill).center(Length::Fill).padding(Padding { top: 10.0, left: 24.0, right: 24.0, bottom: 0.0 });
@@ -841,7 +951,7 @@ fn header<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
 
 /// One group of the pair: its name and size, its cover large, a few more
 /// heads under it.
-fn side<'a>(app: &'a App, r: &'a MergeReview, id: &'a GroupId, heads: &'a [Face]) -> Element<'a, Message> {
+fn side<'a>(app: &'a App, r: &'a MergeReview, index: usize, id: &'a GroupId, heads: &'a [Face]) -> Element<'a, Message> {
     let s = &app.subjects;
     let shape = subj::shape(Kind::Fursuit);
     let g = s.group(id);
@@ -854,11 +964,23 @@ fn side<'a>(app: &'a App, r: &'a MergeReview, id: &'a GroupId, heads: &'a [Face]
     for f in heads.iter().skip(1).take(3) {
         more = more.push(tile::crop(s.crops.get(&f.face, subj::px(app, SMALL), Framing::Face), SMALL, shape));
     }
+    // The big head isn't a fursuit head at all (X, then this side's
+    // number).  Neutral, never the prune pink; lit while X waits.
+    let n = if index == 0 { "1" } else { "2" };
+    let tone = if r.x_pending { t::PHOTO_INK } else { t::PHOTO_INK2 };
+    let not = row![icons::view(Glyph::Close, 14.0, tone), text("Not a fursuit head").size(t::T_SMALL).font(paint::MEDIUM), text(format!("X {n}")).size(11).font(paint::MEDIUM).color(alpha(tone, 0.75))].spacing(6).align_y(Alignment::Center);
+    let look = if r.x_pending { style::Look { border: alpha(tone, 0.7), bg: alpha(tone, 0.12), ..style::toggle(true, tone) } } else { style::Look { fg: tone, hover_fg: t::PHOTO_INK, border: alpha(tone, 0.35), hover_border: alpha(tone, 0.6), ..style::toggle(false, tone) } };
+    let not = tip(
+        button(container(not).center_y(Length::Fill)).height(t::CONTROL_SM).padding(Padding::from([0.0, t::S2])).style(look.style()).on_press(m(Msg::NotHead(index))),
+        "The big head isn't a fursuit head at all (a mask, a plush, a sign): removed for good, and the pairs are asked again  (X, then 1 or 2)",
+        false,
+    );
     column![
         text(name.clone().unwrap_or_else(|| "Unnamed group".into())).size(t::T_TITLE).font(paint::SEMIBOLD).color(if name.is_some() { t::PHOTO_INK } else { t::PHOTO_INK2 }),
         text(counts).size(t::T_SMALL).color(t::PHOTO_INK3),
         cover,
         more,
+        not,
     ]
     .spacing(8)
     .width(BIG)
@@ -946,7 +1068,7 @@ fn strip<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
 fn footer<'a>() -> Element<'a, Message> {
     let note = "A merge or a no takes effect at once, and Z takes the last one back.";
     let key = |k: &'a str, what: &'a str| row![text(k).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::PHOTO_INK), text(what).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(4);
-    let keys = row![key("Y", "Merge"), key("N", "Not the same"), key("← →", "Step"), key("C", "Side by side"), key("Z", "Take back"), key("Esc", "Done")].spacing(16);
+    let keys = row![key("Y", "Merge"), key("N", "Not the same"), key("X 1 / 2", "Not a head"), key("← →", "Step"), key("C", "Side by side"), key("Z", "Take back"), key("Esc", "Done")].spacing(16);
     container(row![text(note).size(t::T_SMALL).color(t::PHOTO_INK3).width(Length::Fill), keys].align_y(Alignment::Center)).padding(Padding::from([7.0, 20.0])).width(Length::Fill).into()
 }
 
@@ -1078,7 +1200,7 @@ pub fn debug_state(app: &App) -> String {
     let similar = s.lists.similar.as_ref().map(|(g, l)| (short(g), l.len()));
     let review = s.merges.as_ref().map(|r| {
         format!(
-            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={}]",
+            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={} x_pending={} not_heads={}]",
             r.len(),
             r.at,
             r.answers.iter().map(|a| match a {
@@ -1090,7 +1212,9 @@ pub fn debug_state(app: &App) -> String {
             r.run.as_ref().map(|x| (x.offered, x.left_out.len(), x.done, x.total, x.beyond, x.stopped)),
             r.judged.len(),
             r.left_out_shown,
-            r.refreshing
+            r.refreshing,
+            r.x_pending,
+            r.not_heads
         )
     });
     format!("merges=[tab={tab:?} similar={similar:?} review={}]", review.unwrap_or_else(|| "none".into()))
@@ -1132,6 +1256,35 @@ mod tests {
         assert_eq!((r.at, r.order.clone()), (0, vec![0]), "the answered pair stays shown");
         assert_eq!(r.counts(), (1, 0));
         assert_eq!(r.next_open(0), 1);
+    }
+
+    /// X in the pair review: X then 1 or 2 names the side (any other key,
+    /// or Esc, lets it go; X itself is free otherwise); Z takes the newest
+    /// step back, an X before an earlier answer.
+    #[test]
+    fn x_then_a_side_and_z_takes_the_newest_step_back() {
+        let ch = |s: &str| iced::keyboard::Key::Character(s.into());
+        assert!(matches!(key_msg(false, &ch("x"), Some("x")), Some(Msg::NotHeadAsk)));
+        assert!(matches!(key_msg(true, &ch("1"), Some("1")), Some(Msg::NotHead(0))));
+        assert!(matches!(key_msg(true, &ch("2"), Some("2")), Some(Msg::NotHead(1))));
+        assert!(matches!(key_msg(true, &ch("y"), Some("y")), Some(Msg::NotHeadCancel)), "Y after X doesn't merge");
+        assert!(key_msg(false, &ch("1"), Some("1")).is_none(), "1 and 2 do nothing without X");
+        assert!(matches!(key_msg(false, &ch("y"), Some("y")), Some(Msg::Answer(true))));
+        // An answer, then an X: Z takes the X back first, then the answer.
+        let mut r = MergeReview::new(1, false);
+        r.append(&[pair(1, 2), pair(3, 4)]);
+        r.loaded = true;
+        r.answers[0] = Some(Answer::NotSame);
+        r.order.push(0);
+        r.steps.push(true);
+        r.steps.push(false);
+        r.not_heads = 1;
+        r.at = 1;
+        assert_eq!(r.pop_step(), Some(None), "the X first");
+        assert_eq!(r.not_heads, 0);
+        assert_eq!(r.pop_step(), Some(Some(0)), "then the answer");
+        assert_eq!((r.answers[0], r.at), (None, 0));
+        assert_eq!(r.pop_step(), None);
     }
 
     /// The name rule of a merge from the review: the named one is kept; of

@@ -3659,3 +3659,95 @@ undo step; today's tools fold into the editor; people and fursuits alike.
   *Move to…* menu.
 - **The record:** one `edit` entry per *Apply* (above).
 
+
+## As built — X in the reviews: not a fursuit head (or not a face) (2026-10-10)
+
+The user: "When answering yes or no while labelling, I should be able to
+mark something as not a fursuit, the same as we did on the labelling web
+page."
+
+### "Same fursuit?" / "Same person?" (`app/subjects_review.rs`)
+
+- **X** (or the neutral *Not a fursuit head* / *Not a face* button under
+  Y and N) removes the candidate's box through the removed list, as the
+  viewer's label removal does.  A burst is one entry, and an entry's
+  frames each carry the head that frame was suggested with, so X removes
+  exactly those boxes, one per frame; no matching across frames is
+  needed or done.
+- It counts as answered (`Review::answered`: an answer or an X), moves on
+  with Auto-advance, and takes back a Y or N given first.  Y or N on an
+  X'd entry waits for Z.  The crop and its strip cell show a dimmed
+  neutral ×.
+- **Z / Ctrl+Z** takes it back as one step.  The review's take-backs
+  are new checkpoints, not pops (`answer(None)`), so X's take-back is a
+  targeted restore as well: `Engine::restore_heads` drops the boxes from
+  `removed` and puts back the group memberships they lost, which the
+  engine kept for that X (`Worker::not_heads`).
+- The judge's lists drop the X'd heads (`left_out` filtered at once;
+  later calls covered by `removed` are offered nowhere and counted done,
+  `on_judge_event`).
+
+### "Possibly the same fursuit" (`app/subjects_merge.rs`)
+
+- **X then 1 or 2** (or the small button under each side) removes that
+  side's shown head, its cover.  Esc, or any other key, lets a waiting X
+  go; C (the editor) does too.  One undo step through the ordinary undo;
+  Z takes the newest step back, an X or an answer (`MergeReview::steps`).
+  The pairs are asked again (`refresh`), since that group's cover
+  changes; settled pairs whose shown head is removed count as done.
+
+### The engine and the record
+
+- `Cmd::NotHeads { kind, faces, at }` refuses boxes that aren't
+  detections of the kind (`MixedKinds`), then `People::remove_faces`:
+  one checkpoint, so one undo step.  The record: `remove` for one box,
+  `remove_many` (`groups: []`, every head) for a burst's frames, since one
+  undo step is one entry; `how` is `{by: "hand", at: "review"}` or
+  `"merge-review"`.  The review's take-back appends an `undo` naming it.
+- The stand-ins (`FakePeople::not_faces`, `FakeFursuits::not_heads`)
+  do the same through `Link::not_heads` / `Link::restore_heads`.
+
+### Checked
+
+- Tests: `x_covers_a_burst_counts_as_answered_and_is_taken_back`
+  (review), `x_then_a_side_and_z_takes_the_newest_step_back` (pair
+  review keys and Z order),
+  `x_in_the_reviews_removes_heads_records_them_and_takes_back` (engine:
+  refused other kinds, `remove` at the review, never offered again in the
+  review or the merge suggestions, the take-back's `undo`, a burst's
+  `remove_many`, `merge-review` taken back by the ordinary undo).
+- Stand-in screenshots of both reviews and People; one real run on the
+  card: X in a check of a 46-photo group and X 1 in the pair review,
+  each taken back, the record's entries as above.
+
+### Z after X lost (found in main's check, fixed)
+
+- **The cause:** an unnamed group's id follows its clearest head (its
+  cover).  X on the cover in its check gave the group a new id; when
+  the snapshot landed, the page knew only to follow a new name or a
+  merge, so it went back to the tab ("That group changed while it was
+  open") and took the review, with its X, along.  Z then had no review
+  to act on: the head stayed removed and no `undo` was written.  It
+  depended on which entry was X'd, not on timing: the engine runs
+  commands in order, so Z can never overtake its X.
+- **The fix:** the page follows an unnamed group to the group whose
+  cover is one of the heads it knew were in it, the largest of several,
+  never a named one or another kind's
+  (`subjects_person::follow_cluster`); after Z the head comes back and
+  the page follows it back.  If a group truly goes (its last head X'd),
+  the status says what stays removed and offers Undo.
+- **Found with it:** X on a box the user drew took it out of `added`
+  (drawn boxes aren't remembered as removed), and Z only cleared
+  `removed`, so the drawn box was lost and no `undo` was written.
+  `People::remove_faces` now keeps which boxes were drawn (`Taken`), and
+  `restore_faces` draws them again.
+- **A head already left removed** is brought back from the viewer:
+  L on its photo, draw over it (IoU 0.6 or more with the removed box)
+  as a fursuit head.  That clears the removal, and the box comes back
+  as a drawn one.  The group editor can't do this: its "Removed" column
+  holds only what it removed itself, before Apply.
+- **Tests:** `x_on_a_groups_cover_then_a_regroup_then_z_still_restores`
+  (engine: the id changes, the page follows it there and back, the
+  `undo` is written, nothing is left removed),
+  `an_unnamed_group_is_followed_by_the_heads_it_held`, and
+  `x_then_z_brings_back_a_detection_and_a_drawn_box`.

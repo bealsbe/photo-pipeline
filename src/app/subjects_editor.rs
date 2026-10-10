@@ -531,10 +531,14 @@ pub fn compare_key(app: &mut App) -> Task<Message> {
                 _ => app.show_status("Pick two groups (S, then click them), then C shows them side by side.", 4000),
             }
         }
-        subj::Page::Merges => match super::subjects_merge::current_pair(app) {
-            Some((a, b)) => open(app, a, Preset::With(b)),
-            None => Task::none(),
-        },
+        subj::Page::Merges => {
+            // An X waiting for its 1 or 2 is let go: C is the answer.
+            super::subjects_merge::cancel_x(app);
+            match super::subjects_merge::current_pair(app) {
+                Some((a, b)) => open(app, a, Preset::With(b)),
+                None => Task::none(),
+            }
+        }
         subj::Page::Person => edit_key(app),
         _ => Task::none(),
     }

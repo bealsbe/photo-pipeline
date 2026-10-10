@@ -972,6 +972,10 @@ pub fn escape(app: &mut App) -> Task<Message> {
         super::subjects_merge::dialog_cancelled(app);
         return Task::none();
     }
+    // An X in the pair review waiting for its 1 or 2: let go.
+    if super::subjects_merge::cancel_x(app) {
+        return app.show_status("", 1);
+    }
     let s = &mut app.subjects;
     match s.page() {
         Page::Review => review::update(app, review::Msg::Done),

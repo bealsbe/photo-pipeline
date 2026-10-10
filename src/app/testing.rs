@@ -197,7 +197,7 @@
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
 //! merges open [2]             # "Possibly the same fursuit": the review (at
 //!                             # the tab's 3rd pair)
-//! merges y|n|next|prev|at 3|undo|done|showleftout|checkmore
+//! merges y|n|x 1|x 2|x|xcancel|next|prev|at 3|undo|done|showleftout|checkmore
 //! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
 //! merges dump                 # print the lists and the review
 //! editor open 2|with 0 3      # the group editor on the tab's 3rd group / the 1st and 4th side by side
@@ -231,7 +231,8 @@
 //! subjects pclick 2|pactivate 2   # a photo tile on a subject's page
 //! subjects openday|back
 //! subjects review             # Y: start the review
-//! subjects y|n|next|prev|at 5|done|findmore|advance|open
+//! subjects y|n|x|z|next|prev|at 5|done|findmore|advance|open   # x: not a head; z: take back
+//! subjects atcover            # step the review to the entry holding the group's cover
 //! subjects pfindmore          # Find more on a fursuit's band
 //! subjects wait 3000          # wait for the subject's query in flight
 //! subjects dump               # print the page's state
@@ -608,6 +609,13 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "open" => app.update(g(G::Review(rest.trim().parse().ok()))),
                 "y" => app.update(g(G::Answer(true))),
                 "n" => app.update(g(G::Answer(false))),
+                // X, then the side (x 1, x 2), or x alone (it waits).
+                "x" => match rest.trim() {
+                    "1" => app.update(g(G::NotHead(0))),
+                    "2" => app.update(g(G::NotHead(1))),
+                    _ => app.update(g(G::NotHeadAsk)),
+                },
+                "xcancel" => app.update(g(G::NotHeadCancel)),
                 "next" => app.update(g(G::Step(1))),
                 "prev" => app.update(g(G::Step(-1))),
                 "at" => app.update(g(G::At(n))),
@@ -1680,6 +1688,22 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
         "review" => app.update(p(P::Review)),
         "y" => app.update(r(R::Answer(true))),
         "n" => app.update(r(R::Answer(false))),
+        "x" => app.update(r(R::NotHead)),
+        // Step to the entry holding the group's cover (an unnamed group's
+        // id follows it: X there changes the id).
+        "atcover" => {
+            let s = &app.subjects;
+            let at = s.review.as_ref().and_then(|r| {
+                let cover = s.group(&r.group)?.cover.face;
+                r.list.as_ref()?.iter().position(|e| e.iter().any(|f| f.face == cover))
+            });
+            eprintln!("[subjects] cover at {at:?}");
+            match at {
+                Some(i) => app.update(r(R::At(i))),
+                None => Task::none(),
+            }
+        }
+        "z" => app.update(r(R::TakeBack)),
         "next" => app.update(r(R::Step(1))),
         "prev" => app.update(r(R::Step(-1))),
         "at" => app.update(r(R::At(n))),
