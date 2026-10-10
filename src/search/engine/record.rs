@@ -271,6 +271,16 @@ impl Worker {
         Some(b)
     }
 
+    /// *Export…*: the named groups as they are now go to the record's
+    /// thread with the export, which answers `reply` (nothing here waits).
+    pub(super) fn export_record(&mut self, into: &std::path::Path, reply: crossbeam_channel::Sender<std::io::Result<(std::path::PathBuf, usize)>>) {
+        let snapshot = self.shared.subjects.lock().clone();
+        let counts = |sid: &str| snapshot.group(&GroupId::Subject(crate::model::subjects::SubjectId(sid.to_string()))).map(|g| (g.photos, g.bursts, g.days));
+        let libs = [Kind::Person, Kind::Fursuit].into_iter().filter_map(|k| self.record_lib(k).map(|l| (k, l))).collect();
+        let groups = crate::model::group_export::Snapshot::of(&self.people.file, counts, libs);
+        self.decisions.export_to(into, Some(groups), reply);
+    }
+
     /// Naming a group (the tab, a group's page).
     pub(super) fn before_name_group(&mut self, id: &GroupId, name: &str) -> Option<Before> {
         if !self.decisions.is_on() {

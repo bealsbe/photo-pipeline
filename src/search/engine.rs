@@ -137,6 +137,8 @@ enum Cmd {
     Whitened(Option<Box<super::whiten::Whitening>>),
     /// Every decision sent so far written to the record (the exit).
     FlushDecisions(Sender<()>),
+    /// *Export…* the record with the named groups.
+    ExportRecord { into: PathBuf, reply: Sender<std::io::Result<(PathBuf, usize)>> },
     Shutdown,
 }
 
@@ -396,6 +398,16 @@ impl Engine {
     }
 
     /// Stop the pass and the helper; the index is flushed.
+    /// *Export…*: the record of corrections and the named groups as they
+    /// are now (`groups.json`), names replaced by codes, into a new
+    /// folder in `into`; the folder and the entries copied.  **Blocks**
+    /// until written: call it on a worker.
+    pub fn export_record(&self, into: &Path) -> std::io::Result<(PathBuf, usize)> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.send(Cmd::ExportRecord { into: into.to_path_buf(), reply: tx });
+        rx.recv().map_err(|_| std::io::Error::other("the search engine stopped"))?
+    }
+
     /// Wait (at most `limit`) until the edits sent so far are in the
     /// decision record: the exit's last step, so a correction made just
     /// before quitting isn't lost.  **Blocks** for that long at most.
@@ -1503,6 +1515,7 @@ impl Worker {
                         }
                     }
                 },
+                Cmd::ExportRecord { into, reply } => self.export_record(&into, reply),
                 Cmd::FlushDecisions(reply) => {
                     self.decisions.flush();
                     let _ = reply.send(());
@@ -4480,6 +4493,21 @@ mod tests {
         assert!(matches!(&got[6].act, Act::Name { head: Some(h), name: Some(n), .. } if h.0 == head(2) && n == "Suit"), "{:?}", got[6]);
         assert!(matches!(&got[7].act, Act::Remove { head: h } if h.0 == head(4)));
         assert_eq!(got[7].how.as_ref().unwrap().at, Some(At::Viewer));
+        // Export: the log and the named groups now, by codes.
+        let out = d.join("export");
+        std::fs::create_dir_all(&out).unwrap();
+        let (dir, n) = e.export_record(&out).unwrap();
+        assert_eq!(n, 8);
+        let (entries, groups) = crate::model::group_export::read_export(&dir).unwrap();
+        let groups = groups.expect("groups.json");
+        assert_eq!(entries.len(), 8);
+        let suit = groups.groups.iter().find(|g| g.heads.iter().any(|h| h.0 == head(2))).expect("the named head's group");
+        assert_eq!((suit.kind, suit.photos), (Kind::Fursuit, Some(1)));
+        assert!(matches!(&entries[6].act, Act::Name { name: Some(n), .. } if *n == suit.code), "one code in both files");
+        assert!(groups.removed.iter().any(|b| b.kind == Kind::Fursuit && b.head.0 == head(4)), "the viewer's removal");
+        assert_eq!(groups.kinds.iter().find(|k| k.kind == Kind::Fursuit).and_then(|k| k.lib.grouping), Some(heads::Grouping::Tighter));
+        let text = std::fs::read_to_string(dir.join(crate::model::group_export::FILE_NAME)).unwrap() + &std::fs::read_to_string(dir.join(crate::model::decisions::FILE_NAME)).unwrap();
+        assert!(!text.contains("Suit"), "no names");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;

@@ -3525,6 +3525,45 @@ being the same subject (`decisions::without_names`,
 names.  It reads nothing else and writes nowhere else.  The script
 driver: `prefs export-to <dir>`, `decisions print|pairs`.
 
+### The named groups in the export (`groups.json`, 2026-10-10)
+
+The user curates a few solid groups and hands the data back for a second
+round of matching work: the groups are the strongest ground truth, so
+*Export…* writes them beside the log.
+
+- **Taken on the engine's thread** (`Engine::export_record` →
+  `Worker::export_record`): every named subject of each kind from the
+  user's file, with its members (confirmed heads), its rejected heads
+  ("not this one"), and the counts the tab shows (photos, bursts, days,
+  from the snapshot); the viewer's `added` and `removed` boxes; the "not
+  the same" answers; and each kind's state as the log's `lib` has it
+  (head count, whitened, model, grouping choice, cut-offs).  The record's
+  thread writes it with the log (`model::group_export`); nothing else is
+  read or written.  Unnamed automatic groups are left out (not curated).
+- **Codes, no names.**  The log is coded first, then the groups with the
+  same `Codes`, so a subject has one code in both files; a subject named
+  but never in the log gets the next free code.  Tested through the
+  engine and on its own (`the_groups_go_out_beside_the_log_with_its_codes_and_no_names`).
+- **The format** (`groups.json`, `v` 1):
+
+  ```
+  {"v", "t", "app",
+   "kinds": [{"kind", "heads", "white", "model", "grouping", "cuts"}],
+   "groups": [{"code", "kind", "photos", "bursts", "days", "heads", "rejected"}],
+   "added": [{"kind", "head"}], "removed": [{"kind", "head"}],
+   "not_same": [{"kind", "a", "b"}]}
+  ```
+
+- **Pairs** (`group_export::pairs_with_groups`): within a group the same;
+  across named groups of one kind different (the square of the named
+  heads; `across: false` leaves it out); a rejected head different from
+  its group; `not_same` different; never across kinds.  The log's pairs
+  first, the groups' after, winning where both hold a pair (the groups
+  are the later state).  `decisions export-pairs <dir>` in a script
+  prints them for an export's folder.
+- An empty log with named groups still exports (the groups alone);
+  nothing at all is refused.
+
 ### Checked
 
 - Tests: every act round-trips; a head is five values; a partial last

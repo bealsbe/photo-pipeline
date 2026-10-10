@@ -817,8 +817,8 @@ fn corrections_kept(p: &Prefs) -> bool {
 /// A folder picked for the record's export: copied there on the record's
 /// own thread (a worker waits for it), never on this one.
 pub fn export_corrections(app: &mut App, into: PathBuf) -> Task<Message> {
-    let recorder = app.search.link.decisions();
-    let work = move || recorder.export(&into).map_err(|e| e.to_string());
+    let export = app.search.link.exporter();
+    let work = move || export(&into).map_err(|e| e.to_string());
     Task::perform(on_worker("prefs-export", work), |r| m(Msg::Exported(r.unwrap_or_else(|| Err("the export stopped".into())))))
 }
 
