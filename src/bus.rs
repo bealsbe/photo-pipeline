@@ -163,9 +163,6 @@ pub enum BgEvent {
         pairs: Arc<Vec<(crate::model::subjects::FaceRef, crate::model::subjects::FaceRef)>>,
         split: Option<Arc<(Vec<crate::model::subjects::FaceRef>, Vec<crate::model::subjects::FaceRef>)>>,
     },
-    /// Which group holds each of `heads` now (`Engine::locate`), in order;
-    /// `None` for one in no group.
-    Located { seq: u64, groups: Arc<Vec<Option<crate::model::subjects::GroupId>>> },
     /// A set of fursuit heads, farthest from the rest of the set first
     /// (`Engine::heads_order`).
     HeadsOrder { seq: u64, far: Arc<Vec<(crate::model::subjects::FaceRef, f32)>> },
@@ -254,7 +251,6 @@ impl BgEvent {
             BgEvent::Judged { .. } => "Judged",
             BgEvent::MergeSuggestions { .. } => "MergeSuggestions",
             BgEvent::GroupCheck { .. } => "GroupCheck",
-            BgEvent::Located { .. } => "Located",
             BgEvent::HeadsOrder { .. } => "HeadsOrder",
             BgEvent::NearGroups { .. } => "NearGroups",
             BgEvent::EditApplied { .. } => "EditApplied",

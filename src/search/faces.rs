@@ -987,6 +987,7 @@ impl People {
     /// to a new unnamed subject (`None`).  From a cluster, the faces are
     /// confirmed into the destination; the rest of the cluster stays
     /// where the grouping puts it.
+    #[cfg(test)]
     pub fn move_faces(&mut self, from: &GroupId, faces: Vec<FaceRef>, to: Option<&GroupId>) -> Result<SubjectId, Refused> {
         if faces.is_empty() {
             return Err(Refused::Nothing);

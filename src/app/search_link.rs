@@ -326,27 +326,6 @@ impl Link {
         }
     }
 
-    /// Move faces out of `from`: to `to`, or a new group of their own.
-    pub fn move_faces(&self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>, via: Via) {
-        match self {
-            Link::Engine(e) => e.move_faces(from.clone(), faces.to_vec(), to.cloned(), via),
-            Link::Fake(f) => {
-                let before = f.before(
-                    |s| {
-                        let heads = decisions::heads(faces.iter().take(decisions::MOVED_HEADS).copied());
-                        match to {
-                            None => Act::Split { from: s.side(from, &[]), heads, moved: faces.len() },
-                            Some(t) => Act::Move { from: s.side(from, &[]), to: s.side(t, &[]), heads, moved: faces.len() },
-                        }
-                    },
-                    from,
-                );
-                let done = f.edit(from, |p, _| p.move_faces(from, faces, to), |z, _| z.move_faces(from, faces, to));
-                f.record(done, before, via, None);
-            }
-        }
-    }
-
     /// Yes, No (not this one: out, and never suggested again), or take the
     /// answer back (`None`).
     pub fn answer(&self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>, via: Via) {
@@ -555,20 +534,6 @@ impl Link {
                     if kind == Kind::Fursuit { s.fursuits.far_order_of(heads) } else { s.people.far_order_of(heads) }
                 };
                 let _ = f.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
-            }
-        }
-    }
-
-    /// Which group of `kind` holds each of `heads` now (`BgEvent::Located`).
-    pub fn locate(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
-        match self {
-            Link::Engine(e) => e.locate(seq, kind, heads.to_vec()),
-            Link::Fake(f) => {
-                let groups: Vec<Option<GroupId>> = {
-                    let s = f.state.lock();
-                    heads.iter().map(|h| if kind == Kind::Fursuit { s.fursuits.group_of(h) } else { s.people.group_of(h) }).collect()
-                };
-                let _ = f.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
             }
         }
     }

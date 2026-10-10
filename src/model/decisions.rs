@@ -314,12 +314,6 @@ pub enum Via {
     /// judge and shown on request (`Some(false)`); `check`: an unnamed
     /// group's own heads ("Check this group").
     Review { judge: Option<bool>, check: bool },
-    /// The split proposed around two heads seen in one photo, confirmed
-    /// after `edited` heads were moved between its sides by hand.
-    Proposal { edited: u32 },
-    /// Picked heads split off after arranging the group in two columns,
-    /// `edited` heads moved between the sides by hand first.
-    Arranged { edited: u32 },
     /// The group editor's *Apply*: opened from a proposed split
     /// (`proposal`) or not, `edited` heads moved by hand in it.
     Editor { proposal: bool, edited: u32 },
@@ -387,8 +381,6 @@ impl How {
         match via {
             Via::Hand(at) => How::hand(at),
             Via::Unknown => How { by: "hand".into(), ..How::default() },
-            Via::Proposal { edited } => How { by: "proposal".into(), at: Some(At::Heads), edited: Some(edited), ..How::default() },
-            Via::Arranged { edited } => How { edited: Some(edited), ..How::hand(At::Heads) },
             Via::Editor { proposal: true, edited } => How { by: "proposal".into(), at: Some(At::Editor), edited: Some(edited), ..How::default() },
             Via::Editor { proposal: false, edited } => How { edited: Some(edited), ..How::hand(At::Editor) },
             Via::Pair { at, distance, sure, verdict: Some(v) } => {
@@ -1157,15 +1149,19 @@ mod tests {
     /// *Heads*; other decisions carry no such field.
     #[test]
     fn an_arranged_split_records_the_heads_moved_by_hand() {
-        let how = How::of(Via::Proposal { edited: 3 }, None);
-        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Heads), Some(3)));
+        let how = How::of(Via::Editor { proposal: true, edited: 3 }, None);
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(3)));
         let line = serde_json::to_string(&how).unwrap();
-        assert!(line.contains(r#""edited":3"#), "{line}");
+        assert!(line.contains(r#""edited":3"#) && line.contains(r#""at":"editor""#), "{line}");
         assert_eq!(serde_json::from_str::<How>(&line).unwrap(), how);
-        let as_offered = How::of(Via::Proposal { edited: 0 }, None);
+        let as_offered = How::of(Via::Editor { proposal: true, edited: 0 }, None);
         assert!(serde_json::to_string(&as_offered).unwrap().contains(r#""edited":0"#), "0 is kept: confirmed as offered");
-        let picked = How::of(Via::Arranged { edited: 2 }, None);
-        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Heads), Some(2)));
+        let picked = How::of(Via::Editor { proposal: false, edited: 2 }, None);
+        assert_eq!((picked.by.as_str(), picked.at, picked.edited), ("hand", Some(At::Editor), Some(2)));
+        // An entry written before the editor (a proposal confirmed in the
+        // old dialog) still reads.
+        let old: How = serde_json::from_str(r#"{"by":"proposal","at":"heads","edited":1}"#).unwrap();
+        assert_eq!((old.by.as_str(), old.at, old.edited), ("proposal", Some(At::Heads), Some(1)));
         assert!(!serde_json::to_string(&How::of(Via::Hand(At::Heads), None)).unwrap().contains("edited"));
     }
 

@@ -84,7 +84,6 @@ enum Cmd {
     Forget(SubjectId),
     ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
-    MoveFaces { from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via },
     Answer { group: GroupId, faces: Vec<FaceRef>, yes: Option<bool>, via: Via },
     Suggestions { seq: u64, group: GroupId },
     Undo,
@@ -113,7 +112,6 @@ enum Cmd {
     MergeSuggestions { seq: u64, focus: Option<GroupId>, min_photos: usize, judge: bool },
     GroupCheck { seq: u64, group: GroupId },
     SetGrouping(heads::Grouping),
-    Locate { seq: u64, kind: Kind, heads: Vec<FaceRef> },
     HeadsOrder { seq: u64, kind: Kind, heads: Vec<FaceRef> },
     NearGroups { seq: u64, kind: Kind, heads: Vec<FaceRef> },
     ApplyEdit { seq: u64, edit: crate::model::subjects::GroupEdit, via: Via },
@@ -481,12 +479,6 @@ impl Engine {
         self.send(Cmd::Faces { seq, group });
     }
 
-    /// Move faces out of `from`: into `to` (the same kind, else refused),
-    /// or into a new unnamed group (`None`).
-    pub fn move_faces(&self, from: GroupId, faces: Vec<FaceRef>, to: Option<GroupId>, via: Via) {
-        self.send(Cmd::MoveFaces { from, faces, to, via });
-    }
-
     /// A review answer: `Some(true)` adds the faces to the group,
     /// `Some(false)` is "not this person" (out of the members, never
     /// suggested again), `None` takes an answer back.  One call covers a
@@ -634,13 +626,6 @@ impl Engine {
     /// `Status.heads.cuts()`.
     pub fn set_fursuit_grouping(&self, g: heads::Grouping) {
         self.send(Cmd::SetGrouping(g));
-    }
-
-    /// Which group of `kind` holds each of `heads` now
-    /// (`BgEvent::Located`): the two groups side by side follow their
-    /// heads when a move gives a group a new id.
-    pub fn locate(&self, seq: u64, kind: Kind, heads: Vec<FaceRef>) {
-        self.send(Cmd::Locate { seq, kind, heads });
     }
 
     /// A set of fursuit heads farthest from the rest of the set first
@@ -1297,14 +1282,6 @@ impl Worker {
                     let faces = self.people.faces(&group, &|f| self.resolve_face(f)).unwrap_or_default();
                     let _ = self.bus.unbounded_send(BgEvent::SubjectFaces { seq, group, faces: Arc::new(faces) });
                 }
-                Cmd::MoveFaces { from, faces, to, via } => {
-                    let before = self.before_move(&from, &faces, to.as_ref());
-                    let r = self.people.move_faces(&from, faces, to.as_ref());
-                    if r.is_ok() {
-                        self.record(before, via);
-                    }
-                    self.after_edit(r.map(|_| ()));
-                }
                 Cmd::Answer { group, faces, yes, via } => {
                     let before = match yes {
                         Some(y) => self.before_answer(&group, &faces, y),
@@ -1376,10 +1353,6 @@ impl Worker {
                         self.publish_subjects();
                     }
                     self.publish_heads();
-                }
-                Cmd::Locate { seq, kind, heads } => {
-                    let groups: Vec<Option<GroupId>> = heads.iter().map(|h| self.people.group_of(kind, h)).collect();
-                    let _ = self.bus.unbounded_send(BgEvent::Located { seq, groups: Arc::new(groups) });
                 }
                 Cmd::HeadsOrder { seq, kind, heads } => {
                     let far = self.far_order_of(kind, &heads);
@@ -4535,14 +4508,16 @@ mod tests {
         let how = got[2].how.as_ref().unwrap();
         assert_eq!((how.by.as_str(), how.yes, how.no, how.unseen), ("judge", Some(0), Some(2), Some(1)));
         assert!(matches!(&got[2].act, Act::NotSame { groups } if groups[0].heads[0].0 == head(1) && groups[1].heads[0].0 == head(3)));
-        // A split proposed around two heads of one photo, two heads moved
-        // between its sides by hand before it was confirmed.
-        e.move_faces(far.clone(), vec![head(4)], None, Via::Proposal { edited: 2 });
+        // A split proposed around two heads of one photo, applied from the
+        // editor after two heads were moved by hand: one `edit` entry.
+        let _ = far;
+        let edit = crate::model::subjects::GroupEdit { kind: Kind::Fursuit, new_names: vec![None], moves: vec![(head(4), crate::model::subjects::EditDest::New(0))], ..Default::default() };
+        e.apply_edit(9, edit, Via::Editor { proposal: true, edited: 2 });
         let got = until(4);
         alone(&got[3]);
-        assert!(matches!(&got[3].act, Act::Split { from, heads, moved: 1 } if from.n == 1 && heads[0].0 == head(4)), "{:?}", got[3]);
+        assert!(matches!(&got[3].act, Act::Edit { groups, out } if groups[0].n == 1 && out[0].from == Some(0) && matches!(out[0].to, crate::model::decisions::To::New { new: 0, .. }) && out[0].heads[0].0 == head(4)), "{:?}", got[3]);
         let how = got[3].how.as_ref().unwrap();
-        assert_eq!((how.by.as_str(), how.edited), ("proposal", Some(2)));
+        assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(2)));
         // A review answer: C is A, by distance; the nearest member measured.
         e.answer(a.clone(), vec![head(3)], Some(true), Via::Review { judge: None, check: false });
         let got = until(5);
@@ -4765,7 +4740,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         };
         let b_ref = FaceRef::new(key_of(2), [0.3, 0.2, 0.3, 0.4]);
-        e.move_faces(suit.clone(), vec![b_ref], None, Via::default());
+        let _ = &suit;
+        let edit = crate::model::subjects::GroupEdit { kind: Kind::Fursuit, new_names: vec![None], moves: vec![(b_ref, crate::model::subjects::EditDest::New(0))], ..Default::default() };
+        e.apply_edit(9, edit, Via::default());
         // Three groups, B's of its own: a listing from before the move
         // landed can hold three groups too, so wait for B's.
         let started = Instant::now();

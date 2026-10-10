@@ -31,7 +31,7 @@ pub mod subjects;
 pub mod subjects_fursuits;
 pub mod columns;
 pub mod subjects_merge;
-pub mod subjects_pair;
+pub mod subjects_editor;
 pub mod subjects_split;
 pub mod subjects_person;
 pub mod subjects_remove;
@@ -1835,7 +1835,7 @@ impl App {
                 Task::none()
             }
             // On People and fursuits: two groups side by side.
-            Cmd::Compare if self.view == View::Subjects => subjects_pair::compare_key(self),
+            Cmd::Compare if self.view == View::Subjects => subjects_editor::compare_key(self),
             Cmd::Compare => compare::open_selected(self),
             Cmd::ReviewBurst => viewer_burst::open_from_main(self),
             Cmd::StackBurst if self.view == View::Search => search::toggle_focused(self),
@@ -2242,16 +2242,19 @@ impl App {
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
-                BgEvent::GroupCheck { seq, group, far, pairs, split } => {
-                    if subjects_pair::on_check(self, seq, &far) {
+                BgEvent::GroupCheck { seq, group, far, pairs, split } => tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split)),
+                BgEvent::HeadsOrder { seq, far } => {
+                    if subjects_editor::on_heads_order(self, seq, &far) {
                         tasks.push(subjects::refresh_crops(self));
-                    } else {
-                        tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split));
                     }
                 }
-                BgEvent::Located { seq, groups } => tasks.push(subjects_pair::on_located(self, seq, &groups)),
-                BgEvent::HeadsOrder { seq, far } => tasks.push(subjects_split::on_heads_order(self, seq, &far)),
-                BgEvent::NearGroups { .. } | BgEvent::EditApplied { .. } | BgEvent::EditRefused { .. } => {}
+                BgEvent::NearGroups { seq, list } => {
+                    if subjects_editor::on_near(self, seq, &list) {
+                        tasks.push(subjects::refresh_crops(self));
+                    }
+                }
+                BgEvent::EditApplied { seq, words } => tasks.push(subjects_editor::on_applied(self, seq, &words)),
+                BgEvent::EditRefused { seq, why, gone } => tasks.push(subjects_editor::on_refused(self, seq, &why, gone)),
                 BgEvent::MergeSuggestions { seq, focus, list, judging } => tasks.push(subjects_merge::on_merge_suggestions(self, seq, focus, list, judging)),
                 BgEvent::MergeJudged { seq, offered, left_out, done, total, beyond } => tasks.push(subjects_merge::on_merge_judged(self, seq, offered, left_out, done, total, beyond)),
                 BgEvent::ModelDownload { model, done, fetched, total, state } => tasks.push(search::on_download(self, model, done, fetched, total, state)),

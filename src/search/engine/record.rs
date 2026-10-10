@@ -215,23 +215,6 @@ impl Worker {
         Some(Before { kind, act: Act::NotSame { groups: vec![sa, sb] }, answered: None })
     }
 
-    /// A move or a split: where the heads were, where they go.
-    pub(super) fn before_move(&mut self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) -> Option<Before> {
-        if !self.decisions.is_on() {
-            return None;
-        }
-        let (kind, from_side, _) = self.record_side(from, &[])?;
-        let moved = faces.len();
-        let heads = decisions::heads(faces.iter().take(decisions::MOVED_HEADS).copied());
-        let act = match to {
-            None => Act::Split { from: from_side, heads, moved },
-            Some(t) => {
-                let (_, to_side, _) = self.record_side(t, &[])?;
-                Act::Move { from: from_side, to: to_side, heads, moved }
-            }
-        };
-        Some(Before { kind, act, answered: None })
-    }
 
     /// The group editor's *Apply*: every group heads left or went to, as
     /// it was, and the heads by (from, to).

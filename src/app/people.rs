@@ -723,6 +723,7 @@ impl FakePeople {
     }
 
     /// Move faces out of `from`: into `to`, or a new unnamed group.
+    #[cfg(test)]
     pub fn move_faces(&mut self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) -> Result<(), String> {
         if self.group(from).is_none() || to.is_some_and(|t| self.group(t).is_none()) {
             return Err("That group changed: look again.".into());
