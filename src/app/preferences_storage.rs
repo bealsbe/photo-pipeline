@@ -198,13 +198,18 @@ pub struct Survey {
     pub caches: Vec<(Cache, Usage)>,
     pub journal: Journal,
     pub search: SearchStorage,
+    /// The record of corrections: its bytes and entries (user data, not
+    /// a cache: People and fursuits' section shows it).
+    pub decisions: (u64, usize),
 }
 
-/// Measure every cache and count the unsaved marks (on a worker thread).
-pub fn survey(library: Option<&Path>) -> Survey {
+/// Measure every cache, count the unsaved marks and the record of
+/// corrections at `decisions` (on a worker thread).
+pub fn survey(library: Option<&Path>, decisions: Option<&Path>) -> Survey {
     let caches = Cache::ALL.iter().map(|&c| (c, c.dir().map(|d| measure(&d)).unwrap_or_default())).collect();
     let journal = crate::model::saver::default_journal_dir().map(|d| journal(&d)).unwrap_or_default();
-    Survey { caches, journal, search: crate::search::engine::storage(library) }
+    let decisions = decisions.map(crate::model::decisions::usage).unwrap_or_default();
+    Survey { caches, journal, search: crate::search::engine::storage(library), decisions }
 }
 
 #[cfg(test)]

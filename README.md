@@ -321,7 +321,8 @@ downloaded model deleted, each after a confirmation that says what it costs.
 It also shows any marks waiting to be saved to a
 folder that couldn't be reached.  Those live in
 `~/.local/share/photo-pipeline/unsaved/` and are never cleared from the app:
-they are your marks, not a cache.
+they are your marks, not a cache.  Under them, *Keep a record of my
+corrections* and the record itself (see "A record of your corrections").
 
 ## Library calendar
 
@@ -560,6 +561,8 @@ for you.
   faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
   deletes every face found and every name, behind a plain confirmation.
   Your photos are never changed, and nothing is written into the library.
+- **A record of your corrections** (people and fursuits alike; below,
+  after *Labels in the viewer*).
 
 ### Fursuits
 
@@ -717,6 +720,8 @@ never shown, merged, suggested or completed together with people or pets.
 - **Look:** the tab's glyph is a furry head (full ears, cheek ruffs, a
   muzzle), drawn simpler at small sizes; the stand-in (below) draws grey
   cartoon heads, never a photo.
+- **Forget all fursuits** also takes the fursuit corrections out of the
+  record of corrections (below); People's *Forget all…* likewise.
 
 ### Labels in the viewer
 
@@ -771,6 +776,48 @@ bar under the top bar does the editing; L, *Done* or Esc hides them.
   again; *Forget all* of a kind forgets its labels too.  Nothing is
   written into photos or sidecars.  An older build reading a version 2
   file ignores the two lists, and drops them if it saves the file.
+
+### A record of your corrections
+
+So that later work on matching (re-tuning the cut-offs, training a small
+adapter) can learn from the way you correct groups, every grouping
+decision is added to a file, one line each:
+
+- **What is recorded.**  Merges (dragged, picked with S then M, *Merge
+  into…*, a suggested pair, *Similar groups*), "Not the same", splits and
+  moves (*Split into a new group*, *Move to…*, the two-heads proposal, a
+  head dragged to a group, two groups side by side), review answers (Y,
+  N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
+  names given to groups, and the viewer's label edits (a name, *It's a
+  person* / *It's a fursuit*, a drawn box, *Not a face*).  Ctrl+Z, or Z
+  in a review, adds an entry naming the one it takes back: nothing is
+  rewritten.
+- **Each entry stands alone.**  The heads involved by content key and box
+  (never group numbers, which change at every regroup): for a group, its
+  size and its 16 clearest heads; how it was reached (by hand and where,
+  or a distance suggestion with its distance, or the judge's verdict with
+  the model and its P(yes) or head-pair counts); and the library at the
+  time (heads, whether whitened, the model, the fursuit *Grouping* choice
+  and the cut-offs in force).  A merge is about 2 KB, an answer 1.5 KB, a
+  label edit 0.4 KB.  Hiding a group and *Forget this person* aren't
+  recorded.
+- **Where.**  `~/.local/share/photo-pipeline/decisions.jsonl`, beside
+  `subjects.json`, readable only by you.  It is yours, not a cache:
+  *Clear* and *Rebuild* keep it; *Forget all* of a kind takes that kind's
+  entries out; nothing goes into photos, sidecars or the library.  Each
+  entry is appended on a thread of its own and synced to disk.
+- **Preferences ▸ Storage** has the switch, *Keep a record of my
+  corrections, to improve matching later* (on by default, people and
+  fursuits alike), and the record's row with its size and how many are
+  kept.  Off, nothing new is added and what is kept stays; taking back a
+  correction already recorded is still noted, so the record never shows
+  it as in force.  *Export…* copies the record, with a README describing
+  its format, into a new folder in one you choose, **without names**:
+  each person or fursuit is a code such as `fursuit-12`, the same one
+  throughout the copy (the record here keeps the names).  *Delete the
+  record…* asks first.  The
+  format is in `docs/library-search-plan.md` ("As built — the record of
+  corrections") and `src/model/decisions.rs`.
 
 ### How it works
 
@@ -1181,7 +1228,10 @@ These are deliberate:
   animal word's hits handed back as fursuits left out), made-up Things,
   downloads and indexing on a timer (`search fake download-rate 38` for a
   known speed, `pause` for a stall), and every failure the page shows on
-  request (`search fake …`).  It downloads, reads and writes nothing.
+  request (`search fake …`).  It downloads and reads nothing, and writes
+  only its own record of corrections (`decisions-stand-in.jsonl`, never
+  the real `decisions.jsonl`; `decisions print|pairs` in a script prints
+  it).
   `search complete`, `search things` and `search fursuits show|hide`
   drive and print the completions, the start page's Things and the
   fursuits' list.  The stand-in also makes up people and fursuits on the

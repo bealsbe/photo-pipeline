@@ -39,6 +39,7 @@ use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::subjects_person::{Person, Show};
 use super::{App, Message};
+use crate::model::decisions::{At, Via};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::subject_tile as tile;
@@ -353,7 +354,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let Some(leaving) = a.confirm(|f| held.contains(f)) else { return Task::none() };
             let (moved, from_pick) = (a.moved(), a.from_pick);
             p.proposal = None;
-            let t = split_off(app, leaving.clone());
+            let via = if from_pick { Via::Arranged { edited: moved as u32 } } else { Via::Proposal { edited: moved as u32 } };
+            let t = split_off(app, leaving.clone(), via);
             if moved == 0 {
                 return t;
             }
@@ -395,7 +397,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             let Some(HeadDrag { faces, over: Some(to) }) = p.head_drag.take() else { return Task::none() };
             match to {
-                None => split_off(app, faces),
+                None => split_off(app, faces, Via::Hand(At::Heads)),
                 Some(to) => move_heads(app, faces, to),
             }
         }
@@ -475,7 +477,7 @@ pub fn on_heads_order(app: &mut App, seq: u64, far: &[(FaceRef, f32)]) -> Task<M
 
 /// Heads out of the page's group into a new group of their own: the
 /// existing move, one undo step.
-fn split_off(app: &mut App, faces: Vec<FaceRef>) -> Task<Message> {
+fn split_off(app: &mut App, faces: Vec<FaceRef>, via: Via) -> Task<Message> {
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if faces.is_empty() || p.kind != Kind::Fursuit {
         return Task::none();
@@ -484,7 +486,7 @@ fn split_off(app: &mut App, faces: Vec<FaceRef>) -> Task<Message> {
     p.anchor = None;
     let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(&from, &faces, None);
+    app.search.link.move_faces(&from, &faces, None, via);
     app.show_status_action(format!("Split {} into a new group, to name or merge.", util::plural(n, "head")), "Undo", sm(subj::Msg::Undo))
 }
 
@@ -498,7 +500,7 @@ fn move_heads(app: &mut App, faces: Vec<FaceRef>, to: GroupId) -> Task<Message> 
     p.anchor = None;
     let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(&from, &faces, Some(&to));
+    app.search.link.move_faces(&from, &faces, Some(&to), Via::Hand(At::Heads));
     let whom = subj::label(&app.subjects, &to);
     app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, "head")), "Undo", sm(subj::Msg::Undo))
 }

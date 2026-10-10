@@ -11,7 +11,9 @@
 //! and indexes on a timer, and can be put in any state the page must show
 //! (`search fake …` in a test script).  It sends the same events as the
 //! engine, so the page can't tell them apart.  It reads no photo and
-//! writes no file.  `PP_SEARCH_FAKE=indexed` starts it with the library
+//! writes no file but its own record of corrections
+//! (`decisions-stand-in.jsonl`, never the real record's file: run it with
+//! a throwaway `HOME`).  `PP_SEARCH_FAKE=indexed` starts it with the library
 //! indexed.  It answers phase 2's questions too: made-up Things (the
 //! vocabulary's objects and scenes, with counts that grow with the index),
 //! the query's dates and `-word`s applied to its hits (dates alone answer
@@ -35,6 +37,7 @@ use parking_lot::Mutex;
 
 use super::fursuits::{self, FakeFursuits};
 use super::people::{Face, FaceRef, FakePeople, Framing, GroupId, Kind, Subjects};
+use crate::model::decisions::{self, Act, Entry, How, Recorder, Via};
 use crate::model::subjects::{LabelEdit, LabelTarget};
 use crate::bus::{BgEvent, Bus};
 use crate::ml::download::DownloadState;
@@ -59,6 +62,16 @@ impl Link {
         match std::env::var("PP_SEARCH_FAKE") {
             Ok(v) => Link::Fake(Fake::new(bus, device, index_exports, v == "indexed", find_faces, face_model, find_heads)),
             Err(_) => Link::Engine(Arc::new(Engine::new(bus, device, index_exports, find_faces, face_model, find_heads))),
+        }
+    }
+
+    /// The record of the user's corrections (`model::decisions`): the
+    /// engine's, beside the subjects file; the stand-in's, in a file of
+    /// its own.
+    pub fn decisions(&self) -> Recorder {
+        match self {
+            Link::Engine(e) => e.decisions(),
+            Link::Fake(f) => f.decisions.clone(),
         }
     }
 
@@ -205,36 +218,53 @@ impl Link {
                 GroupId::Subject(s) => e.rename(s.clone(), name.to_string()),
                 GroupId::Cluster(_) => e.name_group(id.clone(), name.to_string()),
             },
-            Link::Fake(f) => f.edit(id, |p, _| p.name_group(id, name).map(|_| ()), |z, _| z.name_group(id, name).map(|_| ())),
+            Link::Fake(f) => {
+                let before = f.before(|s| Act::Name { head: None, name: Some(name.to_string()), group: Some(s.side(id, &[])), from: None }, id);
+                let done = f.edit(id, |p, _| p.name_group(id, name).map(|_| ()), |z, _| z.name_group(id, name).map(|_| ()));
+                f.record(done, before, Via::Hand(decisions::At::Name), None);
+            }
         }
     }
 
     /// Merge `others` into `into` (one kind only; refused otherwise).
-    pub fn merge(&self, into: &GroupId, others: &[GroupId]) {
+    /// `via`: how the page came to it, for the decision record.
+    pub fn merge(&self, into: &GroupId, others: &[GroupId], via: Via) {
         match self {
-            Link::Engine(e) => e.merge(into.clone(), others.to_vec()),
-            Link::Fake(f) => f.edit(
-                into,
-                |p, subjects| p.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
-                |z, subjects| z.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
-            ),
+            Link::Engine(e) => e.merge(into.clone(), others.to_vec(), via),
+            Link::Fake(f) => {
+                let before = f.before(
+                    |s| {
+                        let groups = std::iter::once(into).chain(others.iter().filter(|o| *o != into)).map(|g| s.side(g, &[])).collect();
+                        Act::Merge { groups }
+                    },
+                    into,
+                );
+                let done = f.edit(
+                    into,
+                    |p, subjects| p.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
+                    |z, subjects| z.merge(into, others, |g: &GroupId| subjects.group(g).map(|x| x.kind)),
+                );
+                f.record(done, before, via, None);
+            }
         }
     }
 
     pub fn set_hidden(&self, id: &GroupId, hidden: bool) {
         match self {
             Link::Engine(e) => e.set_hidden(id.clone(), hidden),
-            Link::Fake(f) => f.edit(
-                id,
-                |p, _| {
-                    p.set_hidden(id, hidden);
-                    Ok(())
-                },
-                |z, _| {
-                    z.set_hidden(id, hidden);
-                    Ok(())
-                },
-            ),
+            Link::Fake(f) => {
+                f.edit(
+                    id,
+                    |p, _| {
+                        p.set_hidden(id, hidden);
+                        Ok(())
+                    },
+                    |z, _| {
+                        z.set_hidden(id, hidden);
+                        Ok(())
+                    },
+                );
+            }
         }
     }
 
@@ -246,17 +276,19 @@ impl Link {
                     e.forget(s.clone());
                 }
             }
-            Link::Fake(f) => f.edit(
-                id,
-                |p, _| {
-                    p.forget(id);
-                    Ok(())
-                },
-                |z, _| {
-                    z.forget(id);
-                    Ok(())
-                },
-            ),
+            Link::Fake(f) => {
+                f.edit(
+                    id,
+                    |p, _| {
+                        p.forget(id);
+                        Ok(())
+                    },
+                    |z, _| {
+                        z.forget(id);
+                        Ok(())
+                    },
+                );
+            }
         }
     }
 
@@ -268,7 +300,9 @@ impl Link {
             Link::Fake(f) => f.change(|s| {
                 s.people.forget_all();
                 s.labels.forget_kind(Kind::Person);
-                s.edits.retain(|k| *k != Some(Kind::Person));
+                s.edits.retain(|k| k.0 != Some(Kind::Person));
+                s.answered.retain(|_, (_, k)| *k != Kind::Person);
+                f.decisions.forget_kind(Kind::Person);
                 s.status.faces.looked_at = 0;
                 if s.status.pass.as_ref().is_some_and(|p| p.kind == PassKind::Faces) {
                     s.status.pass = None;
@@ -293,29 +327,53 @@ impl Link {
     }
 
     /// Move faces out of `from`: to `to`, or a new group of their own.
-    pub fn move_faces(&self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) {
+    pub fn move_faces(&self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>, via: Via) {
         match self {
-            Link::Engine(e) => e.move_faces(from.clone(), faces.to_vec(), to.cloned()),
-            Link::Fake(f) => f.edit(from, |p, _| p.move_faces(from, faces, to), |z, _| z.move_faces(from, faces, to)),
+            Link::Engine(e) => e.move_faces(from.clone(), faces.to_vec(), to.cloned(), via),
+            Link::Fake(f) => {
+                let before = f.before(
+                    |s| {
+                        let heads = decisions::heads(faces.iter().take(decisions::MOVED_HEADS).copied());
+                        match to {
+                            None => Act::Split { from: s.side(from, &[]), heads, moved: faces.len() },
+                            Some(t) => Act::Move { from: s.side(from, &[]), to: s.side(t, &[]), heads, moved: faces.len() },
+                        }
+                    },
+                    from,
+                );
+                let done = f.edit(from, |p, _| p.move_faces(from, faces, to), |z, _| z.move_faces(from, faces, to));
+                f.record(done, before, via, None);
+            }
         }
     }
 
     /// Yes, No (not this one: out, and never suggested again), or take the
     /// answer back (`None`).
-    pub fn answer(&self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>) {
+    pub fn answer(&self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>, via: Via) {
         match self {
-            Link::Engine(e) => e.answer(id.clone(), faces.to_vec(), yes),
-            Link::Fake(f) => f.edit(
-                id,
-                |p, _| {
-                    p.answer(id, faces, yes);
-                    Ok(())
-                },
-                |z, _| {
-                    z.answer(id, faces, yes);
-                    Ok(())
-                },
-            ),
+            Link::Engine(e) => e.answer(id.clone(), faces.to_vec(), yes, via),
+            Link::Fake(f) => {
+                let before = yes.and_then(|y| f.before(|s| Act::Answer { yes: y, group: s.side(id, &[]), heads: decisions::heads(faces.iter().copied()) }, id));
+                let done = f.edit(
+                    id,
+                    |p, _| {
+                        p.answer(id, faces, yes);
+                        Ok(())
+                    },
+                    |z, _| {
+                        z.answer(id, faces, yes);
+                        Ok(())
+                    },
+                );
+                match yes {
+                    Some(_) => f.record(done, before, via, Some(faces)),
+                    // Taking an answer back is an undo of its entry.
+                    None => {
+                        let undone = f.state.lock().answered.remove(&fake_sorted(faces));
+                        f.record_undo(undone, done.is_some());
+                    }
+                }
+            }
         }
     }
 
@@ -386,19 +444,26 @@ impl Link {
     pub fn label(&self, edit: LabelEdit) {
         match self {
             Link::Engine(e) => e.label(edit),
-            Link::Fake(f) => f.change(|s| {
-                let key = edit.face().key;
-                let base = s.fake_label_base(&key);
-                let pending = s.drawn_pending().is_some();
-                let subjects = s.subjects.clone();
-                match s.labels.edit(&edit, base, &subjects, pending) {
-                    Ok(what) => {
-                        eprintln!("[labels] {what}");
-                        s.edits.push(None);
+            Link::Fake(f) => {
+                let mut done = None;
+                f.change(|s| {
+                    let key = edit.face().key;
+                    let base = s.fake_label_base(&key);
+                    let pending = s.drawn_pending().is_some();
+                    let subjects = s.subjects.clone();
+                    match s.labels.edit(&edit, base, &subjects, pending) {
+                        Ok(what) => {
+                            eprintln!("[labels] {what}");
+                            s.edits.push((None, None));
+                            done = Some(fake_label_act(&edit, &subjects));
+                        }
+                        Err(e) => eprintln!("[labels] refused: {e}"),
                     }
-                    Err(e) => eprintln!("[labels] refused: {e}"),
+                });
+                if let Some((kind, act)) = done.filter(|_| f.decisions.is_on()) {
+                    f.record(Some(kind), Some((kind, act)), Via::Hand(decisions::At::Viewer), None);
                 }
-            }),
+            }
         }
     }
 
@@ -451,11 +516,30 @@ impl Link {
             Link::Engine(e) => e.remove_boxes(kind, targets.to_vec()),
             Link::Fake(f) => {
                 let Some((first, _)) = targets.first() else { return };
-                f.edit(
+                // The groups as they were, and the heads each target names
+                // (a whole group: all its heads).
+                let before = f.before(
+                    |s| {
+                        let mut removed: Vec<FaceRef> = Vec::new();
+                        for (id, picked) in targets {
+                            let all: Vec<FaceRef> = if s.fursuits.owns(id) { s.fursuits.faces(id) } else { s.people.faces(id) }.iter().map(|x| x.face).collect();
+                            for h in picked.clone().unwrap_or(all) {
+                                if !removed.contains(&h) {
+                                    removed.push(h);
+                                }
+                            }
+                        }
+                        Act::RemoveMany { groups: targets.iter().map(|(id, _)| s.side(id, &[])).collect(), heads: decisions::heads(removed.iter().take(decisions::MOVED_HEADS).copied()), removed: removed.len() }
+                    },
+                    first,
+                );
+                let done = f.edit(
                     first,
                     |p, _| if kind == Kind::Person { p.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
                     |z, _| if kind == Kind::Fursuit { z.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
                 );
+                let at = if kind == Kind::Fursuit { decisions::At::Heads } else { decisions::At::Faces };
+                f.record(done, before, Via::Hand(at), None);
             }
         }
     }
@@ -473,10 +557,14 @@ impl Link {
 
     /// "Not the same": the two groups are different fursuits; never
     /// offered together again (one undo step).
-    pub fn not_same(&self, a: &GroupId, b: &GroupId, a_heads: &[FaceRef], b_heads: &[FaceRef]) {
+    pub fn not_same(&self, a: &GroupId, b: &GroupId, a_heads: &[FaceRef], b_heads: &[FaceRef], via: Via) {
         match self {
-            Link::Engine(e) => e.not_same(a.clone(), b.clone(), a_heads.to_vec(), b_heads.to_vec()),
-            Link::Fake(f) => f.edit(a, |_, _| Err("people have no merge suggestions here".into()), |z, _| z.not_same(a, b)),
+            Link::Engine(e) => e.not_same(a.clone(), b.clone(), a_heads.to_vec(), b_heads.to_vec(), via),
+            Link::Fake(f) => {
+                let before = f.before(|s| Act::NotSame { groups: vec![s.side(a, a_heads), s.side(b, b_heads)] }, a);
+                let done = f.edit(a, |_, _| Err("people have no merge suggestions here".into()), |z, _| z.not_same(a, b));
+                f.record(done, before, via, None);
+            }
         }
     }
 
@@ -486,18 +574,24 @@ impl Link {
         match self {
             Link::Engine(e) => e.undo(),
             Link::Fake(f) => {
+                let mut undone = None;
                 let what = {
                     let mut s = f.state.lock();
                     // The newest edit, whichever kind it changed.
-                    let what = match s.edits.pop() {
-                        Some(Some(Kind::Fursuit)) => s.fursuits.undo(),
+                    let (kind, recorded) = s.edits.pop().unwrap_or((Some(Kind::Person), None));
+                    let what = match kind {
+                        Some(Kind::Fursuit) => s.fursuits.undo(),
                         // A change made in the viewer's labels.
-                        Some(None) => s.labels.undo(),
+                        None => s.labels.undo(),
                         _ => s.people.undo(),
                     };
                     s.refresh_people();
+                    if what.is_some() {
+                        undone = recorded;
+                    }
                     what
                 };
+                f.record_undo(undone, false);
                 if let Some(w) = what {
                     let _ = f.bus.unbounded_send(BgEvent::SubjectsUndone(w));
                 }
@@ -623,7 +717,9 @@ impl Link {
             Link::Fake(f) => f.change(|s| {
                 s.fursuits.forget_all();
                 s.labels.forget_kind(Kind::Fursuit);
-                s.edits.retain(|k| *k != Some(Kind::Fursuit));
+                s.edits.retain(|k| k.0 != Some(Kind::Fursuit));
+                s.answered.retain(|_, (_, k)| *k != Kind::Fursuit);
+                f.decisions.forget_kind(Kind::Fursuit);
                 s.status.heads.step = fursuits::Step::Idle;
                 s.status.heads.skipped = 0;
                 s.refresh_people();
@@ -741,8 +837,14 @@ impl Link {
     }
 
     pub fn shutdown(&self) {
-        if let Link::Engine(e) = self {
-            e.shutdown();
+        match self {
+            Link::Engine(e) => {
+                // The record's last entries first (a moment at most: one
+                // local append each).
+                e.flush_decisions(Duration::from_secs(2));
+                e.shutdown();
+            }
+            Link::Fake(f) => f.decisions.flush(),
         }
     }
 
@@ -769,6 +871,9 @@ const TICK: Duration = Duration::from_millis(250);
 pub struct Fake {
     bus: Bus,
     state: Arc<Mutex<FakeState>>,
+    /// The stand-in's record of corrections: `decisions-stand-in.jsonl`,
+    /// never the real record.
+    decisions: Recorder,
 }
 
 struct FakeState {
@@ -797,8 +902,12 @@ struct FakeState {
     /// Made-up fursuits on the same shots (their status is `status.heads`).
     fursuits: FakeFursuits,
     /// Which kind each edit changed (`None`: the viewer's labels), newest
-    /// last: Ctrl+Z takes back the newest, whichever kind.
-    edits: Vec<Option<Kind>>,
+    /// last: Ctrl+Z takes back the newest, whichever kind; with the
+    /// record's entry for it (its id and kind), when one was written.
+    edits: Vec<(Option<Kind>, Option<(String, Kind)>)>,
+    /// Review answers recorded, by their heads (an answer taken back
+    /// names its entry).
+    answered: HashMap<Vec<FaceRef>, (String, Kind)>,
     /// The viewer's labels as the stand-in keeps them.
     labels: super::viewer_labels::FakeLabels,
     subjects: Arc<Subjects>,
@@ -1159,6 +1268,7 @@ impl Fake {
             people,
             fursuits: FakeFursuits::new(true),
             edits: Vec::new(),
+            answered: HashMap::new(),
             labels: Default::default(),
             subjects: Arc::new(Subjects::default()),
             sent_people: None,
@@ -1167,7 +1277,8 @@ impl Fake {
             loading: 0,
             card_held: false,
         };
-        let fake = Fake { bus, state: Arc::new(Mutex::new(state)) };
+        let decisions = Recorder::new(decisions::default_path().map(|p| p.with_file_name(decisions::STAND_IN_FILE_NAME)));
+        let fake = Fake { bus, state: Arc::new(Mutex::new(state)), decisions };
         fake.publish(&fake.state.lock());
         fake.publish_people();
         fake
@@ -1183,14 +1294,15 @@ impl Fake {
 
     /// Change a group (an edit the page asked for) in the stand-in of its
     /// kind, then say so; a refusal is printed (the page checks first, as
-    /// the engine does).
+    /// the engine does).  The kind changed, when an undo step was made.
     fn edit(
         &self,
         id: &GroupId,
         people: impl FnOnce(&mut FakePeople, &Subjects) -> Result<(), String>,
         fursuits: impl FnOnce(&mut FakeFursuits, &Subjects) -> Result<(), String>,
-    ) {
+    ) -> Option<Kind> {
         // The counts in the status (named, found) change with the groups.
+        let mut stepped = None;
         self.change(|s| {
             let snap = s.subjects.clone();
             let fursuit = s.fursuits.owns(id);
@@ -1198,12 +1310,58 @@ impl Fake {
             let done = if fursuit { fursuits(&mut s.fursuits, &snap) } else { people(&mut s.people, &snap) };
             match done {
                 Err(e) => eprintln!("[people] refused: {e}"),
-                Ok(()) if fursuit && s.fursuits.undo_depth() > before => s.edits.push(Some(Kind::Fursuit)),
-                Ok(()) if !fursuit => s.edits.push(Some(Kind::Person)),
+                Ok(()) if fursuit && s.fursuits.undo_depth() > before => stepped = Some(Kind::Fursuit),
+                Ok(()) if !fursuit => stepped = Some(Kind::Person),
                 Ok(()) => {}
+            }
+            if let Some(k) = stepped {
+                s.edits.push((Some(k), None));
             }
             s.refresh_people();
         });
+        stepped
+    }
+
+    /// A decision's entry, measured before the edit (nothing while the
+    /// record is off): what `act` makes of the stand-in's groups.
+    fn before(&self, act: impl FnOnce(&FakeState) -> Act, id: &GroupId) -> Option<(Kind, Act)> {
+        if !self.decisions.is_on() {
+            return None;
+        }
+        let s = self.state.lock();
+        let kind = if s.fursuits.owns(id) { Kind::Fursuit } else { Kind::Person };
+        Some((kind, act(&s)))
+    }
+
+    /// Write a decision made (`done`: the edit's undo step was made), and
+    /// tie it to that step so its undo can name it.
+    fn record(&self, done: Option<Kind>, before: Option<(Kind, Act)>, via: Via, answered: Option<&[FaceRef]>) {
+        let (Some(_), Some((kind, act))) = (done, before) else { return };
+        let mut s = self.state.lock();
+        let chosen = s.status.judge.choice;
+        let judge = chosen.model().map(|m| (m.dir_name().to_string(), chosen.yes_cut()));
+        let entry = Entry::new(kind, act, Some(How::of(via, judge)), Some(s.lib(kind)));
+        if let Some(id) = self.decisions.record(entry) {
+            if let Some(last) = s.edits.last_mut() {
+                last.1 = Some((id.clone(), kind));
+            }
+            if let Some(faces) = answered {
+                s.answered.insert(fake_sorted(faces), (id, kind));
+            }
+        }
+    }
+
+    /// An undo's entry, naming the one it takes back.  `step`: it made an
+    /// undo step of its own (an answer taken back), which remembers it.
+    fn record_undo(&self, undone: Option<(String, Kind)>, step: bool) {
+        let Some((id, kind)) = undone else { return };
+        if let Some(id) = self.decisions.record_undo((id, kind)) {
+            if step {
+                if let Some(last) = self.state.lock().edits.last_mut() {
+                    last.1 = Some((id, kind));
+                }
+            }
+        }
     }
 
     fn publish(&self, s: &FakeState) {
@@ -1265,7 +1423,7 @@ impl Fake {
         }
         s.ticking = true;
         let (state, bus) = (self.state.clone(), self.bus.clone());
-        let me = Fake { bus, state };
+        let me = Fake { bus, state, decisions: self.decisions.clone() };
         std::thread::Builder::new().name("search-fake".into()).spawn(move || me.run()).ok();
     }
 
@@ -1969,4 +2127,77 @@ fn made_up_hits(index: &LibraryIndex, words: &str, closeness: f32, indexed: usiz
     hits.sort_by(|a, b| b.score.total_cmp(&a.score).then(a.capture.cmp(&b.capture)));
     hits.truncate(crate::search::query::MAX_HITS.max(if everything { usize::MAX } else { 0 }));
     hits
+}
+
+// ── the stand-in's decision record ─────────────────────────────────────────
+
+impl FakeState {
+    /// A group as the record keeps it (`first`: heads shown first).
+    fn side(&self, id: &GroupId, first: &[FaceRef]) -> decisions::Side {
+        let faces = if self.fursuits.owns(id) { self.fursuits.faces(id) } else { self.people.faces(id) };
+        let group = self.subjects.group(id);
+        let sid = match id {
+            GroupId::Subject(s) => Some(s.0.clone()),
+            GroupId::Cluster(_) => None,
+        };
+        let shown = first.iter().filter(|f| faces.iter().any(|x| x.face == **f)).copied();
+        decisions::Side::new(faces.len(), group.and_then(|g| g.name.clone()), sid, shown.chain(faces.iter().map(|f| f.face))).counted(group)
+    }
+
+    /// The stand-in's library for the record: made-up heads, raw space,
+    /// the cut-offs the engine would use.
+    fn lib(&self, kind: Kind) -> decisions::Lib {
+        match kind {
+            Kind::Fursuit => {
+                // The grouping choice as the status carries it.
+                let g = self.status.heads.cuts();
+                let c = if g.whitened { crate::search::heads::CUTOFFS } else { crate::search::heads::RAW_CUTOFFS };
+                let band = if g.whitened { (crate::search::judging::SURE_YES, crate::search::judging::SURE_NO) } else { (crate::search::judging::RAW_SURE_YES, crate::search::judging::RAW_SURE_NO) };
+                decisions::Lib {
+                    heads: self.status.heads.found,
+                    white: g.whitened,
+                    model: "stand-in".into(),
+                    grouping: Some(g.grouping),
+                    cuts: decisions::Cuts {
+                        group: g.group,
+                        suggest: c.suggest,
+                        strict: c.strict,
+                        sure_yes: Some(band.0),
+                        sure_no: Some(band.1),
+                        merge_suggest: Some(g.merge_suggest),
+                        merge_sure: Some(g.merge_sure),
+                        merge_far: Some(g.merge_far),
+                    },
+                }
+            }
+            _ => {
+                let c = crate::model::subjects::cutoff_for(self.status.faces.model.unwrap_or(models::FACE_MODEL_DEFAULT));
+                decisions::Lib { heads: self.status.faces.found, white: false, model: "stand-in".into(), grouping: None, cuts: decisions::Cuts { group: c.group, suggest: c.suggest, strict: c.strict, ..decisions::Cuts::default() } }
+            }
+        }
+    }
+}
+
+fn fake_sorted(faces: &[FaceRef]) -> Vec<FaceRef> {
+    let mut v = faces.to_vec();
+    v.sort_by_key(|f| (f.key.0, f.thousandths()));
+    v
+}
+
+/// A label edit in the stand-in, as the record keeps it (the boxes'
+/// subjects aren't looked up: the stand-in keeps its labels apart).
+fn fake_label_act(edit: &LabelEdit, subjects: &Subjects) -> (Kind, Act) {
+    use crate::model::subjects::NameTo;
+    let name = |to: &NameTo| match to {
+        NameTo::Subject(id) => subjects.group(&GroupId::Subject(id.clone())).and_then(|g| g.name.clone()),
+        NameTo::New(n) => Some(n.clone()),
+        NameTo::Unnamed => None,
+    };
+    let head = decisions::Head(edit.face());
+    match edit {
+        LabelEdit::Name { kind, to, .. } => (*kind, Act::Name { head: Some(head), name: name(to), group: None, from: None }),
+        LabelEdit::Kind { from, to, name: n, .. } => (*from, Act::KindChange { head, to: *to, name: n.as_ref().and_then(name) }),
+        LabelEdit::Add { kind, name: n, .. } => (*kind, Act::Draw { head, name: n.as_ref().and_then(name) }),
+        LabelEdit::Remove { kind, .. } => (*kind, Act::Remove { head }),
+    }
 }

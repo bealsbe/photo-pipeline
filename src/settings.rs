@@ -119,6 +119,10 @@ pub struct Settings {
     /// *Smallest group to show*: clusters with fewer photos fold under
     /// *Smaller groups* (3, 5 or 10; §10 says 5).
     pub people_min_photos: usize,
+    /// *Keep a record of my corrections* (on by default, the user's
+    /// request): merges, splits, answers and label edits are appended to
+    /// `decisions.jsonl` beside `subjects.json` (`model::decisions`).
+    pub keep_corrections: bool,
 }
 
 /// *Smallest group to show*, the choices and the default.
@@ -181,6 +185,7 @@ impl Default for Settings {
             fursuit_judge: crate::ml::judge::JudgeChoice::Off,
             fursuit_grouping: crate::search::heads::Grouping::Balanced,
             people_min_photos: PEOPLE_MIN_PHOTOS_DEFAULT,
+            keep_corrections: true,
         }
     }
 }
@@ -511,6 +516,17 @@ mod tests {
         assert!(!serde_json::from_str::<Settings>(&off).unwrap().rail_subjects);
         let on = serde_json::to_string(&Settings::default()).unwrap();
         assert!(serde_json::from_str::<Settings>(&on).unwrap().rail_subjects);
+    }
+
+    /// The record of corrections is kept unless turned off; a file from
+    /// before the option keeps it.
+    #[test]
+    fn corrections_are_recorded_by_default() {
+        assert!(Settings::default().keep_corrections);
+        let old: Settings = serde_json::from_str(r#"{"thumb_size": 200}"#).unwrap();
+        assert!(old.keep_corrections);
+        let off = serde_json::to_string(&Settings { keep_corrections: false, ..Settings::default() }).unwrap();
+        assert!(!serde_json::from_str::<Settings>(&off).unwrap().keep_corrections);
     }
 
     #[test]

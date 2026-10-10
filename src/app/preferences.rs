@@ -99,6 +99,11 @@ pub enum Control {
     FindHeadsNow,
     /// *Forget all…* (fursuits).
     ForgetFursuits,
+    /// *Keep a record of my corrections*.
+    KeepCorrections,
+    /// The record: *Export…* and *Delete the record…*.
+    ExportCorrections,
+    DeleteCorrections,
     /// *Grouping*: Tighter, Balanced or Looser.
     Grouping(crate::search::heads::Grouping),
     /// *Close-call judge*: one of the choices.
@@ -154,6 +159,9 @@ impl Control {
             Control::RailSubjects => "pref-rail-subjects",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
+            Control::KeepCorrections => "pref-keep-corrections",
+            Control::ExportCorrections => "pref-export-corrections",
+            Control::DeleteCorrections => "pref-delete-corrections",
             Control::Grouping(crate::search::heads::Grouping::Tighter) => "pref-grouping-tighter",
             Control::Grouping(crate::search::heads::Grouping::Balanced) => "pref-grouping-balanced",
             Control::Grouping(crate::search::heads::Grouping::Looser) => "pref-grouping-looser",
@@ -204,6 +212,9 @@ pub enum Msg {
     Reveal(Control),
     /// Count the sizes again (after the engine cleared or deleted).
     Recount,
+    /// The record of corrections was exported: the folder made and the
+    /// entries copied, or what went wrong.
+    Exported(Result<(PathBuf, usize), String>),
     /// A face model picked in *Change the face model*.
     PickFaceModel(crate::ml::models::ModelId),
     /// Change to it (or cancel: `false`).
@@ -223,6 +234,8 @@ pub enum Ask {
     ForgetFursuits,
     /// Delete a close-call judge's model.
     DeleteJudge(JudgeChoice),
+    /// Delete the record of corrections.
+    DeleteCorrections,
 }
 
 /// The Preferences window and what it has counted.
@@ -247,6 +260,8 @@ pub struct Prefs {
     faces_offer: bool,
     /// *Change the face model* is open, with the model picked.
     face_change: Option<crate::ml::models::ModelId>,
+    /// What the last export of the record did, for its row.
+    exported: Option<String>,
 }
 
 impl Prefs {
@@ -265,6 +280,7 @@ impl Prefs {
             confirm: None,
             faces_offer: false,
             face_change: None,
+            exported: None,
         }
     }
 
@@ -382,7 +398,8 @@ fn recount(app: &mut App) -> Task<Message> {
     p.counting = true;
     let seq = p.survey_seq;
     let library = app.library.clone();
-    Task::perform(on_worker("prefs-count", move || storage::survey(library.as_deref())), move |s| m(Msg::Surveyed(seq, s)))
+    let decisions = app.search.link.decisions().path().map(Path::to_path_buf);
+    Task::perform(on_worker("prefs-count", move || storage::survey(library.as_deref(), decisions.as_deref())), move |s| m(Msg::Surveyed(seq, s)))
 }
 
 /// A folder chosen for the edit copies (Change… on the page).
@@ -465,6 +482,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Reveal(c) if matches!(c, Control::SearchDevice(_)) => reveal_search_section(),
         Msg::Reveal(c) => reveal(c),
         Msg::Recount => recount(app),
+        Msg::Exported(r) => {
+            let text = match r {
+                Ok((dir, n)) => format!("Exported {} with a README of the format to {}.", util::plural(n as u64, "correction"), tilde(&dir)),
+                Err(e) => format!("Couldn't export the record: {e}."),
+            };
+            app.prefs.exported = Some(text.clone());
+            app.show_status(text, 8000)
+        }
         Msg::PickFaceModel(f) => {
             if app.prefs.face_change.is_some() {
                 app.prefs.face_change = Some(f);
@@ -516,7 +541,12 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
         }
         Ask::ForgetFursuits => {
             link.forget_all_fursuits();
-            "Forgot every fursuit head found and every fursuit name given. Your photos are not changed."
+            "Forgot every fursuit head found and every fursuit name given, and the fursuit corrections in your record. Your photos are not changed."
+        }
+        Ask::DeleteCorrections => {
+            link.decisions().delete_all();
+            app.prefs.exported = None;
+            "Deleted the record of your corrections. Your names and groups are not changed."
         }
         Ask::DeleteJudge(c) => {
             // The chosen judge turns off with its files; another one's
@@ -540,7 +570,7 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
         Ask::ForgetPeople => {
             link.forget_all_people();
             app.subjects.crops.clear();
-            "Forgot every face found and every name given. Your photos are not changed."
+            "Forgot every face found and every name given, and the people corrections in your record. Your photos are not changed."
         }
         Ask::Cache(_) => return Task::none(),
     };
@@ -690,6 +720,29 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::KeepCorrections => {
+            let on = !app.settings.keep_corrections;
+            app.settings.keep_corrections = on;
+            app.settings.save_in_background();
+            app.search.link.decisions().set_on(on);
+            if on {
+                Task::none()
+            } else {
+                app.show_status("Corrections are no longer recorded. What was recorded is kept until you delete it.", 5000)
+            }
+        }
+        Control::ExportCorrections => {
+            if !corrections_kept(&app.prefs) {
+                return Task::none();
+            }
+            app.pick_folder(FolderTarget::ExportCorrections)
+        }
+        Control::DeleteCorrections => {
+            if corrections_kept(&app.prefs) {
+                app.prefs.confirm = Some(Ask::DeleteCorrections);
+            }
+            Task::none()
+        }
         Control::Grouping(g) => choose_grouping(app, g),
         Control::Judge(c) => choose_judge(app, c),
         Control::JudgeDownload => {
@@ -754,6 +807,19 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
         }
         Control::Close => close(app),
     }
+}
+
+/// The record of corrections holds something (as last counted).
+fn corrections_kept(p: &Prefs) -> bool {
+    p.survey.as_ref().is_some_and(|s| s.decisions.0 > 0)
+}
+
+/// A folder picked for the record's export: copied there on the record's
+/// own thread (a worker waits for it), never on this one.
+pub fn export_corrections(app: &mut App, into: PathBuf) -> Task<Message> {
+    let recorder = app.search.link.decisions();
+    let work = move || recorder.export(&into).map_err(|e| e.to_string());
+    Task::perform(on_worker("prefs-export", work), |r| m(Msg::Exported(r.unwrap_or_else(|| Err("the export stopped".into())))))
 }
 
 fn clearable(p: &Prefs, c: Cache) -> bool {
@@ -1019,6 +1085,10 @@ fn controls(app: &App) -> Vec<Control> {
     }
     if p.survey.as_ref().is_some_and(|s| s.journal.exists) {
         v.push(Control::OpenUnsaved);
+    }
+    v.push(Control::KeepCorrections);
+    if corrections_kept(p) {
+        v.extend([Control::ExportCorrections, Control::DeleteCorrections]);
     }
     v.push(Control::Close);
     v
@@ -1398,6 +1468,8 @@ fn storage_section(app: &App) -> Element<'_, Message> {
             judge_rows(app),
             models_row(app),
             unsaved_row(app),
+            corrections_switch(app),
+            corrections_row(app),
         ],
     )
 }
@@ -1764,6 +1836,48 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
     ));
     let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people."), rows);
     container(sec).id("pref-section-fursuits").width(Length::Fill).into()
+}
+
+/// Storage ▸ *Keep a record of my corrections*: the switch, for people
+/// and fursuits alike, with what it keeps.  The record is the user's, not
+/// a cache, so it sits with *Marks waiting to be saved*.
+fn corrections_switch(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    setting(
+        "Keep a record of my corrections, to improve matching later",
+        about(
+            "Each merge, split, review answer and label change you make to people and fursuits, with the faces or heads it was about and how it was suggested. Stays on this computer, readable only by you; never written into your photos. Clear and Rebuild keep it. Off, nothing new is added, but taking back a correction already recorded still is.",
+        ),
+        switch(p, Control::KeepCorrections, app.settings.keep_corrections, true),
+    )
+}
+
+/// Storage ▸ *Record of corrections*: its size and where it is, with
+/// *Export…* (a copy without names) and *Delete the record…*.
+fn corrections_row(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let (bytes, entries) = p.survey.as_ref().map(|s| s.decisions).unwrap_or_default();
+    let kept = corrections_kept(p);
+    let (value, sub) = match (p.survey.is_some(), entries) {
+        (false, _) => ("…".to_string(), None),
+        (true, 0) => ("None".to_string(), None),
+        (true, n) => (util::fmt_bytes(bytes), Some(util::plural(n as u64, "correction"))),
+    };
+    let mut words = column![].spacing(3);
+    words = words.push(about(match &p.exported {
+        Some(done) => done.clone(),
+        None if kept => "Export copies it into a folder you choose, with a README describing its format. Names are replaced by codes such as fursuit-12 in the copy.".to_string(),
+        None => "Nothing recorded yet.".to_string(),
+    }));
+    if bytes > crate::model::decisions::LARGE_BYTES {
+        words = words.push(text("That's a lot: export it, then delete it to start a new one.").size(t::T_SMALL).color(t::INK2));
+    }
+    if let Some(path) = app.search.link.decisions().path() {
+        words = words.push(text(util::elide_path(Path::new(&tilde(path)), 40)).size(t::T_SMALL).color(t::INK4));
+    }
+    let export = focusable(p, Control::ExportCorrections, kit::btn("Export…", style::ghost(), kept.then(|| m(Msg::Press(Control::ExportCorrections)))));
+    let delete = focusable(p, Control::DeleteCorrections, kit::btn("Delete the record…", style::secondary(), kept.then(|| m(Msg::Press(Control::DeleteCorrections)))));
+    setting("Record of corrections", words.into(), row![size_column(value, sub), export, delete].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
 /// The judge's choice wants its download: chosen, not in place, not
@@ -2204,7 +2318,7 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             (
                 "Forget all people?",
                 format!(
-                    "This deletes the {} found in your photos{names}, with every answer from the reviews. Your photos are not changed. To find faces again later, ask on the People tab.",
+                    "This deletes the {} found in your photos{names}, with every answer from the reviews, and takes the people corrections out of your record of corrections. Your photos are not changed. To find faces again later, ask on the People tab.",
                     util::plural(f.found as u64, "face")
                 ),
                 "Forget all",
@@ -2221,7 +2335,7 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
             (
                 "Forget all fursuits?",
                 format!(
-                    "This deletes the {} found in your photos{names}, with every answer from the reviews. People are not touched, and your photos are not changed. Heads are found again at the next index unless finding them is turned off.",
+                    "This deletes the {} found in your photos{names}, with every answer from the reviews, and takes the fursuit corrections out of your record of corrections. People are not touched, and your photos are not changed. Heads are found again at the next index unless finding them is turned off.",
                     util::plural(h.found as u64, "fursuit head")
                 ),
                 "Forget all",
@@ -2239,6 +2353,19 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
                 format!("{freed} is freed. It isn't the judge chosen now, so nothing else changes. Choosing it again in Preferences ▸ Fursuits downloads it again, after asking.")
             };
             (DELETE_TITLES.iter().find(|(k, _)| *k == c).map_or("Delete the close-call judge?", |(_, t)| t), body, "Delete", true)
+        }
+        Ask::DeleteCorrections => {
+            let (bytes, n) = app.prefs.survey.as_ref().map(|s| s.decisions).unwrap_or_default();
+            (
+                "Delete the record of your corrections?",
+                format!(
+                    "This deletes the {} recorded ({}): what later work on matching would learn from. Your names, groups and answers are not changed. Export it first if you want a copy.",
+                    util::plural(n as u64, "correction"),
+                    util::fmt_bytes(bytes)
+                ),
+                "Delete the record",
+                true,
+            )
         }
         _ => (
             "Delete the downloaded models?",
