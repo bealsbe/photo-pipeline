@@ -4344,6 +4344,8 @@ mod tests {
         let mut ev = Events::new(&rx);
         let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
         let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        // Written for the tight grouping: three suits, three groups.
+        e.set_fursuit_grouping(heads::Grouping::Tighter);
         e.on_library(lib);
         e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
         wait_for(&e, "the heads", |s| s.heads.found == 3 && s.heads.step == heads::Step::Idle && s.pass.is_none());
