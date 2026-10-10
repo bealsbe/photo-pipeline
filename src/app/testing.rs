@@ -106,6 +106,13 @@
 //! prefs show-search           # open Preferences at its Search section
 //! prefs show-fursuits|show-storage   # ... at Fursuits' last row, Storage's
 //!                             # models row
+//! prefs show-corrections|show-record   # ... at Keep a record of my
+//!                             # corrections, or at its Export / Delete row
+//! prefs keep-corrections|export-corrections|delete-corrections
+//!                             # the record's switch and buttons
+//! prefs export-to /path       # as if Export…'s folder picker returned /path
+//! decisions print|pairs       # print the record of corrections (waits for
+//!                             # its writer), or the labelled pairs in it
 //! search open                 # the search page (Ctrl+F, the rail)
 //! search type red car         # type into the field (replacing it)
 //! search enter|down|up|tab    # keys in the field (Enter searches, or
@@ -360,6 +367,25 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             }
         }
         "prefs" => prefs_step(app, &arg),
+        "decisions" => {
+            let r = app.search.link.decisions();
+            match arg.as_str() {
+                "pairs" => {
+                    let entries = r.entries();
+                    let ps = crate::model::decisions::pairs(&entries);
+                    let same = ps.iter().filter(|p| p.same).count();
+                    eprintln!("[decisions] {} entries, {} in force, {} labelled pairs: {same} same, {} different", entries.len(), crate::model::decisions::effective(&entries).len(), ps.len(), ps.len() - same);
+                }
+                _ => {
+                    let text = r.text();
+                    eprintln!("[decisions] {} at {:?}, {} bytes, {} lines", if r.is_on() { "on" } else { "off" }, r.path(), text.len(), text.lines().count());
+                    for line in text.lines() {
+                        eprintln!("[decisions] {line}");
+                    }
+                }
+            }
+            Task::none()
+        }
         "search" => {
             let (t, wait) = search_step(app, i, &arg);
             if let Some(t) = wait {
@@ -1172,6 +1198,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "face-model" => Some(Control::FaceModel),
         "forget-people" => Some(Control::ForgetPeople),
         "rail-subjects" => Some(Control::RailSubjects),
+        "keep-corrections" => Some(Control::KeepCorrections),
+        "export-corrections" => Some(Control::ExportCorrections),
+        "delete-corrections" => Some(Control::DeleteCorrections),
         "smallest" => Some(Control::SmallestGroup(rest.parse().unwrap_or(5))),
         "close-button" => Some(Control::Close),
         _ => None,
@@ -1216,6 +1245,9 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
         "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
+        "show-corrections" => super::preferences::open_at(app, Control::KeepCorrections),
+        "show-record" => super::preferences::open_at(app, Control::DeleteCorrections),
+        "export-to" => app.update(Message::FolderPicked(super::FolderTarget::ExportCorrections, Some(rest.into()))),
         "cancel" => app.update(Message::Prefs(Msg::ConfirmCancel)),
         "library" => app.update(Message::FolderPicked(super::FolderTarget::Library, Some(rest.into()))),
         "editcopy" => app.update(Message::FolderPicked(super::FolderTarget::EditCopySetting, Some(rest.into()))),

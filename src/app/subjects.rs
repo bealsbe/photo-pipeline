@@ -39,6 +39,7 @@ use super::subjects_person::{self as person, Person};
 use super::subjects_review::{self as review, Review};
 use super::{App, Message, View};
 use crate::ml::Device;
+use crate::model::decisions::{At, Via};
 use crate::ml::models::ModelId;
 use crate::search::PassKind;
 use crate::search::estimate;
@@ -86,6 +87,9 @@ pub enum Page {
 pub struct MergeAsk {
     pub groups: Vec<GroupId>,
     pub keep: GroupId,
+    /// How the merge came to be asked (picked, dragged, a suggested
+    /// pair), for the decision record.
+    pub via: Via,
 }
 
 impl MergeAsk {
@@ -98,7 +102,7 @@ impl MergeAsk {
         }
         let named = |id: &GroupId| all.group(id).is_some_and(|g| g.name.is_some());
         let keep = prefer.filter(|p| named(p)).or_else(|| groups.iter().find(|id| named(id))).or(prefer).unwrap_or(&groups[0]).clone();
-        Some(MergeAsk { groups, keep })
+        Some(MergeAsk { groups, keep, via: Via::Hand(At::Pick) })
     }
 
     /// More than one of the groups has a name: the dialog asks which to
@@ -767,7 +771,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             // The tile dropped onto is kept, unless only the dragged one
             // has a name.
-            s.merge = MergeAsk::new(&s.all, vec![to.clone(), from], Some(&to));
+            s.merge = MergeAsk::new(&s.all, vec![to.clone(), from], Some(&to)).map(|m| MergeAsk { via: Via::Hand(At::Drag), ..m });
             s.focus = Some(to);
             refresh_crops(app)
         }
@@ -798,7 +802,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if app.subjects.person.as_ref().is_some_and(|p| p.group != mg.keep && mg.groups.contains(&p.group)) {
                 person::follow(app, &mg.keep);
             }
-            app.search.link.merge(&mg.keep, &others);
+            app.search.link.merge(&mg.keep, &others, mg.via);
             let review = super::subjects_merge::merged_by_dialog(app);
             let said = app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo));
             Task::batch([review, said])

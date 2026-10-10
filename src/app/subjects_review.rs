@@ -31,6 +31,7 @@ use super::subjects::{self as subj, m as sm};
 use super::viewer_advance::BEAT_MS;
 use super::{App, Message};
 use crate::model::collection::Collection;
+use crate::model::decisions::Via;
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::subject_tile::{self as tile, PhotoBox};
@@ -97,6 +98,21 @@ impl Review {
             left_out_shown: false,
             judge_done: true,
         }
+    }
+
+    /// How an entry (its frames) came to be offered, for the decision
+    /// record: by distance, by the judge, or left out by the judge and
+    /// shown on request; an unnamed group's own heads are a check.
+    pub fn via(&self, faces: &[FaceRef]) -> Via {
+        let first = |set: &HashSet<FaceRef>| faces.iter().any(|f| set.contains(f));
+        let judge = if first(&self.judged_faces) {
+            Some(true)
+        } else if first(&self.left_out_faces) {
+            Some(false)
+        } else {
+            None
+        };
+        Via::Review { judge, check: self.checking }
     }
 
     /// Entries the judge sent join the end of the list (nothing on screen
@@ -346,11 +362,12 @@ fn answer(app: &mut App, yes: bool) -> Task<Message> {
     if before == Some(yes) {
         return Task::none();
     }
+    let via = r.via(&faces);
     // A changed answer takes the old one back first.
     if before.is_some() {
-        app.search.link.answer(&group, &faces, None);
+        app.search.link.answer(&group, &faces, None, via);
     }
-    app.search.link.answer(&group, &faces, Some(yes));
+    app.search.link.answer(&group, &faces, Some(yes), via);
     let Some(r) = app.subjects.review.as_mut() else { return Task::none() };
     r.beat += 1;
     if !advance {
@@ -368,7 +385,8 @@ pub fn take_back(app: &mut App) -> Task<Message> {
         return app.show_status("No answer to take back.", 3000);
     };
     r.beat += 1;
-    app.search.link.answer(&group, &faces, None);
+    let via = r.via(&faces);
+    app.search.link.answer(&group, &faces, None, via);
     let t = app.show_status("Took the last answer back.", 3000);
     Task::batch([t, subj::refresh_crops(app)])
 }

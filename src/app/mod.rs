@@ -131,6 +131,8 @@ pub enum FolderTarget {
     EditCopy,
     /// The edit-copy destination, chosen in Preferences.
     EditCopySetting,
+    /// Where Preferences exports the record of corrections.
+    ExportCorrections,
 }
 
 /// Filter bar state (what the widgets show).
@@ -1887,6 +1889,7 @@ impl App {
                 let s = &self.settings.edit_copy_folder;
                 ("Folder to Copy Photos Into", (!s.is_empty()).then(|| PathBuf::from(s)))
             }
+            FolderTarget::ExportCorrections => ("Folder to Export the Record Into", None),
         };
         let start = start.or_else(dirs::home_dir).unwrap_or_default();
         let dialog = rfd::AsyncFileDialog::new().set_title(title).set_directory(start);
@@ -1914,6 +1917,11 @@ impl App {
             FolderTarget::EditCopySetting => {
                 preferences::edit_copy_folder_picked(self, path);
                 Task::none()
+            }
+            FolderTarget::ExportCorrections => {
+                let export = preferences::export_corrections(self, path);
+                let recount = Task::perform(tokio::time::sleep(std::time::Duration::from_millis(600)), |_| Message::Prefs(preferences::Msg::Recount));
+                Task::batch([export, recount])
             }
         }
     }

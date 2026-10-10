@@ -30,6 +30,7 @@ use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::subjects_person::{Person, Show};
 use super::{App, Message};
+use crate::model::decisions::{At, Via};
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
 use crate::ui::subject_tile as tile;
@@ -208,7 +209,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::SplitPicked => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             let faces = std::mem::take(&mut p.picked);
-            split_off(app, faces)
+            split_off(app, faces, Via::Hand(At::Heads))
         }
         Msg::Propose => {
             if let Some(p) = app.subjects.person.as_mut().filter(|p| p.check.as_ref().is_some_and(|c| c.split.is_some())) {
@@ -235,7 +236,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let Some(pr) = p.proposal.take() else { return Task::none() };
             let Some((a, b)) = p.check.as_ref().and_then(|c| c.split.clone()) else { return Task::none() };
             let leaving = if pr.second_leaves { b } else { a };
-            split_off(app, leaving)
+            split_off(app, leaving, Via::Proposal)
         }
         Msg::DragStart(f) => {
             let Some(p) = app.subjects.person.as_mut().filter(|p| p.show == Show::Faces && p.kind == Kind::Fursuit) else { return Task::none() };
@@ -261,7 +262,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             let Some(HeadDrag { faces, over: Some(to) }) = p.head_drag.take() else { return Task::none() };
             match to {
-                None => split_off(app, faces),
+                None => split_off(app, faces, Via::Hand(At::Heads)),
                 Some(to) => move_heads(app, faces, to),
             }
         }
@@ -277,7 +278,7 @@ pub fn escape(app: &mut App) -> bool {
 
 /// Heads out of the page's group into a new group of their own: the
 /// existing move, one undo step.
-fn split_off(app: &mut App, faces: Vec<FaceRef>) -> Task<Message> {
+fn split_off(app: &mut App, faces: Vec<FaceRef>, via: Via) -> Task<Message> {
     let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
     if faces.is_empty() || p.kind != Kind::Fursuit {
         return Task::none();
@@ -286,7 +287,7 @@ fn split_off(app: &mut App, faces: Vec<FaceRef>) -> Task<Message> {
     p.anchor = None;
     let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(&from, &faces, None);
+    app.search.link.move_faces(&from, &faces, None, via);
     app.show_status_action(format!("Split {} into a new group, to name or merge.", util::plural(n, "head")), "Undo", sm(subj::Msg::Undo))
 }
 
@@ -300,7 +301,7 @@ fn move_heads(app: &mut App, faces: Vec<FaceRef>, to: GroupId) -> Task<Message> 
     p.anchor = None;
     let from = p.group.clone();
     let n = faces.len() as u64;
-    app.search.link.move_faces(&from, &faces, Some(&to));
+    app.search.link.move_faces(&from, &faces, Some(&to), Via::Hand(At::Heads));
     let whom = subj::label(&app.subjects, &to);
     app.show_status_action(format!("Moved {} to {whom}.", util::plural(n, "head")), "Undo", sm(subj::Msg::Undo))
 }

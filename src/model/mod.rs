@@ -4,6 +4,7 @@ pub mod capture_cache;
 pub mod collection;
 pub mod crop;
 pub mod crop_math;
+pub mod decisions;
 pub mod duplicates;
 pub mod filter;
 pub mod hints;

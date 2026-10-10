@@ -274,6 +274,7 @@ impl Search {
     pub fn new(bus: Bus, settings: &Settings) -> Search {
         let link = Link::new(bus, settings.search_device, settings.search_index_exports, settings.find_faces, settings.face_model(), settings.find_heads);
         link.set_judge(settings.fursuit_judge);
+        link.decisions().set_on(settings.keep_corrections);
         let (status, things) = (link.status(), link.things());
         let pass_start = super::search_setup::pass_start(None, &status);
         Search {

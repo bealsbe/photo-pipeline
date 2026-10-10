@@ -3230,3 +3230,158 @@ as different suits; the heads marked bad.  Groups of 5+ photos.
   undone; *Split into a new group* and undo; the largest group's heads
   least alike first; "Check this group" farthest first.  `PP_PROFILE=1`:
   no slow update but the driver's.
+
+## As built — the record of corrections
+
+The user (2026-10-09): "Is it possible for you to keep track of all the
+merges to use in future research to improve down the line?"  An earlier
+label set was lost because it held only ids into a temporary table, so
+the record is self-contained: every entry names its heads by content key
+and box, never by group number.
+
+### Where and how it is written
+
+- **User data, not cache.**  `~/.local/share/photo-pipeline/decisions.jsonl`
+  (`model::decisions::default_path`), beside `subjects.json`; the folder
+  0700, the file 0600.  *Clear* and *Rebuild* never touch it (held by
+  `every_decision_is_recorded_and_the_record_survives_clear_and_rebuild`,
+  byte for byte).  *Forget all* of a kind rewrites it without that kind's
+  entries (a kind change into the kind, and the undo of an entry taken
+  out, go too); nothing left, the file goes.  *Delete the record…* removes
+  it.  Never in the repository, photos or sidecars.
+- **Append only, off the UI thread.**  `Recorder` owns a thread
+  (`decisions`): each entry is one `write` to the file opened for
+  appending, then `fdatasync`, in the order sent.  A partial last line (a
+  crash mid-write) is closed with a newline before the next entry, and
+  skipped by readers.  A failed append is kept and tried again with the
+  next.  At exit the app waits (two seconds at most) for the engine's
+  queued edits to be recorded (`Engine::flush_decisions`).
+- **Built where the decision is applied.**  The engine builds each entry
+  on its thread, measured *before* the edit (a merge's groups as the user
+  saw them), and writes it only when the edit succeeded; the undo step it
+  made remembers the entry's id (`People::mark_recorded`), so Ctrl+Z
+  appends an `undo` entry naming it.  A review answer taken back (Z in
+  the review, or a changed answer) is an `undo` of the answer's entry.
+  The page tells the engine how the decision was offered (`Via`: by hand
+  and where, a pair with its distance and verdict, a review entry offered
+  by distance or the judge, the split proposal); the engine adds what it
+  measures.
+- **The stand-in** (`PP_SEARCH_FAKE`) builds the same entries from its
+  made-up groups into `decisions-stand-in.jsonl`, never the real file, so
+  a stand-in run under a real home can't mix made-up heads into the
+  record.
+- **Off** (*Keep a record of my corrections*, Preferences ▸ Fursuits, on
+  by default): nothing is appended, not even an undo of an entry recorded
+  while on; what is kept stays.
+
+### Schema, version 1
+
+One JSON object a line.  Readers skip lines that don't parse and entries
+whose `v` is newer.
+
+| Field | Meaning |
+|---|---|
+| `v` | 1. |
+| `id` | 16 hex digits, unique. |
+| `t` | UTC, RFC 3339, milliseconds. |
+| `app` | The app's version. |
+| `kind` | `person` or `fursuit` (for `kind_change`, the kind left). |
+| `act` | Below. |
+| `how` | `{by, at, d, sure, judge, judge_cut, p, yes, no, unseen, offered, pair}`, the fields that apply; absent on `undo`. |
+| `lib` | `{heads, white, model, cuts: {group, suggest, strict, sure_yes, sure_no}}`: heads of the kind, whitened or raw, the vectors' model folder, and the cut-offs in force when it was decided. |
+
+A head is `["<32 hex key>", x, y, w, h]`, the box in thousandths (the
+identity `subjects.json` uses).  A group (`Side`) is `{n, name, sid, d,
+heads}`: its size, name and subject id when it has them, its
+average-linkage distance to the entry's first group (the step's space;
+`Worker::record_side`, `linkage`), and its clearest heads, at most 16
+(`SIDE_HEADS`; heads shown on the page first for "not the same").
+
+| `act` | Fields | Pairs it labels |
+|---|---|---|
+| `merge` | `groups` (the kept one first) | across groups: same |
+| `not_same` | `groups` (two) | across: different |
+| `split` | `from`, `heads`, `moved` | `heads` × rest of `from`: different |
+| `move` | `from`, `to`, `heads`, `moved` | × `to`: same; × rest of `from`: different |
+| `answer` | `yes`, `group`, `heads` | × `group`: same, or different for No |
+| `name` | `head` or `group`; `name` (absent: Unnamed); `group` joined; `from` left | head × group: same; Unnamed: head × `from`: different |
+| `kind_change` | `head`, `to`, `name` | none |
+| `draw` | `head`, `name` | none |
+| `remove` | `head` | none |
+| `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
+
+`how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,
+`faces`, `viewer`, `merge-review`, `similar`), `distance` (a pair: its
+average linkage `d` and `sure`; a review answer: the nearest confirmed
+member's distance `d` and that head `pair`), `judge` (`judge`, the
+model's folder, and `judge_cut`; a pair: the head pairs' `yes`, `no`,
+`unseen`; a review answer: `p`, the mean P(yes) of both orders from the
+verdicts kept, and `offered: false` when the judge had left it out and
+the user asked to see it), `proposal` (the split around two heads of one
+photo), `check` (an unnamed group's own heads).
+
+**Why 16 heads a side is enough.**  A merge of two full sides gives
+16 × 16 = 256 labelled same pairs, and "not the same" as many different
+ones, from the clearest views (the ones the tiles and the review show);
+the full sizes say how much was merged.  The moved, split and answered
+heads are kept whole (up to 200), since they are what the decision is
+about.  `decisions::pairs` rebuilds the labelled pairs from a record
+(`labelled_pairs_are_rebuilt_from_a_sample_record`), later decisions
+winning, undone ones left out; with the cache's vectors (keyed the same
+way) they are a training or tuning set.
+
+### Size
+
+- Measured (`entries_stay_compact`): a merge of two 16-head sides with
+  names, ids, the judge's verdict and the library 2 194 bytes; a review
+  answer with the judge 1 509; a label edit 345; an undo about 150.  The
+  stand-in run's real entries: 910 to 1 255 for merges and splits, 960
+  for an answer, 343 to 360 for label edits.
+- A busy session of 3 000 decisions is about 3 to 5 MB.  Preferences says
+  "That's a lot" past 64 MB (`LARGE_BYTES`, about 40 000 merges).  Nothing
+  rotates: were it ever needed, the plan is to start `decisions-2.jsonl`
+  beside it at that size (never dropping entries; *Export* and
+  `decisions::read` taking every part in order).
+
+### Export
+
+Preferences ▸ Fursuits ▸ *Record of corrections* ▸ *Export…* picks a
+folder; the record's thread makes `photo-pipeline-corrections-<date>`
+there (numbered if taken, never over anything), copies the record (0600)
+and writes `README.md` (`decisions::README`: the schema above).  It reads
+nothing else and writes nowhere else.  The script driver: `prefs
+export-to <dir>`, `decisions print|pairs`.
+
+### Checked
+
+- Tests: every act round-trips; a head is five values; a partial last
+  line and a newer version are skipped and the next append stands alone;
+  undo and undo of undo; labelled pairs rebuilt from a sample record;
+  *Forget all* of a kind filters it (and a kind change into it, and the
+  undo of a removed entry), nothing left removes the file; the switch off
+  writes nothing; export never overwrites; sizes; the setting's default
+  and an old settings file; and through the engine (whitened, a fake
+  helper): a merge offered by distance with its measured linkage, its
+  undo, "not the same" by the judge's majority, a split from the
+  proposal, a review answer with its nearest member, its taking back,
+  a name and a removal in the viewer, every entry with the library and
+  the cut-offs in force, 0600, Clear and Rebuild byte for byte, off, and
+  *Forget all fursuits*.
+- Headless, stand-in (a made-up library of 90 grey JPGs, a throwaway
+  home): "not the same" in the pairs review, a merge by dragging a tile,
+  *Split into a new group* on *Heads*, a Yes in the review and Ctrl+Z, a
+  name and *Not a fursuit head* in the viewer: seven entries, `decisions
+  pairs` 95 labelled pairs (30 same, 65 different); Preferences' rows, the
+  export, the delete and *Forget all fursuits* confirmations, the switch
+  off.
+
+### Open
+
+- Hiding and *Forget this person* aren't recorded (not grouping
+  decisions).  Say if they should be.
+- Group-level "Not fursuit heads" (another branch) should append one
+  `remove` entry per head, or one entry listing them; the hook is the
+  engine's handler, as for `LabelEdit::Remove`.
+- The fursuit grouping strictness (another branch) should be added to
+  `lib` (`grouping`, an optional field: the schema stays version 1) in
+  `Worker::record_lib`, the one place the cut-offs are read.
