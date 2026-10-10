@@ -43,14 +43,22 @@ use crate::ml::models::ModelId;
 use crate::search::PassKind;
 use crate::search::estimate;
 use crate::ui::icons::{self, Glyph};
+use crate::ui::in_view::InView;
 use crate::ui::paint;
 use crate::ui::subject_tile::{self as tile, Shape, Tile};
 use crate::ui::theme as t;
 use crate::util;
 
 pub const HEADER_H: f32 = 60.0;
-/// The face crops kept decoded, by bytes.
-const CROP_CACHE_BYTES: usize = 48 * 1024 * 1024;
+/// The face crops kept decoded, by bytes, at the least: the cap grows to
+/// twice what the page wants now (the tiles on screen and a screen either
+/// side, at this screen's scale), so it always holds what is shown and
+/// some screens more.
+const CROP_CACHE_MIN: usize = 48 * 1024 * 1024;
+/// The cap's room over what is wanted now.
+const CROP_CACHE_ROOM: usize = 2;
+/// The tab's groups' scrollable (scripts scroll it).
+pub const GROUPS_SCROLL: &str = "subjects-groups";
 /// Crops drawn on one worker at a time, in a batch.
 const CROP_BATCH: usize = 48;
 
@@ -147,7 +155,7 @@ impl Subjects {
             person: None,
             review: None,
             judge: None,
-            crops: Crops::new(CROP_CACHE_BYTES),
+            crops: Crops::new(CROP_CACHE_MIN),
             seq: 0,
         }
     }
@@ -239,13 +247,38 @@ impl Arranged<'_> {
 /// whole photo (else the face, framed).
 pub type CropKey = (FaceRef, u32, bool);
 
+/// A run of tiles drawn as they come into view: a section of the tab, or
+/// a subject's faces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
+    Named,
+    ToName,
+    Small,
+    Hidden,
+    Faces,
+}
+
+/// Who holds crops in the cache: the page's own (`refresh_crops`), or
+/// another page's few (the search field's names).
+pub type Holder = &'static str;
+const PAGE: Holder = "page";
+const ELSEWHERE: Holder = "elsewhere";
+
 /// Decoded crops, the least recently wanted dropped first past the cap.
+/// What a page wants now is held: never dropped, whatever the cap.
 pub struct Crops {
     map: HashMap<CropKey, (Option<Handle>, (u32, u32), usize, u64)>,
     bytes: usize,
+    /// The cap now, and the least it can be.
     cap: usize,
+    floor: usize,
     pending: HashSet<CropKey>,
     tick: u64,
+    /// The crops wanted now, by who wants them: kept past the cap.
+    held: HashMap<Holder, HashSet<CropKey>>,
+    /// The tiles of each section on screen or a screen away, as the
+    /// page last drew them.
+    seen: HashMap<Section, HashSet<CropKey>>,
 }
 
 /// The sizes crops are drawn at, in pixels: a wanted size takes the next
@@ -259,7 +292,46 @@ pub fn bucket(px: f32) -> u32 {
 
 impl Crops {
     pub fn new(cap: usize) -> Crops {
-        Crops { map: HashMap::new(), bytes: 0, cap, pending: HashSet::new(), tick: 0 }
+        Crops { map: HashMap::new(), bytes: 0, cap, floor: cap, pending: HashSet::new(), tick: 0, held: HashMap::new(), seen: HashMap::new() }
+    }
+
+    /// What a crop of this key takes decoded, at most.
+    fn weight(k: &CropKey) -> usize {
+        (k.1 as usize).pow(2) * 4
+    }
+
+    /// `who` wants these crops now (instead of what it wanted before):
+    /// they are kept past the cap, and the cap grows to hold them with
+    /// room to spare.
+    pub fn hold(&mut self, who: Holder, keys: HashSet<CropKey>) {
+        self.held.insert(who, keys);
+        let wanted: usize = self.held.values().flatten().map(Crops::weight).sum();
+        self.cap = self.floor.max(wanted * CROP_CACHE_ROOM);
+        self.evict();
+    }
+
+    fn is_held(&self, k: &CropKey) -> bool {
+        self.held.values().any(|h| h.contains(k))
+    }
+
+    /// The tiles of `section` the page draws near the screen now.  True
+    /// when that changed.
+    pub fn saw(&mut self, section: Section, keys: Vec<CropKey>) -> bool {
+        let keys: HashSet<CropKey> = keys.into_iter().collect();
+        if self.seen.get(&section) == Some(&keys) {
+            return false;
+        }
+        self.seen.insert(section, keys);
+        true
+    }
+
+    /// Is this tile of `section` on screen, or a screen away?
+    pub fn is_seen(&self, section: Section, k: &CropKey) -> bool {
+        self.seen.get(&section).is_some_and(|s| s.contains(k))
+    }
+
+    pub fn cap(&self) -> usize {
+        self.cap
     }
 
     pub fn key(face: &FaceRef, px: u32, framing: Framing) -> CropKey {
@@ -311,8 +383,21 @@ impl Crops {
             }
             self.bytes += bytes;
         }
-        while self.bytes > self.cap {
-            let Some((&k, _)) = self.map.iter().min_by_key(|(_, e)| e.3) else { break };
+        self.evict();
+    }
+
+    /// Past the cap, drop the least recently wanted of the crops no one
+    /// holds: never one shown or about to be.
+    fn evict(&mut self) {
+        if self.bytes <= self.cap {
+            return;
+        }
+        let mut old: Vec<(u64, CropKey)> = self.map.iter().filter(|(k, _)| !self.is_held(k)).map(|(k, e)| (e.3, *k)).collect();
+        old.sort_unstable_by_key(|e| e.0);
+        for (_, k) in old {
+            if self.bytes <= self.cap {
+                break;
+            }
             if let Some(e) = self.map.remove(&k) {
                 self.bytes -= e.2;
             }
@@ -335,9 +420,18 @@ impl Crops {
     }
 }
 
-/// Draw the crops `wanted` that aren't decoded yet, on workers.
+/// Draw the crops `wanted` that aren't decoded yet, on workers, for
+/// another page (the search field's names): held while it wants them.
 pub fn fetch(app: &mut App, wanted: Vec<(Face, u32, Framing)>) -> Task<Message> {
-    let missing = app.subjects.crops.missing(wanted);
+    fetch_held(app, ELSEWHERE, wanted)
+}
+
+/// Draw the crops `who` wants now that aren't decoded yet, on workers;
+/// they are held until it wants others.
+fn fetch_held(app: &mut App, who: Holder, wanted: Vec<(Face, u32, Framing)>) -> Task<Message> {
+    let crops = &mut app.subjects.crops;
+    crops.hold(who, wanted.iter().map(|(f, px, fr)| Crops::key(&f.face, *px, *fr)).collect());
+    let missing = crops.missing(wanted);
     if missing.is_empty() {
         return Task::none();
     }
@@ -366,19 +460,24 @@ pub fn px(app: &App, logical: f32) -> u32 {
     bucket(logical * app.scale_factor.max(1.0))
 }
 
-/// The crops the page shows now.
+/// The crops the page shows now: on the tab, the tiles on screen or a
+/// screen away (as the page last drew them), never every group's.
 fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let s = &app.subjects;
     match s.page() {
         Page::Overview => {
             let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
             let (big, small) = (px(app, tile::TILE_CROP), px(app, tile::SMALL_CROP));
-            let mut v: Vec<(Face, u32, Framing)> = a.named.iter().chain(&a.to_name).map(|g| (g.cover.clone(), big, Framing::Face)).collect();
+            let near = |section: Section, groups: &[&Group], px: u32| -> Vec<(Face, u32, Framing)> {
+                groups.iter().filter(|g| s.crops.is_seen(section, &Crops::key(&g.cover.face, px, Framing::Face))).map(|g| (g.cover.clone(), px, Framing::Face)).collect()
+            };
+            let mut v = near(Section::Named, &a.named, big);
+            v.extend(near(Section::ToName, &a.to_name, big));
             if s.small_open {
-                v.extend(a.small.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
+                v.extend(near(Section::Small, &a.small, small));
             }
             if s.hidden_open {
-                v.extend(a.hidden.iter().map(|g| (g.cover.clone(), small, Framing::Face)));
+                v.extend(near(Section::Hidden, &a.hidden, small));
             }
             if let Some(mg) = &s.merge {
                 let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
@@ -391,10 +490,10 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     }
 }
 
-/// Fetch what the page shows now and isn't decoded.
+/// Fetch what the page shows now and isn't decoded; hold it all.
 pub fn refresh_crops(app: &mut App) -> Task<Message> {
     let w = wanted(app);
-    fetch(app, w)
+    fetch_held(app, PAGE, w)
 }
 
 // ── messages ────────────────────────────────────────────────────────────────
@@ -423,6 +522,9 @@ pub enum Msg {
     MergeCancel,
     HidePicked,
     Cropped(Vec<(CropKey, Option<(u32, u32, Vec<u8>)>)>),
+    /// The tiles of a section near the screen changed (a scroll, a
+    /// resize, the list changing).
+    InView(Section, Vec<CropKey>),
     /// The catch-up: find faces in the library indexed before.
     FindFaces,
     OpenPrefs,
@@ -685,6 +787,14 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Cropped(batch) => {
             app.subjects.crops.put(batch);
+            // Anything shown that went missing meanwhile is asked for again
+            // (once: what failed stays a placeholder).
+            if app.view == View::Subjects { refresh_crops(app) } else { Task::none() }
+        }
+        Msg::InView(section, keys) => {
+            if app.subjects.crops.saw(section, keys) {
+                return refresh_crops(app);
+            }
             Task::none()
         }
         Msg::FindFaces => find_faces(app),
@@ -1248,12 +1358,18 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     tip(el, hint, true)
 }
 
-fn tiles<'a>(app: &'a App, groups: &[&'a Group], small: bool) -> Element<'a, Message> {
+/// A section's tiles; their crops are drawn as they come near the screen.
+fn tiles<'a>(app: &'a App, groups: &[&'a Group], section: Section) -> Element<'a, Message> {
+    let small = matches!(section, Section::Small | Section::Hidden);
+    let size = px(app, if small { tile::SMALL_CROP } else { tile::TILE_CROP });
     let mut r = row![].spacing(8);
+    let mut keys = Vec::with_capacity(groups.len());
     for g in groups {
+        keys.push(Crops::key(&g.cover.face, size, Framing::Face));
         r = r.push(group_tile(app, g, small));
     }
-    container(r.wrap().vertical_spacing(8)).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 10.0 }).into()
+    let watched = InView::new(r.wrap().vertical_spacing(8), keys, move |keys| m(Msg::InView(section, keys)));
+    container(watched).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 10.0 }).into()
 }
 
 /// A disclosure: › Smaller groups 412.
@@ -1289,12 +1405,12 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     }
     if !a.named.is_empty() {
         col = col.push(heading("Named", util::thousands(a.named.len() as u64)));
-        col = col.push(tiles(app, &a.named, false));
+        col = col.push(tiles(app, &a.named, Section::Named));
     }
     if !a.to_name.is_empty() {
         let note = format!("{}, largest first", util::thousands(a.to_name.len() as u64));
         col = col.push(heading("Groups to name", note));
-        col = col.push(tiles(app, &a.to_name, false));
+        col = col.push(tiles(app, &a.to_name, Section::ToName));
     }
     let mut folds = row![].spacing(6);
     let mut any = false;
@@ -1314,16 +1430,16 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(container(folds).padding(Padding { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }));
     }
     if s.small_open && !a.small.is_empty() {
-        col = col.push(tiles(app, &a.small, true));
+        col = col.push(tiles(app, &a.small, Section::Small));
     }
     if s.hidden_open && !a.hidden.is_empty() {
         col = col.push(container(text("Hidden: kept off this tab and out of the search field's suggestions. Their photos still come up when searched for by name.").size(t::T_SMALL).color(t::PHOTO_INK2)).padding(Padding { left: 16.0, right: 16.0, top: 8.0, bottom: 8.0 }));
-        col = col.push(tiles(app, &a.hidden, true));
+        col = col.push(tiles(app, &a.hidden, Section::Hidden));
     }
     if a.named.is_empty() && a.to_name.is_empty() && !a.small.is_empty() && !s.small_open {
         col = col.push(container(text("Every group found so far is small. Open Smaller groups to see them.").size(t::T_SMALL).color(t::PHOTO_INK3)).padding(Padding::from([8.0, 16.0])));
     }
-    container(scrollable(col).style(style::scroll).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
+    container(scrollable(col).id(GROUPS_SCROLL).style(style::scroll).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
 /// Under the header while groups are picked: how many, and what to do.
@@ -1503,7 +1619,7 @@ pub fn debug_state(app: &App) -> String {
     let names = |v: &[&Group]| v.iter().map(|g| format!("{}:{}{}", people::short(&g.id), g.name.clone().unwrap_or_else(|| "-".into()), g.photos)).collect::<Vec<_>>();
     let kinds: HashSet<Kind> = a.named.iter().chain(&a.to_name).chain(&a.small).chain(&a.hidden).map(|g| g.kind).collect();
     format!(
-        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB) {} {}",
+        "view={:?} page={:?} tab={:?} state={:?} named={:?} to_name={:?} small={} hidden={:?} kinds_shown={kinds:?} picked={:?} select={} focus={:?} small_open={} hidden_open={} merge={:?} forget={:?} faces=[on={} model={:?} installed={} looked={} unrecognised={} found={} named={} pass={:?}] crops={} ({} KB, cap {} KB) {} {}",
         app.view,
         s.page(),
         s.tab,
@@ -1533,6 +1649,7 @@ pub fn debug_state(app: &App) -> String {
         app.search.status.pass,
         s.crops.len(),
         s.crops.bytes() / 1024,
+        s.crops.cap() / 1024,
         person::debug_state(app),
         review::debug_state(app),
     )
@@ -1662,5 +1779,103 @@ mod tests {
         assert_eq!(bucket(100.0), 128);
         assert_eq!(bucket(10.0), 64);
         assert_eq!(bucket(5000.0), 640);
+    }
+
+    const ONE: usize = 64 * 64 * 4;
+
+    fn pixels() -> Option<(u32, u32, Vec<u8>)> {
+        Some((64, 64, vec![0u8; ONE]))
+    }
+
+    #[test]
+    fn crops_held_are_never_dropped_whatever_arrives() {
+        // Room for three; the page holds two (on screen), so the cap is
+        // twice them: four.
+        let mut c = Crops::new(3 * ONE);
+        let all: Vec<Face> = (0..8).map(face).collect();
+        let key = |i: usize| Crops::key(&all[i].face, 64, Framing::Face);
+        c.hold(PAGE, [key(0), key(1)].into());
+        assert_eq!(c.cap(), 4 * ONE);
+        // Asked for in one go; the held ones land first (the oldest), the
+        // screens around after them, in batches.
+        let missing = c.missing(all.iter().map(|f| (f.clone(), 64, Framing::Face)));
+        assert_eq!(missing.len(), 8);
+        c.put(missing[..2].iter().map(|(k, _)| (*k, pixels())).collect());
+        c.put(missing[2..5].iter().map(|(k, _)| (*k, pixels())).collect());
+        c.put(missing[5..].iter().map(|(k, _)| (*k, pixels())).collect());
+        assert!(c.bytes() <= c.cap(), "{} over {}", c.bytes(), c.cap());
+        for i in [0, 1] {
+            assert!(c.get(&all[i].face, 64, Framing::Face).is_some(), "held crop {i} was dropped");
+        }
+        // The rest go least recently wanted first.
+        assert!(c.get(&all[7].face, 64, Framing::Face).is_some());
+        assert!(c.get(&all[2].face, 64, Framing::Face).is_none());
+        // Held, even a batch over the cap keeps every one of them.
+        let mut c = Crops::new(ONE);
+        let keys: HashSet<CropKey> = (0..6).map(key).collect();
+        c.hold(PAGE, keys.clone());
+        let missing = c.missing(all[..6].iter().map(|f| (f.clone(), 64, Framing::Face)));
+        c.put(missing.iter().map(|(k, _)| (*k, pixels())).collect());
+        assert_eq!(c.len(), 6);
+        // Another page's few are held beside the page's.
+        c.hold(ELSEWHERE, [key(7)].into());
+        let m = c.missing([(all[7].clone(), 64, Framing::Face)]);
+        c.put(vec![(m[0].0, pixels())]);
+        assert_eq!(c.len(), 7);
+    }
+
+    #[test]
+    fn crops_dropped_are_asked_for_again_once_failures_never() {
+        let mut c = Crops::new(2 * ONE);
+        let all: Vec<Face> = (0..4).map(face).collect();
+        let want = |i: usize| (all[i].clone(), 64, Framing::Face);
+        let m = c.missing((0..4).map(want));
+        c.put(m.iter().map(|(k, _)| (*k, pixels())).collect());
+        assert!(c.get(&all[0].face, 64, Framing::Face).is_none(), "dropped past the cap");
+        // Scrolled back to it: asked for again, once.
+        let again = c.missing([want(0)]);
+        assert_eq!(again.len(), 1);
+        assert!(c.missing([want(0)]).is_empty(), "on its way: not asked twice");
+        // A photo that's gone lands as nothing: its placeholder stays, and
+        // it is not asked for again, however often the page refreshes.
+        c.put(vec![(again[0].0, None)]);
+        for _ in 0..3 {
+            assert!(c.missing([want(0)]).is_empty());
+        }
+        assert!(c.get(&all[0].face, 64, Framing::Face).is_none());
+    }
+
+    #[test]
+    fn crops_cap_grows_with_the_screen_and_its_scale() {
+        let floor = 48 * 1024 * 1024;
+        let all: Vec<Face> = (0..200).map(face).collect();
+        let held = |px: u32, n: usize| -> HashSet<CropKey> { all[..n].iter().map(|f| Crops::key(&f.face, px, Framing::Face)).collect() };
+        let mut c = Crops::new(floor);
+        // A few tiles at 1x: the floor.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP), 20));
+        assert_eq!(c.cap(), floor);
+        // Three screens of tiles at 2x (256 px crops, 256 KB each):
+        // twice them.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP * 2.0), 200));
+        assert_eq!(c.cap(), 2 * 200 * 256 * 256 * 4);
+        // At 3x and more, the crops are larger: so is the cap.
+        c.hold(PAGE, held(bucket(tile::TILE_CROP * 3.0), 200));
+        assert_eq!(c.cap(), 2 * 200 * 384 * 384 * 4);
+        // Back to a few: the cap falls to the floor again.
+        c.hold(PAGE, HashSet::new());
+        assert_eq!(c.cap(), floor);
+    }
+
+    #[test]
+    fn crops_seen_changes_only_when_the_tiles_near_the_screen_do() {
+        let mut c = Crops::new(ONE);
+        let k = |n: u8| Crops::key(&face(n).face, 64, Framing::Face);
+        assert!(!c.is_seen(Section::ToName, &k(1)));
+        assert!(c.saw(Section::ToName, vec![k(1), k(2)]));
+        assert!(!c.saw(Section::ToName, vec![k(2), k(1)]), "the same tiles: nothing to do");
+        assert!(c.is_seen(Section::ToName, &k(1)));
+        assert!(!c.is_seen(Section::Named, &k(1)), "per section");
+        assert!(c.saw(Section::ToName, vec![k(3)]));
+        assert!(!c.is_seen(Section::ToName, &k(1)));
     }
 }

@@ -137,6 +137,8 @@
 //!                             # faces-running [n]
 //! search fake fursuits        # the stand-in's fursuits: fursuits (two
 //!                             # named), fursuits-first (none named),
+//!                             # fursuits-many [n] (n more made-up groups,
+//!                             # 800 by default: a tab of many tiles),
 //!                             # heads-catchup (indexed before heads),
 //!                             # heads-off, heads-running [n],
 //!                             # heads-asking [photos] [first|export|resume],
@@ -164,6 +166,7 @@
 //! subjects click 2 [ctrl]     # the 3rd group tile in the tab's order
 //!                             # (opens it; ctrl picks it)
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
+//! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
 //! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
@@ -1361,6 +1364,7 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
             }
             Task::none()
         }
+        "scroll" => iced::widget::operation::scroll_to(subjects::GROUPS_SCROLL, iced::widget::scrollable::AbsoluteOffset { x: None, y: Some(n as f32) }),
         "dump" => {
             eprintln!("[subjects] {} {}", subjects::debug_state(app), super::subjects_fursuits::debug_state(app));
             Task::none()

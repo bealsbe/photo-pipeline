@@ -240,6 +240,10 @@ impl Pane {
                 if settle {
                     self.thumbs.clear_queue(workers);
                 }
+                // What is on screen and near it is kept, so the thumbnails
+                // arriving for the screens around never push it out.
+                let paths: Vec<_> = visible.iter().chain(&nearby).filter_map(|id| r.coll.get(*id)).map(|rec| rec.path.clone()).collect();
+                self.thumbs.hold(paths, settle);
                 for (ids, prio) in [(visible, PRIORITY_VISIBLE), (nearby, PRIORITY_PREFETCH)] {
                     for id in ids {
                         if let Some(rec) = r.coll.get(id) {
