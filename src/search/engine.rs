@@ -2861,10 +2861,12 @@ impl Worker {
                 // the card starts, the processor asks).  A pass that
                 // started just above has the slot, and the step waits for
                 // that pass's end in turn.
+                // A rebuild forgot the heads with the rest, so its end is
+                // a first index again.
                 match kind {
-                    PassKind::FirstIndex => self.offer_head_scan(HeadWhy::FirstIndex, false),
+                    PassKind::FirstIndex | PassKind::Rebuild => self.offer_head_scan(HeadWhy::FirstIndex, false),
                     PassKind::NewExports => self.offer_head_scan(HeadWhy::NewExports, false),
-                    PassKind::Rebuild | PassKind::Faces => {}
+                    PassKind::Faces => {}
                 }
             }
             // Boxes the user drew that lost their vectors (a rebuild, a
@@ -4750,6 +4752,44 @@ mod tests {
         assert!(!matches!(e2.status().heads.step, heads::Step::Asking(_)));
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&d2);
+    }
+
+    /// A rebuild forgets the heads with the index, so its end looks for
+    /// them again as a first index does: on the card the scan follows
+    /// unasked; on the processor the fursuit photos are put to the user.
+    #[test]
+    fn a_rebuild_looks_for_fursuit_heads_again() {
+        let files = [
+            ("2025/Mar-2025/12-Mar-2025", "0001-fursuit-90.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0002-fursuit-80.JPG"),
+            ("2025/Mar-2025/12-Mar-2025", "0003-dog-60.JPG"),
+            ("2025/Mar-2025/13-Mar-2025", "0004-fursuit-70.JPG"),
+        ];
+        for (device, name) in [(Device::Gpu, "rebuild-heads-gpu"), (Device::Cpu, "rebuild-heads-cpu")] {
+            let axes: EmbedderFactory = Box::new(|_| Ok(Arc::new(Axes) as Arc<dyn Embedder>));
+            let (bus, _rx) = crate::bus::channel();
+            let (lib, d) = library_of(name, &files);
+            let config = Config { factory: axes, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+            let e = Engine::with_config(bus, device, true, false, ModelId::AuraFace, true, config);
+            e.on_library(lib);
+            wait_for(&e, "the library", |s| s.library_shots == 4);
+            e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+            wait_for(&e, "the first index", |s| s.indexed_shots == 4 && s.pass.is_none());
+            if device == Device::Cpu {
+                wait_for(&e, "the question", |s| matches!(s.heads.step, heads::Step::Asking(_)));
+                e.answer_heads(true);
+            }
+            wait_for(&e, "the first scan", |s| s.heads.scanned == 3 && s.heads.step == heads::Step::Idle);
+            e.rebuild_index();
+            wait_for(&e, "the rebuild", |s| s.indexed_shots == 4 && s.pass.is_none());
+            if device == Device::Gpu {
+                wait_for(&e, "the scan after the rebuild", |s| s.heads.scanned == 3 && s.heads.found == 3 && s.heads.step == heads::Step::Idle);
+            } else {
+                wait_for(&e, "the question after the rebuild", |s| matches!(s.heads.step, heads::Step::Asking(_)));
+                assert_eq!(e.status().heads.step, heads::Step::Asking(heads::Offer { photos: 3, why: HeadWhy::FirstIndex }));
+            }
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     /// A name shared by a person and a fursuit (the user, 2026-10-03: "the
