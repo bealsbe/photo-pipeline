@@ -1640,7 +1640,7 @@ fn people_section(app: &App) -> Element<'_, Message> {
     let f = &app.search.status.faces;
     let on = s.find_faces;
     let mut find = column![about(format!(
-        "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight.",
+        "Looks for faces while indexing. Groups are never named for you, and groups of fewer than {} photos stay out of sight. A burst counts as one photo.",
         s.people_min_photos()
     ))]
     .spacing(t::S2);

@@ -572,7 +572,7 @@ impl Engine {
     /// whose members are close on average, nearest first
     /// (`BgEvent::MergeSuggestions`), in the step's own space and
     /// cut-offs (raw or whitened).  Groups of fewer than `min_photos`
-    /// photos are left out unless named; hidden ones always; pairs the
+    /// photos (a burst counting as one) are left out unless named; hidden ones always; pairs the
     /// user said are not the same never come back.  `focus`: only that
     /// group's pairs (its page's *Similar groups*).  With `judge` and a
     /// judge that can run, the judge compares the close pairs on the card
@@ -1858,7 +1858,8 @@ impl Worker {
             let out = super::step::Exclusion::new(&self.people.file, Kind::Fursuit);
             for (id, members, named, cover) in groups {
                 let mut faces: Vec<Face> = members.iter().filter(|f| by_ref.contains_key(f) && !out.excludes(store, f)).filter_map(|f| self.resolve_face(f)).collect();
-                let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
+                // The tab's own count: a burst is one photo.
+                let photos = crate::model::subjects::count_bursts(&faces);
                 if faces.is_empty() || (!named && photos < min_photos) {
                     continue;
                 }

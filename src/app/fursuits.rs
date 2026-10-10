@@ -399,7 +399,7 @@ impl FakeFursuits {
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
             let days: HashSet<NaiveDate> = faces.iter().map(|f| f.day).collect();
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
-            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), days: days.len(), cover, suggestions });
+            out.push(Group { id: g.id.clone(), kind: Kind::Fursuit, name: g.name.clone(), hidden: g.hidden, photos: photos.len(), bursts: crate::model::subjects::count_bursts(&faces), days: days.len(), cover, suggestions });
         }
         out.extend((0..self.many).map(many_group));
         out
@@ -912,7 +912,7 @@ fn many_group(i: usize) -> Group {
         clarity: 0.9,
         confirmed: false,
     };
-    Group { id: GroupId::Cluster(ID_BASE + 2_000_000_000 + i as u64), kind: Kind::Fursuit, name: None, hidden: false, photos: 400usize.saturating_sub(i / 3).max(5), days: 1, cover, suggestions: 0 }
+    Group { id: GroupId::Cluster(ID_BASE + 2_000_000_000 + i as u64), kind: Kind::Fursuit, name: None, hidden: false, photos: 400usize.saturating_sub(i / 3).max(5), bursts: 400usize.saturating_sub(i / 3).max(5) / 3, days: 1, cover, suggestions: 0 }
 }
 
 /// Clusters the user made by moving heads out: their own id range.
