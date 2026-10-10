@@ -1060,6 +1060,67 @@ impl People {
         }
     }
 
+    /// "Not fursuit heads" (or "Not faces") on whole groups, or on heads
+    /// picked in one: every box goes as the viewer's "Not a fursuit head"
+    /// does (the `removed` list, so a rebuild never brings it back), in
+    /// one undo step.  Each target is a group of `kind` (another kind is
+    /// refused, nothing changed) with the boxes to remove (`None`: all its
+    /// members; picked boxes not in it are ignored).  A subject left with
+    /// no member goes too.  Returns the words and the boxes removed (one
+    /// decision, for the record of the user's corrections).
+    pub fn remove_boxes(&mut self, kind: Kind, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<(String, Vec<FaceRef>), Refused> {
+        let mut boxes: Vec<FaceRef> = Vec::new();
+        let mut subjects: Vec<SubjectId> = Vec::new();
+        let mut names: Vec<String> = Vec::new();
+        for (id, picked) in targets {
+            let (k, members) = self.members(id)?;
+            if k != kind {
+                return Err(Refused::MixedKinds);
+            }
+            let take: Vec<FaceRef> = match picked {
+                Some(p) => members.iter().filter(|m| p.contains(m)).copied().collect(),
+                None => members,
+            };
+            for f in take {
+                if !boxes.contains(&f) {
+                    boxes.push(f);
+                }
+            }
+            if let GroupId::Subject(s) = id {
+                subjects.push(s.clone());
+                if let Some(n) = self.file.get(s).and_then(|s| s.name.clone()) {
+                    names.push(n);
+                }
+            }
+        }
+        if boxes.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        let n = boxes.len();
+        // Named in the words only when it is one named group.
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { format!("a {}", box_noun(kind)) } else { format!("{n} {}", plural(n, box_noun(kind))) };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.checkpoint(what.clone());
+        for f in &boxes {
+            // Already removed (or never there) is fine: the rest go.
+            let _ = self.file.remove_box(kind, *f);
+        }
+        // A subject with nothing left is gone too (its name with it).
+        for s in subjects {
+            if self.file.get(&s).is_some_and(|x| x.members.is_empty()) {
+                let _ = self.file.forget(&s);
+            }
+        }
+        self.save();
+        Ok((what, boxes))
+    }
+
     /// *Forget all people* (or fursuits, or pets): that kind's subjects
     /// go from the user's file, and for people the face cache too; the
     /// other kinds' names, answers and caches stay untouched.  Beyond
@@ -1707,6 +1768,47 @@ mod tests {
         assert_eq!(p.group_of(Kind::Person, &f4), Some(GroupId::Subject(to)));
         assert_eq!(p.group_of(Kind::Person, &f1), Some(sid));
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// "Not fursuit heads" on whole groups (or picked heads): every box
+    /// goes to the removed list in one undo step; a subject left empty
+    /// goes with it; a group of another kind is refused and changes
+    /// nothing; picked heads not in the group are ignored.
+    #[test]
+    fn whole_groups_are_removed_in_one_step_and_never_across_kinds() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2)])]);
+        let suit = p.file.create(Kind::Fursuit, Some("Suit".into()), vec![face(3), face(4)]);
+        let kept = p.file.create(Kind::Fursuit, Some("Kept".into()), vec![face(5), face(6)]);
+        let person = p.file.create(Kind::Person, Some("Someone".into()), vec![face(8)]);
+        let before = p.file.clone();
+        // A person's group among fursuits: refused whole.
+        let mixed = [(GroupId::Cluster(7), None), (GroupId::Subject(person.clone()), None)];
+        assert_eq!(p.remove_boxes(Kind::Fursuit, &mixed), Err(Refused::MixedKinds));
+        assert_eq!(p.remove_boxes(Kind::Person, &[(GroupId::Cluster(7), None)]), Err(Refused::MixedKinds));
+        assert_eq!(p.file, before, "a refusal changes nothing");
+        assert!(p.undo.is_empty());
+        // Two whole groups: one step.
+        let (what, boxes) = p.remove_boxes(Kind::Fursuit, &[(GroupId::Cluster(7), None), (GroupId::Subject(suit.clone()), None)]).unwrap();
+        assert_eq!(what, "Removed 4 fursuit heads");
+        assert_eq!(boxes, [face(1), face(2), face(3), face(4)]);
+        assert!(p.file.get(&suit).is_none(), "the emptied subject goes");
+        let removed = p.file.removed_index(Kind::Fursuit);
+        assert!(boxes.iter().all(|b| removed.covers(b)));
+        assert!(!p.file.removed_index(Kind::Person).covers(&face(1)), "a fursuit removal is no face's");
+        assert!(p.file.get(&person).is_some() && p.file.get(&kept).unwrap().members.len() == 2);
+        // Picked heads only; one not in the group is ignored.
+        let (what, boxes) = p.remove_boxes(Kind::Fursuit, &[(GroupId::Subject(kept.clone()), Some(vec![face(5), face(9)]))]).unwrap();
+        assert_eq!((what.as_str(), boxes), ("Removed a fursuit head from Kept", vec![face(5)]));
+        assert_eq!(p.file.get(&kept).unwrap().members, [face(6)], "the rest stay, and so does the name");
+        assert_eq!(p.remove_boxes(Kind::Fursuit, &[(GroupId::Subject(kept.clone()), Some(vec![face(9)]))]), Err(Refused::Nothing));
+        // People, for symmetry: a named person's faces.
+        assert_eq!(p.remove_boxes(Kind::Person, &[(GroupId::Subject(person.clone()), None)]).map(|r| r.0).as_deref(), Ok("Removed a face from Someone"));
+        // One undo each.
+        assert_eq!(p.undo().as_deref(), Some("Removed a face from Someone"));
+        assert_eq!(p.undo().as_deref(), Some("Removed a fursuit head from Kept"));
+        assert_eq!(p.undo().as_deref(), Some("Removed 4 fursuit heads"));
+        assert_eq!(p.file, before, "all back as it was");
     }
 
     #[test]

@@ -703,6 +703,47 @@ impl FakeFursuits {
         }
     }
 
+    /// "Not fursuit heads": the groups' heads (all, or the picked ones)
+    /// out of them and never back, as the engine's removal; one undo step.
+    pub fn remove_boxes(&mut self, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<String, String> {
+        if targets.iter().any(|(id, _)| self.group(id).is_none()) {
+            return Err("That group changed: look again.".into());
+        }
+        let mut n = 0;
+        let mut names = Vec::new();
+        for (id, picked) in targets {
+            let g = self.group(id).expect("checked");
+            n += match picked {
+                Some(p) => g.members.iter().filter(|f| p.contains(f)).count(),
+                None => g.members.len(),
+            };
+            names.extend(g.name.clone());
+        }
+        if n == 0 {
+            return Err("nothing to remove".into());
+        }
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { "a fursuit head".to_string() } else { format!("{n} fursuit heads") };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.remember(what.clone());
+        for (id, picked) in targets {
+            let g = self.group_mut(id).expect("checked");
+            let gone: Vec<FaceRef> = g.members.iter().copied().filter(|f| picked.as_ref().is_none_or(|p| p.contains(f))).collect();
+            g.members.retain(|f| !gone.contains(f));
+            g.confirmed.retain(|f| !gone.contains(f));
+            g.rejected.extend(gone);
+            if g.members.is_empty() {
+                g.name = None;
+            }
+        }
+        Ok(what)
+    }
+
     /// Move heads out of `from`: into `to` (a fursuit), or a new group.
     pub fn move_faces(&mut self, from: &GroupId, faces: &[FaceRef], to: Option<&GroupId>) -> Result<(), String> {
         if self.group(from).is_none() || to.is_some_and(|t| self.group(t).is_none()) {

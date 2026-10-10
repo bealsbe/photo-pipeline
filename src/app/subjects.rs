@@ -136,6 +136,8 @@ pub struct Subjects {
     pub drag: Option<Drag>,
     /// "Forget this person?" waiting for an answer.
     pub forget: Option<GroupId>,
+    /// "Not fursuit heads?" (or "Not faces?") waiting for an answer.
+    pub remove: Option<super::subjects_remove::Ask>,
     pub person: Option<Person>,
     pub review: Option<Review>,
     /// The close-call judge's latest run (fursuits).
@@ -163,6 +165,7 @@ impl Subjects {
             merge: None,
             drag: None,
             forget: None,
+            remove: None,
             person: None,
             review: None,
             judge: None,
@@ -521,6 +524,8 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         let size = if mg.groups.len() == 2 { PAIR_CROP } else { 40.0 };
         v.extend(mg.groups.iter().filter_map(|id| s.group(id)).map(|g| (g.cover.clone(), px(app, size), Framing::Face)));
     }
+    // "Not fursuit heads?", over any page.
+    v.extend(super::subjects_remove::wanted(app));
     v
 }
 
@@ -572,6 +577,8 @@ pub enum Msg {
     Merges(super::subjects_merge::Msg),
     Pair(super::subjects_pair::Msg),
     Split(super::subjects_split::Msg),
+    /// "Not fursuit heads" / "Not faces" on groups or picked heads.
+    Remove(super::subjects_remove::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -634,6 +641,9 @@ pub fn on_undone(app: &mut App, what: String) -> Task<Message> {
 /// page's split view.
 pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) -> Task<Message> {
     if super::subjects_pair::on_faces(app, seq, &faces) {
+        return refresh_crops(app);
+    }
+    if super::subjects_remove::on_faces(app, seq, &faces) {
         return refresh_crops(app);
     }
     if review::on_faces(app, seq, &faces) {
@@ -874,6 +884,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Merges(msg) => super::subjects_merge::update(app, msg),
         Msg::Pair(msg) => super::subjects_pair::update(app, msg),
         Msg::Split(msg) => super::subjects_split::update(app, msg),
+        Msg::Remove(msg) => super::subjects_remove::update(app, msg),
     }
 }
 
@@ -945,7 +956,7 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.drag.take().is_some() || s.forget.take().is_some() {
+    if s.drag.take().is_some() || s.forget.take().is_some() || s.remove.take().is_some() {
         return Task::none();
     }
     if s.merge.take().is_some() {
@@ -979,6 +990,12 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     if app.subjects.forget.is_some() {
         return match key {
             Key::Named(Named::Enter) => update(app, Msg::ForgetGo),
+            _ => Task::none(),
+        };
+    }
+    if app.subjects.remove.is_some() {
+        return match key {
+            Key::Named(Named::Enter) => update(app, Msg::Remove(super::subjects_remove::Msg::Go)),
             _ => Task::none(),
         };
     }
@@ -1067,6 +1084,9 @@ pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
     }
     if let Some(id) = &s.forget {
         return Some(forget_dialog(app, id));
+    }
+    if let Some(d) = super::subjects_remove::dialog(app) {
+        return Some(d);
     }
     person::overlay(app)
 }
@@ -1537,6 +1557,12 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
     let n = s.picked.len();
     let merge = tip(kit::icon_text_btn(Glyph::Merge, "Merge…", t::INK, style::secondary(), (n >= 2).then(|| m(Msg::MergeAsk))), "Merge the picked groups into one  (M)", true);
     let hide = kit::icon_text_btn(Glyph::Hide, "Hide", t::INK2, style::ghost(), (n >= 1).then(|| m(Msg::HidePicked)));
+    let what = super::subjects_remove::nouns(s.tab);
+    let not = tip(
+        kit::icon_text_btn(Glyph::Close, format!("{}…", super::subjects_remove::action(s.tab)), t::REJECT, style::ghost(), (n >= 1).then(|| m(Msg::Remove(super::subjects_remove::Msg::AskTab)))),
+        format!("None of the picked groups are {what}: remove every one of their {what}, so they are never grouped, suggested or found again (asks first)"),
+        true,
+    );
     // Two picked: side by side, to move faces between them.
     let side = (n == 2).then(|| tip(kit::icon_text_btn(Glyph::Compare, "Side by side", t::INK, style::secondary(), Some(super::subjects_pair::m(super::subjects_pair::Msg::Open(s.picked[0].clone(), s.picked[1].clone())))), "The two groups side by side, to drag faces between them  (C)", true));
     let close = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::ClearPicks))), "Stop picking  (Esc)", true);
@@ -1545,7 +1571,7 @@ fn pick_strip(app: &App) -> Element<'_, Message> {
     if let Some(side) = side {
         r = r.push(side);
     }
-    let r = r.push(merge).push(hide).push(close)
+    let r = r.push(merge).push(hide).push(not).push(close)
         .spacing(t::S3)
         .align_y(Alignment::Center)
         .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });

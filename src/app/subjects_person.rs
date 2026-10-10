@@ -1067,6 +1067,12 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
                 menu_row(icons::view(Glyph::Merge, 15.0, t::INK2), "Merge into…".into(), String::new(), Some(pm(Msg::Menu(Some(Menu::MergeInto))))),
                 menu_row(icons::view(Glyph::Compare, 15.0, t::INK2), "Side by side with…".into(), "C".into(), Some(pm(Msg::Menu(Some(Menu::SideBySide))))),
                 menu_row(icons::view(Glyph::Hide, 15.0, t::INK2), "Hide".into(), String::new(), Some(pm(Msg::Hide))),
+                menu_row(
+                    icons::view(Glyph::Close, 15.0, t::REJECT),
+                    format!("{}…", super::subjects_remove::action(p.kind)),
+                    String::new(),
+                    Some(subj::m(subj::Msg::Remove(super::subjects_remove::Msg::AskPage))),
+                ),
             ];
             if g.name.is_some() {
                 rows.push(menu_row(icons::view(Glyph::Close, 15.0, t::REJECT), format!("Forget this {one}…"), String::new(), Some(pm(Msg::Forget))));
@@ -1115,6 +1121,13 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     if p.kind == Kind::Fursuit {
         r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "Move them out into a group of their own, to name or merge. Or drag them onto a group.", true));
     }
+    // Not heads at all (a mask, a plush, a sign): removed for good.
+    let what = super::subjects_remove::nouns(p.kind);
+    r = r.push(tip(
+        kit::icon_text_btn(Glyph::Close, format!("{}…", super::subjects_remove::action(p.kind)), t::REJECT, style::ghost(), Some(subj::m(subj::Msg::Remove(super::subjects_remove::Msg::AskPicked)))),
+        format!("These aren't {what} at all: remove them, so they are never grouped, suggested or found again (asks first)"),
+        true,
+    ));
     let r = r.push(row![
         kit::icon_text_btn(Glyph::Split, "Move to…", t::INK, style::secondary(), Some(pm(Msg::Menu(if p.menu == Some(Menu::MoveTo) { None } else { Some(Menu::MoveTo) })))),
         tip(kit::icon_text_btn(Glyph::Close, not, t::REJECT, style::secondary(), Some(pm(Msg::NotThis))), "Take them out, and never suggest them again", true),

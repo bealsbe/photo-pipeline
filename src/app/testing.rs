@@ -21,6 +21,7 @@
 //! labels draw 0.1 0.2 0.15 0.2   # draw a box (fractions of the photo)
 //! labels name Person C|enter|take 0   # type a name, Enter, the 1st offered
 //! labels unnamed|swap|remove|deselect # the picked box's buttons
+//! labels x-box 0|x-name 0     # the × on the picked box / on a name tag
 //! labels kind person|fursuit|add|cancel   # a drawn box's choices
 //! labels dump                 # print the labels' state
 //! labels-wait 30000           # wait (up to 30 s) for drawn boxes being
@@ -180,6 +181,10 @@
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
 //! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
+//! subjects notheads page|tab|picked|go|cancel|dump   # "Not fursuit heads"
+//!                             # (or "Not faces"): a group's ⋯, the tab's
+//!                             # picked groups, the heads picked on a
+//!                             # page; its confirmation
 //! subjects merge|mergego|mergecancel|keep 1   # the merge dialog
 //! merges open [2]             # "Possibly the same fursuit": the review (at
 //!                             # the tab's 3rd pair)
@@ -604,6 +609,9 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             let rest: Vec<&str> = a.collect();
             match what {
                 "pick" => app.update(stage(StageEvent::LabelPick(rest.first().and_then(|n| n.parse().ok())))),
+                // The ×s, as the stage reports a click on them.
+                "x-box" => app.update(stage(StageEvent::LabelRemove(rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)))),
+                "x-name" => app.update(stage(StageEvent::LabelUnname(rest.first().and_then(|n| n.parse().ok()).unwrap_or(0)))),
                 "draw" => {
                     let v: Vec<f32> = rest.iter().filter_map(|x| x.parse().ok()).collect();
                     match v.as_slice() {
@@ -1466,6 +1474,21 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
     let photo = |app: &App, n: usize| app.subjects.pane().and_then(|pp| pp.layout.tiles.get(n).copied());
     let t = match what {
         "open" => app.update(Message::Cmd(Cmd::Subjects)),
+        "notheads" | "notfaces" => {
+            use super::subjects_remove::{Msg as X, debug_state};
+            let x = |m: X| Message::Subjects(Msg::Remove(m));
+            match rest {
+                "page" => app.update(x(X::AskPage)),
+                "tab" => app.update(x(X::AskTab)),
+                "picked" => app.update(x(X::AskPicked)),
+                "go" => app.update(x(X::Go)),
+                "cancel" => app.update(x(X::Cancel)),
+                _ => {
+                    eprintln!("[remove] {}", debug_state(app));
+                    Task::none()
+                }
+            }
+        }
         "tab" => {
             let k = match rest {
                 "fursuit" | "fursuits" => Some(Kind::Fursuit),

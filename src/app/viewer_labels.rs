@@ -129,10 +129,6 @@ impl LabelsUi {
         self.picked_index().map(|i| &self.boxes()[i])
     }
 
-    /// A field is open (a box picked or drawn): typed letters go to it.
-    pub fn editing(&self) -> bool {
-        self.on && (self.picked_index().is_some() || self.draft.is_some())
-    }
 }
 
 /// The stage's part: the boxes, the picked one, the draft.
@@ -401,26 +397,86 @@ pub fn on_draw(app: &mut App, b: [f32; 4]) -> Task<Message> {
 /// and while a field is open every other plain key is the field's.
 pub fn on_key(app: &mut App, key: &Key, ch: Option<&str>) -> Option<Task<Message>> {
     let v = app.viewer.as_ref()?;
-    if !v.labels.on || super::viewer_burst::on_sheet(v) {
-        return None;
+    let ui = &v.labels;
+    let shown = ui.on && !super::viewer_burst::on_sheet(v);
+    let action = key_action(shown, ui.picked_index().is_some(), ui.draft.is_some(), ui.name.is_empty(), key, ch);
+    match action {
+        KeyAction::Pass => None,
+        KeyAction::Swallow => Some(Task::none()),
+        KeyAction::Cancel => Some(update(app, LMsg::Cancel)),
+        KeyAction::Deselect => Some(update(app, LMsg::Deselect)),
+        KeyAction::Hide => Some(toggle(app)),
+        KeyAction::Submit => Some(update(app, LMsg::Submit)),
+        KeyAction::Remove => Some(update(app, LMsg::Remove)),
     }
-    let editing = v.labels.editing();
+}
+
+/// What a key does while the labels may show (pure, so it can be tested).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyAction {
+    /// Not the labels' key: the viewer has it.
+    Pass,
+    /// The labels' (or the name field's): nothing else sees it.
+    Swallow,
+    Cancel,
+    Deselect,
+    Hide,
+    Submit,
+    /// Delete or Backspace on the picked box: "Not a face".
+    Remove,
+}
+
+/// `shown`: the labels are up; `picked`, `draft`: a box picked, a box
+/// drawn; `name_empty`: nothing typed in the name field.  While the
+/// labels show, Delete and Backspace are theirs, always: they remove the
+/// picked box (when nothing is typed: else they edit the name), and never
+/// reach the viewer's prune key.
+pub fn key_action(shown: bool, picked: bool, draft: bool, name_empty: bool, key: &Key, ch: Option<&str>) -> KeyAction {
+    if !shown {
+        return KeyAction::Pass;
+    }
+    let editing = picked || draft;
     // Keys a text field uses; the window's own (F11) still work.
     let typing = matches!(key, Key::Character(_))
-        || matches!(key, Key::Named(Named::ArrowLeft | Named::ArrowRight | Named::ArrowUp | Named::ArrowDown | Named::Home | Named::End | Named::PageUp | Named::PageDown | Named::Delete | Named::Backspace | Named::Space));
+        || matches!(key, Key::Named(Named::ArrowLeft | Named::ArrowRight | Named::ArrowUp | Named::ArrowDown | Named::Home | Named::End | Named::PageUp | Named::PageDown | Named::Space));
     match (key, ch) {
-        (Key::Named(Named::Escape), _) => Some(if v.labels.draft.is_some() {
-            update(app, LMsg::Cancel)
-        } else if v.labels.picked.is_some() {
-            update(app, LMsg::Deselect)
-        } else {
-            toggle(app)
-        }),
-        (Key::Named(Named::Enter), _) if editing => Some(update(app, LMsg::Submit)),
-        (_, Some("l")) if !editing => Some(toggle(app)),
-        _ if editing && typing => Some(Task::none()),
-        _ => None,
+        (Key::Named(Named::Escape), _) if draft => KeyAction::Cancel,
+        (Key::Named(Named::Escape), _) if picked => KeyAction::Deselect,
+        (Key::Named(Named::Escape), _) => KeyAction::Hide,
+        (Key::Named(Named::Delete | Named::Backspace), _) if picked && !draft && name_empty => KeyAction::Remove,
+        (Key::Named(Named::Delete | Named::Backspace), _) => KeyAction::Swallow,
+        (Key::Named(Named::Enter), _) if editing => KeyAction::Submit,
+        (_, Some("l")) if !editing => KeyAction::Hide,
+        _ if editing && typing => KeyAction::Swallow,
+        _ => KeyAction::Pass,
     }
+}
+
+/// The × on the picked box: "Not a face" (or "Not a fursuit head").
+pub fn on_remove_box(app: &mut App, i: usize) -> Task<Message> {
+    if !pick_index(app, i) {
+        return Task::none();
+    }
+    update(app, LMsg::Remove)
+}
+
+/// The × on a box's name tag: back to "Unnamed"; the box stays.
+pub fn on_unname_box(app: &mut App, i: usize) -> Task<Message> {
+    if !pick_index(app, i) {
+        return Task::none();
+    }
+    update(app, LMsg::Unnamed)
+}
+
+/// Pick box `i` (no field focus): false when there is no such box.
+fn pick_index(app: &mut App, i: usize) -> bool {
+    let Some(v) = app.viewer.as_mut() else { return false };
+    let ui = &mut v.labels;
+    let Some(b) = ui.boxes().get(i).map(|b| (b.face, b.kind)) else { return false };
+    ui.draft = None;
+    ui.name.clear();
+    ui.picked = Some(b);
+    true
 }
 
 fn focus_name() -> Task<Message> {
@@ -499,7 +555,7 @@ pub fn view<'a>(app: &'a App, ui: &'a LabelsUi) -> Element<'a, Message> {
     // What happened last (or how to start), then why drawn boxes wait.
     let hint = match &ui.note {
         Some(n) => n.clone(),
-        None => format!("{}.  Click a box to name it, or drag on the photo to add one the finder missed.", counts(&labels.boxes)),
+        None => format!("{}.  Click a box to name it (Delete or its × removes it), or drag on the photo to add one the finder missed.", counts(&labels.boxes)),
     };
     let mut r = row![lead, kit::secondary(hint)].spacing(t::S2).align_y(Alignment::Center);
     if let Some(why) = labels.pending {
@@ -573,7 +629,7 @@ fn picked_row<'a>(all: &'a Subjects, ui: &'a LabelsUi, b: &'a LabelBox) -> Eleme
         r = r.push(kit::tip(waiting, "Drawn, and not matched yet: it is kept, and matched on the graphics card when it is available", true));
     }
     if b.name.is_some() {
-        r = r.push(kit::tip(kit::btn("Unnamed", style::ghost(), Some(lmsg(LMsg::Unnamed))), format!("Take this {} out of {who}; it won't be suggested for them again", box_noun(b.kind)), true));
+        r = r.push(kit::tip(kit::btn("Unnamed", style::ghost(), Some(lmsg(LMsg::Unnamed))), format!("Take this {} out of {who}; it won't be suggested for them again  (or the × on its name)", box_noun(b.kind)), true));
     }
     let swap = if b.kind == Kind::Fursuit { "It's a person" } else { "It's a fursuit" };
     r = r.push(kit::tip(
@@ -583,7 +639,7 @@ fn picked_row<'a>(all: &'a Subjects, ui: &'a LabelsUi, b: &'a LabelBox) -> Eleme
     ));
     r = r.push(kit::tip(
         kit::btn(format!("Not a {}", box_noun(b.kind)), style::secondary(), Some(lmsg(LMsg::Remove))),
-        format!("Remove this box: it isn't a {}, and won't come back when the library is looked at again", box_noun(b.kind)),
+        format!("Remove this box: it isn't a {}, and won't come back when the library is looked at again  (Delete)", box_noun(b.kind)),
         true,
     ));
     r = r.push(kit::tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(lmsg(LMsg::Deselect))), "Done with this box  (Esc)", true));
@@ -773,6 +829,50 @@ mod tests {
 
     fn bx(n: u8, kind: Kind, name: Option<&str>) -> LabelBox {
         LabelBox { face: FaceRef::new(ContentKey([1; 16]), [0.1 * n as f32, 0.1, 0.1, 0.1]), kind, subject: None, name: name.map(String::from), drawn: false, pending: false }
+    }
+
+    /// Delete (or Backspace) on the picked box removes it; while the
+    /// labels show it never reaches the viewer (so it never prunes),
+    /// picked or not; with a name typed it edits the name; with the labels
+    /// hidden it is the viewer's again (prune).
+    #[test]
+    fn delete_removes_the_picked_box_and_never_prunes_while_labels_show() {
+        let del = Key::Named(Named::Delete);
+        let back = Key::Named(Named::Backspace);
+        assert_eq!(key_action(true, true, false, true, &del, None), KeyAction::Remove);
+        assert_eq!(key_action(true, true, false, true, &back, None), KeyAction::Remove);
+        assert_eq!(key_action(true, false, false, true, &del, None), KeyAction::Swallow, "nothing picked: kept from the prune key");
+        assert_eq!(key_action(true, true, false, false, &back, None), KeyAction::Swallow, "a name typed: the field's");
+        assert_eq!(key_action(true, false, true, true, &del, None), KeyAction::Swallow, "a box being drawn: nothing removed");
+        assert_eq!(key_action(false, false, false, true, &del, None), KeyAction::Pass, "labels hidden: the viewer prunes as ever");
+        // The other keys keep their places.
+        let esc = Key::Named(Named::Escape);
+        assert_eq!(key_action(true, true, false, true, &esc, None), KeyAction::Deselect);
+        assert_eq!(key_action(true, false, false, true, &esc, None), KeyAction::Hide);
+        assert_eq!(key_action(true, false, false, true, &Key::Character("p".into()), Some("p")), KeyAction::Pass, "P still prunes in a culling viewer");
+        assert_eq!(key_action(true, true, false, true, &Key::Character("p".into()), Some("p")), KeyAction::Swallow, "typed into the name");
+        assert_eq!(key_action(true, false, false, true, &Key::Character("l".into()), Some("l")), KeyAction::Hide);
+    }
+
+    /// The tag's × (or the bar's Unnamed) clears the name and keeps the
+    /// box, one undo step.
+    #[test]
+    fn unnamed_clears_the_name_and_keeps_the_box() {
+        use crate::model::subjects::{Face, Group};
+        let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
+        let cover = Face { face: FaceRef::new(ContentKey([9; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
+        let id = SubjectId("p".into());
+        let all = Subjects { groups: vec![Group { id: GroupId::Subject(id.clone()), kind: Kind::Person, name: Some("Someone".into()), hidden: false, photos: 3, days: 1, cover, suggestions: 0 }], ..Subjects::default() };
+        let key = ContentKey([1; 16]);
+        let mut named = bx(1, Kind::Person, Some("Someone"));
+        named.subject = Some(id);
+        let base = vec![named.clone()];
+        let mut f = FakeLabels::default();
+        f.edit(&LabelEdit::Name { face: named.face, kind: Kind::Person, to: NameTo::Unnamed }, base.clone(), &all, false).unwrap();
+        let l = f.labels(key, base.clone(), None);
+        assert_eq!((l.boxes.len(), l.boxes[0].name.clone(), l.boxes[0].subject.clone()), (1, None, None), "the box stays, unnamed");
+        assert_eq!(f.undo().as_deref(), Some("Moved a face to Unnamed"));
+        assert_eq!(f.labels(key, base, None).boxes[0].name.as_deref(), Some("Someone"));
     }
 
     #[test]
