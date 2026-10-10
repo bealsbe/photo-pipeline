@@ -543,6 +543,15 @@ for you.
   dialog says in plain words.  YuNet finds the faces for whichever model
   you pick.  Changing the model recognises every face again; the names
   you gave and the faces you confirmed are kept.
+- **Not faces at all** (a poster, a statue, a fursuit taken for a
+  face): ⋯ ▸ *Not faces…* on a group's page removes every face of the
+  group; *Not faces…* in the tab's pick strip does it for the groups
+  picked, and in *Faces*' pick strip for the faces picked.  It asks
+  first, with how many and a few of them; a named group is named, and
+  its name goes with its last face.  They are removed as the viewer's
+  *Not a face* removes one: never grouped, suggested or found again,
+  even after Rebuild.  One Ctrl+Z takes the whole removal back.
+  Fursuits have the same, *Not fursuit heads…*.
 - **Forget:** *Forget this person…* removes one name and its answers (their
   faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
   deletes every face found and every name, behind a plain confirmation.
@@ -605,6 +614,13 @@ never shown, merged, suggested or completed together with people or pets.
 - **Similar groups** on a fursuit's page: its nearest groups, each with
   *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
   and × (not the same).
+- **Not fursuit heads…** (⋯ on a group's page, the tab's pick strip for
+  picked groups, *Heads*' pick strip for picked heads) removes every
+  head of them, after a confirmation that counts them and shows a few:
+  a mask, a plush, a sign the finder took for a head.  They leave the
+  groups, the suggestions, *Find more*, the merge suggestions and the
+  split tools, and a rebuild doesn't find them again; one Ctrl+Z takes
+  it all back.  Never across kinds.
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
@@ -701,6 +717,13 @@ bar under the top bar does the editing; L, *Done* or Esc hides them.
 - **Remove a label.**  *Not a face* (or *Not a fursuit head*) removes
   the box and takes it out of its group; the answer is kept, so
   looking at the library again (Rebuild) doesn't bring it back.
+  Quicker: **Delete** (or Backspace, with nothing typed in the name
+  field) removes the picked box, and so does the small **×** on its
+  corner (only the picked box shows it).  While the labels show,
+  Delete never reaches the viewer's prune key.
+- **Clear a name.**  The small **×** on a name tag (on the picked box,
+  or the one under the pointer) sets it back to "Unnamed"; the box
+  stays.
 - **Ctrl+Z** takes back the last change, one at a time, as on the
   subjects pages (while the labels show it doesn't touch marks).
 - **Which photos.**  Faces and heads are found in the library only

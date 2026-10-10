@@ -91,6 +91,8 @@ enum Cmd {
     /// `seq` with the first the index holds.
     Keyed { seq: u64, keys: Vec<Key> },
     Label(LabelEdit),
+    /// Whole groups (or heads picked in them) are not of their kind.
+    RemoveBoxes { kind: Kind, targets: Vec<(GroupId, Option<Vec<FaceRef>>)> },
     /// Match drawn boxes now (sent to itself after a label edit).
     StartDrawn,
     /// Drawn boxes matched (or not) on the card, from their worker.
@@ -488,6 +490,15 @@ impl Engine {
     /// kept and listed as pending.  A fresh `BgEvent::Subjects` follows.
     pub fn label(&self, edit: LabelEdit) {
         self.send(Cmd::Label(edit));
+    }
+
+    /// "Not fursuit heads" (or "Not faces") on groups of `kind`: each
+    /// target's boxes (`None`: every member; else the ones picked) go to
+    /// the removed list, as the viewer's "Not a fursuit head" does, in
+    /// one undo step; refused, with nothing changed, when a group is of
+    /// another kind.  A fresh `BgEvent::Subjects` follows.
+    pub fn remove_boxes(&self, kind: Kind, targets: Vec<(GroupId, Option<Vec<FaceRef>>)>) {
+        self.send(Cmd::RemoveBoxes { kind, targets });
     }
 
     /// A face's or head's pixels for a tile or the review, `px`×`px`
@@ -1225,6 +1236,15 @@ impl Worker {
                     if draws {
                         let _ = self.me.send(Cmd::StartDrawn);
                     }
+                }
+                Cmd::RemoveBoxes { kind, targets } => {
+                    let r = self.people.remove_boxes(kind, &targets);
+                    if let Ok((what, _)) = &r {
+                        if std::env::var_os("PP_PROFILE").is_some() {
+                            eprintln!("labels: {what}");
+                        }
+                    }
+                    self.after_edit(r.map(|_| ()));
                 }
                 Cmd::StartDrawn => self.start_drawn(),
                 Cmd::Drawn(done) => self.on_drawn(*done),
@@ -4256,6 +4276,57 @@ mod tests {
         let _ = fursuit_groups(&e, 2);
         e.merge_suggestions(4, None, 1, false);
         assert!(merges(&mut ev, 4, Duration::from_secs(2)).0.unwrap().is_empty());
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// "Not fursuit heads" on a whole group through the engine: the group
+    /// goes from the tab, its heads from the merge suggestions, in one
+    /// undo step; a person's group among them is refused and changes
+    /// nothing; a rebuild (the heads found again) never brings them back.
+    #[test]
+    fn a_whole_group_removed_is_gone_through_a_rebuild_and_one_undo() {
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.699)), (3, 1800)];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("remove-group", &refs);
+        let suits: EmbedderFactory = Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>));
+        let (bus, rx) = crate::bus::channel();
+        let mut ev = Events::new(&rx);
+        let config = Config { factory: suits, installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: None, downloader: no_downloads() };
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 3 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let groups = fursuit_groups(&e, 3);
+        let id = |n: usize| groups.iter().find(|g| g.1 == key_of(n)).unwrap().0.clone();
+        // Mixed with a person's group: refused, nothing changes.
+        let person = GroupId::Subject(SubjectId("0".repeat(32)));
+        e.remove_boxes(Kind::Fursuit, vec![(id(2), None), (person, None)]);
+        std::thread::sleep(Duration::from_millis(200));
+        let _ = fursuit_groups(&e, 3);
+        // B's whole group: gone, and with it A and B's pair.
+        e.remove_boxes(Kind::Fursuit, vec![(id(2), None)]);
+        let _ = fursuit_groups(&e, 2);
+        e.merge_suggestions(1, None, 1, false);
+        assert!(merges(&mut ev, 1, Duration::from_secs(2)).0.unwrap().is_empty());
+        assert_eq!(e.subjects().undoable.as_deref(), Some("Removed a fursuit head"));
+        // A rebuild finds the head again: still removed.
+        e.rebuild_index();
+        assert!(ev.pass_starts().contains(&PassKind::Rebuild), "the rebuild ran");
+        wait_for(&e, "the rebuild and its heads", |s| s.indexed_shots == 3 && s.pass.is_none() && s.heads.found == 3 && s.heads.step == heads::Step::Idle);
+        e.set_whitening(super::super::whiten::Whitening::identity(2));
+        wait_for(&e, "the whitening", |s| s.heads.whitened);
+        std::thread::sleep(Duration::from_millis(300));
+        let after = fursuit_groups(&e, 2);
+        assert!(after.iter().all(|g| g.1 != key_of(2)), "the removed head grouped nowhere: {after:?}");
+        // One undo brings the group back.
+        e.undo();
+        let _ = fursuit_groups(&e, 3);
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

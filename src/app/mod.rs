@@ -32,6 +32,7 @@ pub mod subjects_fursuits;
 pub mod subjects_merge;
 pub mod subjects_split;
 pub mod subjects_person;
+pub mod subjects_remove;
 pub mod subjects_review;
 pub mod testing;
 pub mod undo;

@@ -415,6 +415,22 @@ impl Link {
         }
     }
 
+    /// "Not fursuit heads" / "Not faces": every head of the groups (or
+    /// the ones picked in them) removed, in one undo step.
+    pub fn remove_boxes(&self, kind: Kind, targets: &[(GroupId, Option<Vec<FaceRef>>)]) {
+        match self {
+            Link::Engine(e) => e.remove_boxes(kind, targets.to_vec()),
+            Link::Fake(f) => {
+                let Some((first, _)) = targets.first() else { return };
+                f.edit(
+                    first,
+                    |p, _| if kind == Kind::Person { p.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                    |z, _| if kind == Kind::Fursuit { z.remove_boxes(targets).map(|w| eprintln!("[people] {w}")) } else { Err("people, fursuits and pets are never combined".into()) },
+                );
+            }
+        }
+    }
+
     /// *Possibly the same fursuit*: pairs of fursuit groups to merge or
     /// tell apart (`BgEvent::MergeSuggestions`, then with `judge` and a
     /// judge that can run, `BgEvent::MergeJudged`).  `focus`: one group's

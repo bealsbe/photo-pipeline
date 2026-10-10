@@ -122,6 +122,10 @@ pub enum StageEvent {
     LabelPick(Option<usize>),
     /// A box was drawn on the photo (fractions of the image).
     LabelDraw([f32; 4]),
+    /// The × on the picked box: remove it.
+    LabelRemove(usize),
+    /// The × on a box's name tag: back to "Unnamed".
+    LabelUnname(usize),
 }
 
 /// What the burst sheet reports.
@@ -302,8 +306,9 @@ struct State {
     /// fractions) and where the pointer is now (image fractions).  A
     /// short one is a click; a longer one draws a box.
     label_drag: Option<(Point, (f64, f64), (f64, f64))>,
-    /// The label box under the pointer.
+    /// The label box under the pointer, and whether a label's × is.
     label_hover: Option<usize>,
+    label_control: bool,
 }
 
 /// The wheel's part in changing level between a burst's sheet and one of
@@ -654,6 +659,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             level: LevelWheel::default(),
             label_drag: None,
             label_hover: None,
+            label_control: false,
         })
     }
 
@@ -1011,9 +1017,17 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 let double = click.kind() == amouse::click::Kind::Double;
 
                 // Labels: a press picks a box or starts drawing one.
-                if let (Some(_), Some(l)) = (&self.labels, st.live.clone()) {
-                    let ip = norm_point(st, &l, p, now);
-                    st.label_drag = Some((p, ip, ip));
+                if let (Some(lp), Some(l)) = (&self.labels, st.live.clone()) {
+                    // The ×s first: on the picked box, on a name tag.
+                    let (s, off) = st.transform_at(&l, now);
+                    match control_hit(&label_places(&l, s, off, lp, st.label_hover, vp.width), p) {
+                        Some(Control::Remove(i)) => shell.publish((self.on)(StageEvent::LabelRemove(i))),
+                        Some(Control::Unname(i)) => shell.publish((self.on)(StageEvent::LabelUnname(i))),
+                        None => {
+                            let ip = norm_point(st, &l, p, now);
+                            st.label_drag = Some((p, ip, ip));
+                        }
+                    }
                     return;
                 }
                 if let (Some(cp), Some(l)) = (&self.crop, st.live.clone()) {
@@ -1100,9 +1114,12 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 }
                 if let (Some(lp), Some(l)) = (&self.labels, st.live.clone()) {
                     let (s, off) = st.transform_at(&l, now);
-                    let over = label_hit(&l, s, off, lp, p, vp.width);
-                    if over != st.label_hover {
+                    let places = label_places(&l, s, off, lp, st.label_hover, vp.width);
+                    let over = label_hit(&places, p);
+                    let control = control_hit(&places, p).is_some();
+                    if over != st.label_hover || control != st.label_control {
                         st.label_hover = over;
+                        st.label_control = control;
                         shell.request_redraw();
                     }
                 }
@@ -1126,7 +1143,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                     let p = cursor.position().map(local).unwrap_or(p0);
                     if (p.x - p0.x).abs() < LABEL_CLICK && (p.y - p0.y).abs() < LABEL_CLICK {
                         let (s, off) = st.transform_at(&l, now);
-                        shell.publish((self.on)(StageEvent::LabelPick(label_hit(&l, s, off, lp, p0, vp.width))));
+                        shell.publish((self.on)(StageEvent::LabelPick(label_hit(&label_places(&l, s, off, lp, st.label_hover, vp.width), p0))));
                     } else if let Some(b) = drawn_box(a, z) {
                         shell.publish((self.on)(StageEvent::LabelDraw(b)));
                     }
@@ -1159,7 +1176,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             return if over { mouse::Interaction::Pointer } else { mouse::Interaction::Idle };
         }
         if self.labels.is_some() && st.live.is_some() {
-            return if st.label_drag.is_none() && st.label_hover.is_some() { mouse::Interaction::Pointer } else { mouse::Interaction::Crosshair };
+            return if st.label_drag.is_none() && (st.label_hover.is_some() || st.label_control) { mouse::Interaction::Pointer } else { mouse::Interaction::Crosshair };
         }
         if self.crop.is_some() {
             let region = st.crop_drag.as_ref().map(|d| d.0).unwrap_or(st.hover_region);
@@ -1509,24 +1526,94 @@ fn label_rect(l: &Live, s: f32, off: Vector, b: &[f32; 4]) -> Rectangle {
     rect(off.x + b[0] * w, off.y + b[1] * h, b[2] * w, b[3] * h)
 }
 
+/// The × on a picked box: drawn radius, and the half side of the square
+/// it answers to (generous, the same at any zoom).
+const X_R: f32 = 10.0;
+const X_HIT: f32 = 14.0;
+/// The room a name tag's × takes at its right end.
+const TAG_X: f32 = 18.0;
+
 /// Where a box's tag sits: above its top-left corner, or just inside it
 /// when the box touches the top of the stage; pulled left when it would
-/// run off the stage's right edge (`top`, `right`: the stage's).
-fn tag_rect(bx: Rectangle, tag: &str, top: f32, right: f32) -> Rectangle {
-    let w = (paint::text_width(tag, t::T_SMALL, paint::SEMIBOLD) + 2.0 * TAG_PAD).ceil();
+/// run off the stage's right edge (`top`, `right`: the stage's).  `extra`
+/// widens it (room for its ×).
+fn tag_rect(bx: Rectangle, tag: &str, top: f32, right: f32, extra: f32) -> Rectangle {
+    let w = (paint::text_width(tag, t::T_SMALL, paint::SEMIBOLD) + 2.0 * TAG_PAD).ceil() + extra;
     let y = if bx.y - TAG_H >= top { bx.y - TAG_H } else { bx.y };
     rect(bx.x.min(right - w), y, w, TAG_H)
 }
 
-/// The box under `p` (local): the smallest whose outline or tag holds it.
-fn label_hit(l: &Live, s: f32, off: Vector, lp: &LabelProps, p: Point, width: f32) -> Option<usize> {
-    lp.boxes
+/// One label box laid out on the stage: the box, its tag, and the
+/// controls it shows (the picked box's ×; a named tag's × when its box is
+/// picked or under the pointer).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placed {
+    bx: Rectangle,
+    tag: Rectangle,
+    /// The picked box's ×: its centre.
+    remove: Option<Point>,
+    /// The name tag's ×: the end of the tag it fills.
+    unname: Option<Rectangle>,
+}
+
+/// What a click on a label's control does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Control {
+    /// The picked box's ×: "Not a face".
+    Remove(usize),
+    /// A name tag's ×: back to "Unnamed".
+    Unname(usize),
+}
+
+/// Lay the boxes out (`boxes`: each box on the stage and its tag's words
+/// and whether it is named; the stage's top and right edges).
+fn label_layout(boxes: &[(Rectangle, &str, bool)], selected: Option<usize>, hover: Option<usize>, top: f32, right: f32) -> Vec<Placed> {
+    boxes
         .iter()
         .enumerate()
-        .filter_map(|(i, b)| {
-            let r = label_rect(l, s, off, &b.bbox);
+        .map(|(i, &(bx, words, named))| {
+            let picked = selected == Some(i);
+            let tag_x = named && (picked || hover == Some(i));
+            let tag = tag_rect(bx, words, top, right, if tag_x { TAG_X } else { 0.0 });
+            // The box's ×: its top-right corner, or its bottom-right when
+            // the tag reaches that corner.
+            let remove = picked.then(|| {
+                let corner_free = tag.x + tag.width < bx.x + bx.width - 2.0 * X_R || tag.y + tag.height < bx.y - X_R;
+                if corner_free { Point::new(bx.x + bx.width, bx.y) } else { Point::new(bx.x + bx.width, bx.y + bx.height) }
+            });
+            let unname = tag_x.then(|| rect(tag.x + tag.width - TAG_X, tag.y, TAG_X, tag.height));
+            Placed { bx, tag, remove, unname }
+        })
+        .collect()
+}
+
+/// The control under `p`, if any (they sit above the boxes).
+fn control_hit(placed: &[Placed], p: Point) -> Option<Control> {
+    for (i, pl) in placed.iter().enumerate() {
+        if let Some(c) = pl.remove {
+            if (p.x - c.x).abs() <= X_HIT && (p.y - c.y).abs() <= X_HIT {
+                return Some(Control::Remove(i));
+            }
+        }
+    }
+    placed.iter().enumerate().find(|(_, pl)| pl.unname.is_some_and(|u| rect(u.x - 2.0, u.y - 3.0, u.width + 4.0, u.height + 6.0).contains(p))).map(|(i, _)| Control::Unname(i))
+}
+
+/// The boxes on the stage (local coordinates), laid out.
+fn label_places(l: &Live, s: f32, off: Vector, lp: &LabelProps, hover: Option<usize>, width: f32) -> Vec<Placed> {
+    let boxes: Vec<(Rectangle, &str, bool)> = lp.boxes.iter().map(|b| (label_rect(l, s, off, &b.bbox), b.tag.as_str(), b.named)).collect();
+    label_layout(&boxes, lp.selected, hover, 0.0, width)
+}
+
+/// The box under `p` (local): the smallest whose outline or tag holds it.
+fn label_hit(placed: &[Placed], p: Point) -> Option<usize> {
+    placed
+        .iter()
+        .enumerate()
+        .filter_map(|(i, pl)| {
+            let r = pl.bx;
             let grown = rect(r.x - 3.0, r.y - 3.0, r.width + 6.0, r.height + 6.0);
-            (grown.contains(p) || tag_rect(r, &b.tag, 0.0, width).contains(p)).then_some((i, r.width * r.height))
+            (grown.contains(p) || pl.tag.contains(p)).then_some((i, r.width * r.height))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
@@ -1571,11 +1658,13 @@ fn dashed(r: &mut Renderer, bx: Rectangle, width: f32, color: Color) {
 #[allow(clippy::too_many_arguments)]
 fn draw_labels(r: &mut Renderer, b: Rectangle, l: &Live, s: f32, off: Vector, lp: &LabelProps, hover: Option<usize>, drawing: Option<[f32; 4]>) {
     let keyline = t::alpha(t::PHOTO_GROUND, 0.55);
+    let shift = |q: Rectangle| rect(q.x + b.x, q.y + b.y, q.width, q.height);
+    let placed = label_places(l, s, off, lp, hover, b.width);
     let order: Vec<usize> = (0..lp.boxes.len()).filter(|&i| Some(i) != lp.selected).chain(lp.selected).collect();
     for i in order {
         let bx_def = &lp.boxes[i];
-        let local = label_rect(l, s, off, &bx_def.bbox);
-        let bx = rect(local.x + b.x, local.y + b.y, local.width, local.height);
+        let pl = placed[i];
+        let bx = shift(pl.bx);
         let selected = lp.selected == Some(i);
         let quiet = lp.selected.is_some() && !selected && hover != Some(i);
         let color = if quiet { t::alpha(bx_def.color, 0.55) } else { bx_def.color };
@@ -1587,13 +1676,28 @@ fn draw_labels(r: &mut Renderer, b: Rectangle, l: &Live, s: f32, off: Vector, lp
         } else {
             paint::framed(r, bx, 0.0, Color::TRANSPARENT, color, width);
         }
-        let tag = tag_rect(bx, &bx_def.tag, b.y, b.x + b.width);
+        let tag = shift(pl.tag);
+        let ink = if bx_def.named { t::alpha(t::ON_SIGNAL, if quiet { 0.7 } else { 1.0 }) } else { color };
         if bx_def.named {
             paint::rounded(r, tag, 2.0, color);
-            paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, t::alpha(t::ON_SIGNAL, if quiet { 0.7 } else { 1.0 }), HAlign::Left, b);
         } else {
             paint::framed(r, tag, 2.0, t::alpha(t::PHOTO_GROUND, 0.82), color, 1.0);
-            paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, color, HAlign::Left, b);
+        }
+        paint::text(r, &bx_def.tag, rect(tag.x + TAG_PAD, tag.y, tag.width, tag.height), t::T_SMALL, paint::SEMIBOLD, ink, HAlign::Left, b);
+        // The name tag's ×: back to "Unnamed".  A hairline parts it from
+        // the name.
+        if let Some(u) = pl.unname.map(shift) {
+            paint::vline(r, u.x, u.y + 4.0, u.y + u.height - 4.0, 1.0, t::alpha(t::ON_SIGNAL, 0.35));
+            let (cx, cy, k) = (u.center_x(), u.center_y(), 3.5);
+            paint::strokes(r, &[(Point::new(cx - k, cy - k), Point::new(cx + k, cy + k)), (Point::new(cx - k, cy + k), Point::new(cx + k, cy - k))], 1.6, ink, true);
+        }
+        // The picked box's ×: remove it.  A dark disc in the box's colour
+        // ring, over the corner (a control, never a tint on the photo).
+        if let Some(c) = pl.remove {
+            let c = Point::new(c.x + b.x, c.y + b.y);
+            paint::circle(r, c, X_R, t::alpha(t::PHOTO_GROUND, 0.92), color, 1.5);
+            let k = 3.5;
+            paint::strokes(r, &[(Point::new(c.x - k, c.y - k), Point::new(c.x + k, c.y + k)), (Point::new(c.x - k, c.y + k), Point::new(c.x + k, c.y - k))], 1.8, t::PHOTO_INK, true);
         }
     }
     let draft = drawing.map(|d| (d, lp.draft.map_or(t::PHOTO_INK, |(_, c)| c))).or(lp.draft);
@@ -1716,6 +1820,47 @@ impl<'a, Message: 'a> From<ImageStage<'a, Message>> for Element<'a, Message, ice
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    /// The labels' ×s: only the picked box has the box's ×, at its
+    /// top-right corner (its bottom-right when the tag reaches the
+    /// corner); a name tag has its × when it is named and its box picked
+    /// or under the pointer, never when unnamed; a click on either is
+    /// that control, whatever the boxes below; a click elsewhere none.
+    #[test]
+    fn the_label_crosses_sit_on_the_picked_box_and_named_tags() {
+        let wide = rect(100.0, 100.0, 200.0, 150.0);
+        let narrow = rect(400.0, 100.0, 30.0, 40.0);
+        let boxes = [(wide, "Someone", true), (narrow, "Unnamed", false), (rect(600.0, 300.0, 100.0, 100.0), "Suit", true)];
+        // Nothing picked or hovered: no control at all.
+        let plain = label_layout(&boxes, None, None, 0.0, 1000.0);
+        assert!(plain.iter().all(|p| p.remove.is_none() && p.unname.is_none()));
+        assert_eq!(control_hit(&plain, Point::new(300.0, 100.0)), None);
+        // The wide named box picked: its × at the top-right corner, and
+        // its tag's ×.
+        let picked = label_layout(&boxes, Some(0), None, 0.0, 1000.0);
+        assert_eq!(picked[0].remove, Some(Point::new(300.0, 100.0)));
+        let u = picked[0].unname.expect("a named tag's ×");
+        assert_eq!(u.x + u.width, picked[0].tag.x + picked[0].tag.width, "at the tag's end");
+        assert!(picked[0].tag.width > plain[0].tag.width, "the tag widens for it");
+        assert!(picked[1].remove.is_none() && picked[1].unname.is_none() && picked[2].unname.is_none());
+        // Easy to hit: anywhere within the square round the corner.
+        assert_eq!(control_hit(&picked, Point::new(300.0 + X_HIT - 1.0, 100.0 - X_HIT + 1.0)), Some(Control::Remove(0)));
+        assert_eq!(control_hit(&picked, Point::new(u.center_x(), u.center_y())), Some(Control::Unname(0)));
+        assert_eq!(control_hit(&picked, Point::new(200.0, 200.0)), None, "inside the box: a pick, not a control");
+        // An unnamed box picked: the box's ×, no tag × (nothing to clear);
+        // its tag reaches its corner, so the × goes to the bottom-right.
+        let narrow_picked = label_layout(&boxes, Some(1), None, 0.0, 1000.0);
+        assert!(narrow_picked[1].unname.is_none());
+        assert_eq!(narrow_picked[1].remove, Some(Point::new(430.0, 140.0)));
+        // A named box under the pointer shows its tag's × (to clear the
+        // name without picking it first); no box ×.
+        let hovered = label_layout(&boxes, None, Some(2), 0.0, 1000.0);
+        assert!(hovered[2].unname.is_some() && hovered[2].remove.is_none());
+        let u = hovered[2].unname.unwrap();
+        assert_eq!(control_hit(&hovered, Point::new(u.center_x(), u.center_y())), Some(Control::Unname(2)));
+        // The tag still holds the box for picking.
+        assert_eq!(label_hit(&hovered, Point::new(hovered[2].tag.x + 2.0, hovered[2].tag.y + 2.0)), Some(2));
+    }
 
     fn at(start: Instant, ms: u64) -> Instant {
         start + Duration::from_millis(ms)

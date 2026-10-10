@@ -598,6 +598,47 @@ impl FakePeople {
         Ok(())
     }
 
+    /// "Not faces": the groups' faces (all, or the picked ones) out of
+    /// them and never back, as the engine's removal; one undo step.
+    pub fn remove_boxes(&mut self, targets: &[(GroupId, Option<Vec<FaceRef>>)]) -> Result<String, String> {
+        if targets.iter().any(|(id, _)| self.group(id).is_none()) {
+            return Err("That group changed: look again.".into());
+        }
+        let mut n = 0;
+        let mut names = Vec::new();
+        for (id, picked) in targets {
+            let g = self.group(id).expect("checked");
+            n += match picked {
+                Some(p) => g.members.iter().filter(|k| p.iter().any(|f| f.key == **k)).count(),
+                None => g.members.len(),
+            };
+            names.extend(g.name.clone());
+        }
+        if n == 0 {
+            return Err("nothing to remove".into());
+        }
+        if targets.len() != 1 {
+            names.clear();
+        }
+        let count = if n == 1 { "a face".to_string() } else { format!("{n} faces") };
+        let what = match names.as_slice() {
+            [one] => format!("Removed {count} from {one}"),
+            _ => format!("Removed {count}"),
+        };
+        self.remember(what.clone());
+        for (id, picked) in targets {
+            let g = self.group_mut(id).expect("checked");
+            let gone: Vec<Key> = g.members.iter().copied().filter(|k| picked.as_ref().is_none_or(|p| p.iter().any(|f| f.key == *k))).collect();
+            g.members.retain(|k| !gone.contains(k));
+            g.confirmed.retain(|k| !gone.contains(k));
+            g.rejected.extend(gone);
+            if g.members.is_empty() {
+                g.name = None;
+            }
+        }
+        Ok(what)
+    }
+
     /// Yes (add the faces), No (not this person: out, and never suggested
     /// again) or None (take the answer back).
     pub fn answer(&mut self, id: &GroupId, faces: &[FaceRef], yes: Option<bool>) {
