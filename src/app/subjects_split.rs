@@ -463,7 +463,7 @@ fn ask_order(app: &mut App) {
     a.rank_seq = seqs;
     let sides = a.sides.clone();
     for (side, heads) in sides.iter().enumerate() {
-        app.search.link.heads_order(seqs[side], heads);
+        app.search.link.heads_order(seqs[side], Kind::Fursuit, heads);
     }
 }
 

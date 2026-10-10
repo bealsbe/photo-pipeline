@@ -169,6 +169,14 @@ pub enum BgEvent {
     /// A set of fursuit heads, farthest from the rest of the set first
     /// (`Engine::heads_order`).
     HeadsOrder { seq: u64, far: Arc<Vec<(crate::model::subjects::FaceRef, f32)>> },
+    /// Every group of a kind with its distance to some heads (the group
+    /// editor's panel, nearest first): `Engine::near_groups`.
+    NearGroups { seq: u64, list: Arc<Vec<(crate::model::subjects::GroupId, f32)>> },
+    /// The group editor's *Apply* went through (one undo step): its words.
+    EditApplied { seq: u64, words: String },
+    /// ... or was refused, nothing changed: why, and the subject that was
+    /// gone, if that was it.
+    EditRefused { seq: u64, why: String, gone: Option<crate::model::subjects::SubjectId> },
     /// Pairs of fursuit groups that may be one suit
     /// (`Engine::merge_suggestions`), nearest first: those offered now
     /// (by distance, or with verdicts already kept).  `focus`: the group
@@ -248,6 +256,9 @@ impl BgEvent {
             BgEvent::GroupCheck { .. } => "GroupCheck",
             BgEvent::Located { .. } => "Located",
             BgEvent::HeadsOrder { .. } => "HeadsOrder",
+            BgEvent::NearGroups { .. } => "NearGroups",
+            BgEvent::EditApplied { .. } => "EditApplied",
+            BgEvent::EditRefused { .. } => "EditRefused",
             BgEvent::MergeJudged { .. } => "MergeJudged",
             BgEvent::ModelDownload { .. } => "ModelDownload",
         }

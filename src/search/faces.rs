@@ -31,7 +31,7 @@ use crate::ml::face;
 use crate::ml::models::{self, ModelId};
 use crate::model::binfile::{Reader, Writer};
 use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
-use crate::model::subjects::{self, Face, FaceRef, Framing, Group, GroupId, Kind, LabelEdit, NameTo, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, box_noun, private_dir, private_file};
+use crate::model::subjects::{self, EditDest, EditPlan, EditTarget, Face, FaceRef, Framing, Group, GroupEdit, GroupId, Kind, LabelEdit, NameTo, PlanDest, Refused, Subject, SubjectId, Subjects, SubjectsFile, UNDO_DEPTH, box_noun, private_dir, private_file};
 use crate::ops::fsutil;
 
 const FACES_MAGIC: &[u8; 8] = b"PPFACED\0";
@@ -1019,6 +1019,204 @@ impl People {
         Ok(target)
     }
 
+    /// The group editor's edit, resolved against the groups as they are
+    /// now: each head's group (`group_of`), each target's (a subject by
+    /// its id; an automatic group by the heads it holds, as `locate`
+    /// finds them).  Heads the viewer's labels removed, and moves to where
+    /// a head already is, drop out.  Refused only when a subject it sends
+    /// heads to (or renames) is gone, or is of another kind; an automatic
+    /// target that is gone becomes a new group of its own.
+    pub fn plan_edit(&self, e: &GroupEdit) -> Result<EditPlan, Refused> {
+        let kind = e.kind;
+        let removed = self.file.removed_index(kind);
+        let mut new_names = e.new_names.clone();
+        let mut gone = 0;
+        let mut targets: Vec<PlanDest> = Vec::with_capacity(e.targets.len());
+        for t in &e.targets {
+            targets.push(match t {
+                EditTarget::Subject(s) => {
+                    let sub = self.file.get(s).ok_or_else(|| Refused::NoSuchSubject(s.clone()))?;
+                    if sub.kind != kind {
+                        return Err(Refused::MixedKinds);
+                    }
+                    PlanDest::Group(GroupId::Subject(s.clone()))
+                }
+                EditTarget::ClusterOf(heads) => {
+                    let mut count: HashMap<GroupId, usize> = HashMap::new();
+                    for g in heads.iter().filter_map(|h| self.group_of(kind, h)) {
+                        *count.entry(g).or_default() += 1;
+                    }
+                    let mut best: Vec<(GroupId, usize)> = count.into_iter().collect();
+                    best.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| format!("{:?}", a.0).cmp(&format!("{:?}", b.0))));
+                    match best.into_iter().next() {
+                        Some((g, _)) => PlanDest::Group(g),
+                        None => {
+                            gone += 1;
+                            new_names.push(None);
+                            PlanDest::New(new_names.len() - 1)
+                        }
+                    }
+                }
+            });
+        }
+        let mut moves = Vec::with_capacity(e.moves.len());
+        let mut seen: HashSet<FaceRef> = HashSet::new();
+        for (head, dest) in &e.moves {
+            if removed.covers(head) || !seen.insert(*head) {
+                continue;
+            }
+            let to = match dest {
+                EditDest::Group(i) => targets.get(*i).cloned().ok_or(Refused::Nothing)?,
+                EditDest::New(i) if *i < e.new_names.len() => PlanDest::New(*i),
+                EditDest::New(_) => return Err(Refused::Nothing),
+                EditDest::Removed => PlanDest::Removed,
+                EditDest::TakenOut => PlanDest::TakenOut,
+            };
+            let from = self.group_of(kind, head);
+            // Taken out of no group: nothing to do.
+            if to == PlanDest::TakenOut && from.is_none() {
+                continue;
+            }
+            if let (PlanDest::Group(t), Some(f)) = (&to, &from) {
+                if t == f {
+                    continue;
+                }
+            }
+            moves.push((*head, from, to));
+        }
+        let renames = e
+            .renames
+            .iter()
+            .filter_map(|(i, name)| match targets.get(*i) {
+                Some(PlanDest::Group(g)) => Some((g.clone(), name.clone())),
+                _ => None,
+            })
+            .collect();
+        Ok(EditPlan { kind, new_names, moves, renames, gone })
+    }
+
+    /// The group editor's *Apply*, planned (`plan_edit`): every move, the
+    /// new groups, the removals and the names, as ONE undo step.  An
+    /// automatic group that receives heads (or a name) becomes a subject
+    /// first, as a move makes it; a subject left with nothing is gone (as
+    /// "Not heads" leaves it), and so is a new group nothing went to.
+    /// Refused with nothing changed (and no undo step) when any part is.
+    /// Returns the words (the status line's and the undo's) and the new
+    /// groups made.
+    pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<(String, Vec<SubjectId>), Refused> {
+        if plan.moves.is_empty() && plan.renames.is_empty() {
+            return Err(Refused::Nothing);
+        }
+        let words = self.edit_words(plan);
+        let before = self.file.clone();
+        self.checkpoint(words.clone());
+        match self.apply_plan(plan) {
+            Ok(made) => {
+                self.save();
+                Ok((words, made))
+            }
+            Err(e) => {
+                self.file = before;
+                self.undo.pop();
+                Err(e)
+            }
+        }
+    }
+
+    fn apply_plan(&mut self, plan: &EditPlan) -> Result<Vec<SubjectId>, Refused> {
+        let kind = plan.kind;
+        // Every existing group that receives heads or a name, as a
+        // subject: automatic ones made into subjects first, before any
+        // head moves (their members as the grouping holds them now).
+        let mut as_subject: HashMap<GroupId, SubjectId> = HashMap::new();
+        // (A group heads are taken out of, too: the rejection is kept on
+        // a subject, so it outlives a regroup.)
+        let wanted = plan.moves.iter().filter_map(|(_, from, to)| match to {
+            PlanDest::Group(g) => Some(g.clone()),
+            PlanDest::TakenOut => from.clone(),
+            _ => None,
+        });
+        for g in wanted.chain(plan.renames.iter().map(|(g, _)| g.clone())) {
+            if as_subject.contains_key(&g) {
+                continue;
+            }
+            let (k, members) = self.members(&g)?;
+            if k != kind {
+                return Err(Refused::MixedKinds);
+            }
+            let sid = match &g {
+                GroupId::Subject(s) => s.clone(),
+                GroupId::Cluster(_) => self.file.create(kind, None, members),
+            };
+            as_subject.insert(g, sid);
+        }
+        let made: Vec<SubjectId> = plan.new_names.iter().map(|n| self.file.create(kind, n.clone(), Vec::new())).collect();
+        // The heads, by where they go (in the editor's order).
+        let mut by_dest: Vec<(PlanDest, Vec<FaceRef>)> = Vec::new();
+        for (head, _, to) in &plan.moves {
+            match by_dest.iter_mut().find(|(d, _)| d == to) {
+                Some((_, v)) => v.push(*head),
+                None => by_dest.push((to.clone(), vec![*head])),
+            }
+        }
+        // Taken out: by the group each leaves.
+        let mut taken: Vec<(GroupId, Vec<FaceRef>)> = Vec::new();
+        for (head, from, to) in &plan.moves {
+            if let (PlanDest::TakenOut, Some(g)) = (to, from) {
+                match taken.iter_mut().find(|(x, _)| x == g) {
+                    Some((_, v)) => v.push(*head),
+                    None => taken.push((g.clone(), vec![*head])),
+                }
+            }
+        }
+        for (g, heads) in &taken {
+            let _ = self.file.reject(&as_subject[g], heads.clone());
+        }
+        for (to, heads) in &by_dest {
+            match to {
+                PlanDest::TakenOut => {}
+                PlanDest::Group(g) => {
+                    let _ = self.file.add_members(&as_subject[g], heads.clone());
+                }
+                PlanDest::New(i) => {
+                    let _ = self.file.add_members(&made[*i], heads.clone());
+                }
+                PlanDest::Removed => {
+                    for h in heads {
+                        let _ = self.file.remove_box(kind, *h);
+                    }
+                }
+            }
+        }
+        for (g, name) in &plan.renames {
+            self.file.rename(&as_subject[g], name.clone())?;
+        }
+        // A subject left with nothing goes (its name with it); so does a
+        // new group nothing went to.
+        let touched: HashSet<SubjectId> = plan
+            .moves
+            .iter()
+            .filter_map(|(_, from, _)| match from {
+                Some(GroupId::Subject(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .chain(as_subject.values().cloned())
+            .chain(made.iter().cloned())
+            .collect();
+        for s in touched {
+            if self.file.get(&s).is_some_and(|x| x.members.is_empty()) {
+                let _ = self.file.forget(&s);
+            }
+        }
+        Ok(made.into_iter().filter(|s| self.file.get(s).is_some()).collect())
+    }
+
+    /// An edit in words: "Split into 3 groups, 4 heads to Kiba, 2
+    /// removed".
+    pub fn edit_words(&self, plan: &EditPlan) -> String {
+        subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.subject_of(g).and_then(|s| s.name.clone()))
+    }
+
     /// A review answer for `group`: `Some(true)` confirms the faces as
     /// members, `Some(false)` rejects them ("not this person"), `None`
     /// takes an earlier answer back (the faces leave both lists).  A
@@ -1753,6 +1951,126 @@ mod tests {
         assert_eq!(p.file.not_same.len(), 1, "people's forget leaves the fursuits' answers");
         p.forget_kind(Kind::Fursuit);
         assert!(p.file.not_same.is_empty());
+    }
+
+    fn h(n: u8) -> FaceRef {
+        FaceRef::new(Key([n; 16]), [0.1, 0.1, 0.2, 0.2])
+    }
+
+    /// The group editor's *Apply* in one step: a new group (named), heads
+    /// to a named group and to an automatic one, a removal and a rename;
+    /// one undo puts every part back.  Viewer-removed heads stay out.
+    #[test]
+    fn an_edit_applies_as_one_step_and_one_undo_takes_it_back() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let a = p.file.create(k, None, vec![h(1), h(2), h(3), h(4), h(5)]);
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(10)]);
+        p.set_other_clusters(k, vec![(7, vec![h(20), h(21)])]);
+        p.file.remove_box(k, h(5)).unwrap();
+        p.file.add_members(&a, vec![h(5)]).unwrap();
+        let before = p.file.clone();
+        let edit = GroupEdit {
+            kind: k,
+            targets: vec![EditTarget::Subject(kiba.clone()), EditTarget::ClusterOf(vec![h(20), h(21)]), EditTarget::Subject(a.clone())],
+            new_names: vec![Some("Rook".into()), None],
+            moves: vec![(h(2), EditDest::New(0)), (h(3), EditDest::Group(0)), (h(4), EditDest::Removed), (h(1), EditDest::Group(1)), (h(5), EditDest::Group(0)), (h(10), EditDest::Group(0))],
+            renames: vec![(2, "Ash".into())],
+        };
+        let plan = p.plan_edit(&edit).unwrap();
+        assert!(!plan.moves.iter().any(|m| m.0 == h(5)), "the viewer removed it");
+        assert!(!plan.moves.iter().any(|m| m.0 == h(10)), "already in Kiba");
+        let undo_depth = p.undo.len();
+        let (words, made) = p.apply_edit(&plan).unwrap();
+        assert_eq!(p.undo.len(), undo_depth + 1, "one undo step");
+        assert_eq!(words, "Split into 2 groups, 1 head to Kiba, 1 head to an unnamed group, 1 removed, named Ash");
+        assert_eq!(made.len(), 1, "the unused new group is not made");
+        let rook = p.file.named(k, "Rook")[0].id.clone();
+        assert_eq!(p.file.get(&rook).unwrap().members, vec![h(2)]);
+        assert!(p.file.get(&kiba).unwrap().members.contains(&h(3)));
+        let cluster_now = p.file.member_of(k, &h(20)).expect("the automatic group became a subject");
+        assert!(cluster_now.members.contains(&h(1)) && cluster_now.members.contains(&h(21)));
+        assert!(p.file.removed_index(k).covers(&h(4)));
+        assert_eq!(p.file.get(&a).unwrap().name.as_deref(), Some("Ash"));
+        p.undo().unwrap();
+        assert_eq!(p.file.subjects, before.subjects, "every part back");
+        assert!(!p.file.removed_index(k).covers(&h(4)));
+    }
+
+    /// Apply survives a regroup landing while the editor is open: an
+    /// automatic target is found by its heads under its new id; one that
+    /// is gone becomes a group of its own.  A named target that is gone is
+    /// refused (nothing changed), and so is one of another kind.
+    #[test]
+    fn an_edit_follows_its_heads_through_a_regroup_and_refuses_a_gone_subject() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let a = p.file.create(k, None, vec![h(1), h(2)]);
+        p.set_other_clusters(k, vec![(7, vec![h(20), h(21)])]);
+        let edit = GroupEdit { kind: k, targets: vec![EditTarget::ClusterOf(vec![h(20), h(21)])], moves: vec![(h(2), EditDest::Group(0))], ..GroupEdit::default() };
+        // The regroup: the same heads, a new id.
+        p.set_other_clusters(k, vec![(9, vec![h(20), h(21)])]);
+        let plan = p.plan_edit(&edit).unwrap();
+        assert_eq!(plan.moves[0].2, PlanDest::Group(GroupId::Cluster(9)));
+        assert_eq!(plan.moves[0].1, Some(GroupId::Subject(a.clone())), "from the group it is in when it applies");
+        // Gone altogether: a new group of its own.
+        p.set_other_clusters(k, Vec::new());
+        let plan = p.plan_edit(&edit).unwrap();
+        assert_eq!((plan.gone, plan.moves[0].2.clone()), (1, PlanDest::New(0)));
+        p.apply_edit(&plan).unwrap();
+        assert!(p.file.member_of(k, &h(2)).is_some_and(|s| s.id != a));
+        // A named target deleted meanwhile: refused, nothing changed.
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(30)]);
+        let gone = GroupEdit { kind: k, targets: vec![EditTarget::Subject(kiba.clone())], moves: vec![(h(1), EditDest::Group(0))], ..GroupEdit::default() };
+        p.file.forget(&kiba).unwrap();
+        let file = p.file.clone();
+        assert_eq!(p.plan_edit(&gone), Err(Refused::NoSuchSubject(kiba)));
+        assert_eq!(p.file.subjects, file.subjects);
+        // Never across kinds.
+        let person = p.file.create(Kind::Person, Some("Someone".into()), vec![h(40)]);
+        let mixed = GroupEdit { kind: k, targets: vec![EditTarget::Subject(person)], moves: vec![(h(1), EditDest::Group(0))], ..GroupEdit::default() };
+        assert_eq!(p.plan_edit(&mixed), Err(Refused::MixedKinds));
+    }
+
+    /// "Take out of this group" in bulk, for both kinds: the heads leave
+    /// the group they are in and are rejected for it (an automatic group
+    /// becomes a subject, so the rejection outlives a regroup), free for
+    /// any other group; one undo puts them back.
+    #[test]
+    fn taken_out_heads_leave_are_rejected_and_stay_free_for_others() {
+        for k in [Kind::Fursuit, Kind::Person] {
+            let mut p = People::load(None);
+            let a = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2), h(3), h(4)]);
+            let take = |heads: &[u8]| GroupEdit { kind: k, moves: heads.iter().map(|&n| (h(n), EditDest::TakenOut)).collect(), ..GroupEdit::default() };
+            let before = p.file.clone();
+            let plan = p.plan_edit(&take(&[2, 3])).unwrap();
+            assert_eq!(plan.moves.iter().map(|m| m.1.clone()).collect::<Vec<_>>(), vec![Some(GroupId::Subject(a.clone())); 2]);
+            let (words, _) = p.apply_edit(&plan).unwrap();
+            assert_eq!(words, "2 taken out");
+            let s = p.file.get(&a).unwrap();
+            assert_eq!((s.members.clone(), s.rejected.clone()), (vec![h(1), h(4)], vec![h(2), h(3)]), "{k:?}");
+            assert!(p.file.member_of(k, &h(2)).is_none(), "free");
+            // Free for another group.
+            let rook = p.file.create(k, Some("Rook".into()), vec![h(9)]);
+            let to_rook = GroupEdit { kind: k, targets: vec![EditTarget::Subject(rook.clone())], moves: vec![(h(2), EditDest::Group(0))], ..GroupEdit::default() };
+            let plan = p.plan_edit(&to_rook).unwrap();
+            p.apply_edit(&plan).unwrap();
+            assert!(p.file.get(&rook).unwrap().members.contains(&h(2)));
+            p.undo().unwrap();
+            p.undo().unwrap();
+            assert_eq!(p.file.subjects.iter().filter(|s| s.id != rook).cloned().collect::<Vec<_>>(), before.subjects, "{k:?}: one undo each");
+        }
+        // Out of an automatic group: it becomes a subject holding the
+        // rejection, so a regroup can't bring the head back.
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        p.set_other_clusters(k, vec![(7, vec![h(20), h(21), h(22)])]);
+        let plan = p.plan_edit(&GroupEdit { kind: k, moves: vec![(h(22), EditDest::TakenOut)], ..GroupEdit::default() }).unwrap();
+        p.apply_edit(&plan).unwrap();
+        let s = p.file.member_of(k, &h(20)).expect("a subject now").clone();
+        assert_eq!((s.members.len(), s.rejected.clone()), (2, vec![h(22)]));
+        // Taken out of no group: nothing to do.
+        assert_eq!(p.apply_edit(&p.plan_edit(&GroupEdit { kind: k, moves: vec![(h(50), EditDest::TakenOut)], ..GroupEdit::default() }).unwrap()), Err(Refused::Nothing));
     }
 
     /// Two groups side by side: a person's faces come least like the rest

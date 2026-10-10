@@ -23,6 +23,7 @@ pub use crate::model::subjects::{Face, FaceRef, Framing, Group, GroupId, Kind, S
 use crate::model::library_index::{self, LibraryIndex};
 use crate::model::record::FileType;
 use crate::search::index::Key;
+use crate::model::subjects::{EditDest, EditPlan, EditTarget, GroupEdit, PlanDest};
 use crate::util;
 
 // ── the words for each kind ─────────────────────────────────────────────────
@@ -388,9 +389,149 @@ impl FakePeople {
         self.groups.iter().filter(|g| g.name.is_some()).count()
     }
 
+    /// The group editor's edit, resolved against the stand-in's groups as
+    /// they are now (as the engine's `plan_edit`): each head's group, each
+    /// target's; a named target that is gone is refused.
+    pub fn plan_edit(&self, e: &GroupEdit) -> Result<EditPlan, (String, Option<SubjectId>)> {
+        let mut new_names = e.new_names.clone();
+        let mut gone = 0;
+        let mut targets: Vec<PlanDest> = Vec::new();
+        for t in &e.targets {
+            targets.push(match t {
+                EditTarget::Subject(s) => {
+                    let id = GroupId::Subject(s.clone());
+                    if self.group(&id).is_none() {
+                        return Err(("That group is gone.".into(), Some(s.clone())));
+                    }
+                    PlanDest::Group(id)
+                }
+                EditTarget::ClusterOf(heads) => {
+                    let mut count: HashMap<GroupId, usize> = HashMap::new();
+                    for g in heads.iter().filter_map(|h| self.group_of(h)) {
+                        *count.entry(g).or_default() += 1;
+                    }
+                    let mut best: Vec<(GroupId, usize)> = count.into_iter().collect();
+                    best.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| format!("{:?}", a.0).cmp(&format!("{:?}", b.0))));
+                    match best.into_iter().next() {
+                        Some((g, _)) => PlanDest::Group(g),
+                        None => {
+                            gone += 1;
+                            new_names.push(None);
+                            PlanDest::New(new_names.len() - 1)
+                        }
+                    }
+                }
+            });
+        }
+        let mut moves = Vec::new();
+        let mut seen = HashSet::new();
+        for (head, dest) in &e.moves {
+            if !seen.insert(*head) {
+                continue;
+            }
+            let to = match dest {
+                EditDest::Group(i) => targets.get(*i).cloned().ok_or(("nothing to do".to_string(), None))?,
+                EditDest::New(i) => PlanDest::New(*i),
+                EditDest::Removed => PlanDest::Removed,
+                EditDest::TakenOut => PlanDest::TakenOut,
+            };
+            let from = self.group_of(head);
+            if (to == PlanDest::TakenOut && from.is_none()) || matches!((&to, &from), (PlanDest::Group(t), Some(f)) if t == f) {
+                continue;
+            }
+            moves.push((*head, from, to));
+        }
+        let renames = e.renames.iter().filter_map(|(i, n)| match targets.get(*i) {
+            Some(PlanDest::Group(g)) => Some((g.clone(), n.clone())),
+            _ => None,
+        }).collect();
+        Ok(EditPlan { kind: e.kind, new_names, moves, renames, gone })
+    }
+
+    /// The group editor's *Apply*, planned: one undo step.  Its words.
+    pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<String, String> {
+        if plan.moves.is_empty() && plan.renames.is_empty() {
+            return Err("nothing to do".into());
+        }
+        let words = crate::model::subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.group(g).and_then(|x| x.name.clone()));
+        self.remember(words.clone());
+        let mut made: Vec<Option<GroupId>> = vec![None; plan.new_names.len()];
+        for (head, from, to) in &plan.moves {
+            if let Some(f) = from {
+                if let Some(g) = self.group_mut(f) {
+                    g.members.retain(|m| *m != head.key);
+                    g.confirmed.retain(|m| *m != head.key);
+                    if *to == PlanDest::TakenOut {
+                        g.rejected.insert(head.key);
+                    }
+                }
+            }
+            let dest = match to {
+                PlanDest::Group(g) => Some(g.clone()),
+                PlanDest::New(i) => {
+                    if made[*i].is_none() {
+                        made[*i] = Some(self.new_edit_group(head, plan.new_names[*i].clone()));
+                    }
+                    made[*i].clone()
+                }
+                PlanDest::Removed | PlanDest::TakenOut => None,
+            };
+            if let Some(g) = dest.and_then(|d| self.group_mut(&d)) {
+                if !g.members.contains(&head.key) {
+                    g.members.push(head.key);
+                }
+                g.rejected.remove(&head.key);
+                g.confirmed.insert(head.key);
+            }
+        }
+        for (g, name) in &plan.renames {
+            if let Some(x) = self.group_mut(g) {
+                x.name = Some(name.clone());
+            }
+        }
+        self.groups.retain(|g| !g.members.is_empty());
+        Ok(words)
+    }
+
+    fn new_edit_group(&mut self, first: &FaceRef, name: Option<String>) -> GroupId {
+        self.next_id += 1;
+        let id = GroupId::Cluster(1_000_000 + self.next_id);
+        let person = self.by_key.get(&first.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)).unwrap_or(0);
+        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), person });
+        id
+    }
+
+    /// Every group with its made-up distance to some faces: groups of the
+    /// person most of them show near, the rest far.
+    pub fn near_groups(&self, faces: &[FaceRef]) -> Vec<(GroupId, f32)> {
+        let person = |f: &FaceRef| self.by_key.get(&f.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst));
+        let mut count: HashMap<Option<usize>, usize> = HashMap::new();
+        for f in faces {
+            *count.entry(person(f)).or_default() += 1;
+        }
+        let most = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).and_then(|(p, _)| p);
+        let mut v: Vec<(GroupId, f32)> = self.groups.iter().filter(|g| !g.members.is_empty()).map(|g| (g.id.clone(), if Some(g.person) == most { 0.1 } else { 0.5 + 0.01 * (hash64(&g.id) % 30) as f32 })).collect();
+        v.sort_by(|a, b| a.1.total_cmp(&b.1));
+        v
+    }
+
     /// The group holding a face (by its photo), if any.
     pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
         self.groups.iter().find(|g| g.members.contains(&f.key)).map(|g| g.id.clone())
+    }
+
+    /// A set of faces farthest from the rest first: those of another
+    /// person than most of the set's, first.
+    pub fn far_order_of(&self, faces: &[FaceRef]) -> Vec<(FaceRef, f32)> {
+        let person = |f: &FaceRef| self.by_key.get(&f.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst));
+        let mut count: HashMap<Option<usize>, usize> = HashMap::new();
+        for f in faces {
+            *count.entry(person(f)).or_default() += 1;
+        }
+        let most = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).map(|(p, _)| p);
+        let mut v: Vec<(FaceRef, f32)> = faces.iter().map(|f| (*f, if Some(person(f)) == most { 0.3 } else { 0.8 })).collect();
+        v.sort_by(|a, b| b.1.total_cmp(&a.1));
+        v
     }
 
     /// A group's faces farthest from the rest first: those of another

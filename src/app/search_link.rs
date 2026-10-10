@@ -483,13 +483,77 @@ impl Link {
         }
     }
 
+    /// Every group of `kind` with its distance to `heads`, nearest first
+    /// (`BgEvent::NearGroups`): the group editor's panel.
+    pub fn near_groups(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
+        match self {
+            Link::Engine(e) => e.near_groups(seq, kind, heads.to_vec()),
+            Link::Fake(f) => {
+                let list = {
+                    let s = f.state.lock();
+                    if kind == Kind::Fursuit { s.fursuits.near_groups(heads) } else { s.people.near_groups(heads) }
+                };
+                let _ = f.bus.unbounded_send(BgEvent::NearGroups { seq, list: Arc::new(list) });
+            }
+        }
+    }
+
+    /// The group editor's *Apply*: one undo step (`BgEvent::EditApplied`,
+    /// or `EditRefused` with nothing changed).
+    pub fn apply_edit(&self, seq: u64, edit: crate::model::subjects::GroupEdit, via: Via) {
+        match self {
+            Link::Engine(e) => e.apply_edit(seq, edit, via),
+            Link::Fake(f) => {
+                let kind = edit.kind;
+                let plan = {
+                    let s = f.state.lock();
+                    if kind == Kind::Fursuit { s.fursuits.plan_edit(&edit) } else { s.people.plan_edit(&edit) }
+                };
+                let plan = match plan {
+                    Ok(p) => p,
+                    Err((why, gone)) => {
+                        let _ = f.bus.unbounded_send(BgEvent::EditRefused { seq, why, gone });
+                        return;
+                    }
+                };
+                // The record's entry, measured before.
+                let before = f.decisions.is_on().then(|| {
+                    let s = f.state.lock();
+                    (kind, s.edit_act(&plan))
+                });
+                let mut result = None;
+                f.change(|s| {
+                    let r = if kind == Kind::Fursuit { s.fursuits.apply_edit(&plan) } else { s.people.apply_edit(&plan) };
+                    if r.is_ok() {
+                        s.edits.push((Some(kind), None));
+                    }
+                    s.refresh_people();
+                    result = Some(r);
+                });
+                match result {
+                    Some(Ok(words)) => {
+                        f.record(Some(kind), before, via, None);
+                        let _ = f.bus.unbounded_send(BgEvent::EditApplied { seq, words });
+                    }
+                    Some(Err(why)) => {
+                        let _ = f.bus.unbounded_send(BgEvent::EditRefused { seq, why, gone: None });
+                    }
+                    None => {}
+                }
+            }
+        }
+    }
+
     /// A set of fursuit heads farthest from the rest first
     /// (`BgEvent::HeadsOrder`).
-    pub fn heads_order(&self, seq: u64, heads: &[FaceRef]) {
+    pub fn heads_order(&self, seq: u64, kind: Kind, heads: &[FaceRef]) {
         match self {
-            Link::Engine(e) => e.heads_order(seq, heads.to_vec()),
+            Link::Engine(e) => e.heads_order(seq, kind, heads.to_vec()),
             Link::Fake(f) => {
-                let far = f.state.lock().fursuits.far_order_of(heads);
+                let far = {
+                    let s = f.state.lock();
+                    if kind == Kind::Fursuit { s.fursuits.far_order_of(heads) } else { s.people.far_order_of(heads) }
+                };
                 let _ = f.bus.unbounded_send(BgEvent::HeadsOrder { seq, far: Arc::new(far) });
             }
         }
@@ -2133,6 +2197,35 @@ fn made_up_hits(index: &LibraryIndex, words: &str, closeness: f32, indexed: usiz
 
 impl FakeState {
     /// A group as the record keeps it (`first`: heads shown first).
+    /// An edit's entry for the record, as the engine's `before_edit`.
+    fn edit_act(&self, plan: &crate::model::subjects::EditPlan) -> Act {
+        use crate::model::subjects::PlanDest;
+        let mut ids: Vec<GroupId> = Vec::new();
+        let index = |g: &GroupId, ids: &mut Vec<GroupId>| match ids.iter().position(|x| x == g) {
+            Some(i) => i,
+            None => {
+                ids.push(g.clone());
+                ids.len() - 1
+            }
+        };
+        let mut out: Vec<(Option<usize>, decisions::To, Vec<FaceRef>)> = Vec::new();
+        for (head, from, to) in &plan.moves {
+            let from = from.as_ref().map(|g| index(g, &mut ids));
+            let to = match to {
+                PlanDest::Group(g) => decisions::To::Group { group: index(g, &mut ids) },
+                PlanDest::New(i) => decisions::To::New { new: *i, name: plan.new_names.get(*i).cloned().flatten() },
+                PlanDest::Removed => decisions::To::Removed,
+                PlanDest::TakenOut => decisions::To::TakenOut,
+            };
+            match out.iter_mut().find(|(f, t, _)| *f == from && *t == to) {
+                Some((_, _, v)) => v.push(*head),
+                None => out.push((from, to, vec![*head])),
+            }
+        }
+        let groups = ids.iter().map(|g| self.side(g, &[])).collect();
+        Act::Edit { groups, out: out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect() }
+    }
+
     fn side(&self, id: &GroupId, first: &[FaceRef]) -> decisions::Side {
         let faces = if self.fursuits.owns(id) { self.fursuits.faces(id) } else { self.people.faces(id) };
         let group = self.subjects.group(id);
