@@ -862,7 +862,7 @@ mod tests {
         let day = chrono::NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
         let cover = Face { face: FaceRef::new(ContentKey([9; 16]), [0.0; 4]), jpg: None, raw: None, day, capture: day.and_hms_opt(1, 0, 0).unwrap(), burst: None, clarity: 1.0, confirmed: true };
         let id = SubjectId("p".into());
-        let all = Subjects { groups: vec![Group { id: GroupId::Subject(id.clone()), kind: Kind::Person, name: Some("Someone".into()), hidden: false, photos: 3, days: 1, cover, suggestions: 0 }], ..Subjects::default() };
+        let all = Subjects { groups: vec![Group { id: GroupId::Subject(id.clone()), kind: Kind::Person, name: Some("Someone".into()), hidden: false, photos: 3, bursts: 3, days: 1, cover, suggestions: 0 }], ..Subjects::default() };
         let key = ContentKey([1; 16]);
         let mut named = bx(1, Kind::Person, Some("Someone"));
         named.subject = Some(id);
