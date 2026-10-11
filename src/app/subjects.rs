@@ -1444,7 +1444,9 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     // Two of its heads in one photo: it holds at least two fursuits.
     let together = g.kind == Kind::Fursuit && s.all.seen_together.contains(&g.id);
     let badge = if g.hidden { Some(Glyph::Hide) } else if together { Some(Glyph::Split) } else { None };
-    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge, on }.into();
+    // The split mark's click: the group editor, which offers the split.
+    let badge_on = (together && !g.hidden).then(|| super::subjects_editor::m(super::subjects_editor::Msg::Open(g.id.clone(), super::subjects_editor::Preset::Plain)));
+    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge, on, badge_on }.into();
     if g.hidden {
         return tip(el, "Show it on the tab again", true);
     }

@@ -2242,7 +2242,13 @@ impl App {
                 BgEvent::SubjectFaces { seq, group, faces } => tasks.push(subjects::on_faces(self, seq, group, faces)),
                 BgEvent::Suggestions { seq, group, list } => tasks.push(subjects::on_suggestions(self, seq, group, list)),
                 BgEvent::Judged { seq, group, offered, left_out, done, total, beyond } => tasks.push(fursuit_judge::on_judged(self, seq, group, offered, left_out, done, total, beyond)),
-                BgEvent::GroupCheck { seq, group, far, pairs, split } => tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split)),
+                BgEvent::GroupCheck { seq, group, far, pairs, split } => {
+                    if subjects_editor::on_check(self, seq, &pairs, split.as_deref()) {
+                        tasks.push(subjects::refresh_crops(self));
+                    } else {
+                        tasks.push(subjects_split::on_check(self, seq, group, far, pairs, split));
+                    }
+                }
                 BgEvent::HeadsOrder { seq, far } => {
                     if subjects_editor::on_heads_order(self, seq, &far) {
                         tasks.push(subjects::refresh_crops(self));

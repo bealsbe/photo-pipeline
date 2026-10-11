@@ -629,17 +629,19 @@ never shown, merged, suggested or completed together with people or pets.
   Shift+click picks a run; *Split into a new group* in the pick strip
   opens the group editor with them in a new column.  "Check this group"
   goes least alike first too.  A group with **two heads in one photo**
-  holds at least two fursuits: its tile carries a split mark, and its
-  page says so with the two heads and *Propose a split…*, which opens the
-  editor with the group split around them (each head beside the one it
-  looks more like), the two in different columns.
+  holds at least two fursuits: its tile carries a small split mark (a
+  click on it opens the group editor), and the editor offers *Suggested
+  split* in its header, with the two heads: a click lays the split out
+  (each head beside the one it looks more like, the two in different
+  columns) as a new column, moving nothing you arranged; Ctrl+Z takes it
+  back.  It is only offered: nothing changes until you apply.
 - **The group editor** (people and fursuits alike, never the two mixed):
   one place to sort a group.  *Edit group* (E) on a group's page, or E
   with a group picked on the tab; every other way to move faces opens it
-  too, set up for the task: *Propose a split…*, side by side (C with two
-  groups picked, the button on a similar group, C on a pair in "Same
-  fursuit?"), and the picked faces' *Split into a new group* and *Move
-  to…* (with them picked).
+  too, set up for the task: the split mark on a tile, side by side (C
+  with two groups picked, the button on a similar group, C on a pair in
+  "Same fursuit?"), and the picked faces' *Split into a new group* and
+  *Move to…* (with them picked).
   - **Columns:** *Stays* (the group), any group opened beside it, and any
     number of new groups (*+ New group*, or drop on it).  Each least like
     the rest first, the farthest few marked, scrolling; only the tiles on
