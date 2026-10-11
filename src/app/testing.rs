@@ -205,11 +205,11 @@
 //! editor send left|right|new|out|remove|group 0|col 2   # the picked faces there
 //! editor drag 0 2 col 1|drag 0 2 group 0|dragto 0 2 new  # drag a face (the picked with it)
 //! editor add|expand 0|collapse 1|name 1 Some name|mergename 1|search kib
-//! editor undo|apply|cancel|gonetonew|dump
+//! editor undo|apply|cancel|gonetonew|suggest|mark 2|dump   # suggest: lay out the suggested split; mark: the tile's split mark
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
-//! split propose               # the proposed split (two heads in one photo): the editor
+//! split propose               # the group editor, which offers the split around two heads of one photo
 //! split openflagged           # open a group flagged with two heads of one photo (unnamed first)
 //! split dump                  # print the order, the check, the picks
 //! subjects drag 3 0|dragto 3 0|dragdrop   # drag the 4th tile onto the 1st
@@ -587,6 +587,15 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
                 "search" => app.update(x(E::Search(rest.to_string()))),
                 "gonetonew" => app.update(x(E::GoneToNew)),
+                "suggest" => app.update(x(E::Suggest)),
+                // The split mark on the tab's 3rd tile: what its click sends.
+                "mark" => match tab(app, nums.first().copied().unwrap_or(0)) {
+                    Some(g) if app.subjects.all.seen_together.contains(&g) => app.update(x(E::Open(g, Preset::Plain))),
+                    _ => {
+                        eprintln!("[editor] no split mark on that tile");
+                        Task::none()
+                    }
+                },
                 "undo" => super::subjects::undo(app),
                 "apply" => app.update(x(E::Apply)),
                 "cancel" => app.update(x(E::Cancel)),

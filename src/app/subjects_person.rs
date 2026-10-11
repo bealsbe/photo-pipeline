@@ -430,7 +430,6 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             v.push((g.cover.clone(), subj::px(app, 22.0), Framing::Face));
         }
     }
-    v.extend(super::subjects_split::wanted(app));
     v
 }
 
@@ -703,8 +702,9 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     if mods.control() || mods.alt() {
         return Task::none();
     }
-    // E: the group editor (with the picked faces picked).
-    if matches!(key, Key::Character(c) if c.as_str().eq_ignore_ascii_case("e")) && !mods.shift() && p.naming.is_none() {
+    // E: the group editor (with the picked faces picked).  A focused name
+    // field takes its own keys, so an E here was not typed into it.
+    if matches!(key, Key::Character(c) if c.as_str().eq_ignore_ascii_case("e")) && !mods.shift() {
         return edit_group(app);
     }
     // The name's options: ↑ ↓ choose, Tab takes.
@@ -745,10 +745,6 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Space::new().into() };
     let mut col = column![header(app, p), kit::hairline(), band(app, p), kit::hairline()].width(Length::Fill).height(Length::Fill);
-    // A group holding two heads of one photo holds two fursuits.
-    if let Some(flag) = super::subjects_split::flag_strip(app, p) {
-        col = col.push(flag).push(kit::hairline());
-    }
     // A fursuit's nearest groups, to merge with one click.
     if let Some(similar) = super::subjects_merge::similar_row(app, &p.group) {
         col = col.push(similar).push(kit::hairline());
@@ -1156,7 +1152,7 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, subj::shape(p.kind));
         let badge = if fursuit { super::subjects_split::badge(p, &f.face) } else { None };
-        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: badge.map(|b| b.0), on: pm(Msg::FacePick(f.face)) }.into();
+        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: badge.map(|b| b.0), on: pm(Msg::FacePick(f.face)), badge_on: None }.into();
         let words = format!("{}{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }, badge.map(|b| format!(". {}", b.1)).unwrap_or_default());
         r = r.push(tip(el, words, true));
     }

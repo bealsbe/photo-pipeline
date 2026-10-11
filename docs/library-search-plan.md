@@ -3751,3 +3751,16 @@ page."
   `undo` is written, nothing is left removed),
   `an_unnamed_group_is_followed_by_the_heads_it_held`, and
   `x_then_z_brings_back_a_detection_and_a_drawn_box`.
+- **The suggested split moved into the editor (2026-10-10).**  The user:
+  "The proposed splits should be hidden within Edit group, not an entire
+  banner."  The group page has no banner for it; the tile keeps its quiet
+  split mark, whose click opens the editor.  The editor asks for the
+  group's split check (`Engine::group_check`) and, for a group with two
+  heads in one photo, offers *Suggested split* in its header (the two
+  heads, small).  A click lays it out as a new column of the heads of the
+  smaller side still in *Stays*: what the user arranged stays as it is
+  (chosen over asking before replacing: nothing is lost, and Ctrl+Z takes
+  the suggestion back).  Laid out, *Apply* records `by: "proposal"`, and
+  `edited` counts only the user's own moves
+  (`a_suggested_split_is_offered_then_laid_out_without_undoing_the_users_moves`).
+

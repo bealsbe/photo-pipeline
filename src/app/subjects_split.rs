@@ -8,8 +8,9 @@
 //! - **Picking a run**: Shift+click picks every head between the last one
 //!   clicked and this one, in the order shown.
 //! - **Two heads in one photo**: a group holding both holds at least two
-//!   fursuits.  A strip says so with the two heads, and *Propose a split…*
-//!   opens the group editor with the group split around them.
+//!   fursuits.  Its tile carries a quiet split mark (a click opens the
+//!   group editor); the editor offers the split around them, never applies
+//!   it (`subjects_editor::Suggestion`).  No banner on the page.
 //!
 //! Moving heads is the group editor's (`subjects_editor`): *Split into a
 //! new group* opens it with the picked heads in a new column.  Fursuits
@@ -18,27 +19,22 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use iced::widget::{row, text, container};
-use iced::{Alignment, Element, Length, Padding, Task};
+use iced::widget::{container, row, text};
+use iced::{Alignment, Element, Padding, Task};
 
-use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, GroupId, Kind};
-use super::style;
+use super::kit;
+use super::people::{Face, FaceRef, GroupId, Kind};
 use super::subjects::{self as subj, m as sm};
 use super::subjects_editor::Preset;
 use super::subjects_person::Person;
 use super::{App, Message};
-use crate::ui::icons::{self, Glyph};
-use crate::ui::subject_tile as tile;
+use crate::ui::icons::Glyph;
 use crate::ui::theme as t;
 use crate::util;
 
 pub fn m(msg: Msg) -> Message {
     sm(subj::Msg::Split(msg))
 }
-
-/// The flag strip's crops.
-const FLAG: f32 = 36.0;
 
 /// How *Heads* is ordered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +65,8 @@ pub enum Msg {
     /// The picked heads (people: faces) split off: the editor, with them
     /// in a new column.
     SplitPicked,
-    /// The split proposed around two heads of one photo: the editor.
+    /// The group editor, which offers the split proposed around two heads
+    /// of one photo.
     Propose,
 }
 
@@ -93,11 +90,7 @@ pub fn on_check(app: &mut App, seq: u64, group: GroupId, far: Arc<Vec<(FaceRef, 
     let rank: HashMap<FaceRef, usize> = far.iter().enumerate().map(|(i, (f, _))| (*f, i)).collect();
     let marked = far.iter().take(crate::search::splitting::marked(n)).map(|(f, _)| *f).collect();
     p.check = Some(Check { rank, marked, pairs: (*pairs).clone(), split: split.map(|s| (*s).clone()) });
-    // The flag strip and the proposal show heads: have them at hand.
-    let want_faces = !pairs.is_empty() && p.faces.is_none();
-    let group = p.group.clone();
-    let t = if want_faces { super::subjects_person::ask_faces(app, group) } else { Task::none() };
-    Task::batch([t, subj::refresh_crops(app)])
+    subj::refresh_crops(app)
 }
 
 /// The groups changed: a fursuit page's heads and check follow (a split or
@@ -183,23 +176,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Msg::Propose => {
             let Some(p) = app.subjects.person.as_ref() else { return Task::none() };
-            let Some((a, b)) = p.check.as_ref().and_then(|c| c.split.clone()) else { return Task::none() };
-            // The smaller side splits off, to start.
-            let off = if b.len() <= a.len() { b } else { a };
             let group = p.group.clone();
-            super::subjects_editor::open(app, group, Preset::Proposal(off))
+            super::subjects_editor::open(app, group, Preset::Plain)
         }
     }
-}
-
-// ── crops ───────────────────────────────────────────────────────────────────
-
-pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
-    let s = &app.subjects;
-    let Some(p) = s.person.as_ref() else { return Vec::new() };
-    let faces: HashMap<FaceRef, &Face> = p.faces.iter().flat_map(|f| f.iter()).map(|f| (f.face, f)).collect();
-    let Some((a, b)) = p.check.as_ref().and_then(|c| c.pairs.first()) else { return Vec::new() };
-    [a, b].into_iter().filter_map(|f| faces.get(f)).map(|f| ((*f).clone(), subj::px(app, FLAG), Framing::Face)).collect()
 }
 
 // ── views ───────────────────────────────────────────────────────────────────
@@ -224,31 +204,6 @@ pub fn badge(p: &Person, f: &FaceRef) -> Option<(Glyph, &'static str)> {
         return Some((Glyph::Split, "In one photo with another head of this group: one of the two is another fursuit"));
     }
     (p.order == Order::LeastAlike && c.marked.contains(f)).then_some((Glyph::Split, "Among the least like the rest"))
-}
-
-/// Under the band of a group holding two heads of one photo: it holds at
-/// least two fursuits; the two heads; *Propose a split…*.
-pub fn flag_strip<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
-    let c = p.check.as_ref().filter(|c| !c.pairs.is_empty())?;
-    let s = &app.subjects;
-    let faces: HashMap<FaceRef, &Face> = p.faces.iter().flat_map(|f| f.iter()).map(|f| (f.face, f)).collect();
-    let shape = subj::shape(Kind::Fursuit);
-    let (a, b) = c.pairs[0];
-    let crop = |f: FaceRef| -> Element<'a, Message> {
-        let handle = faces.get(&f).and_then(|x| s.crops.get(&x.face, subj::px(app, FLAG), Framing::Face));
-        tile::crop(handle, FLAG, shape)
-    };
-    let n = c.pairs.len();
-    let words = if n == 1 {
-        "Two of these heads are in one photo, so this group holds at least two fursuits.".to_string()
-    } else {
-        format!("{n} pairs of these heads are in one photo, so this group holds at least two fursuits.")
-    };
-    let mut r = row![icons::view(Glyph::Split, 16.0, t::INK2), crop(a), crop(b), text(words).size(t::T_SMALL).color(t::INK2).width(Length::Fill)].spacing(t::S2).align_y(Alignment::Center);
-    if c.split.is_some() {
-        r = r.push(tip(kit::btn("Propose a split…", style::secondary(), Some(m(Msg::Propose))), "The group split around these two heads, for you to check and confirm", true));
-    }
-    Some(container(r.padding(Padding::from([6.0, 12.0]))).width(Length::Fill).style(style::fill(t::MOUNT)).into())
 }
 
 pub fn debug_state(p: &Person) -> String {

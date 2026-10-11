@@ -269,7 +269,7 @@ pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], m
         let pinned = paired(&f.face);
         let badge = if pinned { Some(Glyph::Pin) } else { (i < marked).then_some(Glyph::Split) };
         let picked = look.cols.picked_in == Some(col) && look.cols.picked.contains(&f.face);
-        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked, small: true, badge, on: wrap(ColMsg::Pick(col, f.face)) }.into();
+        let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked, small: true, badge, on: wrap(ColMsg::Pick(col, f.face)), badge_on: None }.into();
         let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::DragStart(col, f.face)), enter: wrap(ColMsg::Nothing), leave: wrap(ColMsg::Nothing), drop: wrap(ColMsg::DragDrop) };
         let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, dragging).into();
         let words = if pinned {

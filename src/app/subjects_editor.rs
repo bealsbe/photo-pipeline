@@ -24,10 +24,16 @@
 //!   *Cancel* or Esc leaves everything as it was.
 //!
 //! What opens it (each with its preset): *Edit group* (E) on a group's
-//! page or a picked tile; *Propose a split…* (the photo pair split between
-//! two columns); side by side (C with two picked, a similar group, a pair in
-//! "Same fursuit?"); the picked heads' *Split into a new group* and *Move
-//! to…*.
+//! page or a picked tile (and the split mark on a tile); side by side (C
+//! with two picked, a similar group, a pair in "Same fursuit?"); the picked
+//! heads' *Split into a new group* and *Move to…*.
+//!
+//! **A suggested split.**  A fursuit group holding two heads of one photo
+//! holds two fursuits: the header offers *Suggested split* (the two heads,
+//! small).  It is offered, never applied: a click lays it out as a new
+//! column (the smaller side around the pair, the pair apart), taking only
+//! heads still in *Stays*, so nothing the user arranged is undone; Ctrl+Z
+//! takes it back.  Applied, it is recorded `by: "proposal"`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -68,6 +74,8 @@ const UNNAMED_N: usize = 12;
 /// unnamed ones shown (for the photo pair check; others are read when a
 /// drag first goes over them, or a move to them waits for it).
 const READ_N: usize = 12;
+/// The suggested split's two heads, in the header.
+const SUGGEST: f32 = 22.0;
 /// A column at its narrowest.
 const COL_MIN: f32 = 250.0;
 /// Heads of an automatic group remembered to find it at *Apply*.
@@ -82,9 +90,6 @@ pub enum Preset {
     With(GroupId),
     /// These heads in a new column (picked heads split off).
     Split(Vec<FaceRef>),
-    /// A proposed split: these heads in a new column, the photo pair
-    /// split between the two.
-    Proposal(Vec<FaceRef>),
     /// These heads picked in *Stays*, the panel ready for them (*Move to…*).
     Pick(Vec<FaceRef>),
 }
@@ -116,6 +121,27 @@ struct Arrangement {
     sent: Vec<(GroupId, Vec<FaceRef>)>,
     removed: Vec<FaceRef>,
     taken: Vec<FaceRef>,
+    start: HashMap<FaceRef, Place>,
+}
+
+/// A split the engine suggests for a group holding two heads of one
+/// photo: the pair, and the side to split off (the smaller of the two
+/// around them, holding `pair.1`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Suggestion {
+    pub pair: (FaceRef, FaceRef),
+    pub off: Vec<FaceRef>,
+}
+
+impl Suggestion {
+    /// From the engine's split check: none unless two of the group's heads
+    /// are in one photo and it proposes a split around them.
+    pub fn from_check(pairs: &[(FaceRef, FaceRef)], split: Option<&(Vec<FaceRef>, Vec<FaceRef>)>) -> Option<Suggestion> {
+        let &(a, b) = pairs.first()?;
+        let (with_a, with_b) = split?;
+        // The smaller side splits off, its pair head with it.
+        Some(if with_b.len() <= with_a.len() { Suggestion { pair: (a, b), off: with_b.clone() } } else { Suggestion { pair: (b, a), off: with_a.clone() } })
+    }
 }
 
 pub struct Editor {
@@ -135,7 +161,9 @@ pub struct Editor {
     /// hand are those elsewhere now).
     start: HashMap<FaceRef, Place>,
     preset: Option<Preset>,
-    pub proposal: bool,
+    /// A suggested split (a fursuit group holding two heads of one photo).
+    pub suggestion: Option<Suggestion>,
+    check_seq: u64,
     /// The panel: every group of the kind with its distance.
     pub near: Vec<(GroupId, f32)>,
     near_seq: u64,
@@ -181,15 +209,16 @@ pub enum Msg {
     MergeName(usize, GroupId),
     /// After a refusal: the gone group's heads into a new column.
     GoneToNew,
+    /// Lay out the suggested split (a new column; nothing else moves).
+    Suggest,
     Apply,
     Cancel,
 }
 
 impl Editor {
     fn new(kind: Kind, home: GroupId, was: Option<String>, preset: Preset) -> Editor {
-        let proposal = matches!(preset, Preset::Proposal(_));
         let mut cols = vec![Col { origin: Origin::Existing { id: home, was: was.clone() }, heads: Vec::new(), name: was.unwrap_or_default(), rank: HashMap::new(), loaded: false }];
-        if let Preset::Split(_) | Preset::Proposal(_) = preset {
+        if let Preset::Split(_) = preset {
             cols.push(Col { origin: Origin::New, heads: Vec::new(), name: String::new(), rank: HashMap::new(), loaded: true });
         }
         Editor {
@@ -204,7 +233,8 @@ impl Editor {
             origin: HashMap::new(),
             start: HashMap::new(),
             preset: Some(preset),
-            proposal,
+            suggestion: None,
+            check_seq: 0,
             near: Vec::new(),
             near_seq: 0,
             search: String::new(),
@@ -249,7 +279,7 @@ impl Editor {
     }
 
     fn snapshot(&self) -> Arrangement {
-        Arrangement { cols: self.cols.clone(), sent: self.sent.clone(), removed: self.removed.clone(), taken: self.taken.clone() }
+        Arrangement { cols: self.cols.clone(), sent: self.sent.clone(), removed: self.removed.clone(), taken: self.taken.clone(), start: self.start.clone() }
     }
 
     fn col_of_group(&self, g: &GroupId) -> Option<usize> {
@@ -356,6 +386,7 @@ impl Editor {
         self.sent = a.sent;
         self.removed = a.removed;
         self.taken = a.taken;
+        self.start = a.start;
         self.ui.renumber(|c| (c < n).then_some(c));
         true
     }
@@ -437,7 +468,7 @@ impl Editor {
         let Some(preset) = self.preset.take() else { return };
         let home: HashSet<FaceRef> = self.cols[0].heads.iter().copied().collect();
         match preset {
-            Preset::Split(heads) | Preset::Proposal(heads) => {
+            Preset::Split(heads) => {
                 let heads: Vec<FaceRef> = heads.into_iter().filter(|f| home.contains(f)).collect();
                 self.cols[0].heads.retain(|f| !heads.contains(f));
                 self.cols[1].heads = heads;
@@ -453,6 +484,35 @@ impl Editor {
                 self.start.insert(*f, Place::Col(i));
             }
         }
+    }
+
+    /// The suggested split is laid out: its pair head that splits off is
+    /// in a column of its own, apart from *Stays*.
+    pub fn suggestion_shown(&self) -> bool {
+        self.suggestion.as_ref().is_some_and(|s| matches!(self.place_of(&s.pair.1), Some(Place::Col(i)) if i > 0 && self.cols[i].origin == Origin::New))
+    }
+
+    /// Lay out the suggested split: the side it splits off, of the heads
+    /// still in *Stays*, in a new column; whatever the user arranged stays
+    /// as it is.  One step (Ctrl+Z takes it back); not a move by hand.
+    pub fn lay_out_suggestion(&mut self) -> bool {
+        let Some(s) = self.suggestion.clone() else { return false };
+        if self.suggestion_shown() {
+            return false;
+        }
+        let off: Vec<FaceRef> = s.off.iter().filter(|f| self.cols[0].heads.contains(f)).copied().collect();
+        if off.is_empty() {
+            return false;
+        }
+        self.history.push(self.snapshot());
+        self.cols[0].heads.retain(|f| !off.contains(f));
+        self.cols.push(Col { origin: Origin::New, heads: off.clone(), name: String::new(), rank: HashMap::new(), loaded: true });
+        let i = self.cols.len() - 1;
+        for f in off {
+            self.start.insert(f, Place::Col(i));
+        }
+        self.ui.clear();
+        true
     }
 
     /// Heads that share their photo with another head in the edit.
@@ -487,6 +547,15 @@ pub fn open(app: &mut App, group: GroupId, preset: Preset) -> Task<Message> {
     }
     app.subjects.editor = Some(ed);
     app.quicklook = None;
+    // A fursuit group's split check: a suggested split, if two of its
+    // heads are in one photo.
+    if kind == Kind::Fursuit {
+        let seq = app.subjects.next_seq();
+        if let Some(e) = app.subjects.editor.as_mut() {
+            e.check_seq = seq;
+        }
+        app.search.link.group_check(seq, &group);
+    }
     let n = app.subjects.editor.as_ref().map_or(0, |e| e.cols.len());
     for i in 0..n {
         if let Some(Origin::Existing { id, .. }) = app.subjects.editor.as_ref().map(|e| e.cols[i].origin.clone()) {
@@ -626,6 +695,16 @@ pub fn on_faces(app: &mut App, seq: u64, faces: &Arc<Vec<Face>>) -> bool {
     if home_first {
         ask_near(app);
     }
+    true
+}
+
+/// The edited group's split check arrived: a suggested split, or none.
+pub fn on_check(app: &mut App, seq: u64, pairs: &[(FaceRef, FaceRef)], split: Option<&(Vec<FaceRef>, Vec<FaceRef>)>) -> bool {
+    let Some(e) = app.subjects.editor.as_mut() else { return false };
+    if e.check_seq != seq {
+        return false;
+    }
+    e.suggestion = Suggestion::from_check(pairs, split);
     true
 }
 
@@ -810,6 +889,13 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             }
             reorder(app)
         }
+        Msg::Suggest => {
+            if e.lay_out_suggestion() {
+                e.note = None;
+                return reorder(app);
+            }
+            Task::none()
+        }
         Msg::Apply => apply(app),
         Msg::Cancel => close(app),
     }
@@ -862,7 +948,7 @@ fn apply(app: &mut App) -> Task<Message> {
     if edit.moves.is_empty() && edit.renames.is_empty() {
         return close(app);
     }
-    let via = Via::Editor { proposal: e.proposal, edited: e.edited() as u32 };
+    let via = Via::Editor { proposal: e.suggestion_shown(), edited: e.edited() as u32 };
     let seq = app.subjects.next_seq();
     if let Some(e) = app.subjects.editor.as_mut() {
         e.apply_seq = seq;
@@ -920,6 +1006,10 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     for i in 0..e.cols.len() {
         let section = cols::section(i);
         v.extend(e.ordered(i).iter().filter_map(|f| e.faces.get(f)).filter(|f| s.crops.is_seen(section, &subj::Crops::key(&f.face, small, Framing::Face))).cloned().map(|f| (f, small, Framing::Face)));
+    }
+    if let Some(sg) = &e.suggestion {
+        let px = subj::px(app, SUGGEST);
+        v.extend([sg.pair.0, sg.pair.1].iter().filter_map(|f| e.faces.get(f)).cloned().map(|f| (f, px, Framing::Face)));
     }
     let cover = subj::px(app, COVER);
     v.extend(panel_groups(s, e).into_iter().chain(unnamed_groups(s, e)).filter_map(|g| s.group(&g)).map(|g| (g.cover.clone(), cover, Framing::Face)));
@@ -1002,6 +1092,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         tip(kit::icon_text_btn(Glyph::ChevronLeft, "Cancel", t::INK2, style::secondary(), Some(m(Msg::Cancel))), "Leave without changing anything  (Esc)", true),
         column![text(title).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK), kit::caption("Nothing changes until you apply. Ctrl+Z here takes back a step.")].spacing(1).padding(Padding { left: t::S3, ..Padding::ZERO }),
         Space::new().width(Length::Fill),
+        suggestion(app, e),
         text(counter).size(t::T_BODY).font(paint::MEDIUM).color(t::INK2),
         tip(kit::btn(if busy { "Applying…" } else { "Apply" }, style::primary(), (!busy).then(|| m(Msg::Apply))), "Make these changes, as one undo step  (Enter)", true),
     ]
@@ -1046,6 +1137,23 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let keys = cols::keys(&[("Shift+click", "Pick a run"), ("← →", "To the column beside"), ("N", "New group"), ("R", r_word), ("Delete", if crops == "head" { "Not heads" } else { "Not faces" }), ("Ctrl+Z", "Take back"), ("Enter", "Apply"), ("Esc", "Cancel")]);
     page = page.push(container(keys).padding(Padding::from([7.0, 20.0])).width(Length::Fill).style(style::fill(t::PHOTO_GROUND)));
     page.width(Length::Fill).height(Length::Fill).into()
+}
+
+/// *Suggested split*, in the header, for a group holding two heads of one
+/// photo: the two, small, and a click lays the split out.  Nothing when
+/// there is none, or once it is laid out.
+fn suggestion<'a>(app: &'a App, e: &'a Editor) -> Element<'a, Message> {
+    let Some(sg) = &e.suggestion else { return Space::new().into() };
+    if e.suggestion_shown() || !e.cols[0].loaded {
+        return Space::new().into();
+    }
+    let s = &app.subjects;
+    let px = subj::px(app, SUGGEST);
+    let shape = subj::shape(e.kind);
+    let thumb = |f: &FaceRef| tile::crop(e.faces.get(f).and_then(|x| s.crops.get(&x.face, px, Framing::Face)), SUGGEST, shape);
+    let inner = row![icons::view(Glyph::Split, 14.0, t::INK2), thumb(&sg.pair.0), thumb(&sg.pair.1), text("Suggested split").size(t::T_SMALL).font(paint::MEDIUM).color(t::INK)].spacing(6).align_y(Alignment::Center);
+    let b = button(inner).padding(Padding::from([3.0, 8.0])).style(style::secondary().style()).on_press(m(Msg::Suggest));
+    tip(b, format!("Two of its heads are in one photo. Lay out a split around them ({} {}s in a new column); nothing else moves", sg.off.len(), cols::crop_word(e.kind)), true)
 }
 
 fn column_view<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>, i: usize, w: f32, paired: &dyn Fn(&FaceRef) -> bool) -> Element<'a, Message> {
@@ -1185,7 +1293,7 @@ pub fn debug_state(app: &App) -> String {
         .collect();
     let (stay, moved, removed, taken) = e.counts();
     format!(
-        "editor=[kind={:?} cols={:?} sent={:?} picked={}@{:?} counts=({stay},{moved},{removed},{taken}) edited={} near={} note={:?} history={}]",
+        "editor=[kind={:?} cols={:?} sent={:?} picked={}@{:?} counts=({stay},{moved},{removed},{taken}) edited={} near={} suggest={} note={:?} history={}]",
         e.kind,
         cols,
         e.sent.iter().map(|(g, v)| (super::people::short(g), v.len())).collect::<Vec<_>>(),
@@ -1193,6 +1301,11 @@ pub fn debug_state(app: &App) -> String {
         e.ui.picked_in,
         e.edited(),
         e.near.len(),
+        match (&e.suggestion, e.suggestion_shown()) {
+            (None, _) => "none".to_string(),
+            (Some(s), false) => format!("offered:{}", s.off.len()),
+            (Some(s), true) => format!("shown:{}", s.off.len()),
+        },
         e.note,
         e.history.len()
     )
@@ -1234,22 +1347,57 @@ mod tests {
         cols::Move { from, faces: faces.to_vec(), to }
     }
 
-    /// The presets: a proposal (the pair split between two columns), the
-    /// picked heads split off, the picked heads picked; side by side has
-    /// both groups as columns.
+    /// The presets: the picked heads split off, the picked heads picked;
+    /// side by side has both groups as columns.
     #[test]
     fn each_preset_starts_as_its_task_needs() {
         let home = GroupId::Cluster(1);
-        let e = editor(home.clone(), &[h(1), h(2), h2(2), h(3)], Preset::Proposal(vec![h2(2), h(3)]));
-        assert_eq!((e.cols[0].heads.clone(), e.cols[1].heads.clone()), (vec![h(1), h(2)], vec![h2(2), h(3)]));
-        assert!(e.proposal && e.edited() == 0, "the preset is not a move by hand");
         let e = editor(home.clone(), &[h(1), h(2)], Preset::Split(vec![h(2)]));
-        assert_eq!((e.cols.len(), e.cols[1].heads.clone(), e.proposal), (2, vec![h(2)], false));
+        assert_eq!((e.cols.len(), e.cols[1].heads.clone(), e.suggestion_shown()), (2, vec![h(2)], false));
         let e = editor(home.clone(), &[h(1), h(2), h(3)], Preset::Pick(vec![h(1), h(3)]));
         assert_eq!((e.cols.len(), e.ui.picked.clone(), e.ui.picked_in), (1, vec![h(1), h(3)], Some(0)));
         let mut e = Editor::new(Kind::Fursuit, home, None, Preset::With(GroupId::Cluster(2)));
         e.cols.push(Col { origin: Origin::Existing { id: GroupId::Cluster(2), was: None }, heads: vec![], name: String::new(), rank: HashMap::new(), loaded: false });
         assert_eq!(e.cols.len(), 2);
+    }
+
+    /// A suggested split: offered only for a group with two heads in one
+    /// photo (and a split proposed around them); laid out, it is the old
+    /// proposal's layout (the smaller side in a new column, the pair
+    /// apart), not a move by hand, recorded as a proposal; with the user's
+    /// arrangement already made, it adds its column and moves nothing
+    /// else; Ctrl+Z takes it back.
+    #[test]
+    fn a_suggested_split_is_offered_then_laid_out_without_undoing_the_users_moves() {
+        assert_eq!(Suggestion::from_check(&[], None), None, "not flagged: nothing offered");
+        assert_eq!(Suggestion::from_check(&[(h(2), h2(2))], None), None, "no split proposed: nothing offered");
+        let split = (vec![h(1), h(2), h(4)], vec![h2(2), h(3)]);
+        let sg = Suggestion::from_check(&[(h(2), h2(2))], Some(&split)).unwrap();
+        assert_eq!((sg.pair, sg.off.clone()), ((h(2), h2(2)), vec![h2(2), h(3)]), "the smaller side, its pair head with it");
+        let home = GroupId::Cluster(1);
+        // Laid out on a fresh editor: the old proposal preset's layout.
+        let mut e = editor(home.clone(), &[h(1), h(2), h2(2), h(3), h(4)], Preset::Plain);
+        e.suggestion = Some(sg.clone());
+        assert!(!e.suggestion_shown());
+        assert!(e.lay_out_suggestion());
+        assert_eq!((e.cols[0].heads.clone(), e.cols[1].heads.clone()), (vec![h(1), h(2), h(4)], vec![h2(2), h(3)]));
+        assert!(e.suggestion_shown() && e.edited() == 0, "laid out, not moved by hand");
+        assert!(!e.lay_out_suggestion(), "once");
+        assert!(matches!(e.apply_move(&mv(1, &[h2(2)], Target::Col(0))), Err(Some(_))), "the pair stays apart");
+        assert!(e.take_back());
+        assert!(!e.suggestion_shown() && e.cols.len() == 1 && e.edited() == 0, "Ctrl+Z takes it back");
+        // The user arranged first: h(3) to Kiba, h(4) to a new column.
+        let mut e = editor(home, &[h(1), h(2), h2(2), h(3), h(4)], Preset::Plain);
+        let kiba = GroupId::Subject(crate::model::subjects::SubjectId("kiba".into()));
+        e.photos_of.insert(kiba.clone(), HashSet::new());
+        e.apply_move(&mv(0, &[h(3)], Target::Group(kiba.clone()))).unwrap();
+        e.apply_move(&mv(0, &[h(4)], Target::New)).unwrap();
+        e.suggestion = Some(sg);
+        assert!(e.lay_out_suggestion());
+        assert_eq!(e.cols.len(), 3, "its own column, after the user's");
+        assert_eq!(e.cols[2].heads, vec![h2(2)], "only what was still in Stays");
+        assert_eq!((e.place_of(&h(3)), e.place_of(&h(4))), (Some(Place::Sent(kiba)), Some(Place::Col(1))), "the user's moves stand");
+        assert_eq!(e.edited(), 2, "the user's two moves, not the suggestion's");
     }
 
     /// Two heads of one photo never share a column, nor a panel group
@@ -1258,7 +1406,7 @@ mod tests {
     #[test]
     fn two_heads_of_one_photo_never_share_a_column_or_a_group() {
         let home = GroupId::Cluster(1);
-        let mut e = editor(home, &[h(1), h(2), h2(2), h(3)], Preset::Proposal(vec![h2(2)]));
+        let mut e = editor(home, &[h(1), h(2), h2(2), h(3)], Preset::Split(vec![h2(2)]));
         assert!(matches!(e.apply_move(&mv(1, &[h2(2)], Target::Col(0))), Err(Some(_))), "back with its pair");
         assert!(matches!(e.apply_move(&mv(0, &[h(2), h(3)], Target::New)), Ok(())), "a new column of its own is fine");
         let kiba = GroupId::Subject(SubjectId("kiba".into()));

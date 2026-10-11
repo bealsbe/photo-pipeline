@@ -67,6 +67,9 @@ pub struct Tile<'a, M> {
     /// A glyph in the corner (the hidden ones' crossed-out eye).
     pub badge: Option<Glyph>,
     pub on: M,
+    /// The glyph's own click, when it has one (the split mark: the
+    /// group editor).
+    pub badge_on: Option<M>,
 }
 
 /// The tile's width: a large one, a small one.
@@ -95,9 +98,13 @@ impl<'a, M: Clone + 'a> From<Tile<'a, M>> for Element<'a, M> {
                 ..button::Style::default()
             }
         });
-        match tile.badge {
-            Some(g) => stack![b, container(icons::view(g, 14.0, t::PHOTO_INK3)).width(w).align_x(iced::alignment::Horizontal::Right).padding(Padding { top: 8.0, right: 8.0, ..Padding::ZERO })].into(),
-            None => b.into(),
+        match (tile.badge, tile.badge_on) {
+            (Some(g), Some(on)) => {
+                let mark = iced::widget::mouse_area(container(icons::view(g, 14.0, t::PHOTO_INK3)).padding(3)).on_press(on).interaction(iced::mouse::Interaction::Pointer);
+                stack![b, container(mark).width(w).align_x(iced::alignment::Horizontal::Right).padding(Padding { top: 5.0, right: 5.0, ..Padding::ZERO })].into()
+            }
+            (Some(g), None) => stack![b, container(icons::view(g, 14.0, t::PHOTO_INK3)).width(w).align_x(iced::alignment::Horizontal::Right).padding(Padding { top: 8.0, right: 8.0, ..Padding::ZERO })].into(),
+            (None, _) => b.into(),
         }
     }
 }
