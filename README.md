@@ -34,6 +34,17 @@ own icon: KWin and the taskbar look it up through the window's app id,
 `io.github.bealsbe.PhotoPipeline`, which names the installed entry.  (KWin
 window rules that matched the app before need the new id.)
 
+To take the app to another PC, `scripts/build-appimage.sh` packages the
+release build as one portable file, `dist/PhotoPipeline-<version>-<commit>-x86_64.AppImage`.
+It needs [appimagetool](https://github.com/AppImage/appimagetool) on `PATH`
+(or `APPIMAGETOOL=/path/to/it`).  The AppImage holds the app, the WebGPU
+library its helpers use, and the libraries a desktop may lack (libjpeg,
+libgomp).  The graphics stack (Vulkan loader, EGL, Wayland, X11) and glibc
+come from the target system, so it runs on Linux at least as new as the one
+that built it.  Copy the file across, `chmod +x` it and run it.  Settings,
+names, models and caches live in the usual folders (`~/.config`,
+`~/.local/share`, `~/.cache`), not inside the AppImage.
+
 ## Shared with the Python app
 
 - **Sidecars:** the prune, export and crop sidecars (`.photo_pipeline.json`,
