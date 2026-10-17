@@ -19,8 +19,18 @@
 //! the frame grows from its tile to the stage, or shrinks back onto it from
 //! wherever it was zoomed and panned to.  A zoom that turns round part-way
 //! starts from the frame on screen.
+//!
+//! The sheet's tiles can be bigger than fit (`Sheet::size`, chosen with
+//! Ctrl+wheel here or the app's keys and slider); the sheet then runs on
+//! below the stage and the wheel scrolls it.  The stage owns the scroll: it
+//! follows the outline, and a change of size keeps the tile under the
+//! pointer (or the outlined one) where it was.  It reports the tiles on
+//! screen and near it (`SheetEvent::Shown`) so the app loads their
+//! pictures.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -33,7 +43,7 @@ use iced::mouse::{self, Cursor, ScrollDelta};
 use iced::widget::image::FilterMethod;
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, Vector, touch, window};
 
-use super::burst_sheet::{self, Sheet};
+use super::burst_sheet::{self, Grid, Sheet};
 use super::paint::{self, HAlign, Renderer, rect};
 use super::theme as t;
 use crate::imaging::loader::FullImage;
@@ -131,7 +141,7 @@ pub enum StageEvent {
 /// What the burst sheet reports.
 #[derive(Debug, Clone, PartialEq)]
 pub enum SheetEvent {
-    /// A tile was clicked, or the wheel zoomed in over it: show that frame.
+    /// A tile was clicked: show that frame.
     Open(usize),
     /// Ctrl+click: pick the frame to compare, or put it back.
     Pick(usize),
@@ -139,7 +149,17 @@ pub enum SheetEvent {
     Back,
     /// Tiles with no thumbnail and none on its way.
     Thumbs(Vec<usize>),
+    /// Ctrl+wheel chose this tile size (0: fit).
+    Size(f32),
+    /// The tiles of burst `key` on screen, and those within a screen of
+    /// them (to load pictures for, nearest first), and how big a tile's
+    /// photo is on screen (its long edge, device pixels).
+    Shown { key: u64, visible: Range<usize>, near: Range<usize>, px: u32 },
 }
+
+/// The wheel turned over the sheet without a wheel (the test driver):
+/// `(seq, dy in lines, Ctrl held)`; a new `seq` turns it once.
+pub type SheetWheel = (u64, f32, bool);
 
 pub struct ImageStage<'a, Message> {
     key: u64,
@@ -154,6 +174,7 @@ pub struct ImageStage<'a, Message> {
     sheet: Option<Sheet>,
     /// The viewer's labels, while shown.
     labels: Option<LabelProps>,
+    sheet_wheel: SheetWheel,
     on: Box<dyn Fn(StageEvent) -> Message + 'a>,
 }
 
@@ -170,7 +191,7 @@ impl<'a, Message> ImageStage<'a, Message> {
         scale_factor: f32,
         on: impl Fn(StageEvent) -> Message + 'a,
     ) -> Self {
-        Self { key, image, status, transition, cmd, crop, neighbors, scale_factor, sheet: None, labels: None, on: Box::new(on) }
+        Self { key, image, status, transition, cmd, crop, neighbors, scale_factor, sheet: None, labels: None, sheet_wheel: (0, 0.0, false), on: Box::new(on) }
     }
 
     /// The viewer's labels over the photo (`None`: not shown).
@@ -183,6 +204,12 @@ impl<'a, Message> ImageStage<'a, Message> {
     /// `sheet.shown`, and what zooming out goes back to otherwise.
     pub fn sheet(mut self, sheet: Option<Sheet>) -> Self {
         self.sheet = sheet;
+        self
+    }
+
+    /// Turn the wheel over the sheet (the test driver's stand-in for one).
+    pub fn sheet_wheel(mut self, wheel: SheetWheel) -> Self {
+        self.sheet_wheel = wheel;
         self
     }
 }
@@ -203,8 +230,8 @@ struct Live {
 enum Snap {
     Blank,
     Image { img: Arc<FullImage>, scale: f32, off: Vector },
-    /// A burst's sheet, at rest.
-    Sheet(Sheet),
+    /// A burst's sheet, at rest, scrolled this far.
+    Sheet(Sheet, f32),
     Slide { old: Box<Snap>, new: Box<Snap>, dir: i32, p: f32 },
 }
 
@@ -309,7 +336,39 @@ struct State {
     /// The label box under the pointer, and whether a label's × is.
     label_hover: Option<usize>,
     label_control: bool,
+    /// The sheet scrolled this far (where a glide is going), and a
+    /// glide's start: where from and when.
+    sheet_scroll: f32,
+    sheet_glide: Option<(f32, Instant)>,
+    /// Ctrl+wheel over a tile: which, how far down it, and where on the
+    /// stage, to keep there once the new size comes back.
+    sheet_anchor: Option<(usize, f32, f32)>,
+    /// The size Ctrl+wheel last asked for, until the app gives it back
+    /// (notches in one batch of events add up).
+    sheet_asked: Option<f32>,
+    /// The sheet's scrollbar held: where on its thumb.
+    sheet_sb_drag: Option<f32>,
+    /// What `SheetEvent::Shown` last said.
+    sheet_reported: Option<(u64, Range<usize>, Range<usize>, u32)>,
+    /// The test driver's wheel: the last turn taken, and one waiting.
+    sheet_wheel_seq: u64,
+    sheet_wheel_due: Option<(f32, bool)>,
+    /// The layout last worked out (drawing asks for it several times a
+    /// frame).
+    grid_memo: RefCell<Option<GridMemo>>,
 }
+
+/// A burst's layout, and what it was worked out for.
+struct GridMemo {
+    key: u64,
+    size: f32,
+    vp: Size,
+    aspects: Vec<f32>,
+    grid: Arc<Grid>,
+}
+
+/// How long a wheel notch's glide takes.
+const GLIDE_MS: f32 = 180.0;
 
 /// The wheel's part in changing level between a burst's sheet and one of
 /// its frames: enough travel one way changes level; a pause starts the
@@ -401,7 +460,7 @@ impl State {
     fn live_snap(&self, now: Instant) -> Snap {
         if let Some(sheet) = &self.sheet {
             match self.sheet_zoom.map(|z| z.at(now)) {
-                Some((_, alpha)) if alpha > 0.5 => return Snap::Sheet(sheet.clone()),
+                Some((_, alpha)) if alpha > 0.5 => return Snap::Sheet(sheet.clone(), self.scroll_at(now)),
                 // Mostly the photo: as far as it has grown.
                 Some((photo, _)) => {
                     return match &self.live {
@@ -409,7 +468,7 @@ impl State {
                         None => Snap::Blank,
                     };
                 }
-                None if sheet.shown => return Snap::Sheet(sheet.clone()),
+                None if sheet.shown => return Snap::Sheet(sheet.clone(), self.scroll_at(now)),
                 None => {}
             }
         }
@@ -421,12 +480,118 @@ impl State {
         self.sheet_zoom.is_some() || self.sheet.as_ref().is_some_and(|s| s.shown)
     }
 
-    /// The tiles' places on the stage (stage coordinates).
-    fn sheet_cells(&self) -> Vec<burst_sheet::Cell> {
+    /// The tiles' places on the stage now (stage coordinates, scrolled).
+    fn sheet_cells(&self, now: Instant) -> Vec<burst_sheet::Cell> {
         match &self.sheet {
-            Some(s) => burst_sheet::layout(&s.aspects(), Rectangle::with_size(self.viewport)),
+            Some(s) => self.grid(s, self.viewport).scrolled(self.scroll_at(now)),
             None => Vec::new(),
         }
+    }
+
+    /// `sheet` laid out on a stage of `vp` (the last one worked out when
+    /// nothing has changed).
+    fn grid(&self, sheet: &Sheet, vp: Size) -> Arc<Grid> {
+        let aspects = sheet.aspects();
+        let mut memo = self.grid_memo.borrow_mut();
+        if let Some(m) = memo.as_ref().filter(|m| m.key == sheet.key && m.size == sheet.size && m.vp == vp && m.aspects == aspects) {
+            return m.grid.clone();
+        }
+        let grid = Arc::new(burst_sheet::layout_at(&aspects, Rectangle::with_size(vp), sheet.size));
+        *memo = Some(GridMemo { key: sheet.key, size: sheet.size, vp, aspects, grid: grid.clone() });
+        grid
+    }
+
+    /// How far the sheet is scrolled now (part-way through a glide).
+    fn scroll_at(&self, now: Instant) -> f32 {
+        match self.sheet_glide {
+            Some((from, start)) => {
+                let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / GLIDE_MS).clamp(0.0, 1.0);
+                paint::lerp(from, self.sheet_scroll, paint::out_cubic(t))
+            }
+            None => self.sheet_scroll,
+        }
+    }
+
+    /// Scroll the sheet to `to` at once.
+    fn jump_to(&mut self, to: f32) {
+        self.sheet_scroll = to;
+        self.sheet_glide = None;
+    }
+
+    /// Glide the sheet to `to` from where it is now.
+    fn glide_to(&mut self, to: f32, now: Instant) {
+        if (to - self.sheet_scroll).abs() < 0.5 && self.sheet_glide.is_none() {
+            return;
+        }
+        let from = self.scroll_at(now);
+        self.sheet_scroll = to;
+        self.sheet_glide = ((to - from).abs() >= 0.5).then_some((from, now));
+    }
+
+    /// The sheet as the app now gives it (`new`), after `self.sheet`: the
+    /// scroll that goes with it.  A new burst shows its outline; a new
+    /// size keeps the tile under the pointer (Ctrl+wheel) or the outlined
+    /// one where it was; a new outline glides into view.
+    fn settle_scroll(&mut self, new: &Sheet, now: Instant) {
+        let vp = self.viewport;
+        let anchor = self.sheet_anchor.take();
+        self.sheet_asked = None;
+        if vp.height <= 0.0 {
+            return;
+        }
+        let grid = self.grid(new, vp);
+        let Some(old) = self.sheet.clone().filter(|o| o.key == new.key) else {
+            self.jump_to(burst_sheet::follow(&grid, vp.height, new.outline, 0.0));
+            return;
+        };
+        let old_grid = self.grid(&old, vp);
+        let scroll = self.scroll_at(now);
+        if (old_grid.edge - grid.edge).abs() > 0.25 || old_grid.cols != grid.cols {
+            let to = match anchor {
+                Some((i, frac, y)) => burst_sheet::anchored(&grid, vp.height, i, frac, y),
+                None => {
+                    // The outlined tile's centre stays put, then shows whole.
+                    let y = old_grid.cells.get(new.outline).map_or(vp.height / 2.0, |c| c.mount.center_y() - scroll);
+                    let s = burst_sheet::anchored(&grid, vp.height, new.outline, 0.5, y);
+                    burst_sheet::follow(&grid, vp.height, new.outline, s)
+                }
+            };
+            self.jump_to(to);
+        } else if new.outline != old.outline {
+            let to = burst_sheet::follow(&grid, vp.height, new.outline, self.sheet_scroll);
+            if new.shown && old.shown {
+                self.glide_to(to, now);
+            } else {
+                self.jump_to(to);
+            }
+        } else {
+            let to = burst_sheet::clamp_scroll(&grid, vp.height, self.sheet_scroll);
+            if to != self.sheet_scroll {
+                self.jump_to(to);
+            }
+        }
+    }
+
+    /// Ctrl+wheel (or the test driver's) by `steps` over the sheet, the
+    /// pointer at `at` (stage coordinates): the size to ask the app for,
+    /// with the tile under the pointer (else the outlined one) to keep in
+    /// place.  `None` when the size can't change that way.
+    fn resize_sheet(&mut self, sheet: &Sheet, steps: f32, at: Option<Point>, now: Instant) -> Option<f32> {
+        let vp = self.viewport;
+        let range = burst_sheet::size_range(&sheet.aspects(), vp);
+        let edge = burst_sheet::shown_edge(self.sheet_asked.unwrap_or(sheet.size), range);
+        let chosen = burst_sheet::step_size(edge, range, steps);
+        if (burst_sheet::shown_edge(chosen, range) - edge).abs() < 0.25 {
+            return None;
+        }
+        let cells = self.sheet_cells(now);
+        let over = at.and_then(|p| burst_sheet::hit(&cells, p).map(|i| (i, p)));
+        self.sheet_anchor = match over {
+            Some((i, p)) => Some((i, (p.y - cells[i].mount.y) / cells[i].mount.height.max(1.0), p.y)),
+            None => cells.get(sheet.outline).map(|c| (sheet.outline, 0.5, c.mount.center_y())),
+        };
+        self.sheet_asked = Some(chosen);
+        Some(chosen)
     }
 
     /// The photo's rectangle on the stage now (stage coordinates).
@@ -440,7 +605,13 @@ impl State {
     /// onto its tile, starting from whatever is on screen.
     fn start_sheet_zoom(&mut self, sheet: &Sheet, into: bool, now: Instant) {
         let vp = self.viewport;
-        let cells = burst_sheet::layout(&sheet.aspects(), Rectangle::with_size(vp));
+        // The outlined tile shows whole: the frame grows from it, or
+        // shrinks back onto it.
+        let grid = self.grid(sheet, vp);
+        if self.sheet_zoom.is_none() {
+            self.jump_to(burst_sheet::follow(&grid, vp.height, sheet.outline, self.scroll_at(now)));
+        }
+        let cells = grid.scrolled(self.scroll_at(now));
         let (Some(cell), Some(tile)) = (cells.get(sheet.outline), sheet.tiles.get(sheet.outline)) else {
             self.sheet_zoom = None;
             return;
@@ -474,11 +645,14 @@ impl State {
         self.level.changed(now);
     }
 
-    /// The outline's mount now (stage coordinates), sliding between tiles.
+    /// The outline's mount now (stage coordinates, `cells` as scrolled
+    /// now), sliding between tiles.
     fn ring_rect(&self, cells: &[burst_sheet::Cell], outline: usize, now: Instant) -> Option<Rectangle> {
         let to = cells.get(outline)?.mount;
         Some(match self.ring_from {
             Some((from, since)) => {
+                // Kept on the sheet (it scrolls under the ring).
+                let from = rect(from.x, from.y - self.scroll_at(now), from.width, from.height);
                 let t = (now.saturating_duration_since(since).as_secs_f32() * 1000.0 / t::MOTION_MS).clamp(0.0, 1.0);
                 paint::lerp_rect(from, to, paint::out_cubic(t))
             }
@@ -660,6 +834,15 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             label_drag: None,
             label_hover: None,
             label_control: false,
+            sheet_scroll: 0.0,
+            sheet_glide: None,
+            sheet_anchor: None,
+            sheet_asked: None,
+            sheet_sb_drag: None,
+            sheet_reported: None,
+            sheet_wheel_seq: self.sheet_wheel.0,
+            sheet_wheel_due: None,
+            grid_memo: RefCell::new(None),
         })
     }
 
@@ -675,9 +858,19 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
         } else if let (Some(new), Some(old)) = (&self.sheet, &st.sheet) {
             // The outline slides to the next tile.
             if new.shown && old.shown && new.outline != old.outline && self.key == st.key {
-                let cells = st.sheet_cells();
-                st.ring_from = st.ring_rect(&cells, old.outline, now).map(|r| (r, now));
+                let cells = st.sheet_cells(now);
+                let scroll = st.scroll_at(now);
+                st.ring_from = st.ring_rect(&cells, old.outline, now).map(|r| (rect(r.x, r.y + scroll, r.width, r.height), now));
             }
+        }
+        // What was on screen, as it was, for a slide away from it.
+        let mut old_snap = (self.key != st.key && matches!(self.transition, Transition::Slide(_))).then(|| st.current_snap(now));
+        if let Some(sheet) = &self.sheet {
+            st.settle_scroll(sheet, now);
+        }
+        if self.sheet_wheel.0 != st.sheet_wheel_seq {
+            st.sheet_wheel_seq = self.sheet_wheel.0;
+            st.sheet_wheel_due = Some((self.sheet_wheel.1, self.sheet_wheel.2));
         }
         if self.key != st.key {
             st.key = self.key;
@@ -691,13 +884,13 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             match self.transition {
                 // Onto a sheet: it needs no image, so it slides in at once.
                 Transition::Slide(dir) if shown => {
-                    let old = st.current_snap(now);
+                    let old = old_snap.take().unwrap_or(Snap::Blank);
                     st.live = self.image.clone().map(Live::new);
                     st.pending_old = None;
                     st.slide = Some(SlideAnim { old, dir, from: 0.0, to: 1.0, start: now, ms: SLIDE_MS, restore: None });
                 }
                 Transition::Slide(dir) => {
-                    let old = st.current_snap(now);
+                    let old = old_snap.take().unwrap_or(Snap::Blank);
                     st.slide = None;
                     match &self.image {
                         Some(img) => {
@@ -847,12 +1040,17 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                 }
             }
             st.viewport = vp;
+            // The outline stays in view.
+            if let Some(sheet) = &self.sheet {
+                let grid = st.grid(sheet, vp);
+                st.jump_to(burst_sheet::follow(&grid, vp.height, sheet.outline, st.sheet_scroll));
+            }
             // A zoom to or from the sheet lands where the new size puts it
             // (zooming into a pruned frame brings the viewer's banner).
             if let (Some(z), Some(sheet)) = (st.sheet_zoom, &self.sheet) {
                 let area = Rectangle::with_size(vp);
                 let landing = if z.to.1 > 0.5 {
-                    burst_sheet::layout(&sheet.aspects(), area).get(z.tile).map(|c| c.photo)
+                    st.grid(sheet, vp).scrolled(st.sheet_scroll).get(z.tile).map(|c| c.photo)
                 } else {
                     let aspect = match &st.live {
                         Some(l) => l.img.width.max(1) as f32 / l.img.height.max(1) as f32,
@@ -867,6 +1065,12 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
         }
         st.finish_zoom(now);
         let local = |p: Point| Point::new(p.x - b.x, p.y - b.y);
+        // The test driver's turn of the wheel over the sheet.
+        if let Some((dy, ctrl)) = st.sheet_wheel_due.take() {
+            if let Some(sheet) = self.sheet.as_ref().filter(|s| s.shown && st.sheet_zoom.is_none()) {
+                sheet_wheel(st, sheet, dy, true, ctrl, None, now, shell, &self.on);
+            }
+        }
 
         // The sheet, or a zoom to or from it, takes the pointer.
         if st.sheet_visible() && !matches!(event, Event::Window(_)) {
@@ -904,6 +1108,25 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                         st.ring_from = None;
                     } else {
                         shell.request_redraw();
+                    }
+                }
+                if let Some((_, start)) = st.sheet_glide {
+                    if now.saturating_duration_since(start).as_secs_f32() * 1000.0 >= GLIDE_MS {
+                        st.sheet_glide = None;
+                    } else {
+                        shell.request_redraw();
+                    }
+                }
+                // The tiles on screen and near it, for their pictures.
+                if let Some(sheet) = self.sheet.as_ref().filter(|s| s.shown && st.sheet_zoom.is_none() && vp.height > 0.0) {
+                    let grid = st.grid(sheet, vp);
+                    let visible = burst_sheet::visible(&grid, vp.height, st.sheet_scroll, 0.0);
+                    let near = burst_sheet::visible(&grid, vp.height, st.sheet_scroll, vp.height);
+                    let px = (grid.edge * self.scale_factor).round() as u32;
+                    let report = (sheet.key, visible.clone(), near.clone(), px);
+                    if st.sheet_reported.as_ref() != Some(&report) {
+                        st.sheet_reported = Some(report);
+                        shell.publish((self.on)(StageEvent::Sheet(SheetEvent::Shown { key: sheet.key, visible, near, px })));
                     }
                 }
                 if let Some(sheet) = self.sheet.as_ref().filter(|_| st.sheet_visible()) {
@@ -1172,7 +1395,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             return mouse::Interaction::None;
         };
         if st.sheet_visible() {
-            let over = st.sheet_zoom.is_none() && burst_sheet::hit(&st.sheet_cells(), p).is_some();
+            let over = st.sheet_zoom.is_none() && burst_sheet::hit(&st.sheet_cells(Instant::now()), p).is_some();
             return if over { mouse::Interaction::Pointer } else { mouse::Interaction::Idle };
         }
         if self.labels.is_some() && st.live.is_some() {
@@ -1230,8 +1453,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
             } else if let (Some(z), Some(sheet)) = (st.sheet_zoom, &self.sheet) {
                 draw_sheet_zoom(r, b, st, sheet, z, sf, now);
             } else if let Some(sheet) = self.sheet.as_ref().filter(|s| s.shown) {
-                let cells = burst_sheet::layout(&sheet.aspects(), b);
-                let ring = st.ring_rect(&st.sheet_cells(), sheet.outline, now).map(|r| shifted(r, b));
+                let cells = on_stage(st.grid(sheet, b.size()).scrolled(st.scroll_at(now)), b);
+                let ring = st.ring_rect(&st.sheet_cells(now), sheet.outline, now).map(|r| shifted(r, b));
                 let hover = |i: usize| st.tile_hover_amount(i, now);
                 let look = burst_sheet::Look { alpha: 1.0, zoom: None, hover: &hover, ring, skip: None, scale_factor: sf, now };
                 burst_sheet::paint(r, b, sheet, &cells, &look);
@@ -1248,6 +1471,15 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
         // draw above every quad in theirs.
         r.with_layer(b, |r| {
             if sheet_up {
+                // The sheet's scrollbar, when it runs past the stage.
+                if let Some(sheet) = self.sheet.as_ref().filter(|s| s.shown && st.sheet_zoom.is_none()) {
+                    let grid = st.grid(sheet, b.size());
+                    if grid.max_scroll(b.height) > 0.5 {
+                        let (y, th) = sb_thumb(b.height, grid.height, st.scroll_at(now));
+                        let col = if st.sheet_sb_drag.is_some() { t::PHOTO_INK2 } else { t::PHOTO_INK4 };
+                        paint::rounded(r, rect(b.x + b.width - SB - 2.0, b.y + y, SB, th), 3.0, col);
+                    }
+                }
                 return;
             }
             if let Some(l) = st.live.as_ref().filter(|_| st.slide.is_none() && st.pending_old.is_none()) {
@@ -1301,10 +1533,15 @@ fn shifted(r: Rectangle, b: Rectangle) -> Rectangle {
     rect(r.x + b.x, r.y + b.y, r.width, r.height)
 }
 
+/// Cells in stage coordinates, on screen in `b`.
+fn on_stage(cells: Vec<burst_sheet::Cell>, b: Rectangle) -> Vec<burst_sheet::Cell> {
+    cells.into_iter().map(|c| burst_sheet::Cell { slot: shifted(c.slot, b), photo: shifted(c.photo, b), mount: shifted(c.mount, b) }).collect()
+}
+
 /// The zoom between a tile and the whole frame: the sheet carried along
 /// and fading, the frame's photo over it, its marks fading with the sheet.
 fn draw_sheet_zoom(r: &mut Renderer, b: Rectangle, st: &State, sheet: &Sheet, z: SheetZoom, sf: f32, now: Instant) {
-    let cells = burst_sheet::layout(&sheet.aspects(), b);
+    let cells = on_stage(st.grid(sheet, b.size()).scrolled(st.scroll_at(now)), b);
     let (Some(cell), Some(tile)) = (cells.get(z.tile), sheet.tiles.get(z.tile)) else { return };
     let (photo, alpha) = z.at(now);
     let photo = shifted(photo, b);
@@ -1325,9 +1562,9 @@ fn draw_sheet_zoom(r: &mut Renderer, b: Rectangle, st: &State, sheet: &Sheet, z:
 }
 
 /// Pointer input while the sheet is up: hover, click to open a frame,
-/// Ctrl+click to pick one, the wheel to zoom into the frame under it.
-/// Nothing reacts while a zoom runs (a double-click's second click lands
-/// on the zoom).
+/// Ctrl+click to pick one, the wheel to scroll (Ctrl: to size the tiles),
+/// the scrollbar to drag.  Nothing reacts while a zoom runs (a
+/// double-click's second click lands on the zoom).
 #[allow(clippy::too_many_arguments)]
 fn sheet_input<Message>(
     st: &mut State,
@@ -1340,9 +1577,18 @@ fn sheet_input<Message>(
     on: &dyn Fn(StageEvent) -> Message,
 ) {
     let zooming = st.sheet_zoom.is_some();
-    let over = |st: &State| if zooming { None } else { cursor.position_in(b).and_then(|p| burst_sheet::hit(&st.sheet_cells(), p)) };
+    let over = |st: &State| if zooming { None } else { cursor.position_in(b).and_then(|p| burst_sheet::hit(&st.sheet_cells(now), p)) };
+    let vh = st.viewport.height;
     match event {
         Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+            if let (Some(grab), Some(p)) = (st.sheet_sb_drag, cursor.position()) {
+                let grid = st.grid(sheet, st.viewport);
+                let (_, th) = sb_thumb(vh, grid.height, st.sheet_scroll);
+                let frac = ((p.y - b.y - grab) / (vh - th).max(1.0)).clamp(0.0, 1.0);
+                st.jump_to(frac * grid.max_scroll(vh));
+                shell.request_redraw();
+                return;
+            }
             let hit = over(st);
             if hit != st.tile_hover.map(|h| h.0) {
                 st.set_tile_hover(hit, now);
@@ -1356,34 +1602,87 @@ fn sheet_input<Message>(
             }
         }
         Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
-            if cursor.position_in(b).is_none() {
+            let Some(p) = cursor.position_in(b) else { return };
+            shell.capture_event();
+            if zooming {
                 return;
             }
-            shell.capture_event();
+            // The scrollbar: grab its thumb, or jump to where the track
+            // was pressed.
+            let grid = st.grid(sheet, st.viewport);
+            if grid.max_scroll(vh) > 0.5 && p.x >= st.viewport.width - SB - 4.0 {
+                let scroll = st.scroll_at(now);
+                let (y0, th) = sb_thumb(vh, grid.height, scroll);
+                let grab = if p.y >= y0 && p.y <= y0 + th { p.y - y0 } else { th / 2.0 };
+                st.sheet_sb_drag = Some(grab);
+                let frac = ((p.y - grab) / (vh - th).max(1.0)).clamp(0.0, 1.0);
+                st.jump_to(frac * grid.max_scroll(vh));
+                shell.request_redraw();
+                return;
+            }
             if let Some(i) = over(st) {
                 let pick = crate::ui::modifiers::get().control();
                 shell.publish(on(StageEvent::Sheet(if pick { SheetEvent::Pick(i) } else { SheetEvent::Open(i) })));
             }
         }
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
+            if st.sheet_sb_drag.take().is_some() {
+                shell.request_redraw();
+            }
+        }
         Event::Mouse(mouse::Event::WheelScrolled { delta }) => {
-            if cursor.position_in(b).is_none() {
-                return;
-            }
+            let Some(p) = cursor.position_in(b) else { return };
             shell.capture_event();
-            let up = match delta {
-                ScrollDelta::Lines { y, .. } => y * 120.0,
-                ScrollDelta::Pixels { y, .. } => *y,
-            };
-            if zooming {
+            // Not while zooming, nor while a flick that just zoomed out of
+            // a frame is still turning the wheel.
+            if zooming || st.level.settling(now) {
                 return;
             }
-            if st.level.turn(up, now) {
-                let i = over(st).unwrap_or(sheet.outline);
-                shell.publish(on(StageEvent::Sheet(SheetEvent::Open(i))));
-            }
+            let (dy, lines) = match delta {
+                ScrollDelta::Lines { y, .. } => (*y, true),
+                ScrollDelta::Pixels { y, .. } => (*y, false),
+            };
+            let ctrl = crate::ui::modifiers::get().control();
+            sheet_wheel(st, sheet, dy, lines, ctrl, Some(p), now, shell, on);
         }
         Event::Touch(_) => shell.capture_event(),
         _ => {}
+    }
+}
+
+/// The wheel over the sheet (`burst_sheet::wheel`): Ctrl sizes the tiles
+/// about the one under the pointer at `at`; else it scrolls the sheet when
+/// it runs past the stage, and does nothing when it all fits.
+#[allow(clippy::too_many_arguments)]
+fn sheet_wheel<Message>(
+    st: &mut State,
+    sheet: &Sheet,
+    dy: f32,
+    lines: bool,
+    ctrl: bool,
+    at: Option<Point>,
+    now: Instant,
+    shell: &mut Shell<'_, Message>,
+    on: &dyn Fn(StageEvent) -> Message,
+) {
+    let vh = st.viewport.height;
+    let grid = st.grid(sheet, st.viewport);
+    match burst_sheet::wheel(dy, lines, ctrl, grid.max_scroll(vh) > 0.5) {
+        burst_sheet::Wheel::Resize(steps) => {
+            if let Some(size) = st.resize_sheet(sheet, steps, at, now) {
+                shell.publish(on(StageEvent::Sheet(SheetEvent::Size(size))));
+            }
+        }
+        burst_sheet::Wheel::Scroll(d) => {
+            let to = burst_sheet::clamp_scroll(&grid, vh, st.sheet_scroll + d);
+            if lines {
+                st.glide_to(to, now);
+            } else {
+                st.jump_to(to);
+            }
+            shell.request_redraw();
+        }
+        burst_sheet::Wheel::Nothing => {}
     }
 }
 
@@ -1391,9 +1690,9 @@ fn draw_snap(r: &mut Renderer, b: Rectangle, snap: &Snap, shift: Vector, sf: f32
     match snap {
         Snap::Blank => {}
         Snap::Image { img, scale, off } => draw_image(r, b, img, *scale, *off + shift, sf),
-        Snap::Sheet(sheet) => {
+        Snap::Sheet(sheet, scroll) => {
             let area = rect(b.x + shift.x, b.y + shift.y, b.width, b.height);
-            let cells = burst_sheet::layout(&sheet.aspects(), area);
+            let cells = burst_sheet::layout_at(&sheet.aspects(), area, sheet.size).scrolled(*scroll);
             let ring = cells.get(sheet.outline).map(|c| c.mount);
             let none = |_: usize| 0.0;
             let look = burst_sheet::Look { alpha: 1.0, zoom: None, hover: &none, ring, skip: None, scale_factor: sf, now: Instant::now() };

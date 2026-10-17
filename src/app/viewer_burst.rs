@@ -5,9 +5,19 @@
 //! on outlined.  From there:
 //!
 //! * the arrow keys move the outline, Home / End to the first / last frame;
-//! * a click, Enter or a zoom in (+, the wheel) zooms into a frame, which
-//!   is then the ordinary viewer: ← → step through the burst's frames, and
-//!   Esc, a zoom out at fit, B or "All frames" zoom back out to the sheet;
+//!   when the sheet runs past the stage, it scrolls to keep the outline in
+//!   view;
+//! * a click, Enter or + zooms into a frame, which is then the ordinary
+//!   viewer: ← → step through the burst's frames, and Esc, a zoom out at
+//!   fit (−, the wheel), B or "All frames" zoom back out to the sheet;
+//! * Ctrl+wheel, Ctrl+= (or Ctrl++) and Ctrl+−, or the slider in the top
+//!   bar, make the tiles bigger or smaller: from fit (every frame on the
+//!   stage) to one frame a row ([`resize`]).  The size is kept for the
+//!   session and every burst, though a burst never shows smaller than its
+//!   fit.  Bigger, the sheet scrolls: the wheel scrolls it (and does
+//!   nothing when it all fits; it never opens a frame).  Tiles bigger than
+//!   their thumbnails show the camera's preview at their size, loaded for
+//!   the tiles on screen and near it only ([`want_previews`]);
 //! * P, M and U mark the outlined frame (advance after marking moves the
 //!   outline along the sheet);
 //! * Ctrl+click or Space picks frames, and C compares them (the outlined
@@ -28,25 +38,25 @@
 
 use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::Arc;
 
 use iced::keyboard::{Key, key::Named};
 use iced::{Rectangle, Task};
 
 use super::viewer::{self, Source, Viewer};
 use super::{App, Message, View};
-use crate::imaging::thumbs::{GENERATION_SIZE, PRIORITY_VISIBLE};
+use crate::imaging::loader::FullImage;
+use crate::imaging::thumbs::PRIORITY_VISIBLE;
+use crate::imaging::tile_previews;
 use crate::model::bursts::{BurstId, Bursts};
 use crate::model::collection::RecordId;
 use crate::ui::burst_sheet::{self, Sheet, Tile};
 use crate::ui::compare_stage::MAX_PANES;
-use crate::ui::image_stage::SheetEvent;
+use crate::ui::image_stage::{SheetEvent, SheetWheel};
 
 /// Compare from the sheet with nothing picked: the outlined frame and this
 /// many around it.
 const NEIGHBOURHOOD: usize = 3;
-/// Previews fetched for tiles bigger than their thumbnails (the loader
-/// keeps a dozen).
-const SHEET_PREVIEWS: usize = 12;
 
 /// How the viewer lands on a photo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +96,11 @@ pub struct SheetUi {
     /// A word in the top bar about the last thing tried (cleared on the
     /// next move).
     pub note: Option<String>,
+    /// What the stage last said is on screen: the burst, the tiles shown,
+    /// those near them, and how big a tile is (device pixels).
+    pub shown: Option<(u64, Range<usize>, Range<usize>, u32)>,
+    /// The test driver's turn of the wheel over the sheet.
+    pub wheel: SheetWheel,
 }
 
 // ── the rules (pure) ────────────────────────────────────────────────────────
@@ -337,7 +352,7 @@ pub fn sheet(app: &App, v: &Viewer) -> Option<Sheet> {
             let thumb = r.and_then(|r| app.thumbs.get(&r.path)).cloned();
             let wanted = thumb.is_none() && r.is_some_and(|r| !app.thumbs.is_queued(&r.path));
             Tile {
-                image: r.and_then(|r| app.loader.peek(&r.path)).cloned(),
+                image: r.and_then(|r| tile_image(app, &r.path)),
                 aspect: tile_aspect(app, id),
                 number: app.bursts.frame_index(id).map_or(k + 1, |f| f + 1),
                 pruned: r.is_some_and(|r| r.is_pruned),
@@ -356,7 +371,31 @@ pub fn sheet(app: &App, v: &Viewer) -> Option<Sheet> {
         outline: v.index - run.start,
         shown: v.sheet.on,
         picking: !v.sheet.picked.is_empty(),
+        size: app.sheet_tiles,
     })
+}
+
+/// The sharpest picture held for a tile: the frame itself once the viewer
+/// has decoded it, else the bigger of the tile's own picture and the
+/// viewer's preview.
+fn tile_image(app: &App, path: &std::path::Path) -> Option<Arc<FullImage>> {
+    let held = app.loader.peek(path);
+    if let Some(full) = held.filter(|img| !img.preview) {
+        return Some(full.clone());
+    }
+    let edge = |img: &&Arc<FullImage>| img.levels.first().map_or(0, |l| l.width.max(l.height));
+    [app.tile_previews.get(path), held].into_iter().flatten().max_by_key(edge).cloned()
+}
+
+/// The tile sizes the burst on screen can show at: fit and the largest.
+pub fn size_range(app: &App, v: &Viewer) -> Option<(f32, f32)> {
+    let run = run(v)?;
+    Some(burst_sheet::size_range(&aspects(app, v, &run), v.stage_size()))
+}
+
+/// The burst's layout at the chosen size.
+fn grid(app: &App, v: &Viewer, run: &Range<usize>) -> burst_sheet::Grid {
+    burst_sheet::layout_at(&aspects(app, v, run), Rectangle::with_size(v.stage_size()), app.sheet_tiles)
 }
 
 /// The burst as the top bar names it: its frame count, and how many of
@@ -379,9 +418,20 @@ pub fn frame_caption(app: &App, v: &Viewer) -> Option<String> {
 pub fn debug_state(app: &App, v: &Viewer) -> String {
     let name = v.record(app).map(|r| r.filename()).unwrap_or_default();
     let picked: Vec<String> = v.items.iter().filter(|id| v.sheet.picked.contains(id)).filter_map(|&id| app.coll.get(id)).map(|r| r.stem()).collect();
-    let cols = run(v).map(|r| burst_sheet::shape(&aspects(app, v, &r), v.stage_size()).0);
+    let g = run(v).map(|r| grid(app, v, &r));
+    let cols = g.as_ref().map(|g| g.cols);
+    let (fit, max) = size_range(app, v).unwrap_or_default();
+    let tiles = format!(
+        "tiles: chosen={:.0} shown={:.0} fit={fit:.0} max={max:.0} height={:.0} shown_tiles={:?} pictures={} ({} MB)",
+        app.sheet_tiles,
+        g.as_ref().map_or(0.0, |g| g.edge),
+        g.as_ref().map_or(0.0, |g| g.height),
+        v.sheet.shown.as_ref().map(|s| (s.1.clone(), s.2.clone(), s.3)),
+        app.tile_previews.len(),
+        app.tile_previews.bytes() / (1024 * 1024),
+    );
     format!(
-        "index={} file={name} run={:?} on_sheet={} open={} cols={cols:?} picked={picked:?} note={:?} zoom={:.0}% stage={}x{}",
+        "index={} file={name} run={:?} on_sheet={} open={} cols={cols:?} picked={picked:?} note={:?} zoom={:.0}% stage={}x{} {tiles}",
         v.index,
         run(v),
         on_sheet(v),
@@ -411,7 +461,7 @@ pub fn set_outline(app: &mut App, to: usize) -> Task<Message> {
 pub fn move_outline(app: &mut App, mv: Move) -> Task<Message> {
     let Some(v) = app.viewer.as_ref() else { return Task::none() };
     let Some(run) = run(v) else { return Task::none() };
-    let cols = burst_sheet::shape(&aspects(app, v, &run), v.stage_size()).0;
+    let cols = grid(app, v, &run).cols;
     match sheet_move(&run, v.items.len(), cols, v.index, mv) {
         Outcome::Outline(i) => set_outline(app, i),
         Outcome::Leave(i, dir) => viewer::navigate(app, i, dir),
@@ -585,28 +635,91 @@ pub fn on_stage(app: &mut App, ev: SheetEvent) -> Task<Message> {
             }
             Task::none()
         }
+        SheetEvent::Size(size) => {
+            app.sheet_tiles = size;
+            Task::none()
+        }
+        SheetEvent::Shown { key, visible, near, px } => {
+            if let Some(v) = app.viewer.as_mut() {
+                v.sheet.shown = Some((key, visible, near, px));
+            }
+            want_previews(app);
+            Task::none()
+        }
     }
 }
 
-/// Tiles bigger than their thumbnails show the camera's preview: fetch the
-/// burst's (a short burst's tiles are big; a long one's never are).
+/// Ctrl+= (`steps` 1) or Ctrl+− (-1) on the sheet: bigger or smaller
+/// tiles, the outlined one kept in place (the stage sees to that).
+pub fn resize(app: &mut App, steps: f32) -> Task<Message> {
+    let Some(v) = app.viewer.as_ref().filter(|v| on_sheet(v)) else { return Task::none() };
+    let Some(range) = size_range(app, v) else { return Task::none() };
+    let edge = burst_sheet::shown_edge(app.sheet_tiles, range);
+    let chosen = burst_sheet::step_size(edge, range, steps);
+    if (burst_sheet::shown_edge(chosen, range) - edge).abs() >= 0.25 {
+        app.sheet_tiles = chosen;
+    }
+    Task::none()
+}
+
+/// The sheet's slider moved to `pos` (0: fit, 1: the largest).
+pub fn slide_size(app: &mut App, pos: f32) -> Task<Message> {
+    let Some(v) = app.viewer.as_ref().filter(|v| on_sheet(v)) else { return Task::none() };
+    if let Some(range) = size_range(app, v) {
+        app.sheet_tiles = burst_sheet::size_at(pos, range);
+    }
+    Task::none()
+}
+
+/// Tiles bigger than their thumbnails show the camera's preview at their
+/// size: ask for the ones on screen and near it (as the stage last
+/// reported them), nearest the outline first.  Nothing while the
+/// thumbnails are big enough.
 pub fn want_previews(app: &mut App) {
     let Some(v) = app.viewer.as_ref() else { return };
     let Some(run) = run(v).filter(|_| v.sheet.on) else { return };
-    let cells = burst_sheet::layout(&aspects(app, v, &run), Rectangle::with_size(v.stage_size()));
-    let biggest = cells.iter().map(|c| c.photo.width.max(c.photo.height)).fold(0.0, f32::max);
-    if biggest * app.scale_factor <= GENERATION_SIZE as f32 * 1.15 {
+    let key = key_of(v, &run).id();
+    let Some((_, visible, near, px)) = v.sheet.shown.clone().filter(|s| s.0 == key) else { return };
+    let Some(edge) = tile_previews::edge_for(px) else {
+        // Thumbnails will do: drop what was queued, and pin nothing.
+        app.tile_previews.want(&[], &[], 0);
         return;
-    }
-    let mut order: Vec<usize> = run.clone().collect();
-    order.sort_by_key(|&i| i.abs_diff(v.index));
-    let files: Vec<_> = order.into_iter().take(SHEET_PREVIEWS).filter_map(|i| app.coll.get(v.items[i]).map(|r| (r.path.clone(), r.file_type))).collect();
-    for (path, ft) in files {
-        app.loader.request_preview(&path, ft, false);
-    }
+    };
+    let outline = v.index - run.start;
+    let file = |k: usize| v.items.get(run.start + k).and_then(|&id| app.coll.get(id)).map(|r| (r.path.clone(), r.file_type));
+    let mut shown: Vec<usize> = visible.clone().collect();
+    shown.sort_by_key(|&k| k.abs_diff(outline));
+    // Near: outwards from the tiles on screen, below them first.
+    let mut around: Vec<usize> = near.filter(|k| !visible.contains(k)).collect();
+    around.sort_by_key(|&k| if k >= visible.end { 2 * (k - visible.end) } else { 2 * (visible.start - k) + 1 });
+    let shown: Vec<_> = shown.into_iter().filter_map(file).collect();
+    let around: Vec<_> = around.into_iter().filter_map(file).collect();
+    app.tile_previews.want(&shown, &around, edge);
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
+
+/// A key on the sheet besides the arrows (Ctrl+= and Ctrl+−, which size
+/// the tiles, are commands: `Cmd::SheetBigger`, `Cmd::SheetSmaller`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SheetKey {
+    /// Zoom into the outlined frame: Enter, + (or =, its key), B.
+    Open,
+    /// Pick it to compare, or put it back: Space.
+    Pick,
+    Compare,
+}
+
+/// What a key without Ctrl or Alt does on the sheet (− does nothing: there
+/// is nothing to zoom out to).
+pub fn sheet_key(key: &Key, c: Option<&str>) -> Option<SheetKey> {
+    match (key, c) {
+        (Key::Named(Named::Enter), _) | (_, Some("b" | "+" | "=")) => Some(SheetKey::Open),
+        (Key::Named(Named::Space), _) => Some(SheetKey::Pick),
+        (_, Some("c")) => Some(SheetKey::Compare),
+        _ => None,
+    }
+}
 
 /// Keys for the burst: on the sheet, and on one of its frames.  `None`
 /// leaves the key to the viewer (marks, the filmstrip, Esc on the sheet…).
@@ -631,11 +744,10 @@ pub fn on_key(app: &mut App, key: &Key, c: Option<&str>) -> Option<Task<Message>
             return Some(move_outline(app, mv));
         }
         let at = v.index;
-        return match (key, c) {
-            (Key::Named(Named::Enter), _) | (_, Some("b")) => Some(zoom_in(app, at)),
-            (Key::Named(Named::Space), _) => Some(toggle_pick(app, at)),
-            (_, Some("c")) => Some(compare(app)),
-            _ => None,
+        return match sheet_key(key, c)? {
+            SheetKey::Open => Some(zoom_in(app, at)),
+            SheetKey::Pick => Some(toggle_pick(app, at)),
+            SheetKey::Compare => Some(compare(app)),
         };
     }
     run(v)?;
@@ -746,6 +858,46 @@ mod tests {
         assert_eq!(mv(11, Move::First), Outcome::Outline(5));
         assert_eq!(mv(11, Move::Last), Outcome::Outline(17));
         assert_eq!(mv(5, Move::First), Outcome::Stay);
+    }
+
+    /// With the tiles bigger than fit, every arrow step leaves the outline
+    /// on screen: the arrows use the columns the sheet shows, and the view
+    /// follows.
+    #[test]
+    fn the_outline_stays_in_view_as_the_arrows_move_it() {
+        use iced::{Rectangle, Size};
+        let area = Rectangle::with_size(Size::new(1200.0, 700.0));
+        let aspects = vec![burst_sheet::DEFAULT_ASPECT; 64];
+        let (fit, _) = burst_sheet::size_range(&aspects, area.size());
+        let g = burst_sheet::layout_at(&aspects, area, fit * 3.0);
+        assert!(g.max_scroll(area.height) > 0.0 && g.cols > 1);
+        let run = 0..64;
+        let (mut at, mut scroll) = (0usize, 0.0f32);
+        let steps = [Move::Down; 20].into_iter().chain([Move::Right; 7]).chain([Move::Up; 20]).chain([Move::Last, Move::First, Move::Last]);
+        for mv in steps {
+            if let Outcome::Outline(i) = sheet_move(&run, 64, g.cols, at, mv) {
+                at = i;
+            }
+            scroll = burst_sheet::follow(&g, area.height, at, scroll);
+            let m = g.cells[at].mount;
+            assert!(m.y >= scroll && m.y + m.height <= scroll + area.height, "{mv:?} left tile {at} off screen");
+        }
+        assert_eq!(at, 63);
+    }
+
+    /// On the sheet, + (or =) and Enter still open the outlined frame; −
+    /// does nothing (Ctrl+= and Ctrl+− are commands, `Cmd::SheetBigger`
+    /// and `Cmd::SheetSmaller`).
+    #[test]
+    fn plus_and_enter_still_open_a_frame() {
+        let ch = |c: &str| Key::Character(c.into());
+        assert_eq!(sheet_key(&Key::Named(Named::Enter), None), Some(SheetKey::Open));
+        assert_eq!(sheet_key(&ch("+"), Some("+")), Some(SheetKey::Open));
+        assert_eq!(sheet_key(&ch("="), Some("=")), Some(SheetKey::Open));
+        assert_eq!(sheet_key(&ch("b"), Some("b")), Some(SheetKey::Open));
+        assert_eq!(sheet_key(&ch("-"), Some("-")), None);
+        assert_eq!(sheet_key(&Key::Named(Named::Space), None), Some(SheetKey::Pick));
+        assert_eq!(sheet_key(&ch("c"), Some("c")), Some(SheetKey::Compare));
     }
 
     #[test]

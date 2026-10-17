@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Space, button, column, container, image as iimage, row, scrollable, stack, text, text_input};
+use iced::widget::{Space, button, column, container, image as iimage, row, scrollable, slider, stack, text, text_input};
 use iced::{Alignment, Element, Length, Padding, Size, Task, window};
 
 use super::kit;
@@ -126,6 +126,8 @@ pub enum Msg {
     Leave(i32),
     /// The sheet's Compare button.
     CompareFrames,
+    /// The sheet's tile-size slider moved (0: fit, 1: the largest).
+    SheetSize(f32),
     /// The faces and fursuit heads over the photo (L).
     Labels(super::viewer_labels::LMsg),
 }
@@ -387,6 +389,7 @@ pub fn close(app: &mut App) -> Task<Message> {
         }
     }
     app.loader.clear_queue();
+    app.tile_previews.clear();
     viewer_window::remember(app);
     Task::batch(tasks)
 }
@@ -784,6 +787,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::ToSheet => return viewer_burst::to_sheet(app),
         Msg::Leave(dir) => return viewer_burst::leave(app, dir),
         Msg::CompareFrames => return viewer_burst::compare(app),
+        Msg::SheetSize(pos) => return viewer_burst::slide_size(app, pos),
     }
     Task::none()
 }
@@ -829,6 +833,13 @@ pub fn on_key(app: &mut App, key: Key, mods: keyboard::Modifiers) -> Task<Messag
     }
     if super::commands::Cmd::from_key(&key, mods) == Some(super::commands::Cmd::Preferences) {
         return app.update(Message::Cmd(super::commands::Cmd::Preferences));
+    }
+    // Ctrl+= and Ctrl+−: the burst sheet's tiles (nothing on a frame).
+    if let Some(cmd @ (super::commands::Cmd::SheetBigger | super::commands::Cmd::SheetSmaller)) = super::commands::Cmd::from_key(&key, mods) {
+        if v.crop_mode {
+            return Task::none();
+        }
+        return app.update(Message::Cmd(cmd));
     }
     if mods.control() || mods.alt() {
         return Task::none();
@@ -1048,6 +1059,10 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         }
     }
     top = top.push(Space::new().width(Length::Fill));
+    if on_sheet && v.win.width >= 900.0 {
+        top = top.push(sheet_size_slider(app, v));
+        top = top.push(kit::vrule(20.0));
+    }
 
     let pair_btn: Element<'a, Message> = match (v.pair.is_some() && !on_sheet, display) {
         (true, Some(d)) => {
@@ -1203,6 +1218,7 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         |e| Message::Viewer(Msg::Stage(e)),
     )
     .sheet(sheet)
+    .sheet_wheel(v.sheet.wheel)
     .labels(if on_sheet { None } else { super::viewer_labels::stage_props(&v.labels) });
     // The stamp floats over the photo; the filmstrip runs under it.
     let mut photo = column![stack![stage, viewer_advance::stamp(v)]].height(Length::Fill);
@@ -1273,7 +1289,12 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     }
     bottom = bottom.push(Space::new().width(Length::Fill));
     if on_sheet && v.win.width >= 1180.0 {
-        bottom = bottom.push(kit::caption("Click a frame to look closer  ·  Ctrl+click or Space picks frames  ·  C compares"));
+        let hint = if v.win.width >= 1450.0 {
+            "Click a frame to look closer  ·  Ctrl+scroll sizes the tiles  ·  Ctrl+click or Space picks frames  ·  C compares"
+        } else {
+            "Click a frame to look closer  ·  Ctrl+scroll sizes the tiles  ·  C compares"
+        };
+        bottom = bottom.push(kit::caption(hint));
         bottom = bottom.push(Space::new().width(t::S3));
     }
     let film = app.settings.viewer_filmstrip;
@@ -1298,6 +1319,23 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
     body = body.push(kit::hairline()).push(bottom_bar);
 
     container(body).width(Length::Fill).height(Length::Fill).style(style::fill(t::GROUND)).into()
+}
+
+/// The sheet's tile size, as the main grid's thumbnail size: from fit
+/// (every frame on the stage) to one frame a row.  Dimmed when the burst
+/// already shows as big as it can.
+fn sheet_size_slider<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
+    let range = viewer_burst::size_range(app, v).unwrap_or_default();
+    let enabled = range.1 > range.0 * 1.001;
+    let pos = crate::ui::burst_sheet::slider_pos(crate::ui::burst_sheet::shown_edge(app.sheet_tiles, range), range);
+    let sl = slider(0.0f32..=1.0, pos, move |p| if enabled { Message::Viewer(Msg::SheetSize(p)) } else { Message::Noop })
+        .step(0.01f32)
+        .width(96)
+        .style(style::zoom_slider(enabled));
+    let tone = if enabled { t::INK3 } else { t::INK4 };
+    let control = row![icons::view(Glyph::Grid, 12.0, tone), sl, icons::view(Glyph::Photos, 14.0, tone)].spacing(6).align_y(Alignment::Center);
+    let tip = if enabled { "Tile size  (Ctrl+scroll, or Ctrl+− and Ctrl+=)" } else { "Every frame already shows as big as it can" };
+    kit::tip(control, tip, true)
 }
 
 fn crop_bar(v: &Viewer) -> Element<'_, Message> {

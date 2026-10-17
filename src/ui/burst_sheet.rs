@@ -1,6 +1,8 @@
 //! The burst sheet: every frame of one burst laid out over the viewer's
 //! photo area, the largest tiles that fit, in shooting order, on the
-//! neutral backdrop.  Each tile wears its marks as the grid draws them, a
+//! neutral backdrop.  The tiles can be made bigger, up to one frame a row
+//! ([`layout_at`]); the sheet then runs on below the photo area and
+//! scrolls.  Each tile wears its marks as the grid draws them, a
 //! small frame number (with the analysis' hint beside it: the burst's
 //! sharpest frame, or one that looks out of focus), and (while frames are
 //! being picked to compare) the grid's select checkbox; the frame the
@@ -76,6 +78,8 @@ pub struct Sheet {
     pub shown: bool,
     /// Frames are being picked: every tile shows its checkbox.
     pub picking: bool,
+    /// The tile size chosen (0: fit; see [`layout_at`]).
+    pub size: f32,
 }
 
 impl Sheet {
@@ -164,6 +168,207 @@ pub fn layout(aspects: &[f32], area: Rectangle) -> Vec<Cell> {
 /// The tile under `p`.
 pub fn hit(cells: &[Cell], p: Point) -> Option<usize> {
     cells.iter().position(|c| c.mount.contains(p))
+}
+
+// ── tile size and scrolling ─────────────────────────────────────────────────
+//
+// The tile size is the long edge of a tile's photo box, in logical pixels.
+// The smallest is the fit layout above (every frame on the stage); the
+// largest has one frame per row that still fits the stage whole.  Between
+// them the tiles keep that size, as many to a row as fit across, and the
+// sheet runs on below the stage and scrolls.  The size chosen is the app's
+// (kept across bursts); a burst whose fit is bigger shows at its fit.
+
+/// One Ctrl+wheel notch, Ctrl+= or Ctrl+− grows or shrinks the tiles by
+/// this much.
+pub const SIZE_STEP: f32 = 1.125;
+/// Wheel travel in pixels (a trackpad's) that makes one size step.
+const PIXELS_PER_STEP: f32 = 60.0;
+/// One wheel notch scrolls the sheet this far.
+pub const LINE_SCROLL: f32 = 100.0;
+
+/// A burst's tiles laid out at one size.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Grid {
+    /// Every tile's place, with the sheet scrolled to the top.
+    pub cells: Vec<Cell>,
+    pub cols: usize,
+    /// How tall the sheet is: the area's height when it fits.
+    pub height: f32,
+    /// The tile size shown.
+    pub edge: f32,
+}
+
+impl Grid {
+    /// How far the sheet scrolls in a view `view_h` tall.
+    pub fn max_scroll(&self, view_h: f32) -> f32 {
+        (self.height - view_h).max(0.0)
+    }
+
+    /// The cells with the sheet scrolled down by `scroll`.
+    pub fn scrolled(&self, scroll: f32) -> Vec<Cell> {
+        let dy = |r: Rectangle| rect(r.x, r.y - scroll, r.width, r.height);
+        self.cells.iter().map(|c| Cell { slot: dy(c.slot), photo: dy(c.photo), mount: dy(c.mount) }).collect()
+    }
+}
+
+/// The widest frame's shape: the photo box every tile gets.
+fn box_aspect(aspects: &[f32]) -> f32 {
+    let a = aspects.iter().copied().fold(0.0, f32::max);
+    if a > 0.01 { a } else { DEFAULT_ASPECT }
+}
+
+/// The photo box for tile size `edge`.
+fn photo_box(edge: f32, aspect: f32) -> Size {
+    if aspect >= 1.0 { Size::new(edge, edge / aspect) } else { Size::new(edge * aspect, edge) }
+}
+
+/// The tile sizes a burst can show at on a stage of `area`: its fit (every
+/// frame on the stage) and the largest (one frame to a row, whole on the
+/// stage), never smaller than fit.
+pub fn size_range(aspects: &[f32], area: Size) -> (f32, f32) {
+    let fit = fit_edge(&layout(aspects, Rectangle::with_size(area)), box_aspect(aspects));
+    (fit, largest_edge(aspects, area).max(fit))
+}
+
+fn fit_edge(cells: &[Cell], aspect: f32) -> f32 {
+    cells.first().map_or(0.0, |c| if aspect >= 1.0 { c.slot.width } else { c.slot.height } - 2.0 * PAD).max(0.0)
+}
+
+fn largest_edge(aspects: &[f32], area: Size) -> f32 {
+    let a = box_aspect(aspects);
+    let w = (area.width - 2.0 * MARGIN - 2.0 * PAD).max(0.0);
+    let h = (area.height - 2.0 * MARGIN - 2.0 * PAD).max(0.0);
+    if a >= 1.0 { w.min(h * a) } else { (w / a).min(h) }
+}
+
+/// The size a chosen size shows at: never under fit (a chosen size of 0
+/// is fit), never over the largest.
+pub fn shown_edge(chosen: f32, (fit, max): (f32, f32)) -> f32 {
+    if chosen <= fit { fit } else { chosen.min(max) }
+}
+
+/// The size chosen after `steps` steps (negative: smaller) from `edge`:
+/// 0 (fit) once it gets down to fit, at most the largest.
+pub fn step_size(edge: f32, (fit, max): (f32, f32), steps: f32) -> f32 {
+    let to = edge * SIZE_STEP.powf(steps);
+    if to <= fit * 1.001 || max <= fit * 1.001 { 0.0 } else { to.min(max) }
+}
+
+/// Where the size slider's knob sits for `edge` (0 at fit, 1 at the
+/// largest; the steps are even along it).
+pub fn slider_pos(edge: f32, (fit, max): (f32, f32)) -> f32 {
+    if max <= fit * 1.001 || fit <= 0.0 {
+        return 0.0;
+    }
+    ((edge.max(fit) / fit).ln() / (max / fit).ln()).clamp(0.0, 1.0)
+}
+
+/// The size chosen with the slider at `pos` (0: fit).
+pub fn size_at(pos: f32, (fit, max): (f32, f32)) -> f32 {
+    if pos <= 0.001 || max <= fit * 1.001 || fit <= 0.0 { 0.0 } else { fit * (max / fit).powf(pos.min(1.0)) }
+}
+
+/// The tiles at `chosen` size in `area`: today's fit layout when the
+/// chosen size is fit or less, else rows of tiles that size from the top,
+/// as many to a row as fit across, the block centred.
+pub fn layout_at(aspects: &[f32], area: Rectangle, chosen: f32) -> Grid {
+    let n = aspects.len();
+    let fit_cells = layout(aspects, area);
+    let a = box_aspect(aspects);
+    let fit = fit_edge(&fit_cells, a);
+    let max = largest_edge(aspects, area.size()).max(fit);
+    let edge = shown_edge(chosen, (fit, max));
+    if n == 0 || edge <= fit * 1.0005 {
+        // The first row's tiles: the fit's columns.
+        let cols = fit_cells.iter().take_while(|c| c.slot.y == fit_cells[0].slot.y).count().max(1);
+        return Grid { cells: fit_cells, cols, height: area.height, edge: fit };
+    }
+    let b = photo_box(edge, a);
+    let (w, h) = ((b.width + 2.0 * PAD).round(), (b.height + 2.0 * PAD).round());
+    let cols = (((area.width - 2.0 * MARGIN + GAP) / (w + GAP)).floor() as usize).clamp(1, n);
+    let rows = n.div_ceil(cols);
+    let block = Size::new(cols as f32 * w + (cols as f32 - 1.0) * GAP, rows as f32 * h + (rows as f32 - 1.0) * GAP);
+    let height = (block.height + 2.0 * MARGIN).max(area.height);
+    let x0 = area.x + ((area.width - block.width) / 2.0).round();
+    let y0 = area.y + ((height - block.height) / 2.0).round();
+    let cells = aspects
+        .iter()
+        .enumerate()
+        .map(|(i, &asp)| {
+            let (row, col) = ((i / cols) as f32, (i % cols) as f32);
+            let slot = rect(x0 + col * (w + GAP), y0 + row * (h + GAP), w, h);
+            let photo = fit_rect(asp, paint::inset(slot, PAD));
+            Cell { slot, photo, mount: paint::inset(photo, -PAD) }
+        })
+        .collect();
+    Grid { cells, cols, height, edge }
+}
+
+/// `scroll` kept within the sheet.
+pub fn clamp_scroll(grid: &Grid, view_h: f32, scroll: f32) -> f32 {
+    scroll.clamp(0.0, grid.max_scroll(view_h))
+}
+
+/// The scroll that shows tile `i` whole (its outline included), moving as
+/// little as it can; a tile taller than the view shows from its top.
+pub fn follow(grid: &Grid, view_h: f32, i: usize, scroll: f32) -> f32 {
+    let Some(c) = grid.cells.get(i) else { return clamp_scroll(grid, view_h, scroll) };
+    // The sheet's margin beside it, so the first and last rows scroll
+    // right to the ends.
+    let room = MARGIN;
+    let (top, bottom) = (c.mount.y - room, c.mount.y + c.mount.height + room);
+    let s = if bottom - top >= view_h || top < scroll {
+        top
+    } else if bottom > scroll + view_h {
+        bottom - view_h
+    } else {
+        scroll
+    };
+    clamp_scroll(grid, view_h, s)
+}
+
+/// After a change of size: the scroll that keeps the point `frac` of the
+/// way down tile `i` at `screen_y` on the stage, as far as the sheet can
+/// scroll.
+pub fn anchored(grid: &Grid, view_h: f32, i: usize, frac: f32, screen_y: f32) -> f32 {
+    let Some(c) = grid.cells.get(i) else { return 0.0 };
+    clamp_scroll(grid, view_h, c.mount.y + frac * c.mount.height - screen_y)
+}
+
+/// The tiles within `margin` of a view `view_h` tall scrolled to `scroll`.
+pub fn visible(grid: &Grid, view_h: f32, scroll: f32, margin: f32) -> std::ops::Range<usize> {
+    let (lo, hi) = (scroll - margin, scroll + view_h + margin);
+    let shown = |c: &Cell| c.mount.y + c.mount.height > lo && c.mount.y < hi;
+    let Some(first) = grid.cells.iter().position(shown) else { return 0..0 };
+    let last = grid.cells.iter().rposition(shown).unwrap_or(first);
+    first..last + 1
+}
+
+/// What the wheel does on the sheet.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Wheel {
+    /// Ctrl held: the tiles grow (positive) or shrink by this many steps.
+    Resize(f32),
+    /// Scroll down (positive) or up by this many pixels.
+    Scroll(f32),
+    /// The whole sheet fits: nothing (the wheel never opens a frame).
+    Nothing,
+}
+
+/// The wheel on the sheet: `dy` as iced reports it (positive away from
+/// the user), in lines (a mouse's notches) or pixels (a trackpad's).
+pub fn wheel(dy: f32, lines: bool, ctrl: bool, scrolls: bool) -> Wheel {
+    if dy == 0.0 {
+        return Wheel::Nothing;
+    }
+    if ctrl {
+        return Wheel::Resize(if lines { dy.signum() } else { dy / PIXELS_PER_STEP });
+    }
+    if !scrolls {
+        return Wheel::Nothing;
+    }
+    Wheel::Scroll(if lines { -dy * LINE_SCROLL } else { -dy })
 }
 
 // ── the zoom ────────────────────────────────────────────────────────────────
@@ -440,6 +645,209 @@ mod tests {
         // Turning round part-way: the next zoom starts from that frame.
         assert_eq!(zoom_at((mid, a), (tile, 1.0), 0.0), (mid, a));
         assert_eq!(zoom_at((mid, a), (tile, 1.0), 1.0), (tile, 1.0));
+    }
+
+    /// The stage's own coordinates, as the image stage lays the sheet out.
+    fn stage(w: f32, h: f32) -> Rectangle {
+        Rectangle::with_size(Size::new(w, h))
+    }
+
+    #[test]
+    fn tile_sizes_run_from_fit_to_one_frame_a_row() {
+        let a = stage(1100.0, 640.0);
+        let aspects = [LAND; 46];
+        let range @ (fit, max) = size_range(&aspects, a.size());
+        // Fit is today's layout; the largest is one 3:2 frame that fits the
+        // stage whole (here the height limits it: 600 px tall).
+        assert!((fit - (layout(&aspects, a)[0].slot.width - 2.0 * PAD)).abs() < 0.01);
+        assert!((max - (640.0 - 2.0 * MARGIN - 2.0 * PAD) * LAND).abs() < 0.01, "{max}");
+        assert!(fit < max / 4.0);
+        // Up from fit, step by step, smoothly, to the largest, and no
+        // further.
+        let mut edge = fit;
+        let mut steps = 0;
+        loop {
+            let chosen = step_size(edge, range, 1.0);
+            let next = shown_edge(chosen, range);
+            assert!(next >= edge && next / edge <= SIZE_STEP + 1e-3, "a step from {edge} to {next} jumps");
+            if next == edge {
+                break;
+            }
+            edge = next;
+            steps += 1;
+        }
+        assert_eq!(edge, max);
+        assert!((10..30).contains(&steps), "{steps} steps from fit to the largest");
+        assert_eq!(step_size(max, range, 1.0), max, "the largest stays the largest");
+        assert_eq!(step_size(max, range, 3.0), max);
+        // Down again, and back to fit: chosen 0 means fit (today's sheet).
+        let mut chosen = max;
+        for _ in 0..100 {
+            chosen = step_size(shown_edge(chosen, range), range, -1.0);
+        }
+        assert_eq!(chosen, 0.0);
+        assert_eq!(shown_edge(0.0, range), fit);
+        assert_eq!(step_size(fit * 1.05, range, -1.0), 0.0, "a step past fit lands on fit");
+        // A size chosen on a longer burst never shows a shorter one smaller
+        // than its own fit, and never past the largest.
+        assert_eq!(shown_edge(fit * 0.5, range), fit);
+        assert_eq!(shown_edge(max * 3.0, range), max);
+        // A short burst already as big as it gets has nowhere to go.
+        let two = size_range(&[LAND; 2], Size::new(700.0, 1200.0));
+        assert_eq!(step_size(two.0, two, 1.0), 0.0);
+        assert_eq!(slider_pos(two.0, two), 0.0);
+    }
+
+    #[test]
+    fn the_slider_runs_evenly_from_fit_to_the_largest() {
+        let range = (150.0, 1200.0);
+        assert_eq!(slider_pos(150.0, range), 0.0);
+        assert_eq!(slider_pos(1200.0, range), 1.0);
+        assert_eq!(slider_pos(100.0, range), 0.0);
+        assert_eq!(size_at(0.0, range), 0.0, "the slider's start is fit");
+        for pos in [0.1f32, 0.37, 0.5, 0.9, 1.0] {
+            let size = size_at(pos, range);
+            assert!((slider_pos(size, range) - pos).abs() < 1e-4);
+        }
+        // Even: each tenth of the way multiplies the size by the same.
+        let r1 = size_at(0.2, range) / size_at(0.1, range);
+        let r2 = size_at(0.9, range) / size_at(0.8, range);
+        assert!((r1 - r2).abs() < 1e-3);
+    }
+
+    #[test]
+    fn bigger_tiles_run_on_below_the_stage() {
+        let a = stage(1100.0, 640.0);
+        let aspects = [LAND; 46];
+        let range @ (fit, max) = size_range(&aspects, a.size());
+        // At fit (or less): exactly today's layout, all on the stage.
+        let g = layout_at(&aspects, a, 0.0);
+        assert_eq!(g.cells, layout(&aspects, a));
+        assert_eq!((g.height, g.edge), (a.height, fit));
+        assert_eq!(g.cols, shape(&aspects, a.size()).0);
+        assert_eq!(layout_at(&aspects, a, fit * 0.7), g);
+        // Bigger: tiles that size, as many to a row as fit across, rows in
+        // shooting order, the sheet taller than the stage.
+        let mid = fit * 2.5;
+        let g = layout_at(&aspects, a, mid);
+        assert_eq!(g.edge, mid);
+        assert!(g.height > a.height && g.max_scroll(a.height) > 0.0);
+        for (i, c) in g.cells.iter().enumerate() {
+            assert!((c.photo.width - mid).abs() <= 1.0, "tile {i} is {} wide", c.photo.width);
+            assert!(c.mount.x >= a.x && c.mount.x + c.mount.width <= a.x + a.width, "tile {i} overruns the sides");
+            assert!(c.mount.y >= 0.0 && c.mount.y + c.mount.height <= g.height);
+            if i % g.cols != 0 {
+                assert!(c.slot.y == g.cells[i - 1].slot.y && c.slot.x > g.cells[i - 1].slot.x);
+            } else if i > 0 {
+                assert!(c.slot.y > g.cells[i - 1].slot.y);
+            }
+        }
+        let used = g.cols as f32 * g.cells[0].slot.width + (g.cols as f32 - 1.0) * GAP;
+        assert!(used <= a.width - 2.0 * MARGIN && used + g.cells[0].slot.width + GAP > a.width - 2.0 * MARGIN, "as many to a row as fit");
+        // The largest: one frame a row, whole on the stage.
+        let g = layout_at(&aspects, a, max);
+        assert_eq!(g.cols, 1);
+        assert!(g.cells[0].mount.height <= a.height - 2.0 * MARGIN + 0.5);
+        assert_eq!(layout_at(&aspects, a, max * 2.0).edge, max);
+        // A wide stage limits by height too: still whole, never cut off.
+        let wide = stage(2400.0, 700.0);
+        let (_, wmax) = size_range(&aspects, wide.size());
+        assert!(layout_at(&aspects, wide, wmax).cells[0].mount.height <= 700.0 - 2.0 * MARGIN + 0.5);
+        let _ = range;
+    }
+
+    #[test]
+    fn a_new_size_keeps_the_tile_in_place() {
+        let a = stage(1100.0, 640.0);
+        let aspects = [LAND; 60];
+        let (fit, _) = size_range(&aspects, a.size());
+        let before = layout_at(&aspects, a, fit * 2.0);
+        // Tile 30 is part-way down the view, the pointer a third of the way
+        // down it.
+        let scroll = clamp_scroll(&before, a.height, before.cells[30].mount.y - 200.0);
+        let m = before.cells[30].mount;
+        let (frac, at) = (1.0 / 3.0, m.y + m.height / 3.0 - scroll);
+        let after = layout_at(&aspects, a, fit * 2.0 * SIZE_STEP);
+        let s = anchored(&after, a.height, 30, frac, at);
+        let m2 = after.cells[30].mount;
+        assert!((m2.y + frac * m2.height - s - at).abs() < 0.01, "the point under the pointer stays put");
+        // Near the top the sheet can't scroll far enough: as far as it can.
+        assert_eq!(anchored(&after, a.height, 0, 0.5, 600.0), 0.0);
+        // Near the end, likewise, never past the end.
+        assert_eq!(anchored(&after, a.height, 59, 0.5, 0.0), after.max_scroll(a.height));
+        // From fit to the first size up: the outlined tile stays near where
+        // it was.
+        let fitted = layout_at(&aspects, a, 0.0);
+        let y = fitted.cells[25].mount.center_y();
+        let up = layout_at(&aspects, a, step_size(fit, (fit, 9999.0), 1.0));
+        let s = anchored(&up, a.height, 25, 0.5, y);
+        assert!((up.cells[25].mount.center_y() - s - y).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_view_follows_the_outline() {
+        let a = stage(1100.0, 640.0);
+        let aspects = [LAND; 60];
+        let (fit, _) = size_range(&aspects, a.size());
+        let g = layout_at(&aspects, a, fit * 3.0);
+        let h = a.height;
+        let shows = |i: usize, s: f32| {
+            let m = g.cells[i].mount;
+            m.y >= s && m.y + m.height <= s + h
+        };
+        // On screen already: no move.
+        assert_eq!(follow(&g, h, 0, 0.0), 0.0);
+        // Below the view: just enough to show it, its outline included.
+        let last = g.cells.len() - 1;
+        let s = follow(&g, h, last, 0.0);
+        assert!(shows(last, s) && s <= g.max_scroll(h));
+        // Above the view: up to it.
+        let s2 = follow(&g, h, 0, s);
+        assert!(shows(0, s2) && s2 == 0.0);
+        // At the largest size on a short stage (two a row there: the
+        // height limits it), each tile still shows whole.
+        let big = layout_at(&aspects, stage(1100.0, 300.0), 9999.0);
+        let s3 = follow(&big, 300.0, 5, 0.0);
+        let m = big.cells[5].mount;
+        assert!(m.y >= s3 && m.y + m.height <= s3 + 300.0);
+    }
+
+    #[test]
+    fn only_the_tiles_near_the_view_are_shown() {
+        let a = stage(1100.0, 640.0);
+        let aspects = [LAND; 100];
+        let (fit, _) = size_range(&aspects, a.size());
+        let g = layout_at(&aspects, a, fit * 3.0);
+        let on = visible(&g, a.height, 0.0, 0.0);
+        assert_eq!(on.start, 0);
+        assert!(on.len() < 20 && on.len() >= g.cols, "{on:?}");
+        let near = visible(&g, a.height, 0.0, a.height);
+        assert!(near.start == 0 && near.end > on.end && near.len() < 50);
+        // Scrolled down: the window moves along.
+        let mid = visible(&g, a.height, 2000.0, 0.0);
+        assert!(mid.start > on.end);
+        for i in mid.clone() {
+            let m = g.cells[i].mount;
+            assert!(m.y + m.height > 2000.0 && m.y < 2000.0 + a.height);
+        }
+    }
+
+    #[test]
+    fn the_wheel_scrolls_and_ctrl_wheel_sizes() {
+        // Ctrl: a notch is a step; a trackpad's pixels a share of one.
+        assert_eq!(wheel(1.0, true, true, false), Wheel::Resize(1.0));
+        assert_eq!(wheel(-1.0, true, true, true), Wheel::Resize(-1.0));
+        assert_eq!(wheel(3.0, true, true, true), Wheel::Resize(1.0), "a notch is one step, however it's reported");
+        assert_eq!(wheel(30.0, false, true, true), Wheel::Resize(0.5));
+        // Plain: scrolls a sheet bigger than the stage (down for a turn
+        // towards the user)...
+        assert_eq!(wheel(-1.0, true, false, true), Wheel::Scroll(LINE_SCROLL));
+        assert_eq!(wheel(1.0, true, false, true), Wheel::Scroll(-LINE_SCROLL));
+        assert_eq!(wheel(-12.0, false, false, true), Wheel::Scroll(12.0));
+        // ...and does nothing on one that fits: never opens a frame.
+        assert_eq!(wheel(1.0, true, false, false), Wheel::Nothing);
+        assert_eq!(wheel(-1.0, true, false, false), Wheel::Nothing);
+        assert_eq!(wheel(0.0, true, true, true), Wheel::Nothing);
     }
 
     #[test]

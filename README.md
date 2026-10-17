@@ -109,7 +109,8 @@ src/model/             records, collection & pairing, filters, crops,
                        sidecars, library index and its saved tree
 src/ops/               file operations: export, sort, trash, edit copy,
                        crop export, and fsutil (the safe-write primitives)
-src/imaging/           JPEG/RAW decoding, thumbnails, viewer loader
+src/imaging/           JPEG/RAW decoding, thumbnails, viewer loader, burst
+                       sheet tile pictures
 src/ml/                the search model: registry, download, the helper
                        process (--ml-worker), its client, preview preparation
 src/search/            library search: the engine the app holds, the index
@@ -212,9 +213,20 @@ KWin's appmenu protocol on Wayland, or the AppMenu registrar on X11.  Set
   first, laid out over the photo area with the one you came to outlined.
   The arrow keys move the outline (Home / End: first and last frame), and P,
   M and U mark the outlined frame; *Advance after marking* moves the
-  outline along.  Click a frame (or Enter, +, the wheel) and it zooms up
-  into the ordinary viewer, where ← → step through the burst's frames;
-  Esc, − at fit, B or *All frames* zoom back out to all of them.
+  outline along.  Click a frame (or Enter, +) and it zooms up into the
+  ordinary viewer, where ← → step through the burst's frames; Esc, − at
+  fit (or the wheel), B or *All frames* zoom back out to all of them.
+  A long burst's frames get small, so **Ctrl+scroll**, **Ctrl+=** (or
+  Ctrl++) and **Ctrl+−**, or the tile-size slider in the top bar, make
+  them bigger or smaller: from all of them at once up to one frame a row.
+  Bigger, they run on below the photo area and the wheel scrolls them
+  (where they all fit, the wheel does nothing); the arrow keys still move
+  the outline and the view follows it, and a change of size keeps the
+  frame under the pointer (or the outlined one) where it was.  The size
+  is kept for the rest of the session and every burst, though a burst
+  never shows its frames smaller than all at once.  Bigger frames show
+  the camera's preview at their size, read only for the frames on screen
+  and near it.
   Ctrl+click or Space picks frames, and **C** compares them (with none
   picked, the outlined frame and its neighbours): compare as above, with
   **1** at 100 % on each frame's own AF point, `,` and `.` changing the

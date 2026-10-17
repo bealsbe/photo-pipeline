@@ -15,6 +15,11 @@
 //! sheet open 3                # click the 4th tile of the viewer's burst sheet
 //! sheet pick 3                # Ctrl+click it (pick it to compare)
 //! sheet back                  # the wheel zooming out past fit on a frame
+//! sheet wheel -3 [ctrl]       # one wheel event over the sheet, 3 lines
+//!                             # towards you (scrolls down 3 lines; with
+//!                             # ctrl: one size step smaller), through the
+//!                             # stage's own wheel handling
+//! sheet size 0.5              # drag the sheet's tile-size slider there
 //! sdump                       # print the viewer's burst sheet state
 //! labels pick 0|none          # the viewer's labels (L): click the 1st box,
 //!                             # or beside every box
@@ -272,7 +277,8 @@ fn parse_key(spec: &str) -> (Key, Modifiers) {
             _ => {}
         }
     }
-    let k = parts[parts.len() - 1];
+    // "ctrl++": the + key itself.
+    let k = if spec == "+" || spec.ends_with("++") { "+" } else { parts[parts.len() - 1] };
     let key = match k.to_lowercase().as_str() {
         "left" => Key::Named(Named::ArrowLeft),
         "right" => Key::Named(Named::ArrowRight),
@@ -366,6 +372,8 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "PrevBurst" => Some(Cmd::PrevBurst),
                 "NextBurst" => Some(Cmd::NextBurst),
                 "LabelFaces" => Some(Cmd::LabelFaces),
+                "SheetBigger" => Some(Cmd::SheetBigger),
+                "SheetSmaller" => Some(Cmd::SheetSmaller),
                 "Analyse" => Some(Cmd::Analyse),
                 "KeepThisPruneRest" => Some(Cmd::KeepThisPruneRest),
                 "PruneSoft" => Some(Cmd::PruneSoft),
@@ -681,6 +689,18 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             use crate::ui::image_stage::{SheetEvent, StageEvent};
             let mut a = arg.split_whitespace();
             let what = a.next().unwrap_or("");
+            if what == "wheel" {
+                let dy: f32 = a.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                let ctrl = a.next() == Some("ctrl");
+                if let Some(v) = app.viewer.as_mut() {
+                    let seq = v.sheet.wheel.0 + 1;
+                    v.sheet.wheel = (seq, dy, ctrl);
+                }
+                Task::none()
+            } else if what == "size" {
+                let pos: f32 = a.next().and_then(|x| x.parse().ok()).unwrap_or(0.0);
+                app.update(Message::Viewer(super::viewer::Msg::SheetSize(pos)))
+            } else {
             let n: usize = a.next().and_then(|x| x.parse().ok()).unwrap_or(0);
             let ev = match what {
                 "open" => Some(SheetEvent::Open(n)),
@@ -691,6 +711,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
             match ev {
                 Some(ev) => app.update(Message::Viewer(super::viewer::Msg::Stage(StageEvent::Sheet(ev)))),
                 None => Task::none(),
+            }
             }
         }
         "labels" => {
