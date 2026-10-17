@@ -207,7 +207,10 @@ pub enum Scene {
 pub enum StageEvent {
     Step(i32),
     Zoom(i32, Point),
+    /// A click on a day with photos: open its folder.
     DayActivated(NaiveDate, Rectangle),
+    /// Alt+click on one: show its photos, without opening the folder.
+    DayBrowse(NaiveDate, Rectangle),
     MonthActivated(u32, Rectangle),
     MonthJump(i32, u32),
     JumpNearest,
@@ -216,6 +219,14 @@ pub enum StageEvent {
     /// The day under the pointer on a month page changed.
     Hover(Option<NaiveDate>),
     Resized(Size),
+}
+
+/// A click held with Alt: on a day, show its photos rather than open it.
+fn with_alt(ev: StageEvent, alt: bool) -> StageEvent {
+    match ev {
+        StageEvent::DayActivated(d, r) if alt => StageEvent::DayBrowse(d, r),
+        ev => ev,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -488,7 +499,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for CalendarStage<'a, M
                     (Page::Year(y), HoverKey::Month(m)) => Some(StageEvent::MonthActivated(m, year_layout(size, *y).month_rect(m))),
                     _ => None,
                 };
-                if let Some(ev) = ev {
+                if let Some(ev) = ev.map(|ev| with_alt(ev, crate::ui::modifiers::get().alt())) {
                     shell.publish((self.on)(ev));
                     shell.capture_event();
                 }
@@ -1000,11 +1011,27 @@ fn paint_year(r: &mut Renderer, size: Size, year: i32, alpha: f32, ctx: &Ctx<'_>
     let title = format!("{}, {} {}", DOW[d.weekday().num_days_from_monday() as usize], MONTH_ABBR[d.month0() as usize], d.day());
     paint::text(r, &title, rect(x + 10.0, y + ch - 44.0, cw - 20.0, 20.0), t::T_BODY, paint::SEMIBOLD, b(t::INK), HAlign::Left, clip);
     paint::text(r, &plural(day.shot_count as u64, "photo"), rect(x + 10.0, y + ch - 24.0, cw - 20.0, 18.0), t::T_SMALL, paint::REGULAR, b(t::INK3), HAlign::Left, clip);
-    paint::text(r, "Open  ›", rect(x + 10.0, y + ch - 24.0, cw - 20.0, 18.0), t::T_SMALL, paint::MEDIUM, b(t::SIGNAL), HAlign::Right, clip);
+    let action = if day.folders.len() > 1 { "Choose a folder  ›" } else { "Open  ›" };
+    paint::text(r, action, rect(x + 10.0, y + ch - 24.0, cw - 20.0, 18.0), t::T_SMALL, paint::MEDIUM, b(t::SIGNAL), HAlign::Right, clip);
 }
 
 impl<'a, Message: 'a> From<CalendarStage<'a, Message>> for Element<'a, Message, iced::Theme, Renderer> {
     fn from(s: CalendarStage<'a, Message>) -> Self {
         Element::new(s)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn alt_click_on_a_day_shows_its_photos_instead_of_opening_it() {
+        let d = NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
+        let r = rect(10.0, 20.0, 100.0, 80.0);
+        assert!(matches!(with_alt(StageEvent::DayActivated(d, r), false), StageEvent::DayActivated(x, _) if x == d));
+        assert!(matches!(with_alt(StageEvent::DayActivated(d, r), true), StageEvent::DayBrowse(x, _) if x == d));
+        // Alt changes nothing else.
+        assert!(matches!(with_alt(StageEvent::MonthActivated(3, r), true), StageEvent::MonthActivated(3, _)));
     }
 }

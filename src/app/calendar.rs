@@ -1,8 +1,10 @@
 //! The library calendar (Python `CalendarView`): year ↔ month ↔ day.
 //!
 //! The index is built on a worker; pages are painted by
-//! `ui::calendar_stage`; a day opens as a read-only grid of that day's
-//! photos.  Every page change animates — a slide for prev/next, a zoom into
+//! `ui::calendar_stage`.  A click on a day opens its folder as the working
+//! folder (a day in several folders asks which first); Alt+click, zooming
+//! in or Open day › from search shows the day as a read-only grid of its
+//! photos instead.  Every page change animates — a slide for prev/next, a zoom into
 //! or out of a cell for year ↔ month ↔ day — and input arriving mid-animation
 //! starts from the frame on screen, so rapid navigation chains smoothly.
 
@@ -16,8 +18,8 @@ use parking_lot::Mutex;
 
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime};
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Space, column, container, row, stack, text};
-use iced::{Alignment, Element, Length, Padding, Rectangle, Size, Task};
+use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, row, stack, text};
+use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Rectangle, Size, Task};
 
 use super::kit;
 use super::style;
@@ -27,12 +29,13 @@ use crate::imaging::thumbs::{OWNER_CALENDAR, PRIORITY_PREFETCH, PRIORITY_VISIBLE
 use crate::model::collection::{Collection, RecordId};
 use crate::model::filter;
 use crate::model::library_cache::{self, Store};
-use crate::model::library_index::{self, LibraryIndex, MONTH_ABBR, MONTH_NAME, month_shift};
+use crate::model::library_index::{self, DayFolder, LibraryIndex, MONTH_ABBR, MONTH_NAME, month_shift};
 use crate::model::record::PhotoRecord;
 use crate::settings::Settings;
 use crate::ui::calendar_stage::{self, CalendarStage, Kind, Page, Scene, StageEvent};
 use crate::ui::grid::{self, Grid, GridData, GridEvent, Section};
 use crate::ui::icons::{self, Glyph};
+use crate::ui::motion::Appear;
 use crate::ui::paint;
 use crate::ui::theme as t;
 use crate::util::plural;
@@ -84,6 +87,25 @@ struct Transition {
 impl Transition {
     fn t(&self, now: Instant) -> f32 {
         (now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0)
+    }
+}
+
+/// A day whose photos are in more than one folder: which one to open.  A
+/// small menu at the date clicked, or under the day page's Open button.
+#[derive(Debug, Clone)]
+pub struct Choice {
+    pub date: NaiveDate,
+    pub folders: Vec<DayFolder>,
+    /// The date's cell on the page, or `None` under the Open button.  From
+    /// a page the menu ends with Show the day's photos.
+    at: Option<Rectangle>,
+    /// The row the keyboard (or the pointer) is on.
+    pub hover: usize,
+}
+
+impl Choice {
+    fn rows(&self) -> usize {
+        self.folders.len() + usize::from(self.at.is_some())
     }
 }
 
@@ -144,6 +166,8 @@ pub struct Calendar {
     pick: Option<PathBuf>,
     /// Bring the selected photo into view (bumped with it).
     day_reveal: (u64, Option<RecordId>),
+    /// Which folder to open, for a day in several.
+    pub choice: Option<Choice>,
 }
 
 /// Where the calendar was: its page and day.
@@ -168,7 +192,14 @@ pub enum Msg {
     SetMode(Mode),
     Today,
     Refresh,
+    /// The day page's Open as working folder.
     OpenFolder,
+    /// Open the chosen folder (a row of the choice).
+    Pick(usize),
+    /// The choice's Show the day's photos.
+    ShowDay,
+    ChoiceHover(usize),
+    CloseChoice,
     MessageAction,
 }
 
@@ -213,6 +244,7 @@ impl Calendar {
             back_to: (View::Search, "Search".into()),
             pick: None,
             day_reveal: (0, None),
+            choice: None,
         };
         if (1..=12).contains(&s.calendar_month) && s.calendar_year > 1900 && s.calendar_year < 3000 {
             c.year = s.calendar_year;
@@ -321,6 +353,8 @@ impl Calendar {
 
     pub fn deactivate(&mut self) {
         self.active = false;
+        self.choice = None;
+        self.hovered = None;
     }
 
     /// Search builds its results from the library's index: read it, if
@@ -677,6 +711,10 @@ impl Calendar {
     /// Apply a navigation change, animating between before and after.
     fn change(&mut self, apply: impl FnOnce(&mut Calendar), kind: Kind) {
         self.pending = None;
+        self.choice = None;
+        // The new page starts with nothing under the pointer (the stage
+        // forgets its hover too) until the pointer moves.
+        self.hovered = None;
         if !self.can_animate() {
             apply(self);
             self.after_change();
@@ -812,6 +850,35 @@ impl Calendar {
 
     fn hovered_day_month(&self) -> Option<NaiveDate> {
         self.hovered.filter(|d| d.month() == self.month && self.index.as_ref().is_some_and(|ix| ix.get(*d).is_some()))
+    }
+
+    /// The day with photos under the pointer, on a month or year page, and
+    /// its cell.
+    fn hovered_day(&self) -> Option<(NaiveDate, Rectangle)> {
+        match self.mode {
+            Mode::Month => self.hovered_day_month().map(|d| (d, calendar_stage::month_layout(self.stage_size, d.year(), d.month()).cell_rect(d))),
+            Mode::Year => self
+                .hovered
+                .filter(|d| d.year() == self.year && self.index.as_ref().is_some_and(|ix| ix.get(*d).is_some()))
+                .map(|d| (d, calendar_stage::year_layout(self.stage_size, self.year).day_rect(d))),
+            Mode::Day => None,
+        }
+    }
+
+    /// The status line while the pointer is on a day with photos: what a
+    /// click does there.
+    fn hover_hint(&self) -> Option<String> {
+        if self.pending.is_some() {
+            return None;
+        }
+        let (d, _) = self.hovered_day()?;
+        let day = self.index.as_ref()?.get(d)?;
+        let date = format!("{} {}", MONTH_ABBR[d.month0() as usize], d.day());
+        Some(match day.folders.as_slice() {
+            [] => return None,
+            [one] => format!("Click to open {} as the working folder.  Alt+click shows its photos without opening it.", crate::util::file_name(&one.path)),
+            many => format!("{date}'s photos are in {} folders: click to choose one.  Alt+click shows them without opening any.", many.len()),
+        })
     }
 
     fn zoom_step(&mut self, direction: i32) {
@@ -1015,7 +1082,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     }
                 }
             }
-            StageEvent::DayActivated(d, r) => cal.open_day_from(d, r),
+            StageEvent::DayActivated(d, r) => return activate_day(app, d, Some(r)),
+            StageEvent::DayBrowse(d, r) => cal.open_day_from(d, r),
             StageEvent::MonthActivated(m, r) => cal.zoom_into_month(m, r),
             StageEvent::MonthJump(y, m) => cal.jump_to_month(y, m),
             StageEvent::JumpNearest => cal.jump_nearest(),
@@ -1025,10 +1093,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 }
             }
             StageEvent::Resized(s) => cal.stage_size = s,
-            StageEvent::Hover(d) => {
-                cal.hovered = d;
-                return Task::none();
-            }
+            StageEvent::Hover(d) => cal.hovered = d,
         },
         Msg::Grid(ev) => return on_day_grid(app, ev),
         Msg::BackToSearch => {
@@ -1042,13 +1107,28 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Today => cal.go_today(),
         Msg::Refresh => cal.refresh(),
         Msg::OpenFolder => {
-            let folder = cal.day.and_then(|d| cal.index.as_ref().and_then(|ix| ix.get(d)).and_then(|day| day.folder.clone()));
-            if let Some(f) = folder {
-                let t = app.start_scan(f);
-                let t2 = app.switch_view(View::Grid);
-                return Task::batch([t, t2]);
+            if let Some(d) = cal.day {
+                return activate_day(app, d, None);
             }
         }
+        Msg::Pick(i) => {
+            if let Some(folder) = cal.pick(i) {
+                return open_folder(app, folder);
+            }
+        }
+        Msg::ShowDay => {
+            let row = cal.choice.as_ref().map(|ch| ch.folders.len());
+            if let Some(row) = row {
+                cal.pick(row);
+            }
+        }
+        Msg::ChoiceHover(i) => {
+            if let Some(ch) = &mut cal.choice {
+                ch.hover = i;
+            }
+            return Task::none();
+        }
+        Msg::CloseChoice => cal.choice = None,
         Msg::MessageAction => {
             if cal.root.is_none() {
                 return app.pick_folder(super::FolderTarget::Library);
@@ -1056,11 +1136,91 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             cal.refresh();
         }
     }
-    let status = app.calendar.status_text();
+    let status = app.calendar.hover_hint().unwrap_or_else(|| app.calendar.status_text());
     if app.view == View::Calendar {
         return app.show_status(status, 0);
     }
     Task::none()
+}
+
+/// A click (or Enter) on a day with photos: open its folder as the working
+/// folder, or offer the choice when its photos are in several.
+fn activate_day(app: &mut App, d: NaiveDate, at: Option<Rectangle>) -> Task<Message> {
+    match app.calendar.click_day(d, at) {
+        Some(folder) => open_folder(app, folder),
+        None => Task::none(),
+    }
+}
+
+/// Load `folder` as the working folder and show the grid, as File ▸ Open
+/// does (the scan runs on its own thread).
+fn open_folder(app: &mut App, folder: PathBuf) -> Task<Message> {
+    let scan = app.start_scan(folder);
+    let view = app.switch_view(View::Grid);
+    Task::batch([scan, view])
+}
+
+/// Keys while the choice of folders is open.  The rest wait until it
+/// closes.
+pub fn choice_key(app: &mut App, key: &Key) -> Task<Message> {
+    match app.calendar.choice_key(key) {
+        Some(row) => update(app, Msg::Pick(row)),
+        None => Task::none(),
+    }
+}
+
+impl Calendar {
+    /// A click (or Enter) on a day with photos.  One folder: returns it, to
+    /// open as the working folder.  Several: offers the choice and returns
+    /// nothing.  `at` is the day's cell on the page (`None`: under the day
+    /// page's Open button).  It reads only the index, never the disk.
+    pub fn click_day(&mut self, d: NaiveDate, at: Option<Rectangle>) -> Option<PathBuf> {
+        let day = self.index.as_ref()?.get(d)?;
+        match day.folders.as_slice() {
+            [] => None,
+            [one] => {
+                let folder = one.path.clone();
+                self.choice = None;
+                self.pending = None;
+                Some(folder)
+            }
+            many => {
+                self.choice = Some(Choice { date: d, folders: many.to_vec(), at, hover: 0 });
+                None
+            }
+        }
+    }
+
+    /// Row `i` of the choice taken: its folder, to open; or, the row after
+    /// the folders, the day's photos shown (zooming in from its cell).
+    fn pick(&mut self, i: usize) -> Option<PathBuf> {
+        let ch = self.choice.take()?;
+        match (ch.folders.get(i), ch.at) {
+            (Some(f), _) => Some(f.path.clone()),
+            (None, Some(cell)) => {
+                self.open_day_from(ch.date, cell);
+                None
+            }
+            (None, None) => None,
+        }
+    }
+
+    /// ↑ ↓ Home End move over the choice's rows, Esc closes it, and Enter
+    /// or Space returns the row to take.
+    fn choice_key(&mut self, key: &Key) -> Option<usize> {
+        let ch = self.choice.as_mut()?;
+        let n = ch.rows();
+        match key {
+            Key::Named(Named::ArrowDown) => ch.hover = (ch.hover + 1) % n,
+            Key::Named(Named::ArrowUp) => ch.hover = (ch.hover + n - 1) % n,
+            Key::Named(Named::Home) => ch.hover = 0,
+            Key::Named(Named::End) => ch.hover = n - 1,
+            Key::Named(Named::Enter) | Key::Named(Named::Space) => return Some(ch.hover),
+            Key::Named(Named::Escape) => self.choice = None,
+            _ => {}
+        }
+        None
+    }
 }
 
 fn on_day_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
@@ -1146,7 +1306,15 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
         (Key::Named(Named::ArrowRight), _) | (Key::Named(Named::PageDown), _) => cal.step(1),
         (_, Some("t")) | (Key::Named(Named::Home), _) => cal.go_today(),
         (_, Some("-")) | (Key::Named(Named::Escape), _) => cal.zoom_step(-1),
-        (_, Some("+")) | (_, Some("=")) | (Key::Named(Named::Enter), _) => cal.zoom_step(1),
+        // Enter on the day under the pointer does what a click does; + zooms
+        // into it, showing its photos.
+        (Key::Named(Named::Enter), _) => {
+            if let Some((d, cell)) = cal.hovered_day() {
+                return activate_day(app, d, Some(cell));
+            }
+            cal.zoom_step(1);
+        }
+        (_, Some("+")) | (_, Some("=")) => cal.zoom_step(1),
         _ => {}
     }
     Task::none()
@@ -1173,7 +1341,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let body: Element<'_, Message> = if !cal.has_index() {
         message_page(cal)
     } else if cal.mode == Mode::Day && cal.transition.is_none() {
-        day_grid(app, keyboard_ok)
+        day_grid(app, keyboard_ok && cal.choice.is_none())
     } else {
         let now = Instant::now();
         let scene = cal.current_scene(now);
@@ -1189,7 +1357,96 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     } else {
         body
     };
+    let body = match choice_layer(cal) {
+        Some(layer) => stack![body, layer].width(Length::Fill).height(Length::Fill).into(),
+        None => body,
+    };
     column![header, kit::hairline(), body].width(Length::Fill).height(Length::Fill).into()
+}
+
+const CHOICE_W: f32 = 320.0;
+const CHOICE_HEAD: f32 = 30.0;
+const CHOICE_ROW: f32 = 46.0;
+const CHOICE_SHOW: f32 = 36.0;
+const CHOICE_RULE: f32 = 9.0;
+
+/// The choice of folders over the page: a click outside closes it.  At a
+/// date, the menu sits under its cell (above it near the bottom) with the
+/// cell ringed; from the day page, under the Open button.
+fn choice_layer(cal: &Calendar) -> Option<Element<'_, Message>> {
+    let ch = cal.choice.as_ref()?;
+    let catcher = opaque(mouse_area(container(Space::new()).width(Length::Fill).height(Length::Fill)).on_press(Message::Calendar(Msg::CloseChoice)));
+    let panel = Appear::new(container(choice_menu(cal, ch)).width(CHOICE_W).padding(t::S1).style(style::floating())).rise(-6.0);
+    let Some(cell) = ch.at else {
+        let placed = container(opaque(panel)).align_right(Length::Fill).padding(Padding { top: t::S1, right: t::S3, ..Padding::ZERO });
+        return Some(stack![catcher, placed].into());
+    };
+    let size = cal.stage_size;
+    let h = 2.0 * t::S1 + CHOICE_HEAD + ch.folders.len() as f32 * CHOICE_ROW + CHOICE_RULE + CHOICE_SHOW;
+    let x = cell.x.min(size.width - CHOICE_W - t::S2).max(t::S2);
+    let below = cell.y + cell.height + 6.0;
+    let y = if below + h <= size.height - t::S2 { below } else { (cell.y - h - 6.0).max(t::S2) };
+    let radius = (cell.width.min(cell.height) / 4.0).min(8.0);
+    let ring = container(Space::new()).width(cell.width).height(cell.height).style(move |_| container::Style {
+        border: Border { color: t::SIGNAL, width: 1.5, radius: radius.into() },
+        ..container::Style::default()
+    });
+    Some(
+        stack![
+            catcher,
+            pin(ring).position(Point::new(cell.x, cell.y)).width(Length::Fill).height(Length::Fill),
+            pin(opaque(panel)).position(Point::new(x, y)).width(Length::Fill).height(Length::Fill),
+        ]
+        .into(),
+    )
+}
+
+fn choice_menu<'a>(cal: &'a Calendar, ch: &'a Choice) -> Element<'a, Message> {
+    let d = ch.date;
+    let head = format!("{}, {} {} is in {} folders", d.format("%a"), MONTH_ABBR[d.month0() as usize], d.day(), ch.folders.len());
+    let mut col = column![container(text(head).size(t::T_SMALL).color(t::INK3)).height(CHOICE_HEAD).padding(Padding::from([0.0, t::S2])).center_y(CHOICE_HEAD)];
+    let root = cal.index.as_ref().map(|ix| ix.root.as_path());
+    for (i, f) in ch.folders.iter().enumerate() {
+        let name = crate::util::file_name(&f.path);
+        let parent = f.path.parent().map(|p| root.and_then(|r| p.strip_prefix(r).ok()).unwrap_or(p));
+        let place = match parent {
+            Some(p) if p.as_os_str().is_empty() => "In the library folder".to_string(),
+            Some(p) => format!("In {}", p.display()),
+            None => String::new(),
+        };
+        let words = column![text(name).size(t::T_BODY).color(t::INK), text(place).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill);
+        let line = row![icons::view(Glyph::Folder, 16.0, t::INK2), words, text(plural(f.shots as u64, "photo")).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2)]
+            .spacing(t::S2)
+            .align_y(Alignment::Center);
+        col = col.push(choice_row(line, CHOICE_ROW, i, ch.hover == i, Msg::Pick(i)));
+    }
+    if ch.at.is_some() {
+        let i = ch.folders.len();
+        col = col.push(container(kit::hairline()).height(CHOICE_RULE).center_y(CHOICE_RULE).padding(Padding::from([0.0, t::S2])));
+        let line = row![
+            icons::view(Glyph::Photos, 16.0, t::INK2),
+            text("Show the day's photos").size(t::T_BODY).color(t::INK).width(Length::Fill),
+            text("Alt+click").size(t::T_SMALL).color(t::INK3),
+        ]
+        .spacing(t::S2)
+        .align_y(Alignment::Center);
+        col = col.push(choice_row(line, CHOICE_SHOW, i, ch.hover == i, Msg::ShowDay));
+    }
+    col.into()
+}
+
+fn choice_row<'a>(line: impl Into<Element<'a, Message>>, height: f32, i: usize, hot: bool, msg: Msg) -> Element<'a, Message> {
+    let b = button(container(line).height(height).center_y(height))
+        .padding(Padding::from([0.0, t::S2]))
+        .width(Length::Fill)
+        .style(move |_t, status| button::Style {
+            background: (hot || matches!(status, button::Status::Pressed)).then_some(Background::Color(t::RAISED_HI)),
+            text_color: t::INK,
+            border: Border { radius: t::R_CONTROL.into(), ..Border::default() },
+            ..button::Style::default()
+        })
+        .on_press(Message::Calendar(msg));
+    mouse_area(b).on_enter(Message::Calendar(Msg::ChoiceHover(i))).into()
 }
 
 /// Day pages inside transitions are painted from the cached day data (the
@@ -1344,7 +1601,10 @@ fn header(cal: &Calendar) -> Element<'_, Message> {
                 r = r.push(Space::new().width(t::S2)).push(count(day.jpg_count, "JPG", t::JPG));
             }
             r = r.push(Space::new().width(t::S4));
-            let tip = day.folder.as_ref().map(|f| format!("Load {} as the working folder", f.display())).unwrap_or_default();
+            let tip = match day.folders.as_slice() {
+                [one] => format!("Load {} as the working folder", one.path.display()),
+                many => format!("The day's photos are in {} folders: choose one to load", many.len()),
+            };
             r = r.push(kit::tip(kit::btn("Open as working folder", style::primary(), cmsg(Msg::OpenFolder)), tip, true));
         }
     } else if has {
@@ -1406,4 +1666,160 @@ fn message_page(cal: &Calendar) -> Element<'_, Message> {
     }
     col = col.push(Space::new().height(Length::FillPortion(4)));
     container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).style(style::fill(t::GROUND)).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::library_cache::{CachedFile, Folder, Tree};
+    use crate::model::record::FileType;
+
+    const ROOT: &str = "/mnt/nas/library";
+    const DAY: &str = "2025/Mar-2025/12-Mar-2025";
+
+    fn day() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2025, 3, 12).unwrap()
+    }
+
+    fn cell() -> Rectangle {
+        Rectangle::new(Point::new(300.0, 200.0), Size::new(120.0, 100.0))
+    }
+
+    /// A calendar on the month of `day()`, over a library of `folders`
+    /// (relative path, file names) built in memory.  The files are named
+    /// as the export names them, so their times come from their names:
+    /// nothing is read from disk, and nothing is saved.
+    fn calendar(folders: &[(&str, &[&str])]) -> Calendar {
+        let mut tree = Tree::default();
+        for (rel, names) in folders {
+            let files = names
+                .iter()
+                .map(|n| CachedFile { name: n.into(), file_type: FileType::from_path(Path::new(n)).unwrap(), size: 1000, mtime: (1_700_000_000, 0) })
+                .collect();
+            tree.folders.insert(PathBuf::from(rel), Folder { stamp: None, subdirs: Vec::new(), files });
+        }
+        let root = PathBuf::from(ROOT);
+        let store = Mutex::new(Store::new(root.clone()));
+        let index = library_index::index_from_tree(&root, &tree, &store, &AtomicBool::new(false)).expect("index");
+        let (bus, _rx) = crate::bus::channel();
+        let mut cal = Calendar::new(&Settings::default(), bus);
+        cal.root = Some(root);
+        cal.index = Some(Arc::new(index));
+        (cal.mode, cal.year, cal.month) = (Mode::Month, 2025, 3);
+        cal
+    }
+
+    fn one_folder() -> Calendar {
+        let (raw, jpg) = (format!("{DAY}/RAW"), format!("{DAY}/JPG"));
+        calendar(&[
+            (&raw, &["20250312_1000_0001.ARW", "20250312_1000_0002.ARW"]),
+            (&jpg, &["20250312_1000_0001.JPG", "20250312_1000_0002.JPG"]),
+        ])
+    }
+
+    fn two_folders() -> Calendar {
+        let raw = format!("{DAY}/RAW");
+        calendar(&[
+            (&raw, &["20250312_1000_0001.ARW", "20250312_1000_0002.ARW", "20250312_1000_0003.ARW"]),
+            ("Imports/12-Mar-2025", &["20250312_1500_0001.JPG"]),
+        ])
+    }
+
+    /// The page stays as it was: no day page, and none of the day's
+    /// photos asked for.
+    fn still_on_the_month(cal: &Calendar) {
+        assert_eq!((cal.mode, cal.day), (Mode::Month, None));
+        assert!(cal.requested.is_empty() && cal.days.is_empty());
+    }
+
+    #[test]
+    fn a_click_on_a_day_in_one_folder_opens_it_straight_away() {
+        let mut cal = one_folder();
+        assert_eq!(cal.click_day(day(), Some(cell())), Some(Path::new(ROOT).join(DAY)));
+        assert!(cal.choice.is_none());
+        still_on_the_month(&cal);
+        // A day without photos does nothing.
+        assert_eq!(cal.click_day(day().succ_opt().unwrap(), Some(cell())), None);
+        assert!(cal.choice.is_none());
+    }
+
+    #[test]
+    fn a_click_on_a_day_in_several_folders_offers_the_choice() {
+        let mut cal = two_folders();
+        assert_eq!(cal.click_day(day(), Some(cell())), None);
+        still_on_the_month(&cal);
+        let ch = cal.choice.as_ref().expect("the choice");
+        let folders: Vec<(PathBuf, usize)> = ch.folders.iter().map(|f| (f.path.clone(), f.shots)).collect();
+        assert_eq!(folders, vec![(Path::new(ROOT).join(DAY), 3), (Path::new(ROOT).join("Imports/12-Mar-2025"), 1)]);
+        // Two folders, then Show the day's photos; the first is ready for Enter.
+        assert_eq!((ch.rows(), ch.hover), (3, 0));
+        assert_eq!(cal.choice_key(&Key::Named(Named::ArrowDown)), None);
+        assert_eq!(cal.choice_key(&Key::Named(Named::Enter)), Some(1));
+        assert_eq!(cal.pick(1), Some(Path::new(ROOT).join("Imports/12-Mar-2025")));
+        assert!(cal.choice.is_none());
+        still_on_the_month(&cal);
+        // Esc closes it, opening nothing.
+        cal.click_day(day(), Some(cell()));
+        cal.choice_key(&Key::Named(Named::Escape));
+        assert!(cal.choice.is_none());
+        still_on_the_month(&cal);
+    }
+
+    #[test]
+    fn the_choice_can_show_the_days_photos_instead() {
+        let mut cal = two_folders();
+        cal.click_day(day(), Some(cell()));
+        assert_eq!(cal.choice_key(&Key::Named(Named::ArrowUp)), None);
+        assert_eq!(cal.choice_key(&Key::Named(Named::Enter)), Some(2));
+        assert_eq!(cal.pick(2), None);
+        assert_eq!((cal.mode, cal.day), (Mode::Day, Some(day())));
+        assert!(cal.choice.is_none());
+    }
+
+    #[test]
+    fn the_day_pages_open_button_offers_only_the_folders() {
+        let mut cal = two_folders();
+        cal.open_day_from(day(), cell());
+        assert_eq!(cal.click_day(day(), None), None);
+        let ch = cal.choice.as_ref().expect("the choice");
+        assert_eq!((ch.rows(), ch.folders.len()), (2, 2));
+        assert_eq!(cal.choice_key(&Key::Named(Named::End)), None);
+        assert_eq!(cal.choice_key(&Key::Named(Named::Enter)), Some(1));
+        assert_eq!(cal.pick(1), Some(Path::new(ROOT).join("Imports/12-Mar-2025")));
+        // One folder: the button opens it.
+        let mut cal = one_folder();
+        cal.open_day_from(day(), cell());
+        assert_eq!(cal.click_day(day(), None), Some(Path::new(ROOT).join(DAY)));
+    }
+
+    #[test]
+    fn browsing_a_day_shows_its_photos_and_opens_nothing() {
+        // Alt+click, zooming in and + all come here.
+        let mut cal = one_folder();
+        cal.hovered = Some(day());
+        cal.open_day_from(day(), cell());
+        assert_eq!((cal.mode, cal.day), (Mode::Day, Some(day())));
+        assert!(cal.choice.is_none());
+        // The day page doesn't keep the month's hint, nor its day under
+        // the pointer for Enter when the month comes back.
+        assert_eq!(cal.hover_hint(), None);
+        cal.go_back();
+        assert_eq!((cal.mode, cal.hovered_day()), (Mode::Month, None));
+    }
+
+    #[test]
+    fn enter_takes_the_day_under_the_pointer_and_the_status_says_what_a_click_does() {
+        let mut cal = two_folders();
+        assert_eq!(cal.hovered_day(), None);
+        assert_eq!(cal.hover_hint(), None);
+        cal.hovered = Some(day());
+        assert_eq!(cal.hovered_day().map(|(d, _)| d), Some(day()));
+        assert_eq!(cal.hover_hint().as_deref(), Some("Mar 12's photos are in 2 folders: click to choose one.  Alt+click shows them without opening any."));
+        let mut cal = one_folder();
+        cal.hovered = Some(day());
+        assert_eq!(cal.hover_hint().as_deref(), Some("Click to open 12-Mar-2025 as the working folder.  Alt+click shows its photos without opening it."));
+        // A day of the next month showing on this page isn't taken.
+        cal.month = 2;
+        assert_eq!(cal.hovered_day(), None);
+    }
 }

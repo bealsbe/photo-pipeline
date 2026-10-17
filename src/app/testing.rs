@@ -70,7 +70,14 @@
 //! dlg export-go               # press a dialog button (see `dialog_msg`)
 //! gridscroll 20000 3000       # scroll the grid to y=20000 px over 3 s
 //! zoom 240                    # set the grid's thumbnail size
-//! calday 2026-07-24           # open a day in the calendar
+//! calday 2026-07-24           # show a day's photos in the calendar (as
+//!                             # Alt+click; opens no folder)
+//! calmonth 2026-07            # go to a month in the calendar
+//! calclick 2026-07-24 [alt]   # click a day on the month page (opens its
+//!                             # folder, or offers the choice of folders)
+//! calhover 2026-07-24|none    # the pointer onto a day (then key enter)
+//! calchoice dump|pick 1|show|close   # the choice of folders for a day
+//! calchoice open              # the day page's Open as working folder
 //! calactivate 0               # open the viewer on a tile of the day page
 //! ql close|activate|dump      # quick look: click outside / double-click
 //!                             # the photo (the widget's events), or print it
@@ -1002,11 +1009,55 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         }
         "calday" => match chrono::NaiveDate::parse_from_str(&arg, "%Y-%m-%d") {
             Ok(d) => {
-                let ev = crate::ui::calendar_stage::StageEvent::DayActivated(d, iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(100.0, 100.0)));
+                let ev = crate::ui::calendar_stage::StageEvent::DayBrowse(d, iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(100.0, 100.0)));
                 app.update(Message::Calendar(super::calendar::Msg::Stage(ev)))
             }
             Err(_) => Task::none(),
         },
+        "calmonth" => match chrono::NaiveDate::parse_from_str(&format!("{arg}-01"), "%Y-%m-%d") {
+            Ok(d) => {
+                use chrono::Datelike;
+                let ev = crate::ui::calendar_stage::StageEvent::MonthJump(d.year(), d.month());
+                app.update(Message::Calendar(super::calendar::Msg::Stage(ev)))
+            }
+            Err(_) => Task::none(),
+        },
+        "calclick" | "calhover" => {
+            use crate::ui::calendar_stage::{StageEvent, month_layout};
+            use chrono::Datelike;
+            let mut words = arg.split_whitespace();
+            let date = words.next().and_then(|w| chrono::NaiveDate::parse_from_str(w, "%Y-%m-%d").ok());
+            let ev = match (cmd, date) {
+                ("calhover", d) => StageEvent::Hover(d),
+                (_, Some(d)) => {
+                    // The day's cell on the month page, as a click there.
+                    let cell = month_layout(app.calendar.stage_size, d.year(), d.month()).cell_rect(d);
+                    if words.next() == Some("alt") { StageEvent::DayBrowse(d, cell) } else { StageEvent::DayActivated(d, cell) }
+                }
+                (_, None) => StageEvent::Hover(None),
+            };
+            app.update(Message::Calendar(super::calendar::Msg::Stage(ev)))
+        }
+        "calchoice" => {
+            use super::calendar::Msg;
+            let mut words = arg.split_whitespace();
+            match words.next() {
+                Some("pick") => app.update(Message::Calendar(Msg::Pick(words.next().and_then(|w| w.parse().ok()).unwrap_or(0)))),
+                Some("show") => app.update(Message::Calendar(Msg::ShowDay)),
+                Some("close") => app.update(Message::Calendar(Msg::CloseChoice)),
+                Some("open") => app.update(Message::Calendar(Msg::OpenFolder)),
+                _ => {
+                    match &app.calendar.choice {
+                        Some(ch) => {
+                            let folders: Vec<String> = ch.folders.iter().map(|f| format!("{} ({})", f.path.display(), f.shots)).collect();
+                            eprintln!("[calchoice] {} hover={} folders=[{}] working={:?}", ch.date, ch.hover, folders.join(", "), app.folder);
+                        }
+                        None => eprintln!("[calchoice] none working={:?} view={:?}", app.folder, app.view),
+                    }
+                    Task::none()
+                }
+            }
+        }
         "calactivate" => {
             let n: usize = arg.parse().unwrap_or(0);
             let id = app.calendar.day.and_then(|d| app.calendar.day_data(d)).and_then(|data| data.ids.get(n).copied());

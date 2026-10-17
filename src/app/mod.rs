@@ -1414,6 +1414,10 @@ impl App {
         if self.view == View::Subjects && key == Key::Named(Named::Escape) && self.quicklook.is_none() && self.modal.is_none() {
             return subjects::escape(self);
         }
+        // So does the calendar's choice of folders for a day.
+        if self.view == View::Calendar && self.calendar.choice.is_some() && self.modal.is_none() {
+            return calendar::choice_key(self, &key);
+        }
         // The Hints menu, like the date picker, takes the keys while open.
         if self.quality.menu {
             if key == Key::Named(Named::Escape) {
