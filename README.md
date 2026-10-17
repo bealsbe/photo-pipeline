@@ -337,6 +337,27 @@ corrections* and the record itself (see "A record of your corrections").
 
 ## Library calendar
 
+The calendar (Ctrl+3) shows the library by the day the photos were taken,
+a month or a year at a time.
+
+- **A click on a day opens it.**  Its folder (`12-Mar-2025`, as export
+  files it) becomes the working folder and the grid shows it, as *Open
+  working folder…* (Ctrl+O) does.  Enter does the same for the day under the pointer.  The
+  status bar says which folder a click will open.
+- **A day in several folders asks which.**  If the day's photos are in
+  more than one folder (two day folders with the same date, or loose files
+  next to a day folder), a small menu at the date lists them with how many
+  of the day's photos each holds.  Click one, or choose with ↑ ↓ and Enter;
+  Esc or a click outside closes it.  A folder inside another one counts as
+  part of it, since opening a folder reads its subfolders; only a day
+  folder inside a folder of loose files is listed on its own.
+- **Alt+click shows the day without opening it.**  It shows the day's
+  photos as a read-only grid, so you can look before you load anything.
+  Zooming in (+, Ctrl+scroll or a pinch) does the same, and so does *Show
+  the day's photos* at the foot of the menu.  P, M and U do nothing there,
+  and its *Open as working folder* button opens the day.  Search and the
+  people pages also show a day this way (*Open day ›*).
+
 The calendar doesn't read the whole library each time it opens.
 
 - **The index is saved.**  The library's folder tree is kept in
@@ -1183,7 +1204,9 @@ These are deliberate:
   *Show pruned* moved from the filter bar to Preferences, under the same
   saved setting.
 - **Library calendar** keeps its index between runs and re-reads only
-  changed folders (see above).  In a day's grid, a renamed file's capture
+  changed folders (see above).  A click on a day opens its folder as the
+  working folder at once; Alt+click shows the day's photos first, as a
+  click used to.  In a day's grid, a renamed file's capture
   time is read from its name, to the minute, instead of from EXIF.  The order
   is the same, because export numbers each day in capture order; the names
   matched EXIF for every file checked on the author's library.
@@ -1255,7 +1278,7 @@ These are deliberate:
   the banner.  Never point these at the real cache: downloads go wherever
   `HOME` says, so use a throwaway one.
 - **Scripted UI:** `PP_SCRIPT=<file>` drives the app with commands such as
-  `open`, `key`, `click`, `dlg`, `calday` and `shot`; see
+  `open`, `key`, `click`, `dlg`, `calclick` and `shot`; see
   `src/app/testing.rs` for the full list.  To run it headless:
 
   ```sh

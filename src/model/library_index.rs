@@ -112,7 +112,10 @@ pub struct LibraryDay {
     pub shot_count: usize,
     pub raw_count: usize,
     pub jpg_count: usize,
-    pub folder: Option<PathBuf>,
+    /// The folders the day's photos are in, as the calendar opens them:
+    /// the day folder first, then by how many of the day's photos each
+    /// holds.  Usually one (the library files a day into its day folder).
+    pub folders: Vec<DayFolder>,
     /// Shots (RAW+JPG sharing stem and canonical parent), sorted by name.
     shots: Vec<Vec<usize>>,
 }
@@ -125,12 +128,12 @@ impl LibraryDay {
             shot_count: 0,
             raw_count: 0,
             jpg_count: 0,
-            folder: None,
+            folders: Vec::new(),
             shots: Vec::new(),
         }
     }
 
-    fn finalise(&mut self) {
+    fn finalise(&mut self, root: &Path) {
         // The path breaks ties, so the order never depends on read order.
         self.files.sort_by_cached_key(|e| (util::file_name(&e.path).to_lowercase(), e.path.clone()));
         self.raw_count = self.files.iter().filter(|e| e.file_type == FileType::Raw).count();
@@ -153,28 +156,7 @@ impl LibraryDay {
         self.shot_count = list.len();
         self.shots = list;
 
-        // Prefer the day folder; fall back to the most common parent.
-        let mut parents: Vec<(PathBuf, usize)> = Vec::new();
-        for e in &self.files {
-            let p = canonical_parent(&e.path);
-            match parents.iter_mut().find(|(q, _)| *q == p) {
-                Some((_, n)) => *n += 1,
-                None => parents.push((p, 1)),
-            }
-        }
-        let day_dir = parents
-            .iter()
-            .find(|(p, _)| date_from_day_folder(&util::file_name(p)) == Some(self.date))
-            .map(|(p, _)| p.clone());
-        self.folder = day_dir.or_else(|| {
-            let mut best: Option<&(PathBuf, usize)> = None;
-            for p in &parents {
-                if best.is_none_or(|b| p.1 > b.1) {
-                    best = Some(p);
-                }
-            }
-            best.map(|b| b.0.clone())
-        });
+        self.folders = day_folders(root, self.date, self.shots.iter().map(|s| self.files[s[0]].path.as_path()));
     }
 
     /// The day's shots: indices into `files`, a RAW+JPG pair together.
@@ -201,6 +183,59 @@ impl LibraryDay {
     }
 }
 
+/// A folder holding some of a day's photos, and how many.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DayFolder {
+    pub path: PathBuf,
+    /// The day's photos (a RAW+JPG pair is one) in it, subfolders included.
+    pub shots: usize,
+}
+
+/// Where each of a day's shots (`shots`: a path of each) would be opened
+/// from: its day folder for `date` (`12-Mar-2025`, however deep the file
+/// is under it), else its folder (a `RAW/` or `JPG/` level stripped).  A
+/// folder inside another one listed folds into it, since opening a folder
+/// reads its subfolders too.  Day folders come first, then the folder
+/// with most of the day's photos; the path breaks ties.
+fn day_folders<'a>(root: &Path, date: NaiveDate, shots: impl Iterator<Item = &'a Path>) -> Vec<DayFolder> {
+    let mut found: Vec<DayFolder> = Vec::new();
+    for path in shots {
+        let dir = day_dir(root, date, path).unwrap_or_else(|| canonical_parent(path));
+        match found.iter_mut().find(|f| f.path == dir) {
+            Some(f) => f.shots += 1,
+            None => found.push(DayFolder { path: dir, shots: 1 }),
+        }
+    }
+    // Outermost first, so a folder's subfolders fold into it.  A day folder
+    // stays itself inside a folder that isn't one (`Mar-2025` holding loose
+    // files): it holds just the day, where the other holds more.
+    let is_day = |f: &DayFolder| date_from_day_folder(&util::file_name(&f.path)) == Some(date);
+    found.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut folders: Vec<DayFolder> = Vec::new();
+    for f in found {
+        match folders.iter_mut().rev().find(|o| f.path.starts_with(&o.path) && (is_day(o) || !is_day(&f))) {
+            Some(outer) => outer.shots += f.shots,
+            None => folders.push(f),
+        }
+    }
+    folders.sort_by(|a, b| is_day(b).cmp(&is_day(a)).then(b.shots.cmp(&a.shots)).then_with(|| a.path.cmp(&b.path)));
+    folders
+}
+
+/// The innermost folder named for `date` on `path`'s way down from `root`.
+fn day_dir(root: &Path, date: NaiveDate, path: &Path) -> Option<PathBuf> {
+    let rel = path.parent()?.strip_prefix(root).ok()?;
+    let mut dir = root.to_path_buf();
+    let mut found = None;
+    for c in rel.components() {
+        dir.push(c);
+        if date_from_day_folder(&c.as_os_str().to_string_lossy()) == Some(date) {
+            found = Some(dir.clone());
+        }
+    }
+    found
+}
+
 /// Days of the library that hold photos, with per-day counts.
 #[derive(Debug, Clone)]
 pub struct LibraryIndex {
@@ -213,7 +248,7 @@ pub struct LibraryIndex {
 
 impl LibraryIndex {
     fn new(root: PathBuf, mut days: BTreeMap<NaiveDate, LibraryDay>) -> Self {
-        days.par_iter_mut().for_each(|(_, d)| d.finalise());
+        days.par_iter_mut().for_each(|(_, d)| d.finalise(&root));
         let total_shots = days.values().map(|d| d.shot_count).sum();
         let total_files = days.values().map(|d| d.files.len()).sum();
         // Quantile thresholds, so one 2 000-shot wedding day does not push
@@ -413,6 +448,48 @@ mod tests {
         assert_eq!(time_from_renamed_stem("20250312_2475_0007"), None);
         assert_eq!(folder_day(Path::new("2025/Mar-2025/12-Mar-2025/RAW")), NaiveDate::from_ymd_opt(2025, 3, 12));
         assert_eq!(folder_day(Path::new("2025/Mar-2025")), None);
+    }
+
+    fn folders_of(paths: &[&str]) -> Vec<(String, usize)> {
+        let date = NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
+        let paths: Vec<PathBuf> = paths.iter().map(|p| Path::new("/mnt/nas/lib").join(p)).collect();
+        day_folders(Path::new("/mnt/nas/lib"), date, paths.iter().map(PathBuf::as_path))
+            .into_iter()
+            .map(|f| (f.path.strip_prefix("/mnt/nas/lib").unwrap().display().to_string(), f.shots))
+            .collect()
+    }
+
+    #[test]
+    fn a_day_folder_is_one_folder_whatever_is_inside_it() {
+        let day = "2025/Mar-2025/12-Mar-2025";
+        let got = folders_of(&[
+            &format!("{day}/RAW/a.arw"),
+            &format!("{day}/JPG/b.jpg"),
+            &format!("{day}/c.jpg"),
+            &format!("{day}/Shoot two/RAW/d.arw"),
+            &format!("{day}/Shoot two/e.jpg"),
+        ]);
+        assert_eq!(got, vec![(day.to_string(), 5)]);
+        // Loose files (no day folder) are opened from their own folder.
+        assert_eq!(folders_of(&["Imports/RAW/a.arw", "Imports/b.jpg"]), vec![("Imports".to_string(), 2)]);
+        // A folder inside another one listed folds into it.
+        assert_eq!(folders_of(&["Imports/a.jpg", "Imports/Phone/b.jpg"]), vec![("Imports".to_string(), 2)]);
+    }
+
+    #[test]
+    fn several_folders_list_the_day_folder_first_then_by_size() {
+        let got = folders_of(&[
+            "2025/Mar-2025/20250312_1000_0001.jpg",
+            "2025/Mar-2025/20250312_1000_0002.jpg",
+            "2025/Mar-2025/20250312_1000_0003.jpg",
+            "2025/Mar-2025/12-Mar-2025/RAW/a.arw",
+            "Other/12-Mar-2025/b.jpg",
+            "Other/12-Mar-2025/c.jpg",
+        ]);
+        assert_eq!(
+            got,
+            vec![("Other/12-Mar-2025".to_string(), 2), ("2025/Mar-2025/12-Mar-2025".to_string(), 1), ("2025/Mar-2025".to_string(), 3)]
+        );
     }
 
     #[test]
