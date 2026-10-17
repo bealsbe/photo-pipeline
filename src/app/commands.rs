@@ -61,6 +61,10 @@ pub enum Cmd {
     /// L in the viewer: show the faces and fursuit heads found in the
     /// photo, to name, change, add or remove.  Viewer only.
     LabelFaces,
+    /// Ctrl+= (or Ctrl++) on a burst's sheet: bigger tiles.  Viewer only.
+    SheetBigger,
+    /// Ctrl+− on a burst's sheet: smaller tiles, down to fit.  Viewer only.
+    SheetSmaller,
 }
 
 impl Cmd {
@@ -103,6 +107,8 @@ impl Cmd {
             Cmd::PrevBurst => "Previous burst",
             Cmd::NextBurst => "Next burst",
             Cmd::LabelFaces => "Label faces and fursuits",
+            Cmd::SheetBigger => "Bigger burst tiles",
+            Cmd::SheetSmaller => "Smaller burst tiles",
         }
     }
 
@@ -144,6 +150,8 @@ impl Cmd {
             Cmd::PrevBurst => "Shift+←",
             Cmd::NextBurst => "Shift+→",
             Cmd::LabelFaces => "L",
+            Cmd::SheetBigger => "Ctrl+=",
+            Cmd::SheetSmaller => "Ctrl+−",
         }
     }
 
@@ -181,6 +189,8 @@ impl Cmd {
             Cmd::PrevBurst => "In the viewer, back to the first frame of this burst, or of the burst before",
             Cmd::NextBurst => "In the viewer, on to the first frame of the next burst",
             Cmd::LabelFaces => "In the viewer, show the faces and fursuit heads found in the photo: name them, add one that was missed, or remove one",
+            Cmd::SheetBigger => "On a burst's frames in the viewer, make the tiles bigger",
+            Cmd::SheetSmaller => "On a burst's frames in the viewer, make the tiles smaller, down to every frame at once",
             _ => "",
         }
     }
@@ -216,8 +226,50 @@ impl Cmd {
     /// their keys through to its own use of them (Shift+arrows extend the
     /// grid's selection).
     pub fn viewer_only(self) -> bool {
-        matches!(self, Cmd::PrevBurst | Cmd::NextBurst | Cmd::LabelFaces)
+        matches!(self, Cmd::PrevBurst | Cmd::NextBurst | Cmd::LabelFaces | Cmd::SheetBigger | Cmd::SheetSmaller)
     }
+
+    /// Every command.
+    pub const ALL: &[Cmd] = &[
+        Cmd::Open,
+        Cmd::Export,
+        Cmd::EditCopy,
+        Cmd::Review,
+        Cmd::Sort,
+        Cmd::GridView,
+        Cmd::CalendarView,
+        Cmd::Search,
+        Cmd::Subjects,
+        Cmd::SelectMode,
+        Cmd::QuickLook,
+        Cmd::PruneSelected,
+        Cmd::MarkSelected,
+        Cmd::Undo,
+        Cmd::Redo,
+        Cmd::Quit,
+        Cmd::Shortcuts,
+        Cmd::SideMenu,
+        Cmd::FolderBar,
+        Cmd::ToReview,
+        Cmd::FileNames,
+        Cmd::Compare,
+        Cmd::ReviewBurst,
+        Cmd::StackBurst,
+        Cmd::StackBursts,
+        Cmd::AdvanceAfterMark,
+        Cmd::Preferences,
+        Cmd::Analyse,
+        Cmd::KeepThisPruneRest,
+        Cmd::PruneSoft,
+        Cmd::PruneAccidental,
+        Cmd::PruneCopies,
+        Cmd::ProblemsOnly,
+        Cmd::PrevBurst,
+        Cmd::NextBurst,
+        Cmd::LabelFaces,
+        Cmd::SheetBigger,
+        Cmd::SheetSmaller,
+    ];
 
     /// Match a key press against the command shortcuts.
     pub fn from_key(key: &Key, mods: Modifiers) -> Option<Cmd> {
@@ -249,6 +301,8 @@ impl Cmd {
                     (true, true, "a") => Some(Cmd::AdvanceAfterMark),
                     (true, false, ",") => Some(Cmd::Preferences),
                     (true, false, "f") => Some(Cmd::Search),
+                    (true, _, "=") | (true, _, "+") => Some(Cmd::SheetBigger),
+                    (true, false, "-") => Some(Cmd::SheetSmaller),
                     (false, false, "s") => Some(Cmd::SelectMode),
                     (false, false, "c") => Some(Cmd::Compare),
                     (false, false, "b") => Some(Cmd::ReviewBurst),
@@ -394,6 +448,55 @@ mod tests {
         let all = [Cmd::Open, Cmd::SelectMode, Cmd::Compare, Cmd::ReviewBurst, Cmd::StackBurst, Cmd::Shortcuts, Cmd::QuickLook];
         assert!(all.iter().all(|c| c.shortcut() != "L"));
         assert!(MENUS.iter().all(|(_, _, items)| !items.contains(&Some(Cmd::LabelFaces))), "the viewer has no menus");
+    }
+
+    /// Ctrl+= (Ctrl++ with Shift, as the layout sends it) and Ctrl+− size
+    /// the burst sheet's tiles, in the viewer only; plain +, = and − stay
+    /// the viewer's own (open the outlined frame on the sheet, zoom on a
+    /// frame), and Ctrl+wheel isn't a key.
+    #[test]
+    fn ctrl_plus_and_minus_size_the_burst_tiles() {
+        assert_eq!(Cmd::from_key(&ch("="), Modifiers::CTRL), Some(Cmd::SheetBigger));
+        assert_eq!(Cmd::from_key(&ch("+"), Modifiers::CTRL | Modifiers::SHIFT), Some(Cmd::SheetBigger));
+        assert_eq!(Cmd::from_key(&ch("+"), Modifiers::CTRL), Some(Cmd::SheetBigger), "a keypad's +");
+        assert_eq!(Cmd::from_key(&ch("-"), Modifiers::CTRL), Some(Cmd::SheetSmaller));
+        for k in ["=", "+", "-"] {
+            assert_eq!(Cmd::from_key(&ch(k), Modifiers::empty()), None, "plain {k} is the viewer's zoom");
+            assert_eq!(Cmd::from_key(&ch(k), Modifiers::SHIFT), None);
+            assert_eq!(Cmd::from_key(&ch(k), Modifiers::ALT | Modifiers::CTRL), None);
+        }
+        assert_eq!(Cmd::from_key(&ch("_"), Modifiers::CTRL | Modifiers::SHIFT), None);
+        assert!(Cmd::SheetBigger.viewer_only() && Cmd::SheetSmaller.viewer_only());
+        assert_eq!((Cmd::SheetBigger.shortcut(), Cmd::SheetSmaller.shortcut()), ("Ctrl+=", "Ctrl+−"));
+        assert!(MENUS.iter().all(|(_, _, items)| !items.contains(&Some(Cmd::SheetBigger)) && !items.contains(&Some(Cmd::SheetSmaller))));
+    }
+
+    /// Each shortcut belongs to one command: no two commands show the same
+    /// one, and every key and modifier answers to at most one (from_key is
+    /// a function, so it is the shown shortcuts that must not repeat).
+    #[test]
+    fn no_shortcut_is_bound_twice() {
+        let mut seen = std::collections::HashMap::new();
+        for &c in Cmd::ALL {
+            let s = c.shortcut();
+            if s.is_empty() {
+                continue;
+            }
+            if let Some(other) = seen.insert(s, c) {
+                panic!("{s} is bound to both {other:?} and {c:?}");
+            }
+        }
+        // Every printable key with each modifier answers to one command at
+        // most, and that command's shortcut names it.
+        let mods = [Modifiers::empty(), Modifiers::SHIFT, Modifiers::CTRL, Modifiers::CTRL | Modifiers::SHIFT];
+        for k in (0x20u8..0x7f).map(|b| (b as char).to_string()) {
+            for m in mods {
+                if let Some(c) = Cmd::from_key(&ch(&k), m) {
+                    assert!(Cmd::ALL.contains(&c));
+                    assert!(!c.shortcut().is_empty() || matches!(c, Cmd::Redo), "{k:?} {m:?} gives {c:?}, which shows no shortcut");
+                }
+            }
+        }
     }
 
     #[test]

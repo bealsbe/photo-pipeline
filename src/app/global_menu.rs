@@ -258,6 +258,8 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::PrevBurst => "go-previous",
         Cmd::NextBurst => "go-next",
         Cmd::LabelFaces => "tag",
+        Cmd::SheetBigger => "zoom-in",
+        Cmd::SheetSmaller => "zoom-out",
     }
 }
 

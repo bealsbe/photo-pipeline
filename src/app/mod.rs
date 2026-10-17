@@ -55,6 +55,7 @@ use iced::{Event, Point, Size, Subscription, Task, event, window};
 
 use crate::bus::{self, BgEvent, Bus};
 use crate::imaging::loader::Loader;
+use crate::imaging::tile_previews::TilePreviews;
 use crate::imaging::thumbs::{self, OWNER_CALENDAR, OWNER_MAIN, ThumbCache, ThumbWorkers};
 use crate::model::bursts::{Bursts, RunMark, Stacking};
 use crate::model::collection::{Collection, RecordId};
@@ -402,6 +403,12 @@ pub struct App {
     pub workers: ThumbWorkers,
     pub thumbs: ThumbCache,
     pub loader: Loader,
+    /// Pictures for a burst sheet's tiles bigger than their thumbnails.
+    pub tile_previews: TilePreviews,
+    /// The burst sheet's tile size (0: fit), chosen with Ctrl+wheel,
+    /// Ctrl+= / Ctrl+− or the sheet's slider; kept for the session, across
+    /// bursts (`ui::burst_sheet::layout_at`).
+    pub sheet_tiles: f32,
     /// Writes sidecars off the UI thread.
     saver: sidecar::Saver,
     /// Undo / redo for this working-folder session.
@@ -489,6 +496,7 @@ impl App {
         let (bus, rx) = bus::channel();
         let workers = ThumbWorkers::new(bus.clone());
         let loader = Loader::new(bus.clone());
+        let tile_previews = TilePreviews::new(bus.clone());
         let saver = {
             let bus = bus.clone();
             sidecar::Saver::new(move |report| {
@@ -545,6 +553,8 @@ impl App {
             workers,
             thumbs: ThumbCache::new(OWNER_MAIN, MAIN_CACHE_BYTES),
             loader,
+            tile_previews,
+            sheet_tiles: 0.0,
             saver,
             history: undo::History::new(),
             scale_factor: 1.0,
@@ -1736,6 +1746,7 @@ impl App {
         self.search.link.shutdown();
         self.calendar.shutdown();
         self.loader.shutdown();
+        self.tile_previews.shutdown();
         let mut tasks = Vec::new();
         compare::release(self);
         if self.viewer.is_some() {
@@ -1855,6 +1866,8 @@ impl App {
             Cmd::PrevBurst => viewer_burst::skip(self, -1),
             Cmd::NextBurst => viewer_burst::skip(self, 1),
             Cmd::LabelFaces => viewer_labels::toggle(self),
+            Cmd::SheetBigger => viewer_burst::resize(self, 1.0),
+            Cmd::SheetSmaller => viewer_burst::resize(self, -1.0),
             Cmd::Preferences => preferences::open(self),
             Cmd::Analyse => hints_ui::analyse(self),
             Cmd::KeepThisPruneRest => bulk::open(self, bulk::Action::KeepThis),
@@ -2163,6 +2176,9 @@ impl App {
                     tasks.push(viewer::on_loaded(self, path.clone(), result.clone()));
                     tasks.push(compare::on_loaded(self, &path, &result));
                     tasks.push(quicklook::on_loaded(self, &path, err.as_deref()));
+                }
+                BgEvent::TilePreview { path, edge, image } => {
+                    self.tile_previews.deliver(&path, edge, image);
                 }
                 BgEvent::Preview { path, image } => {
                     tasks.push(viewer::on_preview(self, path.clone(), image));

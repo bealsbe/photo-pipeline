@@ -37,6 +37,9 @@ pub enum BgEvent {
     Full { path: PathBuf, result: Result<Arc<FullImage>, String> },
     /// The embedded preview shown while `Full` decodes (`None`: there is none).
     Preview { path: PathBuf, image: Option<Arc<FullImage>> },
+    /// A burst sheet tile's picture at size class `edge` (`None`: the file
+    /// has no embedded preview to make one from).
+    TilePreview { path: PathBuf, edge: u32, image: Option<Arc<FullImage>> },
 
     Exif { key: (PathBuf, Option<PathBuf>), sections: Sections },
     ExifTool { path: PathBuf, flat: Vec<(String, String)> },
@@ -221,6 +224,7 @@ impl BgEvent {
             BgEvent::Thumb { .. } => "Thumb",
             BgEvent::Full { .. } => "Full",
             BgEvent::Preview { .. } => "Preview",
+            BgEvent::TilePreview { .. } => "TilePreview",
             BgEvent::Exif { .. } => "Exif",
             BgEvent::ExifTool { .. } => "ExifTool",
             BgEvent::IndexProgress { .. } => "IndexProgress",

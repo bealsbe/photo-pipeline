@@ -73,6 +73,12 @@ impl FullImage {
         FullImage { levels, width, height, bytes, preview: false }
     }
 
+    /// `px` alone, at its own size (a burst sheet tile's picture).
+    pub fn single(px: Pixels) -> FullImage {
+        let (w, h) = (px.width, px.height);
+        Self::preview_of(px, w, h)
+    }
+
     /// `px` shown in place of a `width`×`height` image.
     fn preview_of(px: Pixels, width: u32, height: u32) -> FullImage {
         let (w, h) = (px.width, px.height);
