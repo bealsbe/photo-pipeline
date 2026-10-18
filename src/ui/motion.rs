@@ -422,3 +422,197 @@ impl<'a, Message: 'a> From<SmoothBar> for Element<'a, Message, iced::Theme, Rend
         Element::new(b)
     }
 }
+// ── Glow ────────────────────────────────────────────────────────────────────
+
+/// A button with a soft glow that fades in under the pointer and out again
+/// (over [`GLOW_MS`]): a 2 px ring in the button's tone just outside its
+/// edge, drawn beneath it.  The button itself is untouched: clicks, focus,
+/// Tab order, its disabled look and tooltips are its own.  A disabled
+/// button never glows.  Frames are asked for only during the fade.
+///
+/// Until it becomes an element it still takes the button's `width`,
+/// `height` and `padding`, so the kit's callers read as before.
+pub struct Glow<'a, Message> {
+    button: iced::widget::Button<'a, Message>,
+    enabled: bool,
+    tone: Color,
+    radius: f32,
+}
+
+/// How long the glow takes to come and go.
+const GLOW_MS: f32 = 150.0;
+
+/// `PP_GLOW_ALL=1`: every enabled button glows as if under the pointer,
+/// for screenshots from the scripted driver (the headless compositor has
+/// no pointer).  Read once.
+fn glow_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| std::env::var_os("PP_GLOW_ALL").is_some_and(|v| v == "1"))
+}
+
+impl<'a, Message: 'a> Glow<'a, Message> {
+    /// `enabled`: the button has an action (only then does it glow).
+    pub fn new(button: iced::widget::Button<'a, Message>, enabled: bool) -> Self {
+        Self { button, enabled, tone: t::SIGNAL, radius: t::R_CONTROL }
+    }
+
+    /// The glow's colour (the accent unless the button has a tone of its own).
+    pub fn tone(mut self, tone: Color) -> Self {
+        self.tone = tone;
+        self
+    }
+
+    /// The button's corner radius, so the ring follows it.
+    pub fn radius(mut self, radius: f32) -> Self {
+        self.radius = radius;
+        self
+    }
+
+    pub fn width(mut self, width: impl Into<Length>) -> Self {
+        self.button = self.button.width(width);
+        self
+    }
+
+    pub fn height(mut self, height: impl Into<Length>) -> Self {
+        self.button = self.button.height(height);
+        self
+    }
+
+    pub fn padding(mut self, padding: impl Into<iced::Padding>) -> Self {
+        self.button = self.button.padding(padding);
+        self
+    }
+}
+
+struct GlowWidget<'a, Message> {
+    content: Element<'a, Message, iced::Theme, Renderer>,
+    enabled: bool,
+    tone: Color,
+    radius: f32,
+}
+
+struct GlowState {
+    over: bool,
+    /// How lit it was when the pointer last came or went: the fade starts there.
+    from: f32,
+    changed: Instant,
+}
+
+impl GlowState {
+    fn level(&self, now: Instant) -> f32 {
+        let k = paint::out_cubic(progress(self.changed, now, GLOW_MS));
+        if self.over { self.from + (1.0 - self.from) * k } else { self.from * (1.0 - k) }
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        progress(self.changed, now, GLOW_MS) >= 1.0
+    }
+}
+
+impl<'a, Message: 'a> Widget<Message, iced::Theme, Renderer> for GlowWidget<'a, Message> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<GlowState>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(GlowState { over: false, from: 0.0, changed: Instant::now() - Duration::from_secs(1) })
+    }
+
+    fn children(&self) -> Vec<Tree> {
+        vec![Tree::new(&self.content)]
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        tree.diff_children(std::slice::from_ref(&self.content));
+    }
+
+    fn size(&self) -> Size<Length> {
+        self.content.as_widget().size()
+    }
+
+    fn size_hint(&self) -> Size<Length> {
+        self.content.as_widget().size_hint()
+    }
+
+    fn layout(&mut self, tree: &mut Tree, renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        self.content.as_widget_mut().layout(&mut tree.children[0], renderer, limits)
+    }
+
+    fn operate(&mut self, tree: &mut Tree, layout: Layout<'_>, renderer: &Renderer, operation: &mut dyn Operation) {
+        self.content.as_widget_mut().operate(&mut tree.children[0], layout, renderer, operation);
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        layout: Layout<'_>,
+        cursor: Cursor,
+        renderer: &Renderer,
+        clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        viewport: &Rectangle,
+    ) {
+        self.content.as_widget_mut().update(&mut tree.children[0], event, layout, cursor, renderer, clipboard, shell, viewport);
+        let st = tree.state.downcast_mut::<GlowState>();
+        match event {
+            Event::Window(window::Event::RedrawRequested(now)) => {
+                if !st.settled(*now) {
+                    shell.request_redraw();
+                }
+            }
+            _ => {
+                let over = self.enabled && (cursor.is_over(layout.bounds()) || glow_forced());
+                if over != st.over {
+                    let now = Instant::now();
+                    st.from = st.level(now);
+                    st.over = over;
+                    st.changed = now;
+                    shell.request_redraw();
+                }
+            }
+        }
+    }
+
+    fn mouse_interaction(&self, tree: &Tree, layout: Layout<'_>, cursor: Cursor, viewport: &Rectangle, renderer: &Renderer) -> mouse::Interaction {
+        self.content.as_widget().mouse_interaction(&tree.children[0], layout, cursor, viewport, renderer)
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut Renderer,
+        theme: &iced::Theme,
+        style: &iced::advanced::renderer::Style,
+        layout: Layout<'_>,
+        cursor: Cursor,
+        viewport: &Rectangle,
+    ) {
+        let st = tree.state.downcast_ref::<GlowState>();
+        let k = st.level(Instant::now());
+        if k > 0.005 {
+            let b = layout.bounds();
+            let ring = rect(b.x - 2.0, b.y - 2.0, b.width + 4.0, b.height + 4.0);
+            paint::framed(renderer, ring, self.radius + 2.0, Color::TRANSPARENT, t::alpha(self.tone, 0.32 * k), 2.0);
+        }
+        self.content.as_widget().draw(&tree.children[0], renderer, theme, style, layout, cursor, viewport);
+    }
+
+    fn overlay<'b>(
+        &'b mut self,
+        tree: &'b mut Tree,
+        layout: Layout<'b>,
+        renderer: &Renderer,
+        viewport: &Rectangle,
+        translation: Vector,
+    ) -> Option<overlay::Element<'b, Message, iced::Theme, Renderer>> {
+        self.content.as_widget_mut().overlay(&mut tree.children[0], layout, renderer, viewport, translation)
+    }
+}
+
+impl<'a, Message: Clone + 'a> From<Glow<'a, Message>> for Element<'a, Message, iced::Theme, Renderer> {
+    fn from(g: Glow<'a, Message>) -> Self {
+        Element::new(GlowWidget { content: g.button.into(), enabled: g.enabled, tone: g.tone, radius: g.radius })
+    }
+}
+

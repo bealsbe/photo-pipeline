@@ -7,6 +7,7 @@ use iced::{Alignment, Color, Element, Length, Padding};
 use super::Message;
 use super::style::{self, Look};
 use crate::ui::icons::{self, Glyph};
+use crate::ui::motion::Glow;
 use crate::ui::paint;
 use crate::ui::theme as t;
 
@@ -48,38 +49,66 @@ pub fn tip<'a>(content: impl Into<Element<'a, Message>>, label: impl Into<String
 }
 
 // ── buttons ─────────────────────────────────────────────────────────────────
+//
+// Each comes wrapped in a `Glow`: a soft ring in the button's tone fades in
+// under the pointer.  The glow's colour follows the look (the accent, or a
+// filled button's own fill), and a button without an action never glows.
+
+/// The glow's colour for `look`: a toggle's own tone (keep green, prune
+/// red), a filled button's fill (primary, danger), else the accent.
+fn glow_tone(look: &Look) -> Color {
+    if [t::KEEP, t::REJECT, t::SIGNAL, t::WARN].contains(&look.fg) {
+        look.fg
+    } else if look.bg == t::SIGNAL {
+        t::SIGNAL_HI
+    } else if look.bg == t::REJECT {
+        t::REJECT
+    } else {
+        t::SIGNAL
+    }
+}
+
+fn glow<'a>(b: Button<'a, Message>, look: &Look, enabled: bool) -> Glow<'a, Message> {
+    Glow::new(b, enabled).tone(glow_tone(look)).radius(look.radius)
+}
 
 /// A text button of standard height.
-pub fn btn<'a>(label: impl Into<String>, look: Look, on: Option<Message>) -> Button<'a, Message> {
-    button(container(text(label.into()).size(t::T_BODY).font(paint::MEDIUM)).center_y(Length::Fill))
+pub fn btn<'a>(label: impl Into<String>, look: Look, on: Option<Message>) -> Glow<'a, Message> {
+    let enabled = on.is_some();
+    let b = button(container(text(label.into()).size(t::T_BODY).font(paint::MEDIUM)).center_y(Length::Fill))
         .height(t::CONTROL_H)
         .padding(Padding::from([0.0, t::S4]))
         .style(look.style())
-        .on_press_maybe(on)
+        .on_press_maybe(on);
+    glow(b, &look, enabled)
 }
 
 /// A square icon-only button.
-pub fn icon_btn<'a>(glyph: Glyph, color: Color, look: Look, on: Option<Message>) -> Button<'a, Message> {
-    let c = if on.is_some() { color } else { t::INK4 };
-    button(container(icons::view(glyph, 16.0, c)).center(Length::Fill))
+pub fn icon_btn<'a>(glyph: Glyph, color: Color, look: Look, on: Option<Message>) -> Glow<'a, Message> {
+    let enabled = on.is_some();
+    let c = if enabled { color } else { t::INK4 };
+    let b = button(container(icons::view(glyph, 16.0, c)).center(Length::Fill))
         .width(t::CONTROL_H)
         .height(t::CONTROL_H)
         .padding(0)
         .style(look.style())
-        .on_press_maybe(on)
+        .on_press_maybe(on);
+    glow(b, &look, enabled)
 }
 
 /// Icon then label.
-pub fn icon_text_btn<'a>(glyph: Glyph, label: impl Into<String>, color: Color, look: Look, on: Option<Message>) -> Button<'a, Message> {
-    let c = if on.is_some() { color } else { t::INK4 };
+pub fn icon_text_btn<'a>(glyph: Glyph, label: impl Into<String>, color: Color, look: Look, on: Option<Message>) -> Glow<'a, Message> {
+    let enabled = on.is_some();
+    let c = if enabled { color } else { t::INK4 };
     let content = row![icons::view(glyph, 16.0, c), text(label.into()).size(t::T_BODY).font(paint::MEDIUM)]
         .spacing(t::S2)
         .align_y(Alignment::Center);
-    button(container(content).center_y(Length::Fill))
+    let b = button(container(content).center_y(Length::Fill))
         .height(t::CONTROL_H)
         .padding(Padding::from([0.0, t::S3]))
         .style(look.style())
-        .on_press_maybe(on)
+        .on_press_maybe(on);
+    glow(b, &look, enabled)
 }
 
 /// Options of a segmented control, joined on one recessed track.
