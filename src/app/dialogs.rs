@@ -1,5 +1,5 @@
 //! Modal dialogs (Export, Copy Marked Photos, Sort, Prune Review and the
-//! confirm / info boxes) and the Keyboard Shortcuts window.
+//! confirm / info boxes) and the Keyboard shortcuts window.
 //!
 //! Dialogs are in-window overlays over a dimmed backdrop.  Every file
 //! operation runs on a worker thread and reports progress over the bus, so
@@ -652,7 +652,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                         app.modal = Some(Modal {
                             kind: Kind::Export(ex),
                             confirm: Some(Confirm {
-                                title: "Clear Marks".into(),
+                                title: "Clear marks".into(),
                                 text: format!("Clear the export mark from {n} file{}?", s(n)),
                                 ok: "Yes",
                                 cancel: "No",
@@ -781,7 +781,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     app.modal = Some(Modal {
                         kind: Kind::Sort(so),
                         confirm: Some(Confirm {
-                            title: "Sort Files".into(),
+                            title: "Sort files".into(),
                             text: format!(
                                 "Move {n} file{} into RAW/ and JPG/ subfolders?\n\nYou can undo this with Ctrl+Z.",
                                 s(n)

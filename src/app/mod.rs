@@ -663,7 +663,7 @@ impl App {
             return c.title();
         }
         if Some(id) == self.shortcuts {
-            return "Keyboard Shortcuts".into();
+            return "Keyboard shortcuts".into();
         }
         if Some(id) == self.prefs.window {
             return "Preferences".into();
@@ -1912,14 +1912,14 @@ impl App {
 
     pub fn pick_folder(&mut self, target: FolderTarget) -> Task<Message> {
         let (title, start) = match target {
-            FolderTarget::Working => ("Open Working Folder", self.folder.clone()),
-            FolderTarget::Library | FolderTarget::ExportLibrary => ("Set Library Folder", self.library.clone()),
-            FolderTarget::EditCopy => ("Folder to Copy Photos Into", dialogs::edit_copy_base(self)),
+            FolderTarget::Working => ("Open working folder", self.folder.clone()),
+            FolderTarget::Library | FolderTarget::ExportLibrary => ("Set library folder", self.library.clone()),
+            FolderTarget::EditCopy => ("Folder to copy photos into", dialogs::edit_copy_base(self)),
             FolderTarget::EditCopySetting => {
                 let s = &self.settings.edit_copy_folder;
-                ("Folder to Copy Photos Into", (!s.is_empty()).then(|| PathBuf::from(s)))
+                ("Folder to copy photos into", (!s.is_empty()).then(|| PathBuf::from(s)))
             }
-            FolderTarget::ExportCorrections => ("Folder to Export the Record Into", None),
+            FolderTarget::ExportCorrections => ("Folder to export the record into", None),
         };
         let start = start.or_else(dirs::home_dir).unwrap_or_default();
         let dialog = rfd::AsyncFileDialog::new().set_title(title).set_directory(start);
