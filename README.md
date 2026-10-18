@@ -566,10 +566,26 @@ for you.
   F2 renames; an unnamed group opens with its name field ready, and a name
   that already exists offers *Merge into …* first), how many photos and
   how many more may show them, *Photos | Faces*, *Review N suggestions*
-  (Y), and ⋯ for *Merge into…*, *Hide* and *Forget this person…*.
+  (Y), and ⋯ for *Merge into…*, *Change group photo…*, *Hide* and
+  *Forget this person…*.
 - **Faces** shows every face in the group, clearest first; pick the wrong
   ones and *Move to…* (the group editor, them picked), or *Not this
   person*, which takes them out and stops them being suggested again.
+- **The group photo** (named groups only; people and fursuits alike).
+  On *Faces* (a fursuit's *Heads*), pick one and *Set as group photo* in
+  the pick strip: it is what the tile, the page's header, the search
+  field's chip and completions, and the merge dialog and reviews show
+  for the group.  The one shown now wears a small photo mark (its
+  tooltip says whether you chose it or it is the automatic pick, the
+  clearest).  Picked on the chosen one, the strip offers *Use the
+  automatic photo* instead, and so does ⋯ (with *Change group photo…*,
+  which opens *Faces*).  Each is one undo step, and the tile changes at
+  once.  Unnamed groups keep the automatic photo.  It is kept in
+  `subjects.json` (the subject's `cover`, a field since the first
+  version, so the file's version doesn't change), through regroups and
+  rebuilds; it goes back to the automatic one when its face leaves the
+  group, is removed, or isn't found again, and a merge keeps the kept
+  name's photo (or the other's, when the kept one had none chosen).
 - **"Same person?": the review.**  One suggestion at a time, large,
   between the person's confirmed faces and the whole photo with the face
   outlined.  **Y** and **N** answer, in the keep and prune colours; the
@@ -702,6 +718,10 @@ never shown, merged, suggested or completed together with people or pets.
     not heads; Ctrl+Z takes back the last step.  Two heads of one photo
     never end up in one column, or in a group holding the other: such a
     drop is refused with a short note.
+  - **The group photo:** one face picked in a named group's column (or
+    one being named there): *Set as group photo* (or *Use the automatic
+    photo*) in the pick strip, the photo mark moving to it; it is part
+    of the arrangement (Ctrl+Z here takes it back) and applies with it.
   - **Nothing changes until *Apply*** (Enter): the whole arrangement, as
     one undo step ("Split into 3 groups, 4 heads to Kiba, 2 removed",
     with Undo).  *Cancel* or Esc leaves everything as it was.  It applies
@@ -859,7 +879,9 @@ decision is added to a file, one line each:
   were and where each set of heads went, new groups, taken out or not
   heads, with how many were moved by hand), review answers (Y,
   N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
-  names given to groups, and the viewer's label edits (a name, *It's a
+  names given to groups, group photos chosen (`cover`: the group and
+  the head, none for the automatic one again; the editor's ride in its
+  `edit` entry), and the viewer's label edits (a name, *It's a
   person* / *It's a fursuit*, a drawn box, *Not a face*).  Ctrl+Z, or Z
   in a review, adds an entry naming the one it takes back: nothing is
   rewritten.

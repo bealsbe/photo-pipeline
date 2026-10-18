@@ -18,6 +18,8 @@
 //!   panel holding the other): such a drop is refused with a short note.
 //! - **Names.**  A new column, and the group being edited, are named in
 //!   their headers; a name that is taken offers *Merge into …* instead.
+//! - **The group photo** of a named column: *Set as group photo* with one
+//!   face picked (`subjects_cover`), part of the arrangement.
 //! - **Nothing changes in the library until *Apply***, which makes the
 //!   whole arrangement ONE undo step on the engine (`GroupEdit`, by head,
 //!   so it applies to the groups as they are then, a regroup or not).

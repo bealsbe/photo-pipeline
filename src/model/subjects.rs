@@ -614,8 +614,10 @@ pub struct Subject {
     pub kind: Kind,
     #[serde(default)]
     pub hidden: bool,
-    /// The face its tile shows, when the user chose one; else the clearest
-    /// member.
+    /// The face its tile shows (the group photo), when the user chose one:
+    /// named subjects only, one of `members`; cleared when it leaves them
+    /// or is removed, and shown only while its detection is found
+    /// ([`cover_of`]).  Else the clearest member.
     #[serde(default)]
     pub cover: Option<FaceRef>,
     /// Confirmed members: named into it, moved into it, answered Yes.

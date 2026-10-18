@@ -9,7 +9,8 @@
 //! that already exists offers to merge into it first), how many photos and
 //! suggestions, *Photos | Faces*, the review (Y), and ⋯ for merging,
 //! hiding and forgetting.  *Faces* shows every face, clearest first, to
-//! pick wrong ones and move them to someone else or out ("Not Person A").
+//! pick wrong ones and move them to someone else or out ("Not Person A"),
+//! or, on a named group, one to be its group photo (`subjects_cover`).
 
 use std::sync::Arc;
 

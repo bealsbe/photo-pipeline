@@ -1156,6 +1156,7 @@ at the export, by the same codes (below).
 | `draw` | `head`, `name` | none |
 | `remove` | `head` (not a face / not a fursuit head) | none |
 | `remove_many` | `groups` (as they were), `heads`, `removed` (whole groups or picked heads: not faces / not fursuit heads) | none |
+| `cover` | `group` (as it was), `head` (its photo now; absent: the automatic one again) | none |
 | `undo` | `undoes` (an id), `of` (its act) | takes that entry's pairs back |
 
 ## How
