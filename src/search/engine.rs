@@ -121,6 +121,8 @@ enum Cmd {
     NearGroups { seq: u64, kind: Kind, heads: Vec<FaceRef> },
     ApplyEdit { seq: u64, edit: crate::model::subjects::GroupEdit, via: Via },
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via },
+    /// A group is not one subject: its heads are kept apart.
+    Dissolve { group: GroupId, at: crate::model::decisions::At },
     // Fursuit matching v2.
     CatchUpHeadVectors,
     /// Tests: whiten with fewer heads than a library needs.
@@ -700,6 +702,16 @@ impl Engine {
     /// shown) in the user's file, one undo step.
     pub fn not_same(&self, a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via) {
         self.send(Cmd::NotSame { a, b, a_heads, b_heads, via });
+    }
+
+    /// Dissolve a group of either kind: it isn't one person or one
+    /// fursuit, only lookalikes.  Its heads leave it (a subject's name and
+    /// answers go) and are never put in one automatic group together
+    /// again; each stays a face or head, free for any other group.  One
+    /// undo step, recorded as `dissolve`, made `at` there.  A fresh
+    /// `BgEvent::Subjects` follows.
+    pub fn dissolve(&self, group: GroupId, at: crate::model::decisions::At) {
+        self.send(Cmd::Dissolve { group, at });
     }
 
     /// Tests: whiten with as few as `n` heads.
@@ -1485,6 +1497,17 @@ impl Worker {
                         self.record(before, via);
                     }
                     self.after_edit(r);
+                }
+                Cmd::Dissolve { group, at } => {
+                    let before = self.before_dissolve(&group);
+                    let r = self.people.dissolve(&group);
+                    if let Ok((what, _)) = &r {
+                        if std::env::var_os("PP_PROFILE").is_some() {
+                            eprintln!("subjects: {what}");
+                        }
+                        self.record(before, Via::Hand(at));
+                    }
+                    self.after_edit(r.map(|_| ()));
                 }
                 Cmd::SetFindHeads(on) => {
                     self.find_heads = on;
@@ -2675,6 +2698,15 @@ impl Worker {
         let mut snapshot = (*self.people.build_snapshot_found(&|f| self.resolve_face(f), &found)).clone();
         self.fursuits.extend_snapshot(&mut snapshot, &|f| self.resolve_face(f));
         snapshot.seen_together = self.fursuits.seen_together(&self.people.file);
+        // What dissolves left on their own: counted, not shown as groups.
+        let loose = self.people.loose_groups();
+        if !loose.is_empty() {
+            let ids: HashSet<&GroupId> = loose.iter().map(|(id, _, _)| id).collect();
+            snapshot.groups.retain(|g| !ids.contains(&g.id));
+            for (_, kind, n) in &loose {
+                *snapshot.loose.entry(*kind).or_default() += n;
+            }
+        }
         let snapshot = Arc::new(snapshot);
         self.people.set_snapshot(snapshot.clone());
         let named = self.people.file.named_count(Kind::Person);
@@ -5420,6 +5452,131 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(photos_of(&e, &holder), Some(2));
+        e.shutdown();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Dissolving a group through the engine: it leaves the tab, and its
+    /// heads aren't a pile of one-head groups (they are counted, not
+    /// shown); a regroup (another grouping choice) never makes it again;
+    /// the heads stay fursuit heads, free to be sent to another group;
+    /// one undo puts the group back exactly (its id and photos).  A named
+    /// group's name goes with it.  Each is recorded as `dissolve`, its
+    /// undo as an `undo` of it, and the export codes the name and lists
+    /// the dissolved heads in `groups.json`.
+    #[test]
+    fn a_dissolved_group_stays_apart_through_a_regroup_and_undoes_exactly() {
+        use crate::model::decisions::{Act, At, Entry};
+        let name = |n: u32, a: i32| format!("{n:04}-fursuit-90-{}{}", if a < 0 { "m" } else { "p" }, a.abs());
+        let specs = [(1, 0), (2, Suits::at(0.05)), (3, Suits::at(0.08)), (4, -Suits::at(0.9)), (5, -Suits::at(0.95))];
+        let files: Vec<(String, String)> = specs.iter().map(|&(n, a)| (format!("2025/Mar-2025/{:02}-Mar-2025", n), format!("{}.JPG", name(n, a)))).collect();
+        let refs: Vec<(&str, &str)> = files.iter().map(|(d, f)| (d.as_str(), f.as_str())).collect();
+        let (lib, d) = library_of("dissolve", &refs);
+        let user = d.join("user").join("subjects.json");
+        let config = Config { factory: Box::new(|_| Ok(Arc::new(Suits) as Arc<dyn Embedder>)), installed: Box::new(|_| true), index_dir: Some(d.join("index")), subjects_path: Some(user.clone()), downloader: no_downloads() };
+        let (bus, _rx) = crate::bus::channel();
+        let e = Engine::with_config(bus, Device::Gpu, true, false, ModelId::AuraFace, true, config);
+        e.on_library(lib);
+        e.start_first_index(&[ModelId::Siglip2, ModelId::Owlv2]);
+        wait_for(&e, "the heads", |s| s.heads.found == 5 && s.heads.step == heads::Step::Idle && s.pass.is_none());
+        let key_of = |n: usize| Key::of(1, lib_path(&d, &files[n - 1]).as_os_str().as_encoded_bytes());
+        let head = |n: usize| FaceRef::new(key_of(n), [0.3, 0.2, 0.3, 0.4]);
+        let _ = fursuit_groups(&e, 2);
+        let before: Vec<(GroupId, usize)> = {
+            let s = e.subjects();
+            let mut v: Vec<(GroupId, usize)> = s.groups.iter().filter(|g| g.kind == Kind::Fursuit).map(|g| (g.id.clone(), g.photos)).collect();
+            v.sort_by_key(|x| x.1);
+            v
+        };
+        assert_eq!(before.iter().map(|x| x.1).collect::<Vec<_>>(), [2, 3], "{before:?}");
+        let three = before[1].0.clone();
+        let loose = |e: &Engine| e.subjects().loose.get(&Kind::Fursuit).copied().unwrap_or(0);
+        let wait_loose = |e: &Engine, n: usize, groups: usize| {
+            let started = Instant::now();
+            while loose(e) != n || e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).count() != groups || e.status().heads.regrouping {
+                assert!(started.elapsed() < Duration::from_secs(5), "loose {} {:?}", loose(e), e.subjects().groups);
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        // A person's group isn't a fursuit's: a stale id is refused.
+        e.dissolve(GroupId::Cluster(12345), At::Editor);
+        // Dissolved: the three heads leave the tab, counted, not shown.
+        e.dissolve(three.clone(), At::Editor);
+        wait_loose(&e, 3, 1);
+        assert_eq!(e.subjects().undoable.as_deref(), Some("Dissolved a group of 3 fursuit heads"));
+        let file = crate::model::subjects::SubjectsFile::load(&user);
+        assert_eq!((file.written_version(), file.dissolved.len(), file.dissolved[0].heads.len(), file.removed.len()), (2, 1, 3, 0), "kept by heads; nothing removed");
+        assert_eq!(e.status().heads.found, 5, "they stay fursuit heads");
+        // Another grouping choice groups everything again: still apart.
+        e.set_fursuit_grouping(heads::Grouping::Looser);
+        wait_for(&e, "the regroup", |s| s.heads.grouping == heads::Grouping::Looser && !s.heads.regrouping);
+        wait_loose(&e, 3, 1);
+        // Free for another group: one sent to the group of 4 and 5.
+        use crate::model::subjects::{EditDest, EditTarget, GroupEdit};
+        e.apply_edit(1, GroupEdit { kind: Kind::Fursuit, targets: vec![EditTarget::ClusterOf(vec![head(4), head(5)])], moves: vec![(head(2), EditDest::Group(0))], ..GroupEdit::default() }, Via::Editor { proposal: false, edited: 1 });
+        wait_loose(&e, 2, 1);
+        assert!(e.subjects().groups.iter().any(|g| g.kind == Kind::Fursuit && g.photos == 3), "{:?}", e.subjects().groups);
+        e.undo();
+        wait_loose(&e, 3, 1);
+        // One undo: the group exactly as it was.
+        e.set_fursuit_grouping(heads::Grouping::Balanced);
+        wait_for(&e, "the regroup", |s| s.heads.grouping == heads::Grouping::Balanced && !s.heads.regrouping);
+        e.undo();
+        wait_loose(&e, 0, 2);
+        let mut after: Vec<(GroupId, usize)> = e.subjects().groups.iter().filter(|g| g.kind == Kind::Fursuit).map(|g| (g.id.clone(), g.photos)).collect();
+        after.sort_by_key(|x| x.1);
+        assert_eq!(after, before, "back exactly");
+        assert_eq!(crate::model::subjects::SubjectsFile::load(&user).written_version(), 1, "nothing optional left");
+        // Named, then dissolved: the name goes; undo brings it back.
+        e.name_group(three.clone(), "Suit A".into());
+        let started = Instant::now();
+        let named = loop {
+            if let Some(g) = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit A")) {
+                break g.id.clone();
+            }
+            assert!(started.elapsed() < Duration::from_secs(5));
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        e.dissolve(named.clone(), At::Menu);
+        wait_loose(&e, 3, 1);
+        assert!(e.subjects().groups.iter().all(|g| g.name.is_none()), "the name went");
+        assert_eq!(e.subjects().undoable.as_deref(), Some("Dissolved Suit A"));
+        // The record: each dissolve, the undo naming the first.
+        let got: Vec<Entry> = {
+            e.flush_decisions(Duration::from_secs(2));
+            e.decisions().entries()
+        };
+        let dissolves: Vec<&Entry> = got.iter().filter(|x| x.act.name() == "dissolve").collect();
+        assert_eq!(dissolves.len(), 2, "{got:?}");
+        let Act::Dissolve { group, heads: hs, dissolved, named: was_named, spread } = &dissolves[0].act else { panic!() };
+        assert_eq!((group.n, hs.len(), *dissolved, *was_named, group.name.clone()), (3, 3, 3, false, None));
+        assert!(hs.iter().any(|h| h.0 == head(1)) && spread.is_some_and(|s| s > 0.0 && s < 0.2), "{spread:?}");
+        let how = dissolves[0].how.as_ref().unwrap();
+        assert_eq!((how.by.as_str(), how.at), ("hand", Some(At::Editor)));
+        let lib = dissolves[0].lib.as_ref().unwrap();
+        assert_eq!(lib.grouping, Some(heads::Grouping::Balanced), "the grouping choice in force");
+        assert!(got.iter().any(|x| matches!(&x.act, Act::Undo { undoes, of } if *undoes == dissolves[0].id && of == "dissolve")), "the undo names it");
+        let Act::Dissolve { group, named: was_named, .. } = &dissolves[1].act else { panic!() };
+        assert_eq!((group.name.as_deref(), *was_named, dissolves[1].how.as_ref().unwrap().at), (Some("Suit A"), true, Some(At::Menu)));
+        // The export: no name, a code; the dissolved heads in groups.json.
+        let out = d.join("out");
+        std::fs::create_dir_all(&out).unwrap();
+        let (dir, _) = e.export_record(&out).unwrap();
+        let text = std::fs::read_to_string(dir.join(crate::model::decisions::FILE_NAME)).unwrap() + &std::fs::read_to_string(dir.join(crate::model::group_export::FILE_NAME)).unwrap();
+        assert!(!text.contains("Suit A"), "no name leaves the computer");
+        let (entries, groups) = crate::model::group_export::read_export(&dir).unwrap();
+        let coded = entries.iter().find_map(|x| match &x.act {
+            Act::Dissolve { group, named: true, .. } => group.name.clone(),
+            _ => None,
+        });
+        assert!(coded.as_deref().is_some_and(|c| c.starts_with("fursuit-")), "{coded:?}");
+        let groups = groups.expect("groups.json");
+        assert!(groups.groups.is_empty(), "the dissolved group isn't a named group any more");
+        assert_eq!(groups.dissolved.len(), 1);
+        assert_eq!((groups.dissolved[0].kind, groups.dissolved[0].heads.len()), (Kind::Fursuit, 3));
+        e.undo();
+        wait_loose(&e, 0, 2);
+        assert!(e.subjects().groups.iter().any(|g| g.name.as_deref() == Some("Suit A") && g.photos == 3), "undo brings the name back");
         e.shutdown();
         let _ = std::fs::remove_dir_all(&d);
     }

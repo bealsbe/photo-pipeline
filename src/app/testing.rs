@@ -202,6 +202,7 @@
 //! subjects small|hidden       # open or fold Smaller groups / Hidden
 //! subjects scroll 20000       # scroll the tab's groups to y=20000 px
 //! subjects select             # S: pick several
+//! subjects dissolve editor|page|go|cancel|dump   # Dissolve group (the editor's header, ⋯ on a page); dump also prints the tab's loose counts
 //! subjects notheads page|tab|picked|go|cancel|dump   # "Not fursuit heads"
 //!                             # (or "Not faces"): a group's ⋯, the tab's
 //!                             # picked groups, the heads picked on a
@@ -1655,6 +1656,20 @@ fn subjects_step(app: &mut App, i: usize, arg: &str) -> (Task<Message>, Option<T
     let photo = |app: &App, n: usize| app.subjects.pane().and_then(|pp| pp.layout.tiles.get(n).copied());
     let t = match what {
         "open" => app.update(Message::Cmd(Cmd::Subjects)),
+        "dissolve" => {
+            use super::subjects_dissolve::{From as F, Msg as D, debug_state};
+            let x = |m: D| Message::Subjects(Msg::Dissolve(m));
+            match rest {
+                "editor" => app.update(x(D::Ask(F::Editor))),
+                "page" => app.update(x(D::Ask(F::Page))),
+                "go" => app.update(x(D::Go)),
+                "cancel" => app.update(x(D::Cancel)),
+                _ => {
+                    eprintln!("[dissolve] {} loose={:?}", debug_state(app), app.subjects.all.loose);
+                    Task::none()
+                }
+            }
+        }
         "notheads" | "notfaces" => {
             use super::subjects_remove::{Msg as X, debug_state};
             let x = |m: X| Message::Subjects(Msg::Remove(m));

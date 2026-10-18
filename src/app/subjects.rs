@@ -9,6 +9,8 @@
 //!   the smallest size to show (5 photos by default, a burst counting as one) fold away under
 //!   *Smaller groups*, so an event's strangers stay out of sight; hidden
 //!   ones wait under *Hidden*.  Nothing is ever named for the user.
+//!   Heads a dissolve left on their own are counted beside the folds,
+//!   never a tile each (`subjects_dissolve`).
 //! - **Picking several** (S, or Ctrl+click) gives a strip with *Merge…*
 //!   and *Hide*; merging asks which name to keep.  Ctrl+Z takes back the
 //!   last change to people.
@@ -142,6 +144,8 @@ pub struct Subjects {
     pub forget: Option<GroupId>,
     /// "Not fursuit heads?" (or "Not faces?") waiting for an answer.
     pub remove: Option<super::subjects_remove::Ask>,
+    /// "Dissolve this group?" waiting for an answer.
+    pub dissolve: Option<super::subjects_dissolve::Ask>,
     pub person: Option<Person>,
     pub review: Option<Review>,
     /// The close-call judge's latest run (fursuits).
@@ -170,6 +174,7 @@ impl Subjects {
             drag: None,
             forget: None,
             remove: None,
+            dissolve: None,
             person: None,
             review: None,
             judge: None,
@@ -525,6 +530,7 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     }
     // "Not fursuit heads?", over any page.
     v.extend(super::subjects_remove::wanted(app));
+    v.extend(super::subjects_dissolve::wanted(app));
     v
 }
 
@@ -580,6 +586,8 @@ pub enum Msg {
     Remove(super::subjects_remove::Msg),
     /// A named group's photo.
     Cover(super::subjects_cover::Msg),
+    /// Dissolve a group (no one subject).
+    Dissolve(super::subjects_dissolve::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -645,6 +653,9 @@ pub fn on_faces(app: &mut App, seq: u64, group: GroupId, faces: Arc<Vec<Face>>) 
         return refresh_crops(app);
     }
     if super::subjects_remove::on_faces(app, seq, &faces) {
+        return refresh_crops(app);
+    }
+    if super::subjects_dissolve::on_faces(app, seq, &faces) {
         return refresh_crops(app);
     }
     if review::on_faces(app, seq, &faces) {
@@ -896,6 +907,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Split(msg) => super::subjects_split::update(app, msg),
         Msg::Remove(msg) => super::subjects_remove::update(app, msg),
         Msg::Cover(msg) => super::subjects_cover::update(app, msg),
+        Msg::Dissolve(msg) => super::subjects_dissolve::update(app, msg),
     }
 }
 
@@ -970,7 +982,7 @@ fn find_faces(app: &mut App) -> Task<Message> {
 /// below (the review stops; a person's page goes back to the tab).
 pub fn escape(app: &mut App) -> Task<Message> {
     let s = &mut app.subjects;
-    if s.drag.take().is_some() || s.forget.take().is_some() || s.remove.take().is_some() {
+    if s.drag.take().is_some() || s.forget.take().is_some() || s.remove.take().is_some() || s.dissolve.take().is_some() {
         return Task::none();
     }
     if s.merge.take().is_some() {
@@ -1014,6 +1026,12 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
     if app.subjects.remove.is_some() {
         return match key {
             Key::Named(Named::Enter) => update(app, Msg::Remove(super::subjects_remove::Msg::Go)),
+            _ => Task::none(),
+        };
+    }
+    if app.subjects.dissolve.is_some() {
+        return match key {
+            Key::Named(Named::Enter) => update(app, Msg::Dissolve(super::subjects_dissolve::Msg::Go)),
             _ => Task::none(),
         };
     }
@@ -1106,6 +1124,9 @@ pub fn overlay(app: &App) -> Option<Element<'_, Message>> {
         return Some(forget_dialog(app, id));
     }
     if let Some(d) = super::subjects_remove::dialog(app) {
+        return Some(d);
+    }
+    if let Some(d) = super::subjects_dissolve::dialog(app) {
         return Some(d);
     }
     person::overlay(app)
@@ -1595,6 +1616,10 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         folds = folds.push(disclose("Hidden", a.hidden.len(), s.hidden_open, m(Msg::Hidden(!s.hidden_open))));
         any = true;
     }
+    if let Some(n) = loose_note(s.tab, s.all.loose.get(&s.tab).copied().unwrap_or(0)) {
+        folds = folds.push(n);
+        any = true;
+    }
     if any {
         col = col.push(container(folds).padding(Padding { left: 10.0, right: 10.0, top: 6.0, bottom: 6.0 }));
     }
@@ -1609,6 +1634,19 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
         col = col.push(container(text("Every group found so far is small. Open Smaller groups to see them.").size(t::T_SMALL).color(t::PHOTO_INK3)).padding(Padding::from([8.0, 16.0])));
     }
     container(scrollable(col).id(GROUPS_SCROLL).style(style::scroll).width(Length::Fill).height(Length::Fill)).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
+}
+
+/// Heads dissolved groups left on their own: a quiet count beside the
+/// folds, never a tile each (a dissolve of 40 heads adds no tiles).
+fn loose_note<'a>(kind: Kind, n: usize) -> Option<Element<'a, Message>> {
+    if n == 0 {
+        return None;
+    }
+    let what = super::subjects_remove::nouns(kind);
+    let words = if n == 1 { format!("1 {} on its own", what.trim_end_matches('s')) } else { format!("{} {what} on their own", util::thousands(n as u64)) };
+    let line = row![icons::view(Glyph::Dissolve, 14.0, t::PHOTO_INK3), text(words).size(t::T_SMALL).color(t::PHOTO_INK3)].spacing(6).align_y(Alignment::Center);
+    let about = format!("From groups you dissolved: not shown as groups of one. They are still suggested for groups, found with Find more, and join other {what} when they match.");
+    Some(tip(container(line).padding(Padding::from([5.0, 8.0])), about, true).into())
 }
 
 /// Under the header while groups are picked: how many, and what to do.
@@ -1885,7 +1923,7 @@ mod tests {
             ],
             faces_found: 200,
             undoable: None, seen_together: Default::default(),
-            chosen_covers: Default::default(),
+            chosen_covers: Default::default(), loose: Default::default(),
         }
     }
 
@@ -1954,7 +1992,7 @@ mod tests {
             faces_found: 0,
             undoable: None,
             seen_together: Default::default(),
-            chosen_covers: Default::default(),
+            chosen_covers: Default::default(), loose: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;
@@ -1989,7 +2027,7 @@ mod tests {
             faces_found: 0,
             undoable: None,
             seen_together: Default::default(),
-            chosen_covers: Default::default(),
+            chosen_covers: Default::default(), loose: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;

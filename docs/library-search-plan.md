@@ -3474,6 +3474,7 @@ average-linkage distance to the entry's first group (the step's space;
 | `remove_many` | `groups` (as they were), `heads`, `removed` | none: "Not fursuit heads" / "Not faces" on whole groups or picked heads, one entry |
 | `edit` | `groups` (as they were: each group heads left or went to), `out`: `[{from, to, heads, moved}]`, one per (group left, destination); `to` is `{is: "group", group}` (an index into `groups`), `{is: "new", new, name}`, `{is: "removed"}` or `{is: "taken_out"}`; `covers` (absent when none): `[{group, head}]`, group photos chosen in the same *Apply* | per `out`: to a group: × it same, × rest of `from` different; new: × rest of `from` different; taken out: × rest of `from` different; removed: none.  The group editor's *Apply*, one entry |
 | `cover` | `group` (as it was), `head` (absent: back to the automatic photo) | none: a named group's photo chosen on its page (`at`: `faces` / `heads`), one entry |
+| `dissolve` | `group` (as it was; its name and sid when named), `heads` (every head, at most 200), `dissolved` (count), `named`, `spread` (the heads' mean cosine distance to their mean, in `lib`'s space) | none: the group is not one subject, but any two of its heads may be |
 | `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
 
 `how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,
@@ -3557,7 +3558,8 @@ round of matching work: the groups are the strongest ground truth, so
    "kinds": [{"kind", "heads", "white", "model", "grouping", "cuts"}],
    "groups": [{"code", "kind", "photos", "bursts", "days", "heads", "rejected"}],
    "added": [{"kind", "head"}], "removed": [{"kind", "head"}],
-   "not_same": [{"kind", "a", "b"}]}
+   "not_same": [{"kind", "a", "b"}],
+   "dissolved": [{"kind", "heads"}]}
   ```
 
 - **Pairs** (`group_export::pairs_with_groups`): within a group the same;
@@ -3800,3 +3802,66 @@ the cut-offs, the grouping); only where it shows moved.
   `the_review_from_the_editor_starts_at_its_pair_and_goes_back_there`,
   `the_fursuit_merge_review_is_a_view_menu_command_without_a_shortcut`.
 
+## As built — dissolving a group (2026-10-17)
+
+The user: "can we add the ability to … dissolve a group (ie there isn't a
+coherent match). Keep the blank labels however you should log that
+feedback."
+
+- **What it is.**  A group that is no one person or fursuit, only
+  lookalikes, is taken apart: its heads leave it and are never put in one
+  automatic group together again.  They stay faces or fursuit heads
+  ("keep the blank labels"): nothing goes to `removed`, and each can
+  still join other heads' groups, be suggested for a group, be found by
+  *Find more*, or be sent to a group by hand.  A subject's name,
+  confirmed heads and answers go with it (`People::dissolve`).
+- **Kept by heads, as a set.**  `SubjectsFile::dissolved`:
+  `[{"kind", "heads"}]`, one set per dissolve, every head of the group
+  (but those removed in the viewer).  Chosen over "not the same" for
+  every pair: the pairs grow with the square of the heads (a group of 40
+  is 780 answers), a set grows with the heads, and the rule needed is
+  exactly a set's: no two of these together.  An optional list under the
+  one version rule (v2 while any optional list holds something; an old
+  file loads, and a file with none is still written as v1).  *Forget
+  all* of a kind takes its sets; undo is the file as it was.
+- **The grouping honours it** as cannot-link sets
+  (`subjects::Apart`, built by `step::apart` for a regroup and for
+  `Grouped::assign_new`): a row skips the clusters holding a row of one
+  of its sets, joining the nearest other or starting its own; people's
+  merge pass never unites two clusters whose sets meet.  With no set the
+  grouping is exactly what it was (`cluster_with` is `cluster_apart` with
+  an empty `Apart`; the pinned grouping test holds).  "Not the same" is
+  still only for merge suggestions, as before.
+- **No pile of one-head groups.**  The tab already folds groups under
+  the smallest size to show into *Smaller groups*, but each would still be
+  a tile there.  A dissolved head left on its own (an automatic group of
+  one) is left out of the snapshot and counted (`Subjects::loose`); the
+  tab shows a quiet "26 fursuit heads on their own" beside its folds,
+  with a tip.  So dissolving 40 heads adds no tile.  A dissolved head
+  that joins other heads is in an ordinary group, shown as any other.
+  Such heads are in no merge suggestion either (`Fursuits::merge_groups`).
+- **Where.**  *Dissolve group* in the group editor's header (quiet,
+  beside *Suggested split*), and in ⋯ on a group's page.  A named group
+  asks first and says its name goes; so does an editor holding moves not
+  applied (they aren't).  An unnamed group dissolves at once, with *Undo*
+  in the status bar.  No shortcut (none was free that reads well; the
+  group page's letters and the editor's are taken).  One undo step.
+  People and fursuits alike, never mixed (`subjects_dissolve.rs`).
+- **The record.**  `dissolve`: the group as it was (`Side`: its size,
+  photos, bursts, days, name and sid when named, 16 clearest heads),
+  every head (at most 200), `dissolved`, `named`, and `spread` (the
+  heads' mean cosine distance to their mean, how loose the group was),
+  `how` by hand at `editor` or `menu`, `lib` with the grouping choice in
+  force.  It labels no pair.  Undo appends an `undo` of it.  The export
+  codes the name (`fursuit-3`) and `groups.json` lists the sets under
+  `dissolved` (no pairs from them); the dissolved group isn't a named
+  group any more.
+- **Tests:** `a_dissolved_group_is_an_optional_list`,
+  `a_dissolved_set_is_never_grouped_together_again` (both linkages, the
+  merge pass, rows arriving), `dissolving_keeps_heads_apart_by_kind_and_undoes_exactly`,
+  `a_dissolved_group_stays_apart_through_a_regroup_and_undoes_exactly`
+  (engine: regroup with another grouping choice, a head sent to another
+  group, undo back to the same ids, a named group, the record and the
+  export; it fails with the constraint switched off),
+  `a_dissolve_is_one_line_with_its_heads_and_codes_its_name`, and the
+  stand-in's `the_stand_in_dissolves_a_group_for_good_and_undoes_it`.

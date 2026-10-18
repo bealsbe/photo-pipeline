@@ -670,6 +670,27 @@ impl Link {
         }
     }
 
+    /// Dissolve a group (no one subject, only lookalikes): its heads leave
+    /// it and are never grouped together again; each stays a face or
+    /// head.  One undo step, recorded as made `at` there.
+    pub fn dissolve(&self, id: &GroupId, at: decisions::At) {
+        match self {
+            Link::Engine(e) => e.dissolve(id.clone(), at),
+            Link::Fake(f) => {
+                let before = f.before(
+                    |s| {
+                        let side = s.side(id, &[]);
+                        let heads: Vec<FaceRef> = if s.fursuits.owns(id) { s.fursuits.faces(id) } else { s.people.faces(id) }.iter().map(|x| x.face).collect();
+                        Act::Dissolve { named: side.name.is_some(), dissolved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)), group: side, spread: None }
+                    },
+                    id,
+                );
+                let done = f.edit(id, |p, _| p.dissolve(id).map(|w| eprintln!("[people] {w}")), |z, _| z.dissolve(id).map(|w| eprintln!("[people] {w}")));
+                f.record(done, before, Via::Hand(at), None);
+            }
+        }
+    }
+
     /// Take back the last edit to people (`BgEvent::SubjectsUndone`, then
     /// a fresh `Subjects`).
     pub fn undo_subjects(&self) {
@@ -1199,6 +1220,9 @@ impl FakeState {
         snap.groups.extend(self.fursuits.groups());
         snap.seen_together = self.fursuits.seen_together();
         snap.chosen_covers.extend(self.fursuits.chosen_covers());
+        if self.fursuits.loose() > 0 {
+            snap.loose.insert(Kind::Fursuit, self.fursuits.loose());
+        }
         snap.groups.sort_by(|a, b| (b.name.is_some(), b.photos).cmp(&(a.name.is_some(), a.photos)).then(a.cover.capture.cmp(&b.cover.capture)));
         snap.generation += self.fursuits.generation();
         self.refresh_heads();

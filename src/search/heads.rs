@@ -1562,7 +1562,11 @@ impl Fursuits {
     /// chosen cover and whether it is named.  Never another kind's.
     #[allow(clippy::type_complexity)]
     pub fn merge_groups(&self, file: &SubjectsFile) -> Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> {
-        let mut out: Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> = self.clusters().into_iter().map(|(id, m)| (GroupId::Cluster(id), m, false, None)).collect();
+        // A dissolved head on its own (what a dissolve leaves) is not on
+        // the tab, so never in a pair either.
+        let dissolved = file.dissolved_heads(Kind::Fursuit);
+        let loose = |m: &[FaceRef]| matches!(m, [one] if dissolved.contains(one));
+        let mut out: Vec<(GroupId, Vec<FaceRef>, bool, Option<FaceRef>)> = self.clusters().into_iter().filter(|(_, m)| !loose(m)).map(|(id, m)| (GroupId::Cluster(id), m, false, None)).collect();
         out.extend(file.subjects.iter().filter(|s| s.kind == Kind::Fursuit && !s.hidden).map(|s| (GroupId::Subject(s.id.clone()), s.members.clone(), s.name.is_some(), s.cover)));
         out
     }

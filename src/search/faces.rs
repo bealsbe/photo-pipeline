@@ -951,6 +951,72 @@ impl People {
         Ok(())
     }
 
+    /// Dissolve a group: it isn't one person or one fursuit, only
+    /// lookalikes.  Its heads (those not removed in the viewer) leave it:
+    /// a subject is forgotten (its name, confirmed heads and answers go),
+    /// and the heads are kept apart from each other in the automatic
+    /// groups from then on (`SubjectsFile::dissolved`), through every
+    /// regroup.  Each stays a detection of its kind, free to be grouped
+    /// with others, suggested for a group or found by *Find more*.  One
+    /// undo step, which puts the group back as it was.  The words for
+    /// the status line, and the heads.
+    pub fn dissolve(&mut self, id: &GroupId) -> Result<(String, Vec<FaceRef>), Refused> {
+        let (kind, members) = self.members(id)?;
+        let removed = self.file.removed_index(kind);
+        let heads: Vec<FaceRef> = members.into_iter().filter(|h| !removed.covers(h)).collect();
+        let subject = matches!(id, GroupId::Subject(_));
+        if heads.len() < 2 && !subject {
+            return Err(Refused::Nothing);
+        }
+        let what = match self.subject_of(id).and_then(|s| s.name.clone()) {
+            Some(n) => format!("Dissolved {n}"),
+            None => format!("Dissolved a group of {} {}", heads.len(), plural(heads.len(), box_noun(kind))),
+        };
+        self.checkpoint(what.clone());
+        if let GroupId::Subject(s) = id {
+            if let Err(e) = self.file.forget(s) {
+                self.undo.pop();
+                return Err(e);
+            }
+        }
+        if heads.len() >= 2 {
+            self.file.add_dissolved(kind, heads.clone())?;
+        }
+        self.save();
+        Ok((what, heads))
+    }
+
+    /// The automatic groups of one dissolved head on its own, with their
+    /// kind and size (1): what a dissolve mostly leaves.  The tab doesn't
+    /// show them as groups; it counts them.  A dissolved head that joins
+    /// other heads is in an ordinary group, shown as any other.
+    pub fn loose_groups(&self) -> Vec<(GroupId, Kind, usize)> {
+        let mut out = Vec::new();
+        if self.file.dissolved.is_empty() {
+            return out;
+        }
+        let alone = |d: &HashSet<FaceRef>, m: &[FaceRef]| matches!(m, [one] if d.contains(one));
+        let people = self.file.dissolved_heads(Kind::Person);
+        if let (false, Some(store)) = (people.is_empty(), &self.store) {
+            let refs = store.refs();
+            for (c, &id) in self.grouped.clusters.iter().zip(&self.grouped.ids) {
+                let m: Vec<FaceRef> = c.members.iter().filter_map(|&r| refs.get(r).copied()).collect();
+                if alone(&people, &m) {
+                    out.push((GroupId::Cluster(id), Kind::Person, m.len()));
+                }
+            }
+        }
+        let suits = self.file.dissolved_heads(Kind::Fursuit);
+        if !suits.is_empty() {
+            for (id, (k, m)) in &self.other_clusters {
+                if *k == Kind::Fursuit && alone(&suits, m) {
+                    out.push((GroupId::Cluster(*id), Kind::Fursuit, m.len()));
+                }
+            }
+        }
+        out
+    }
+
     /// Hide or show a group (a hidden cluster becomes an unnamed subject,
     /// so the hide outlives a regroup).
     pub fn set_hidden(&mut self, id: &GroupId, hidden: bool) -> Result<SubjectId, Refused> {
@@ -1493,7 +1559,7 @@ impl People {
         groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what, _)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
-        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new(), chosen_covers })
+        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new(), chosen_covers, loose: HashMap::new() })
     }
 
     /// Suggestions for review (UI 6): for a subject, the faces within
@@ -2043,6 +2109,42 @@ mod tests {
         assert_eq!(p.file.named_count(Kind::Fursuit), 1, "the other name goes");
         assert_eq!(p.undo().as_deref(), Some("Merged 2 groups into Other"));
         assert_eq!(p.file, before);
+    }
+
+    /// Dissolving, people and fursuits alike: a group's heads kept apart
+    /// by kind (a fursuit set says nothing of faces), a named subject
+    /// forgotten with its answers, the heads left detections (nothing
+    /// removed), one undo step back to the file exactly; a one-head group
+    /// is nothing to dissolve; a dissolved head on its own is loose.
+    #[test]
+    fn dissolving_keeps_heads_apart_by_kind_and_undoes_exactly() {
+        let mut p = People::load(None);
+        p.set_other_clusters(Kind::Fursuit, vec![(7, vec![face(1), face(2), face(3)]), (8, vec![face(4)])]);
+        assert_eq!(p.dissolve(&GroupId::Cluster(8)), Err(Refused::Nothing), "one head: nothing to dissolve");
+        assert_eq!(p.dissolve(&GroupId::Cluster(99)), Err(Refused::StaleGroup));
+        assert!(p.undo().is_none(), "a refusal leaves nothing to undo");
+        let (what, heads) = p.dissolve(&GroupId::Cluster(7)).unwrap();
+        assert_eq!((what.as_str(), heads.len()), ("Dissolved a group of 3 fursuit heads", 3));
+        assert_eq!(p.file.dissolved_heads(Kind::Fursuit).len(), 3);
+        assert!(p.file.dissolved_heads(Kind::Person).is_empty() && p.file.removed.is_empty(), "never a face's; nothing removed");
+        // After the regroup each is on its own: loose, not a tile.
+        p.set_other_clusters(Kind::Fursuit, vec![(11, vec![face(1)]), (12, vec![face(2)]), (13, vec![face(3), face(4)])]);
+        let loose: Vec<GroupId> = p.loose_groups().into_iter().map(|(id, _, _)| id).collect();
+        assert_eq!(loose.len(), 2, "two alone; the one that joined face 4 is an ordinary group");
+        assert!(!loose.contains(&GroupId::Cluster(13)));
+        assert_eq!(p.undo().as_deref(), Some("Dissolved a group of 3 fursuit heads"));
+        assert!(p.file.dissolved.is_empty() && p.loose_groups().is_empty());
+        // A named person: forgotten, answers and all; undo, exactly.
+        let named = p.file.create(Kind::Person, Some("Someone".into()), vec![face(20), face(21)]);
+        p.file.reject(&named, vec![face(22)]).unwrap();
+        let before = p.file.clone();
+        let (what, heads) = p.dissolve(&GroupId::Subject(named.clone())).unwrap();
+        assert_eq!((what.as_str(), heads.len()), ("Dissolved Someone", 2));
+        assert!(p.file.get(&named).is_none() && p.file.named_count(Kind::Person) == 0, "the name goes");
+        assert_eq!(p.file.dissolved_heads(Kind::Person).len(), 2);
+        assert!(p.file.dissolved_heads(Kind::Fursuit).is_empty(), "kinds never mix");
+        assert!(p.undo().is_some());
+        assert_eq!(p.file, before, "back exactly");
     }
 
     /// "Not the same" is the user's answer: kept by the groups' heads,

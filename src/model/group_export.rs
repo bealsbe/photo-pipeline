@@ -2,7 +2,8 @@
 //! corrections (`groups.json`): the strongest labels the user curates
 //! (same within a named group, different across named groups of a kind,
 //! a rejected head different from its group), with the viewer's drawn
-//! and removed boxes and the "not the same" answers.
+//! and removed boxes, the "not the same" answers and the dissolved
+//! groups.
 //!
 //! Built from the user's subjects file on the engine's thread (or the
 //! stand-in's groups), written by the record's thread with the export.
@@ -42,6 +43,8 @@ pub struct Snapshot {
     pub added: Vec<(Kind, FaceRef)>,
     pub removed: Vec<(Kind, FaceRef)>,
     pub not_same: Vec<(Kind, Vec<FaceRef>, Vec<FaceRef>)>,
+    /// Groups dissolved, each by all its heads.
+    pub dissolved: Vec<(Kind, Vec<FaceRef>)>,
     /// Each kind's library state and the cut-offs (and, for fursuits,
     /// the grouping choice) in force.
     pub libs: Vec<(Kind, Lib)>,
@@ -64,6 +67,7 @@ impl Snapshot {
             added: file.added.iter().map(|l| (l.kind, l.face)).collect(),
             removed: file.removed.iter().map(|l| (l.kind, l.face)).collect(),
             not_same: file.not_same.iter().map(|n| (n.kind, n.a.clone(), n.b.clone())).collect(),
+            dissolved: file.dissolved.iter().map(|d| (d.kind, d.heads.clone())).collect(),
             libs,
         }
     }
@@ -112,6 +116,14 @@ pub struct NotSame {
     pub b: Vec<Head>,
 }
 
+/// A group the user dissolved (not one subject), by all its heads.  No
+/// pair is labelled from it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dissolved {
+    pub kind: Kind,
+    pub heads: Vec<Head>,
+}
+
 /// `groups.json`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupsFile {
@@ -127,6 +139,8 @@ pub struct GroupsFile {
     pub removed: Vec<Boxed>,
     #[serde(default)]
     pub not_same: Vec<NotSame>,
+    #[serde(default)]
+    pub dissolved: Vec<Dissolved>,
 }
 
 /// The snapshot as exported: codes for names, from `codes` (already
@@ -156,6 +170,7 @@ pub fn export(snapshot: &Snapshot, codes: &mut Codes) -> GroupsFile {
         added: boxed(&snapshot.added),
         removed: boxed(&snapshot.removed),
         not_same: snapshot.not_same.iter().map(|(k, a, b)| NotSame { kind: *k, a: heads(a), b: heads(b) }).collect(),
+        dissolved: snapshot.dissolved.iter().map(|(k, v)| Dissolved { kind: *k, heads: heads(v) }).collect(),
     }
 }
 
@@ -254,6 +269,7 @@ mod tests {
             added: vec![(Kind::Fursuit, head(4, 0))],
             removed: vec![(Kind::Person, head(5, 0))],
             not_same: vec![(Kind::Fursuit, vec![head(1, 0)], vec![head(6, 0)])],
+            dissolved: vec![(Kind::Fursuit, vec![head(1, 30), head(8, 0)])],
             libs: vec![(Kind::Fursuit, lib())],
         }
     }
@@ -294,7 +310,8 @@ mod tests {
         assert!(matches!(&entries[0].act, Act::Merge { groups } if groups[0].name.as_deref() == Some("fursuit-1")), "the same code in the log");
         let sparky = &g.groups[2];
         assert_eq!((sparky.photos, sparky.bursts, sparky.days, sparky.rejected.len()), (Some(3), Some(2), Some(1), 1));
-        assert_eq!((g.added.len(), g.removed.len(), g.not_same.len()), (1, 1, 1));
+        assert_eq!((g.added.len(), g.removed.len(), g.not_same.len(), g.dissolved.len()), (1, 1, 1, 1));
+        assert_eq!((g.dissolved[0].kind, g.dissolved[0].heads.len()), (Kind::Fursuit, 2), "a dissolved group by its heads (it labels no pair)");
         // Pairs from both files.
         let ps = pairs_with_groups(&entries, Some(&g), true);
         let find = |a: FaceRef, b: FaceRef| ps.iter().find(|p| (p.a == a && p.b == b) || (p.a == b && p.b == a)).map(|p| (p.same, p.id.clone()));

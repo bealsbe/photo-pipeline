@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::model::subjects::{self, Cluster, Cutoffs, FaceRef, Kind, Linkage, Removed, Rows, SubjectsFile};
+use crate::model::subjects::{self, Apart, Cluster, Cutoffs, FaceRef, Kind, Linkage, Removed, Rows, SubjectsFile};
 
 /// What a kind's step gives the grouping.
 pub trait KindStep: Send {
@@ -158,7 +158,8 @@ impl Grouped {
         let out = Exclusion::new(file, step.kind());
         let new: Vec<usize> = (self.rows..refs.len()).filter(|&i| !confirmed.contains_key(&refs[i]) && !out.excludes(step, &refs[i])).collect();
         let rows = step.rows();
-        subjects::assign_with(&mut self.clusters, &rows, &new, step.cutoffs().group, step.linkage());
+        let apart = apart(file, step.kind(), refs);
+        subjects::assign_apart(&mut self.clusters, &rows, &new, step.cutoffs().group, step.linkage(), &apart);
         self.sureness.resize(refs.len(), 1.0);
         self.rows = refs.len();
         self.refresh_ids(refs, &|r| step.clarity(r));
@@ -170,6 +171,17 @@ impl Grouped {
         let sure = self.sureness.get(row).copied().unwrap_or(1.0);
         0.5 * visual + 0.5 * sure
     }
+}
+
+/// The rows of `refs` the user's dissolved groups of `kind` keep apart
+/// (`SubjectsFile::dissolved`): each row with the sets it is in.  Empty
+/// (and nothing built) when no group of the kind was dissolved.
+pub fn apart(file: &SubjectsFile, kind: Kind, refs: &[FaceRef]) -> Apart {
+    let sets = file.dissolved_sets(kind);
+    if sets.is_empty() {
+        return Apart::default();
+    }
+    Apart::new(refs.iter().enumerate().filter_map(|(i, r)| sets.get(r).map(|s| (i, s.clone()))).collect())
 }
 
 /// A copy of the step's data for a regroup on a worker.
@@ -199,7 +211,7 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
     let out = |i: usize| j.excluded.get(i).copied().unwrap_or(false);
     let mut order: Vec<usize> = (0..n).filter(|&i| !confirmed.contains_key(&j.refs[i]) && !out(i)).collect();
     order.sort_by(|&a, &b| j.clarity[b].total_cmp(&j.clarity[a]).then(a.cmp(&b)));
-    let clusters = subjects::cluster_with(&rows, &order, j.cutoffs.group, j.linkage);
+    let clusters = subjects::cluster_apart(&rows, &order, j.cutoffs.group, j.linkage, &apart(&j.file, j.kind, &j.refs[..n]));
     let mut sureness = vec![1.0f32; n];
     for c in &clusters {
         for &m in &c.members {

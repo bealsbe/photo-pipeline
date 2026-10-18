@@ -35,8 +35,9 @@ use serde::{Deserialize, Serialize};
 use crate::search::index::Key;
 
 /// The file's format version as written when it holds one of the
-/// optional lists added after the first ([`SubjectsFile::not_same`], and
-/// the viewer's [`SubjectsFile::added`] and [`SubjectsFile::removed`]):
+/// optional lists added after the first ([`SubjectsFile::not_same`],
+/// [`SubjectsFile::dissolved`], and the viewer's [`SubjectsFile::added`]
+/// and [`SubjectsFile::removed`]):
 /// every such list is `#[serde(default)]`, and a file without any is
 /// written as [`FILE_VERSION_PLAIN`], exactly as before, so an older app
 /// still reads it ([`SubjectsFile::written_version`]).
@@ -302,6 +303,11 @@ pub struct Subjects {
     /// Named groups whose `cover` is the photo the user chose (the rest
     /// show the automatic pick).
     pub chosen_covers: HashSet<GroupId>,
+    /// Dissolved heads left on their own (an automatic group of one), per
+    /// kind: not in `groups`, so a dissolve doesn't fill the tab with
+    /// groups of one; the tab counts them.  They are still suggested and
+    /// found by *Find more*, and join other heads' groups as any head.
+    pub loose: HashMap<Kind, usize>,
 }
 
 impl Subjects {
@@ -640,6 +646,18 @@ pub struct NotSame {
     pub b: Vec<FaceRef>,
 }
 
+/// "No one subject": a group the user dissolved (only lookalikes, not one
+/// person or one fursuit).  Its heads stay detections of `kind`, free for
+/// any group, suggestion or *Find more*, but no two of them are ever put
+/// in one automatic group again ([`Apart`]): kept by heads, never group
+/// numbers, so it holds through every regroup.  One set per dissolve, so
+/// the file grows with the heads, not with their pairs.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Dissolved {
+    pub kind: Kind,
+    pub heads: Vec<FaceRef>,
+}
+
 /// The user's subjects file: everything that is theirs and not
 /// recomputable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -659,11 +677,15 @@ pub struct SubjectsFile {
     /// Groups the user said are not the same (v2; absent in a v1 file).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub not_same: Vec<NotSame>,
+    /// Groups the user dissolved (v2; absent in a v1 file and in a file
+    /// no group was dissolved in).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dissolved: Vec<Dissolved>,
 }
 
 impl Default for SubjectsFile {
     fn default() -> Self {
-        SubjectsFile { version: FILE_VERSION_PLAIN, subjects: Vec::new(), added: Vec::new(), removed: Vec::new(), not_same: Vec::new() }
+        SubjectsFile { version: FILE_VERSION_PLAIN, subjects: Vec::new(), added: Vec::new(), removed: Vec::new(), not_same: Vec::new(), dissolved: Vec::new() }
     }
 }
 
@@ -749,10 +771,10 @@ impl SubjectsFile {
     }
 
     /// The version the file is written as: 2 while any optional list
-    /// (`not_same`, `added`, `removed`) holds something, else 1 (a v1
-    /// file saves back unchanged).  The one place the rule lives.
+    /// (`not_same`, `dissolved`, `added`, `removed`) holds something, else
+    /// 1 (a v1 file saves back unchanged).  The one place the rule lives.
     pub fn written_version(&self) -> u32 {
-        if self.not_same.is_empty() && self.added.is_empty() && self.removed.is_empty() { FILE_VERSION_PLAIN } else { FILE_VERSION }
+        if self.not_same.is_empty() && self.dissolved.is_empty() && self.added.is_empty() && self.removed.is_empty() { FILE_VERSION_PLAIN } else { FILE_VERSION }
     }
 
     /// Nothing of the user's is kept (the file can go): no subject and
@@ -766,6 +788,7 @@ impl SubjectsFile {
     pub fn forget_kind(&mut self, kind: Kind) {
         self.subjects.retain(|s| s.kind != kind);
         self.not_same.retain(|n| n.kind != kind);
+        self.dissolved.retain(|d| d.kind != kind);
         self.added.retain(|l| l.kind != kind);
         self.removed.retain(|l| l.kind != kind);
     }
@@ -779,6 +802,35 @@ impl SubjectsFile {
         }
         self.not_same.push(NotSame { kind, a, b });
         Ok(())
+    }
+
+    /// "No one subject": these heads of `kind` (a group's, two at least)
+    /// are never put in one automatic group together again.  Nothing else
+    /// changes here: the caller takes the group apart.
+    pub fn add_dissolved(&mut self, kind: Kind, heads: Vec<FaceRef>) -> Result<(), Refused> {
+        let heads = dedup(heads);
+        if heads.len() < 2 {
+            return Err(Refused::Nothing);
+        }
+        self.dissolved.push(Dissolved { kind, heads });
+        Ok(())
+    }
+
+    /// Every head of `kind` in a dissolved group.
+    pub fn dissolved_heads(&self, kind: Kind) -> HashSet<FaceRef> {
+        self.dissolved.iter().filter(|d| d.kind == kind).flat_map(|d| d.heads.iter().copied()).collect()
+    }
+
+    /// The dissolved sets of `kind` each head is in (by the set's place
+    /// among the kind's sets).
+    pub fn dissolved_sets(&self, kind: Kind) -> HashMap<FaceRef, Vec<u32>> {
+        let mut out: HashMap<FaceRef, Vec<u32>> = HashMap::new();
+        for (i, d) in self.dissolved.iter().filter(|d| d.kind == kind).enumerate() {
+            for h in &d.heads {
+                out.entry(*h).or_default().push(i as u32);
+            }
+        }
+        out
     }
 
     /// Where each head of `kind` stands in the "not the same" answers:
@@ -1250,52 +1302,108 @@ impl Default for Linkage {
     }
 }
 
+/// Rows the user's dissolved groups keep apart ([`Dissolved`]): per row,
+/// the sets it is in.  Two rows sharing a set never join one automatic
+/// group (a cannot-link constraint); every other row groups as before.
+/// Empty, the grouping is exactly what it was without it.
+#[derive(Debug, Clone, Default)]
+pub struct Apart {
+    of: HashMap<usize, Vec<u32>>,
+}
+
+impl Apart {
+    /// From each row's sets (rows in no set left out).
+    pub fn new(of: HashMap<usize, Vec<u32>>) -> Apart {
+        Apart { of }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.of.is_empty()
+    }
+
+    fn sets(&self, row: usize) -> &[u32] {
+        self.of.get(&row).map_or(&[], Vec::as_slice)
+    }
+
+    /// The sets a cluster's members are in.
+    fn tags(&self, members: &[usize]) -> HashSet<u32> {
+        if self.of.is_empty() {
+            return HashSet::new();
+        }
+        members.iter().flat_map(|&m| self.sets(m).iter().copied()).collect()
+    }
+
+    /// The clusters a row may not join: those holding a row of one of its
+    /// sets (`owner`: set → clusters holding it).
+    fn banned(&self, row: usize, owner: &HashMap<u32, Vec<usize>>) -> HashSet<usize> {
+        self.sets(row).iter().filter_map(|s| owner.get(s)).flatten().copied().collect()
+    }
+}
+
 /// Group rows: each row, in `order` (clearest first), joins a cluster as
 /// `linkage` says or starts one (under [`Linkage::PEOPLE`]: the nearest
 /// centroid within `cutoff`, then clusters whose centroids lie within
 /// `cutoff` of each other are merged, until none do).  Rows outside
 /// `order` (confirmed to a subject) take no part.  Pure.
+#[cfg(test)]
 pub fn cluster_with(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Linkage) -> Vec<Cluster> {
+    cluster_apart(rows, order, cutoff, linkage, &Apart::default())
+}
+
+/// [`cluster_with`], never putting two rows of one dissolved set in one
+/// cluster: a row skips the clusters holding one of its set (it joins
+/// the nearest other, or starts its own), and the merge pass leaves two
+/// clusters apart when they hold rows of one set.
+pub fn cluster_apart(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Linkage, apart: &Apart) -> Vec<Cluster> {
     let mut clusters: Vec<Cluster> = Vec::new();
     let mut sums: Vec<Vec<f32>> = Vec::new();
+    let mut owner: HashMap<u32, Vec<usize>> = HashMap::new();
     for &i in order {
         if i >= rows.len() {
             continue;
         }
         let v = rows.row_vec(i);
-        match join(&clusters, rows, &v, cutoff, linkage) {
+        let banned = apart.banned(i, &owner);
+        let k = match join(&clusters, rows, &v, cutoff, linkage, &banned) {
             Some(k) => {
                 clusters[k].members.push(i);
                 for (s, x) in sums[k].iter_mut().zip(&v) {
                     *s += x;
                 }
                 clusters[k].centroid = unit(sums[k].clone());
+                k
             }
             None => {
                 clusters.push(Cluster { members: vec![i], centroid: v.clone() });
                 sums.push(v);
+                clusters.len() - 1
             }
+        };
+        for s in apart.sets(i) {
+            owner.entry(*s).or_default().push(k);
         }
     }
     if let Linkage::Centroid { merge: true, .. } = linkage {
-        merge_close(&mut clusters, rows, cutoff);
+        merge_close(&mut clusters, rows, cutoff, apart);
     }
     clusters.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then_with(|| a.members.first().cmp(&b.members.first())));
     clusters
 }
 
-/// The cluster `v` joins under `linkage`, if any.  One pass over the
-/// centroids (no copies); the member-based linkages then look only at
-/// the clusters whose centroid lies within the cut (an exact bound).
-fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: Linkage) -> Option<usize> {
+/// The cluster `v` joins under `linkage`, if any, never one of `banned`
+/// (a dissolved set's).  One pass over the centroids (no copies); the
+/// member-based linkages then look only at the clusters whose centroid
+/// lies within the cut (an exact bound).
+fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: Linkage, banned: &HashSet<usize>) -> Option<usize> {
     use rayon::prelude::*;
     let centroid_distance = |c: &Cluster| 1.0 - dot(&c.centroid, v);
+    let open = |k: &usize| banned.is_empty() || !banned.contains(k);
     match linkage {
         Linkage::Centroid { seed_cap, .. } => {
             let nearest = if clusters.len() < 256 {
-                clusters.iter().enumerate().map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
+                clusters.iter().enumerate().filter(|(k, _)| open(k)).map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
             } else {
-                clusters.par_iter().enumerate().map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
+                clusters.par_iter().enumerate().filter(|(k, _)| open(k)).map(|(k, c)| (k, centroid_distance(c))).min_by(|a, b| a.1.total_cmp(&b.1))
             };
             let (k, d) = nearest?;
             if d > cutoff {
@@ -1316,9 +1424,9 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
             // the mean: so a cluster whose centroid lies beyond the cut
             // can't qualify, and the shortlist is exact.
             let near: Vec<usize> = if clusters.len() < 256 {
-                clusters.iter().enumerate().filter(|(_, c)| centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
+                clusters.iter().enumerate().filter(|(k, c)| open(k) && centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
             } else {
-                clusters.par_iter().enumerate().filter(|(_, c)| centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
+                clusters.par_iter().enumerate().filter(|(k, c)| open(k) && centroid_distance(c) <= cutoff).map(|(k, _)| k).collect()
             };
             let mut best: Option<(usize, f32)> = None;
             for k in near {
@@ -1340,13 +1448,16 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
     }
 }
 
-/// Merge clusters whose centroids lie within `cutoff`, repeatedly.
-fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
+/// Merge clusters whose centroids lie within `cutoff`, repeatedly; never
+/// two holding rows of one dissolved set (`apart`).
+fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32, apart: &Apart) {
     for _ in 0..4 {
         let n = clusters.len();
         if n < 2 {
             return;
         }
+        // Each root's dissolved sets (all empty without any).
+        let mut tags: Vec<HashSet<u32>> = clusters.iter().map(|c| apart.tags(&c.members)).collect();
         // Union-find over close pairs.
         let mut parent: Vec<usize> = (0..n).collect();
         fn find(p: &mut [usize], i: usize) -> usize {
@@ -1367,8 +1478,13 @@ fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
             for b in a + 1..n {
                 if 1.0 - dot(&clusters[a].centroid, &clusters[b].centroid) <= cutoff {
                     let (ra, rb) = (find(&mut parent, a), find(&mut parent, b));
-                    if ra != rb {
-                        parent[rb.max(ra)] = ra.min(rb);
+                    if ra != rb && tags[ra].is_disjoint(&tags[rb]) {
+                        let (root, child) = (ra.min(rb), ra.max(rb));
+                        parent[child] = root;
+                        if !tags[child].is_empty() {
+                            let moved = std::mem::take(&mut tags[child]);
+                            tags[root].extend(moved);
+                        }
                         merged = true;
                     }
                 }
@@ -1398,13 +1514,28 @@ fn merge_close(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, cutoff: f32) {
 /// Add rows to existing clusters as they arrive (the pass): each joins
 /// a cluster as `linkage` says or starts one.  The full [`cluster_with`]
 /// runs later to tidy up.
+#[cfg(test)]
 pub fn assign_with(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutoff: f32, linkage: Linkage) {
+    assign_apart(clusters, rows, new, cutoff, linkage, &Apart::default())
+}
+
+/// [`assign_with`], keeping the rows of a dissolved set apart.
+pub fn assign_apart(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], cutoff: f32, linkage: Linkage, apart: &Apart) {
+    let mut owner: HashMap<u32, Vec<usize>> = HashMap::new();
+    if !apart.is_empty() {
+        for (k, c) in clusters.iter().enumerate() {
+            for s in apart.tags(&c.members) {
+                owner.entry(s).or_default().push(k);
+            }
+        }
+    }
     for &i in new {
         if i >= rows.len() {
             continue;
         }
         let v = rows.row_vec(i);
-        match join(clusters, rows, &v, cutoff, linkage) {
+        let banned = apart.banned(i, &owner);
+        let k = match join(clusters, rows, &v, cutoff, linkage, &banned) {
             Some(k) => {
                 let c = &mut clusters[k];
                 let n = c.members.len() as f32;
@@ -1414,8 +1545,15 @@ pub fn assign_with(clusters: &mut Vec<Cluster>, rows: &Rows<'_>, new: &[usize], 
                 }
                 c.members.push(i);
                 c.centroid = unit(sum);
+                k
             }
-            _ => clusters.push(Cluster { members: vec![i], centroid: v }),
+            _ => {
+                clusters.push(Cluster { members: vec![i], centroid: v });
+                clusters.len() - 1
+            }
+        };
+        for s in apart.sets(i) {
+            owner.entry(*s).or_default().push(k);
         }
     }
 }
@@ -2112,6 +2250,80 @@ mod tests {
         assert_ne!(id, cluster_id(&FaceRef::new(Key([2; 16]), [0.1, 0.2, 0.3, 0.4])));
         let c = cutoff_for(crate::ml::models::ModelId::AuraFace);
         assert!(c.group > cutoff_for(crate::ml::models::ModelId::SFace).group && c.strict < c.suggest && c.suggest == c.group);
+    }
+
+    /// A dissolved group is a v2 list like "not the same": an old file
+    /// loads without it and saves back as v1; one with it is written as
+    /// v2 and reads back the same; taken back (undo, forget), v1 again.
+    /// One set per dissolve, by kind: never fewer than two heads.
+    #[test]
+    fn a_dissolved_group_is_an_optional_list() {
+        let d = std::env::temp_dir().join(format!("pp-subjects-dissolved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("subjects.json");
+        let old = r#"{"version":1,"subjects":[{"id":"5ca1ab1e5ca1ab1e5ca1ab1e5ca1ab1e","name":"Suit","kind":"fursuit","members":[{"key":"01010101010101010101010101010101","box":[0.1,0.2,0.1,0.15]}]}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let mut f = SubjectsFile::load(&path);
+        assert_eq!((f.version, f.subjects.len(), f.dissolved.len()), (1, 1, 0), "an old file loads");
+        assert_eq!(f.written_version(), FILE_VERSION_PLAIN, "nothing optional: still v1");
+        f.save(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("dissolved"), "an empty list isn't written");
+        assert_eq!(f.add_dissolved(Kind::Fursuit, vec![face(2, 0.1), face(2, 0.1)]), Err(Refused::Nothing), "one head is no group");
+        f.add_dissolved(Kind::Fursuit, vec![face(2, 0.1), face(3, 0.1), face(4, 0.1)]).unwrap();
+        f.add_dissolved(Kind::Person, vec![face(5, 0.1), face(6, 0.1)]).unwrap();
+        assert!(!f.is_empty() && f.written_version() == FILE_VERSION);
+        f.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2") && text.contains("\"dissolved\""), "{text}");
+        let back = SubjectsFile::load(&path);
+        assert_eq!(back, SubjectsFile { version: FILE_VERSION, ..f.clone() });
+        assert_eq!(back.dissolved_heads(Kind::Fursuit).len(), 3);
+        assert_eq!(back.dissolved_sets(Kind::Person).get(&face(5, 0.1)), Some(&vec![0]), "sets are counted per kind");
+        assert!(back.dissolved_heads(Kind::Person).contains(&face(6, 0.1)) && !back.dissolved_heads(Kind::Person).contains(&face(2, 0.1)), "kinds never mix");
+        let mut back = back;
+        back.forget_kind(Kind::Fursuit);
+        assert_eq!(back.dissolved.len(), 1, "forget all fursuits leaves people's");
+        back.forget_kind(Kind::Person);
+        assert_eq!(back.written_version(), FILE_VERSION_PLAIN);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The grouping keeps a dissolved set apart: no automatic group holds
+    /// two of its rows, under people's linkage (with its merge pass) and
+    /// the fursuits', in a full grouping and as rows arrive; the rows stay
+    /// in the grouping (each still joins other rows).  With no set, the
+    /// grouping is exactly what it was.
+    #[test]
+    fn a_dissolved_set_is_never_grouped_together_again() {
+        let (data, dim) = people_rows(8, 3);
+        let rows = Rows::F32 { dim, data: &data };
+        let order: Vec<usize> = (0..rows.len()).collect();
+        for linkage in [Linkage::PEOPLE, Linkage::Average] {
+            let plain = cluster_with(&rows, &order, 0.5, linkage);
+            assert_eq!(cluster_apart(&rows, &order, 0.5, linkage, &Apart::default()), plain, "no set: unchanged");
+            // Person 0's eight faces dissolved.
+            let apart = Apart::new((0..8).map(|i| (i, vec![0])).collect());
+            let got = cluster_apart(&rows, &order, 0.5, linkage, &apart);
+            for c in &got {
+                assert!(c.members.iter().filter(|&&m| m < 8).count() <= 1, "{linkage:?}: two of the set together: {:?}", c.members);
+            }
+            assert_eq!(got.iter().map(|c| c.members.len()).sum::<usize>(), rows.len(), "every row still grouped");
+            for c in got.iter().filter(|c| c.members.iter().all(|&m| m >= 8)) {
+                assert!(plain.iter().any(|p| p.members == c.members), "the other groups are as they were: {:?}", c.members);
+            }
+            // Two sets over the same rows: a row in both keeps away from each.
+            let both = Apart::new((0..8).map(|i| (i, if i < 4 { vec![0] } else { vec![1] })).chain([(8, vec![0, 1])]).collect());
+            for c in cluster_apart(&rows, &order, 0.5, linkage, &both) {
+                let has = |r: std::ops::Range<usize>| c.members.iter().filter(|m| r.contains(m)).count();
+                assert!(has(0..4) + has(8..9) <= 1 && has(4..8) + has(8..9) <= 1, "{:?}", c.members);
+            }
+            // Rows arriving: one of the set joins none holding another.
+            let mut live = cluster_apart(&rows, &order[1..], 0.5, linkage, &apart);
+            assign_apart(&mut live, &rows, &[0], 0.5, linkage, &apart);
+            let with0 = live.iter().find(|c| c.members.contains(&0)).unwrap();
+            assert_eq!(with0.members.iter().filter(|&&m| m < 8).count(), 1, "{:?}", with0.members);
+        }
     }
 
     /// Two clusters of one person started apart (a split order) are merged

@@ -53,6 +53,11 @@
 //! arrangement isn't applied: a merge is a change of its own.  Ctrl+Z here
 //! takes back the arrangement's steps first, then the merges and "not the
 //! same" made here.  Fursuits only: kinds never mix.
+//!
+//! **Dissolve group** in the header (`subjects_dissolve`): the group is no
+//! one subject; its heads are kept apart from then on.  It acts on the
+//! group as it is in the library, not on the arrangement (which, if any,
+//! it says it drops).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -579,6 +584,17 @@ impl Editor {
         let stay = self.cols[0].heads.len();
         let moved = self.origin.iter().filter(|(f, o)| **o == home && matches!(self.place_of(f), Some(Place::Col(i)) if i != 0) || **o == home && matches!(self.place_of(f), Some(Place::Sent(_)))).count();
         (stay, moved, self.removed.len(), self.taken.len())
+    }
+
+    /// The group a head read was in when it was read.
+    pub fn origin_of(&self, f: &FaceRef) -> Option<&GroupId> {
+        self.origin.get(f)
+    }
+
+    /// Something arranged that *Apply* would change (a dissolve drops it).
+    pub fn has_changes(&self) -> bool {
+        let e = self.to_edit(&|_| None);
+        !e.moves.is_empty() || !e.renames.is_empty()
     }
 
     /// Heads elsewhere than the preset laid them out.
@@ -1490,6 +1506,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         tip(kit::icon_text_btn(Glyph::ChevronLeft, "Cancel", t::INK2, style::secondary(), Some(m(Msg::Cancel))), "Leave without changing anything  (Esc)", true),
         column![text(title).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK), kit::caption("Nothing changes until you apply. Ctrl+Z here takes back a step.")].spacing(1).padding(Padding { left: t::S3, ..Padding::ZERO }),
         Space::new().width(Length::Fill),
+        super::subjects_dissolve::editor_button(e.kind, e.cols[0].loaded && !busy),
         suggestion(app, e),
         text(counter).size(t::T_BODY).font(paint::MEDIUM).color(t::INK2),
         tip(kit::btn(if busy { "Applying…" } else { "Apply" }, style::primary(), (!busy).then(|| m(Msg::Apply))), "Make these changes, as one undo step  (Enter)", true),

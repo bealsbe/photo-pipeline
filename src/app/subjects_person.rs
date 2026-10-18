@@ -1103,6 +1103,13 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
                 menu_row(icons::view(Glyph::Merge, 15.0, t::INK2), "Merge into…".into(), String::new(), Some(pm(Msg::Menu(Some(Menu::MergeInto))))),
                 menu_row(icons::view(Glyph::Pencil, 15.0, t::INK2), "Edit group…".into(), "E".into(), Some(pm(Msg::Edit))),
                 menu_row(icons::view(Glyph::Hide, 15.0, t::INK2), "Hide".into(), String::new(), Some(pm(Msg::Hide))),
+                // Named: asked first (the name goes).
+                menu_row(
+                    icons::view(Glyph::Dissolve, 15.0, t::INK2),
+                    format!("{}{}", super::subjects_dissolve::ACTION, if g.name.is_some() { "…" } else { "" }),
+                    String::new(),
+                    Some(subj::m(subj::Msg::Dissolve(super::subjects_dissolve::Msg::Ask(super::subjects_dissolve::From::Page)))),
+                ),
                 menu_row(
                     icons::view(Glyph::Close, 15.0, t::REJECT),
                     format!("{}…", super::subjects_remove::action(p.kind)),
@@ -1246,7 +1253,7 @@ mod tests {
             groups: vec![g(1, Kind::Person, Some("Person A"), 312), g(2, Kind::Person, Some("Pat"), 20), g(3, Kind::Person, None, 58), g(4, Kind::Fursuit, Some("Patches"), 90)],
             faces_found: 400,
             undoable: None, seen_together: Default::default(),
-            chosen_covers: Default::default(),
+            chosen_covers: Default::default(), loose: Default::default(),
         }
     }
 
