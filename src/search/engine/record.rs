@@ -38,6 +38,21 @@ fn linkage(step: &dyn KindStep, a: &[FaceRef], b: &[FaceRef]) -> Option<f32> {
     Some(round4(1.0 - m[0].iter().zip(&m[1]).map(|(x, y)| x * y).sum::<f32>()))
 }
 
+/// How spread out a group is: its heads' mean cosine distance to their
+/// (unit) mean, in the step's space.
+fn spread(step: &dyn KindStep, faces: &[FaceRef]) -> Option<f32> {
+    let idx = rows_of(step, faces);
+    if idx.is_empty() || step.rows().dim() == 0 {
+        return None;
+    }
+    let rows = step.rows();
+    let m = merging::means(&rows, &[&idx]);
+    let mean = m.first()?;
+    let n = mean.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
+    let d: f32 = idx.iter().map(|&r| 1.0 - rows.dot(r, mean) / n).sum::<f32>() / idx.len() as f32;
+    Some(round4(d))
+}
+
 /// The nearest pair between `faces` and `members` (cosine distance), as
 /// the review's close calls measure it: (distance, the face, the member).
 fn nearest(step: &dyn KindStep, members: &[FaceRef], faces: &[FaceRef]) -> Option<(f32, FaceRef, FaceRef)> {
@@ -253,6 +268,21 @@ impl Worker {
         }
         let out = out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect();
         Some(Before { kind: plan.kind, act: Act::Edit { groups, out }, answered: None })
+    }
+
+    /// A group dissolved: as it was (name and subject id when it had
+    /// them), every head (but those removed in the viewer, which the
+    /// dissolve leaves alone) and how spread out they are.
+    pub(super) fn before_dissolve(&mut self, id: &GroupId) -> Option<Before> {
+        if !self.decisions.is_on() {
+            return None;
+        }
+        let (kind, side, members) = self.record_side(id, &[])?;
+        let removed = self.people.file.removed_index(kind);
+        let heads = self.clearest(kind, members.into_iter().filter(|h| !removed.covers(h)).collect());
+        let spread = self.record_step(kind).and_then(|s| spread(s, &heads));
+        let named = side.name.is_some();
+        Some(Before { kind, act: Act::Dissolve { group: side, dissolved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)), named, spread }, answered: None })
     }
 
     /// A review answer (Yes or No): the group as it was, the heads.

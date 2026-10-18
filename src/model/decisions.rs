@@ -1,7 +1,7 @@
 //! The record of the user's corrections to people and fursuits: an
 //! append-only JSON-lines file of every grouping decision (merges, "not
-//! the same", splits and moves, review answers, the viewer's label
-//! edits, and undo), kept so that later research can learn from them
+//! the same", splits and moves, dissolved groups, review answers, the
+//! viewer's label edits, and undo), kept so that later research can learn from them
 //! (re-tuning the cut-offs, training a small adapter).
 //!
 //! - **User data, not cache.**  `~/.local/share/photo-pipeline/
@@ -213,6 +213,20 @@ pub enum Act {
     /// one [`Out`] per group they left and where they went, so each reads
     /// as a `move` / `split` / `remove_many` does.
     Edit { groups: Vec<Side>, out: Vec<Out> },
+    /// A group dissolved: not one subject, only lookalikes.  `group` as
+    /// it was (its name and subject id when it had them: `named`, and the
+    /// name went), its `heads` (at most [`MOVED_HEADS`]) and how many
+    /// (`dissolved`), and `spread`, the heads' mean cosine distance to
+    /// their mean in [`Lib`]'s space.  No pair is labelled: some of the
+    /// heads may still be the same subject, only not all of them.
+    Dissolve {
+        group: Side,
+        heads: Vec<Head>,
+        dissolved: usize,
+        named: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spread: Option<f32>,
+    },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -233,6 +247,7 @@ impl Act {
             Act::Remove { .. } => "remove",
             Act::RemoveMany { .. } => "remove_many",
             Act::Edit { .. } => "edit",
+            Act::Dissolve { .. } => "dissolve",
             Act::Undo { .. } => "undo",
         }
     }
@@ -724,7 +739,7 @@ fn export(path: &Path, into: &Path, groups: Option<&super::group_export::Snapsho
         Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e),
     };
-    let labels = groups.is_some_and(|g| !g.named.is_empty() || !g.added.is_empty() || !g.removed.is_empty() || !g.not_same.is_empty());
+    let labels = groups.is_some_and(|g| !g.named.is_empty() || !g.added.is_empty() || !g.removed.is_empty() || !g.not_same.is_empty() || !g.dissolved.is_empty());
     if bytes.is_empty() && !labels {
         return Err(io::Error::new(io::ErrorKind::NotFound, "nothing is recorded and no group is named"));
     }
@@ -853,6 +868,9 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
             }
             Act::Draw { name, .. } => c.name(k, name),
             Act::RemoveMany { groups, .. } => groups.iter_mut().for_each(|g| c.side(k, g)),
+            // A named group dissolved: its name becomes its code, `named`
+            // says it had one.
+            Act::Dissolve { group, .. } => c.side(k, group),
             Act::Remove { .. } | Act::Undo { .. } => {}
         }
     }
@@ -1087,8 +1105,8 @@ code, `person-7` or `fursuit-12`: the same code for the same person or
 fursuit throughout the file, whether an entry named it or gave its id.
 The record on the user's computer keeps the names.
 
-`groups.json` (when any group is named) is the named groups as they were
-at the export, by the same codes (below).
+`groups.json` (when any group is named, or any label kept) is the named
+groups as they were at the export, by the same codes (below).
 
 ## Reading it
 
@@ -1132,6 +1150,8 @@ at the export, by the same codes (below).
 | `draw` | `head`, `name` | none |
 | `remove` | `head` (not a face / not a fursuit head) | none |
 | `remove_many` | `groups` (as they were), `heads`, `removed` (whole groups or picked heads: not faces / not fursuit heads) | none |
+| `edit` | `groups` (as they were), `out`: `[{"from": index into groups, "to": {"is": "group", "group"} / {"is": "new", "new", "name"} / {"is": "removed"} / {"is": "taken_out"}, "heads", "moved"}]` (the group editor's Apply) | each `out` read as a `move`, `split` or `remove_many` |
+| `dissolve` | `group` (as it was), `heads` (all of them, at most 200), `dissolved` (count), `named` (it had a name, which went: its code is `group.name`), `spread` (the heads' mean cosine distance to their mean) | none: the group is not one subject, but some of its heads may be |
 | `undo` | `undoes` (an id), `of` (its act) | takes that entry's pairs back |
 
 ## How
@@ -1144,7 +1164,7 @@ at the export, by the same codes (below).
   pair of groups `yes`, `no`, `unseen` (head pairs; the majority decided),
   for a review answer `p` (P(yes), the mean of both orders) and
   `offered` (`false`: the judge left it out and the user asked to see it).
-- `at`: `drag`, `pick`, `menu`, `name`, `heads`, `side-by-side`,
+- `at`: `drag`, `pick`, `menu`, `name`, `heads`, `side-by-side`, `editor`,
   `faces`, `viewer`, `merge-review`, `similar`, `review`.
 
 ## groups.json: the named groups now
@@ -1159,7 +1179,8 @@ left out (nobody checked them).
  "groups": [{"code", "kind", "photos", "bursts", "days",
              "heads": [heads], "rejected": [heads]}],
  "added": [{"kind", "head"}], "removed": [{"kind", "head"}],
- "not_same": [{"kind", "a": [heads], "b": [heads]}]}
+ "not_same": [{"kind", "a": [heads], "b": [heads]}],
+ "dissolved": [{"kind", "heads": [heads]}]}
 ```
 
 - `kinds`: each kind's state as for the log's `lib`: head count, whether
@@ -1172,6 +1193,10 @@ left out (nobody checked them).
 - `added`: boxes drawn in the viewer; `removed`: boxes the user said are
   not a face or not a fursuit head (never a match for anything).
 - `not_same`: groups the user said are different, by their heads.
+- `dissolved`: groups the user dissolved (no coherent match: only
+  lookalikes), each by all its heads.  The heads are still faces or
+  fursuit heads, never grouped together again by the app; a head may
+  since have been confirmed into a named group.
 
 ### Labelled pairs from groups.json
 
@@ -1180,6 +1205,8 @@ left out (nobody checked them).
   square of the named heads; sample it if it is large.)
 - A rejected head and each member of its group: different.
 - `not_same`: every head of `a` and of `b`: different.
+- `dissolved`: none.  Not all of a set's heads are one subject, but any
+  two of them may be.
 - Never across kinds.
 
 Built after the log's pairs, these win for a pair both hold: the groups
@@ -1268,6 +1295,8 @@ mod tests {
             Act::Remove { head: Head(head(7, 0)) },
             Act::RemoveMany { groups: vec![side(8, 2)], heads: heads([head(8, 0), head(8, 10)]), removed: 2 },
             Act::Undo { undoes: "0123456789abcdef".into(), of: "merge".into() },
+            Act::Dissolve { group: side(9, 3), heads: heads([head(9, 0), head(9, 10), head(9, 20)]), dissolved: 3, named: false, spread: Some(0.4123) },
+            Act::Dissolve { group: side(9, 2), heads: heads([head(9, 0), head(9, 10)]), dissolved: 2, named: false, spread: None },
             Act::Edit {
                 groups: vec![side(1, 5), side(2, 3)],
                 out: vec![
@@ -1287,6 +1316,31 @@ mod tests {
             assert_eq!(back, e, "{line}");
             assert!(line.contains(&format!(r#""act":"{}""#, e.act.name())), "{line}");
         }
+    }
+
+    /// A dissolved group's line: the group as it was, every head, how
+    /// many, whether it was named and how spread out; by hand, where; the
+    /// library with the grouping choice.  It labels no pair (some of its
+    /// heads may be one subject), and an export codes its name.
+    #[test]
+    fn a_dissolve_is_one_line_with_its_heads_and_codes_its_name() {
+        let group = Side { sid: Some("aaaa".into()), name: Some("Sparky Dragon".into()), photos: Some(3), bursts: Some(2), days: Some(1), ..side(9, 3) };
+        let e = Entry::new(Kind::Fursuit, Act::Dissolve { group, heads: heads([head(9, 0), head(9, 10), head(9, 20)]), dissolved: 3, named: true, spread: Some(0.3125) }, Some(How::hand(At::Editor)), Some(lib()));
+        let line = e.line();
+        for part in [
+            r#""kind":"fursuit","act":"dissolve","group":{"n":3,"photos":3,"bursts":2,"days":1,"name":"Sparky Dragon","sid":"aaaa","heads":[["09090909090909090909090909090909",0,100,50,80],"#,
+            r#""heads":[["09090909090909090909090909090909",0,100,50,80],["09090909090909090909090909090909",10,100,50,80],["09090909090909090909090909090909",20,100,50,80]],"dissolved":3,"named":true,"spread":0.3125,"how":{"by":"hand","at":"editor"}"#,
+            r#""grouping":"balanced""#,
+        ] {
+            assert!(line.contains(part), "{part}
+in {line}");
+        }
+        assert!(pairs(std::slice::from_ref(&e)).is_empty(), "no pair is labelled");
+        let mut coded = vec![e];
+        code_entries(&mut coded, &mut Codes::default());
+        let text = coded[0].line();
+        assert!(!text.contains("Sparky") && !text.contains("aaaa"), "{text}");
+        assert!(matches!(&coded[0].act, Act::Dissolve { group, named: true, .. } if group.name.as_deref() == Some("fursuit-1") && group.sid.as_deref() == Some("fursuit-1")));
     }
 
     /// A partial last line (a crash mid-write) and a line from a newer

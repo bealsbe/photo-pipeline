@@ -1841,7 +1841,7 @@ mod tests {
                 group(7, Kind::Person, None, 9, false),
             ],
             faces_found: 200,
-            undoable: None, seen_together: Default::default(),
+            undoable: None, seen_together: Default::default(), loose: Default::default(),
         }
     }
 
@@ -1890,7 +1890,7 @@ mod tests {
             ],
             faces_found: 0,
             undoable: None,
-            seen_together: Default::default(),
+            seen_together: Default::default(), loose: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;
@@ -1924,7 +1924,7 @@ mod tests {
             ],
             faces_found: 0,
             undoable: None,
-            seen_together: Default::default(),
+            seen_together: Default::default(), loose: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;
