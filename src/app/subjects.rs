@@ -510,16 +510,9 @@ fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
             if s.hidden_open {
                 v.extend(near(Section::Hidden, &a.hidden, small));
             }
-            if s.tab == Kind::Fursuit {
-                v.extend(super::subjects_merge::wanted_tab(app));
-            }
             v
         }
-        Page::Person => {
-            let mut v = person::wanted(app);
-            v.extend(super::subjects_merge::wanted_similar(app));
-            v
-        }
+        Page::Person => person::wanted(app),
         Page::Review => review::wanted(app),
         Page::Merges => super::subjects_merge::wanted(app),
         Page::Editor => super::subjects_editor::wanted(app),
@@ -703,11 +696,13 @@ pub fn on_subjects(app: &mut App, all: Arc<Found>) -> Task<Message> {
     if let Some(d) = s.drag.as_mut().filter(|d| d.over.as_ref().is_some_and(|o| all.group(o).is_none())) {
         d.over = None;
     }
+    // The editor first: a merge made from it says where the page's group
+    // went before the page looks for it.
+    let editor = super::subjects_editor::on_subjects(app);
     let t = person::on_subjects(app);
     super::subjects_merge::on_subjects(app);
-    super::subjects_editor::on_subjects(app);
     let split = super::subjects_split::on_subjects(app);
-    Task::batch([t, split, refresh_crops(app)])
+    Task::batch([editor, t, split, refresh_crops(app)])
 }
 
 // ── update ──────────────────────────────────────────────────────────────────
@@ -819,8 +814,9 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::MergeGo => {
             let s = &mut app.subjects;
             let Some(mg) = s.merge.take() else { return Task::none() };
-            // One kind only: the tab's.
-            if mg.groups.iter().any(|id| s.all.group(id).is_none_or(|g| g.kind != s.tab)) {
+            // One kind only: the tab's (the editor's, from the editor).
+            let kind = s.editor.as_ref().map_or(s.tab, |e| e.kind);
+            if mg.groups.iter().any(|id| s.all.group(id).is_none_or(|g| g.kind != kind)) {
                 return app.show_status("Only groups of one kind can be merged.", 5000);
             }
             let others: Vec<GroupId> = mg.groups.iter().filter(|id| **id != mg.keep).cloned().collect();
@@ -832,9 +828,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             if app.subjects.person.as_ref().is_some_and(|p| p.group != mg.keep && mg.groups.contains(&p.group)) {
                 person::follow(app, &mg.keep);
             }
+            // A pair merged from the group editor: it follows the group kept,
+            // and its Undo is the editor's.
+            let undo = match super::subjects_editor::merging(app, &mg.keep, &mg.groups) {
+                true => super::subjects_editor::m(super::subjects_editor::Msg::UndoLibrary),
+                false => m(Msg::Undo),
+            };
             app.search.link.merge(&mg.keep, &others, mg.via);
             let review = super::subjects_merge::merged_by_dialog(app);
-            let said = app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", m(Msg::Undo));
+            let said = app.show_status_action(format!("Merged {} into {name}.", util::plural(others.len() as u64 + 1, "group")), "Undo", undo);
             Task::batch([review, said])
         }
         Msg::HidePicked => {
@@ -1065,7 +1067,7 @@ fn overview_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Mes
         // E: edit the picked (or focused) group.
         Key::Character(c) if c.as_str().eq_ignore_ascii_case("e") && !mods.shift() => super::subjects_editor::edit_key(app),
         // Y on the Fursuits tab: review the pairs that may be one suit.
-        Key::Character(c) if c.as_str().eq_ignore_ascii_case("y") && !mods.shift() && s.tab == Kind::Fursuit && !s.select_mode => super::subjects_merge::tab_key(app).unwrap_or_else(Task::none),
+        Key::Character(c) if c.as_str().eq_ignore_ascii_case("y") && !mods.shift() && s.tab == Kind::Fursuit && !s.select_mode => super::subjects_merge::tab_key(app),
         Key::Named(Named::Space) if s.select_mode => {
             if let Some(id) = s.focus.clone() {
                 toggle_pick(&mut app.subjects, id);
@@ -1159,13 +1161,47 @@ fn header(app: &App) -> Element<'_, Message> {
     if !caption.is_empty() {
         title = title.push(kit::caption(caption));
     }
-    let mut r = row![container(title).padding(Padding { left: t::S2, ..Padding::ZERO }), Space::new().width(Length::Fill), tabs(app)].align_y(Alignment::Center).spacing(t::S2);
+    let mut r = row![container(title).padding(Padding { left: t::S2, ..Padding::ZERO }), Space::new().width(Length::Fill)].align_y(Alignment::Center).spacing(t::S2);
+    // Left of the tabs, so they never move between People and Fursuits.
+    if let Some(b) = merges_entry(app) {
+        r = r.push(b);
+    }
+    r = r.push(tabs(app));
     // Always there (quiet without groups), so the tabs never move.
     let can = has_groups(app, kind) && s.page() == Page::Overview;
     let look = if s.select_mode { style::toggle(true, t::SIGNAL) } else { style::ghost() };
     let b = kit::icon_text_btn(Glyph::Select, "Select", if s.select_mode { t::SIGNAL } else { t::INK2 }, look, can.then(|| m(Msg::SelectMode)));
     r = r.push(tip(b, "Pick several groups, to merge or hide them  (S, or Ctrl+click)", true));
     container(r.padding(Padding::from([0.0, t::S3]))).height(HEADER_H).center_y(HEADER_H).width(Length::Fill).style(style::fill(t::MOUNT)).into()
+}
+
+/// The Fursuits tab's one way to the pairs that may be one suit: a quiet
+/// control in its header saying how many (as the engine pairs them for
+/// the tab), never a row over the groups.  Y does the same.
+fn merges_entry(app: &App) -> Option<Element<'_, Message>> {
+    let s = &app.subjects;
+    if s.tab != Kind::Fursuit || s.page() != Page::Overview || super::subjects_fursuits::state(app) != super::subjects_fursuits::State::Groups {
+        return None;
+    }
+    let n = s.lists.tab.as_ref().map_or(0, |l| l.len());
+    // With a judge on, close pairs can come even when none is sure.
+    let judge = super::fursuit_judge::active(&app.search.status);
+    let on = n > 0 || judge;
+    let mut content = row![icons::view(Glyph::Merge, 15.0, if on { t::INK2 } else { t::INK4 }), text("Possible merges").size(t::T_BODY).font(paint::MEDIUM)].spacing(t::S2).align_y(Alignment::Center);
+    if n > 0 {
+        content = content.push(text(util::thousands(n as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK3));
+    }
+    let b = button(container(content).center_y(Length::Fill))
+        .height(t::CONTROL_H)
+        .padding(Padding::from([0.0, t::S3]))
+        .style(style::ghost().style())
+        .on_press_maybe(on.then(|| super::subjects_merge::m(super::subjects_merge::Msg::Review(None))));
+    let hint = match (n, judge) {
+        (0, false) => "No groups look like the same fursuit now. New pairs come as groups change.".to_string(),
+        (0, true) => "Possibly the same fursuit: the judge compares the close pairs, and you answer Y or N for those it offers  (Y)".to_string(),
+        (n, _) => format!("Possibly the same fursuit: {}, nearest first, one at a time. Y merges, N says they're different  (Y)", util::plural(n as u64, "pair")),
+    };
+    Some(tip(b, hint, true))
 }
 
 /// The tab of `kind` has groups to show (its picking and keys work).
@@ -1441,12 +1477,7 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     let target = drag.is_some_and(|d| d.over.as_ref() == Some(&g.id));
     let source = drag.is_some_and(|d| d.from == g.id);
     let picked = target || s.picked.contains(&g.id) || (s.picked.is_empty() && s.focus.as_ref() == Some(&g.id) && !g.hidden && app.subjects.select_mode);
-    // Two of its heads in one photo: it holds at least two fursuits.
-    let together = g.kind == Kind::Fursuit && s.all.seen_together.contains(&g.id);
-    let badge = if g.hidden { Some(Glyph::Hide) } else if together { Some(Glyph::Split) } else { None };
-    // The split mark's click: the group editor, which offers the split.
-    let badge_on = (together && !g.hidden).then(|| super::subjects_editor::m(super::subjects_editor::Msg::Open(g.id.clone(), super::subjects_editor::Preset::Plain)));
-    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge, on, badge_on }.into();
+    let el: Element<'a, Message> = Tile { crop, name, count, picked, small, badge: tile_badge(g), on, badge_on: None }.into();
     if g.hidden {
         return tip(el, "Show it on the tab again", true);
     }
@@ -1468,15 +1499,22 @@ fn group_tile<'a>(app: &'a App, g: &'a Group, small: bool) -> Element<'a, Messag
     // The same widgets whether or not a drag is under way, so the dragged
     // tile keeps its place in the tree (and its drag) as the page redraws.
     let el: Element<'a, Message> = crate::ui::drag::DragArea::new(el, messages, drag.is_some()).ghost(ghost, shape(g.kind).radius(64.0)).into();
-    let mut hint = if g.name.is_none() {
-        format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one())
-    } else {
-        format!("{}: seen on {}, {}, {}. Drag onto another group to merge them.", g.name.clone().unwrap_or_default(), util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo"))
-    };
-    if together {
-        hint.push_str(" Two of its heads are in one photo, so it holds at least two fursuits: open it to split it.");
+    tip(el, tile_hint(g), true)
+}
+
+/// A tile's mark: hidden, or none.  Never a suggestion (a split, a
+/// merge): the tab shows groups, and those are offered in the group
+/// editor.
+pub fn tile_badge(g: &Group) -> Option<Glyph> {
+    g.hidden.then_some(Glyph::Hide)
+}
+
+/// A tile's tooltip: what it is and what a click or a drag does.
+pub fn tile_hint(g: &Group) -> String {
+    match &g.name {
+        None => format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one()),
+        Some(n) => format!("{n}: seen on {}, {}, {}. Drag onto another group to merge them.", util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo")),
     }
-    tip(el, hint, true)
 }
 
 /// A section's tiles; their crops are drawn as they come near the screen.
@@ -1521,13 +1559,11 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let a = arrange(&s.all, s.tab, app.settings.people_min_photos());
     let mut col = column![].padding(Padding { top: t::S1, bottom: t::S5, left: 0.0, right: 0.0 });
+    // Over the groups only what isn't a suggestion: a running step, a
+    // question it waits on, a failing card.  Merges and splits are
+    // offered in the group editor.
     if let Some(p) = progress_strip(app, s.tab) {
         col = col.push(p);
-    }
-    if s.tab == Kind::Fursuit {
-        if let Some(pairs) = super::subjects_merge::tab_section(app) {
-            col = col.push(pairs);
-        }
     }
     if !a.named.is_empty() {
         col = col.push(heading("Named", util::thousands(a.named.len() as u64)));

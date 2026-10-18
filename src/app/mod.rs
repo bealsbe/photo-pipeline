@@ -1784,6 +1784,7 @@ impl App {
             Cmd::CalendarView => self.switch_view(View::Calendar),
             Cmd::Search => search::open(self),
             Cmd::Subjects => subjects::open(self),
+            Cmd::FursuitMerges => subjects_merge::open_review(self),
             Cmd::QuickLook => quicklook::toggle(self),
             // S on the People tab picks several groups.
             Cmd::SelectMode if self.view == View::Subjects => {

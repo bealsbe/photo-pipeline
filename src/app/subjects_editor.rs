@@ -24,9 +24,11 @@
 //!   *Cancel* or Esc leaves everything as it was.
 //!
 //! What opens it (each with its preset): *Edit group* (E) on a group's
-//! page or a picked tile (and the split mark on a tile); side by side (C
-//! with two picked, a similar group, a pair in "Same fursuit?"); the picked
-//! heads' *Split into a new group* and *Move to…*.
+//! page or a picked tile; side by side (C with two picked, a pair in "Same
+//! fursuit?"); the picked heads' *Split into a new group* and *Move to…*.
+//!
+//! The group's suggestions live here, and only here: the tab and the
+//! group's page show the group, not what might be done to it.
 //!
 //! **A suggested split.**  A fursuit group holding two heads of one photo
 //! holds two fursuits: the header offers *Suggested split* (the two heads,
@@ -34,6 +36,21 @@
 //! column (the smaller side around the pair, the pair apart), taking only
 //! heads still in *Stays*, so nothing the user arranged is undone; Ctrl+Z
 //! takes it back.  Applied, it is recorded `by: "proposal"`.
+//!
+//! **Likely the same fursuit.**  At the top of the panel, the groups the
+//! engine pairs with this one (`search::merging`, asked as a fursuit
+//! page's *Similar groups* were: by distance, under the cut-offs in force,
+//! "not the same" left out), nearest first.  Each is a drop target like
+//! the panel's other rows; a click on it opens it as a column.  *Merge*
+//! merges the two at once, as one undo step on the engine (not part of the
+//! arrangement), recorded as a suggested pair (`Via::Pair`, `At::Similar`,
+//! with its distance); two named ask which name to keep; the editor then
+//! shows the group kept.  × says they are different ("not the same", one
+//! undo step).  The third button opens "Same fursuit?" at that pair, and
+//! Esc there comes back here.  *Merge* and the review wait while an
+//! arrangement isn't applied: a merge is a change of its own.  Ctrl+Z here
+//! takes back the arrangement's steps first, then the merges and "not the
+//! same" made here.  Fursuits only: kinds never mix.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -44,11 +61,12 @@ use iced::{Alignment, Background, Element, Length, Padding, Task};
 
 use super::columns::{self as cols, ColMsg, Columns, Look, Target};
 use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, GroupId, Kind, KindWords};
+use super::people::{Face, FaceRef, Framing, Group, GroupId, Kind, KindWords, Subjects as Found};
 use super::style;
-use super::subjects::{self as subj, m as sm};
+use super::subjects::{self as subj, MergeAsk, m as sm};
 use super::{App, Message};
-use crate::model::decisions::Via;
+use crate::model::decisions::{At, Via};
+use crate::search::merging::GroupPair;
 use crate::model::subjects::{EditDest, EditTarget, GroupEdit};
 use crate::search::index::Key as PhotoKey;
 use crate::ui::icons::{self, Glyph};
@@ -80,6 +98,81 @@ const SUGGEST: f32 = 22.0;
 const COL_MIN: f32 = 250.0;
 /// Heads of an automatic group remembered to find it at *Apply*.
 const ANCHORS: usize = 8;
+/// *Likely the same fursuit*: the nearest few shown (the rest are in the
+/// review).
+const PAIRS_N: usize = 5;
+
+/// A change made to the library from the editor (not part of the
+/// arrangement), for Ctrl+Z here.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibStep {
+    /// A pair merged: the group edited before, to come back to (and its
+    /// cover, should its id change back).
+    Merged { back_to: GroupId, cover: FaceRef },
+    /// "Not the same" on a pair.
+    NotSame,
+}
+
+/// A change sent to the engine that the editor follows: once the groups
+/// change, it shows the group it is on now.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Follow {
+    /// The group to show: a merge's kept one, or (an undo) the one edited
+    /// before.
+    pub want: GroupId,
+    /// A merge has landed once this group is gone (`None`: an undo, which
+    /// lands with the next change).
+    pub gone: Option<GroupId>,
+    /// The covers the group shown may have, should its id change (a merge
+    /// of two unnamed groups makes a new one, its cover the clearer).
+    pub covers: Vec<FaceRef>,
+    /// What Ctrl+Z takes back afterwards.
+    pub step: Option<LibStep>,
+}
+
+/// Where a followed change has left the group.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Followed {
+    Waiting,
+    At(GroupId),
+    /// Nowhere to be found (changed again meanwhile).
+    Lost,
+}
+
+impl Follow {
+    /// Where the change has left the group, as `all` has the groups now.
+    pub fn resolve(&self, all: &Found, kind: Kind) -> Followed {
+        if self.gone.as_ref().is_some_and(|g| all.group(g).is_some()) {
+            return Followed::Waiting;
+        }
+        if all.group(&self.want).is_some_and(|g| g.kind == kind) {
+            return Followed::At(self.want.clone());
+        }
+        // Its id changed: the group of the kind whose cover is one of the
+        // covers (a named one first, then the largest).
+        all.groups.iter().filter(|g| g.kind == kind && self.covers.contains(&g.cover.face)).max_by_key(|g| (g.name.is_some(), g.photos)).map_or(Followed::Lost, |g| Followed::At(g.id.clone()))
+    }
+}
+
+/// What *Merge* on a pair does.
+#[derive(Debug, Clone, PartialEq)]
+pub enum MergePlan {
+    /// Both named: the merge dialog asks which name to keep.
+    Ask,
+    /// One merge, one undo step, recorded as the suggested pair it was.
+    Merge { into: GroupId, gone: GroupId, via: Via },
+}
+
+/// The group edited is kept, unless only the other is named (as a
+/// fursuit page's *Similar groups* did); a named one keeps its name.
+pub fn merge_plan(home: &Group, other: &Group, pair: &GroupPair) -> MergePlan {
+    let via = super::subjects_merge::via(pair, At::Similar);
+    match (home.name.is_some(), other.name.is_some()) {
+        (true, true) => MergePlan::Ask,
+        (false, true) => MergePlan::Merge { into: other.id.clone(), gone: home.id.clone(), via },
+        _ => MergePlan::Merge { into: home.id.clone(), gone: other.id.clone(), via },
+    }
+}
 
 /// What opens the editor, and how it starts.
 #[derive(Debug, Clone, PartialEq)]
@@ -181,6 +274,13 @@ pub struct Editor {
     /// A named group *Apply* found gone.
     pub gone: Option<GroupId>,
     apply_seq: u64,
+    /// *Likely the same fursuit*: the engine's pairs with this group.
+    pub pairs: Option<Arc<Vec<GroupPair>>>,
+    pairs_seq: u64,
+    /// A merge (or its undo) sent, waiting for the groups to change.
+    pub follow: Option<Follow>,
+    /// Merges and "not the same" made here, newest last.
+    pub lib_steps: Vec<LibStep>,
 }
 
 /// Where a head is in the arrangement.
@@ -211,6 +311,14 @@ pub enum Msg {
     GoneToNew,
     /// Lay out the suggested split (a new column; nothing else moves).
     Suggest,
+    /// *Likely the same fursuit*, pair `i` of `pairs`: merge them now,
+    /// they are different, or the review at that pair.
+    PairMerge(usize),
+    PairNotSame(usize),
+    PairReview(usize),
+    /// Take back the last merge or "not the same" made here (the status
+    /// bar's Undo after one).
+    UndoLibrary,
     Apply,
     Cancel,
 }
@@ -245,7 +353,59 @@ impl Editor {
             pending: None,
             gone: None,
             apply_seq: 0,
+            pairs: None,
+            pairs_seq: 0,
+            follow: None,
+            lib_steps: Vec::new(),
         }
+    }
+
+    /// Anything arranged that *Apply* would change: the same test as
+    /// [`Editor::to_edit`]'s moves and renames, without building them.
+    pub fn changed(&self) -> bool {
+        if !self.sent.is_empty() || !self.removed.is_empty() || !self.taken.is_empty() {
+            return true;
+        }
+        self.cols.iter().any(|c| match &c.origin {
+            Origin::New => !c.heads.is_empty(),
+            Origin::Existing { id, was } => {
+                let name = c.name.trim();
+                (!name.is_empty() && Some(name) != was.as_deref()) || c.heads.iter().any(|f| self.origin.get(f).is_some_and(|o| o != id))
+            }
+        })
+    }
+
+    /// *Likely the same fursuit*: the pairs with this group whose other
+    /// group is there now, of this kind (fursuits only), nearest first,
+    /// with their place in `pairs`.
+    pub fn shown_pairs<'a>(&'a self, all: &Found) -> Vec<(usize, &'a GroupId)> {
+        let Some(list) = &self.pairs else { return Vec::new() };
+        if self.kind != Kind::Fursuit {
+            return Vec::new();
+        }
+        let home = self.home();
+        list.iter()
+            .enumerate()
+            .filter_map(|(i, p)| {
+                let other = if p.a == *home { &p.b } else if p.b == *home { &p.a } else { return None };
+                (other != home && all.group(other).is_some_and(|g| g.kind == self.kind)).then_some((i, other))
+            })
+            .collect()
+    }
+
+    /// The pairs the panel shows: the nearest few, none while a name is
+    /// searched for.
+    pub fn panel_pairs<'a>(&'a self, all: &Found) -> Vec<(usize, &'a GroupId)> {
+        if !self.search.trim().is_empty() {
+            return Vec::new();
+        }
+        self.shown_pairs(all).into_iter().take(PAIRS_N).collect()
+    }
+
+    /// The groups *Likely the same fursuit* shows (left out of the
+    /// panel's lists under it).
+    fn paired_groups(&self, all: &Found) -> HashSet<GroupId> {
+        self.panel_pairs(all).into_iter().map(|(_, g)| g.clone()).collect()
     }
 
     pub fn home(&self) -> &GroupId {
@@ -555,6 +715,7 @@ pub fn open(app: &mut App, group: GroupId, preset: Preset) -> Task<Message> {
             e.check_seq = seq;
         }
         app.search.link.group_check(seq, &group);
+        ask_pairs(app);
     }
     let n = app.subjects.editor.as_ref().map_or(0, |e| e.cols.len());
     for i in 0..n {
@@ -631,6 +792,41 @@ fn ask_order(app: &mut App, col: usize) {
     e.ordering.insert(seq, col);
     let (kind, heads) = (e.kind, c.heads.clone());
     app.search.link.heads_order(seq, kind, &heads);
+}
+
+/// *Likely the same fursuit*: the engine's pairs with the group edited,
+/// asked as a fursuit page's *Similar groups* were (by distance; the
+/// review is where the judge compares).  Worked out on the engine.
+fn ask_pairs(app: &mut App) {
+    let seq = app.subjects.next_seq();
+    let min = app.settings.people_min_photos();
+    let Some(e) = app.subjects.editor.as_mut().filter(|e| e.kind == Kind::Fursuit && e.follow.is_none()) else { return };
+    e.pairs_seq = seq;
+    let home = e.home().clone();
+    app.search.link.merge_suggestions(seq, Some(&home), min, false);
+}
+
+/// The engine's pairs, if they are the editor's.
+pub fn on_pairs(app: &mut App, seq: u64, list: &Arc<Vec<GroupPair>>) -> bool {
+    let Some(e) = app.subjects.editor.as_mut().filter(|e| e.pairs_seq == seq && seq != 0) else { return false };
+    e.pairs = Some(list.clone());
+    true
+}
+
+/// *Merge* (or the merge dialog's) on a pair with the group edited: the
+/// editor follows the group kept.  Whether the editor made it.
+pub fn merging(app: &mut App, keep: &GroupId, groups: &[GroupId]) -> bool {
+    let s = &app.subjects;
+    let Some(e) = s.editor.as_ref() else { return false };
+    let home = e.home().clone();
+    let gone = groups.iter().find(|g| *g != keep).cloned();
+    let (Some(gone), true) = (gone, groups.contains(&home) && groups.len() == 2) else { return false };
+    let covers: Vec<FaceRef> = groups.iter().filter_map(|g| s.group(g)).map(|g| g.cover.face).collect();
+    let Some(cover) = s.group(&home).map(|g| g.cover.face) else { return false };
+    let e = app.subjects.editor.as_mut().expect("the editor");
+    e.follow = Some(Follow { want: keep.clone(), gone: Some(gone), covers, step: Some(LibStep::Merged { back_to: home, cover }) });
+    e.note = None;
+    true
 }
 
 fn ask_near(app: &mut App) {
@@ -726,7 +922,7 @@ pub fn on_near(app: &mut App, seq: u64, list: &Arc<Vec<(GroupId, f32)>>) -> bool
         return false;
     }
     e.near = (**list).clone();
-    let shown: Vec<GroupId> = app.subjects.editor.as_ref().map(|e| panel_groups(&app.subjects, e).into_iter().take(READ_N).chain(unnamed_groups(&app.subjects, e)).collect()).unwrap_or_default();
+    let shown: Vec<GroupId> = app.subjects.editor.as_ref().map(|e| e.paired_groups(&app.subjects.all).into_iter().chain(panel_groups(&app.subjects, e).into_iter().take(READ_N)).chain(unnamed_groups(&app.subjects, e)).collect()).unwrap_or_default();
     for g in shown {
         read(app, g, None);
     }
@@ -768,14 +964,40 @@ pub fn on_refused(app: &mut App, seq: u64, why: &str, gone: Option<crate::model:
 }
 
 /// The groups changed while the editor is open (a regroup, a scan): the
-/// arrangement stays; a column whose group changed says so, quietly.
-pub fn on_subjects(app: &mut App) {
+/// arrangement stays; a column whose group changed says so, quietly.  A
+/// merge made here (or its undo) has the editor show the group it is on
+/// now; the pairs are asked again.
+pub fn on_subjects(app: &mut App) -> Task<Message> {
     let all = app.subjects.all.clone();
-    let Some(e) = app.subjects.editor.as_mut() else { return };
+    let Some(e) = app.subjects.editor.as_mut() else { return Task::none() };
+    if let Some(f) = e.follow.clone() {
+        return match f.resolve(&all, e.kind) {
+            Followed::Waiting => Task::none(),
+            Followed::At(g) => {
+                let mut steps = std::mem::take(&mut e.lib_steps);
+                steps.extend(f.step);
+                // A group's page under the editor follows too.
+                if app.subjects.person.as_ref().is_some_and(|p| all.group(&p.group).is_none()) {
+                    super::subjects_person::follow(app, &g);
+                }
+                let t = open(app, g, Preset::Plain);
+                if let Some(e) = app.subjects.editor.as_mut() {
+                    e.lib_steps = steps;
+                }
+                t
+            }
+            Followed::Lost => {
+                app.subjects.editor = None;
+                app.show_status("That group changed meanwhile: here are the groups as they are now.", 6000)
+            }
+        };
+    }
     let changed = e.cols.iter().any(|c| matches!(&c.origin, Origin::Existing { id, .. } if all.group(id).is_none()));
     if changed && e.note.is_none() {
         e.note = Some(format!("The groups were sorted again meanwhile. Your arrangement stays: Apply sends each {} where you put it.", cols::crop_word(e.kind)));
     }
+    ask_pairs(app);
+    Task::none()
 }
 
 // ── update ──────────────────────────────────────────────────────────────────
@@ -784,9 +1006,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
     if let Msg::Open(g, preset) = msg {
         return open(app, g, preset);
     }
+    if let Msg::UndoLibrary = msg {
+        return undo_library(app);
+    }
     let Some(e) = app.subjects.editor.as_mut() else { return Task::none() };
     match msg {
-        Msg::Open(..) => Task::none(),
+        Msg::Open(..) | Msg::UndoLibrary => Task::none(),
+        Msg::PairMerge(i) => pair_merge(app, i),
+        Msg::PairNotSame(i) => pair_not_same(app, i),
+        Msg::PairReview(i) => pair_review(app, i),
         Msg::Cols(c) => {
             // A drag going over a panel group not read yet: read it now.
             if let ColMsg::DragEnter(Target::Group(g)) = &c {
@@ -938,6 +1166,113 @@ fn reorder(app: &mut App) -> Task<Message> {
     subj::refresh_crops(app)
 }
 
+// ── *Likely the same fursuit* ───────────────────────────────────────────────
+
+/// Pair `i`'s other group and the pair, while nothing waits on a merge.
+fn pair_at(app: &App, i: usize) -> Option<(GroupId, GroupPair)> {
+    let e = app.subjects.editor.as_ref().filter(|e| e.follow.is_none())?;
+    let (_, other) = e.shown_pairs(&app.subjects.all).into_iter().find(|(j, _)| *j == i)?;
+    Some((other.clone(), e.pairs.as_ref()?.get(i)?.clone()))
+}
+
+/// The arrangement isn't applied: a merge (or the review) waits for it.
+fn wait_for_apply(app: &mut App) -> bool {
+    let Some(e) = app.subjects.editor.as_mut().filter(|e| e.changed()) else { return false };
+    e.note = Some("Apply or cancel your changes first: a merge is made at once, as a change of its own.".into());
+    true
+}
+
+/// *Merge*: the two at once, one undo step, recorded as the suggested
+/// pair; two named ask which name to keep.
+fn pair_merge(app: &mut App, i: usize) -> Task<Message> {
+    let Some((other, pair)) = pair_at(app, i) else { return Task::none() };
+    if wait_for_apply(app) {
+        return Task::none();
+    }
+    let Some(e) = app.subjects.editor.as_ref() else { return Task::none() };
+    let home = e.home().clone();
+    let (Some(mine), Some(theirs)) = (app.subjects.group(&home).cloned(), app.subjects.group(&other).cloned()) else {
+        return app.show_status("That group changed: look again.", 4000);
+    };
+    if mine.kind != Kind::Fursuit || theirs.kind != Kind::Fursuit {
+        return Task::none();
+    }
+    match merge_plan(&mine, &theirs, &pair) {
+        MergePlan::Ask => {
+            let all = app.subjects.all.clone();
+            app.subjects.merge = MergeAsk::new(&all, vec![home.clone(), other], Some(&home)).map(|m| MergeAsk { via: super::subjects_merge::via(&pair, At::Similar), ..m });
+            subj::refresh_crops(app)
+        }
+        MergePlan::Merge { into, gone, via } => {
+            merging(app, &into, &[into.clone(), gone.clone()]);
+            app.search.link.merge(&into, &[gone], via);
+            let name = mine.name.or(theirs.name).unwrap_or_else(|| "one group".into());
+            app.show_status_action(format!("Merged the two groups into {name}."), "Undo", m(Msg::UndoLibrary))
+        }
+    }
+}
+
+/// ×: not the same fursuit (one undo step); the pair goes at once.
+fn pair_not_same(app: &mut App, i: usize) -> Task<Message> {
+    let Some((_, pair)) = pair_at(app, i) else { return Task::none() };
+    let heads = |h: &[Face]| h.iter().map(|f| f.face).collect::<Vec<FaceRef>>();
+    app.search.link.not_same(&pair.a, &pair.b, &heads(&pair.a_heads), &heads(&pair.b_heads), super::subjects_merge::via(&pair, At::Similar));
+    if let Some(e) = app.subjects.editor.as_mut() {
+        e.lib_steps.push(LibStep::NotSame);
+        if let Some(list) = &e.pairs {
+            e.pairs = Some(Arc::new(list.iter().filter(|p| p.key() != pair.key()).cloned().collect()));
+        }
+    }
+    app.show_status_action("Not the same fursuit: they won't be suggested together again.", "Undo", m(Msg::UndoLibrary))
+}
+
+/// "Same fursuit?" at pair `i` (the editor closes; Esc there opens it
+/// again on this group).
+fn pair_review(app: &mut App, i: usize) -> Task<Message> {
+    let Some((_, pair)) = pair_at(app, i) else { return Task::none() };
+    if wait_for_apply(app) {
+        return Task::none();
+    }
+    let Some(e) = app.subjects.editor.take() else { return Task::none() };
+    super::subjects_merge::start_at(app, pair, e.home().clone())
+}
+
+/// Take back the newest merge or "not the same" made here (Ctrl+Z once
+/// the arrangement's steps are gone, or the status bar's Undo).  With
+/// none, or no editor, the library's last change.
+fn undo_library(app: &mut App) -> Task<Message> {
+    let Some(e) = app.subjects.editor.as_mut() else {
+        app.search.link.undo_subjects();
+        return Task::none();
+    };
+    if e.follow.is_some() {
+        return app.show_status("One moment: the last change is still being made.", 3000);
+    }
+    match e.lib_steps.last().cloned() {
+        None => {
+            app.search.link.undo_subjects();
+            Task::none()
+        }
+        Some(LibStep::NotSame) => {
+            e.lib_steps.pop();
+            app.search.link.undo_subjects();
+            Task::none()
+        }
+        Some(LibStep::Merged { back_to, cover }) => {
+            // Undoing it shows the group edited before: an arrangement
+            // here would go with it.
+            if e.changed() {
+                e.note = Some("Apply or cancel your changes first, then undo the merge.".into());
+                return Task::none();
+            }
+            e.lib_steps.pop();
+            e.follow = Some(Follow { want: back_to, gone: None, covers: vec![cover], step: None });
+            app.search.link.undo_subjects();
+            Task::none()
+        }
+    }
+}
+
 fn apply(app: &mut App) -> Task<Message> {
     let s = &app.subjects;
     let Some(e) = s.editor.as_ref() else { return Task::none() };
@@ -963,13 +1298,17 @@ fn close(app: &mut App) -> Task<Message> {
     subj::refresh_crops(app)
 }
 
-/// Ctrl+Z while the editor is open: its last step (the library's undo
-/// waits).  Whether it was open.
+/// Ctrl+Z while the editor is open: its arrangement's last step, else the
+/// last merge or "not the same" made here (other changes to the library
+/// wait).  Whether it was open.
 pub fn take_back(app: &mut App) -> Option<Task<Message>> {
     let e = app.subjects.editor.as_mut()?;
     if e.take_back() {
         e.note = None;
         return Some(reorder(app));
+    }
+    if !e.lib_steps.is_empty() {
+        return Some(undo_library(app));
     }
     Some(Task::none())
 }
@@ -1012,7 +1351,8 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
         v.extend([sg.pair.0, sg.pair.1].iter().filter_map(|f| e.faces.get(f)).cloned().map(|f| (f, px, Framing::Face)));
     }
     let cover = subj::px(app, COVER);
-    v.extend(panel_groups(s, e).into_iter().chain(unnamed_groups(s, e)).filter_map(|g| s.group(&g)).map(|g| (g.cover.clone(), cover, Framing::Face)));
+    let paired = e.panel_pairs(&s.all).into_iter().map(|(_, g)| g.clone());
+    v.extend(paired.chain(panel_groups(s, e)).chain(unnamed_groups(s, e)).filter_map(|g| s.group(&g)).map(|g| (g.cover.clone(), cover, Framing::Face)));
     for c in &e.cols {
         if let Origin::Existing { id, .. } = &c.origin {
             if let Some(g) = s.group(id) {
@@ -1026,21 +1366,25 @@ pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
 // ── the panel ───────────────────────────────────────────────────────────────
 
 /// Named groups of the kind, nearest first (by name when no distance is
-/// known yet), filtered by the search box; never one shown as a column.
+/// known yet), filtered by the search box; never one shown as a column,
+/// nor one *Likely the same fursuit* shows over them (unless searched for).
 fn panel_groups(s: &subj::Subjects, e: &Editor) -> Vec<GroupId> {
     let want = e.search.trim().to_lowercase();
+    let paired = e.paired_groups(&s.all);
     let rank: HashMap<&GroupId, usize> = e.near.iter().enumerate().map(|(i, (g, _))| (g, i)).collect();
-    let mut v: Vec<&super::people::Group> = s.all.groups.iter().filter(|g| g.kind == e.kind && g.name.is_some() && !g.hidden && e.col_of_group(&g.id).is_none()).filter(|g| want.is_empty() || g.name.as_deref().is_some_and(|n| n.to_lowercase().contains(&want))).collect();
+    let mut v: Vec<&super::people::Group> = s.all.groups.iter().filter(|g| g.kind == e.kind && g.name.is_some() && !g.hidden && e.col_of_group(&g.id).is_none() && !paired.contains(&g.id)).filter(|g| want.is_empty() || g.name.as_deref().is_some_and(|n| n.to_lowercase().contains(&want))).collect();
     v.sort_by_key(|g| (rank.get(&g.id).copied().unwrap_or(usize::MAX), g.name.clone()));
     v.into_iter().map(|g| g.id.clone()).collect()
 }
 
-/// The largest unnamed groups (not when searching by name).
+/// The largest unnamed groups (not when searching by name), but those
+/// *Likely the same fursuit* shows.
 fn unnamed_groups(s: &subj::Subjects, e: &Editor) -> Vec<GroupId> {
     if !e.search.trim().is_empty() {
         return Vec::new();
     }
-    let mut v: Vec<&super::people::Group> = s.all.groups.iter().filter(|g| g.kind == e.kind && g.name.is_none() && !g.hidden && e.col_of_group(&g.id).is_none()).collect();
+    let paired = e.paired_groups(&s.all);
+    let mut v: Vec<&super::people::Group> = s.all.groups.iter().filter(|g| g.kind == e.kind && g.name.is_none() && !g.hidden && e.col_of_group(&g.id).is_none() && !paired.contains(&g.id)).collect();
     v.sort_by(|a, b| b.photos.cmp(&a.photos));
     v.into_iter().take(UNNAMED_N).map(|g| g.id.clone()).collect()
 }
@@ -1245,6 +1589,9 @@ fn panel<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Element<'a, Messag
         cols::drop_target(look, Target::Group(id), r.into())
     };
     let mut list = column![].spacing(2);
+    if let Some(pairs) = pairs_section(app, e, look) {
+        list = list.push(pairs);
+    }
     let named = panel_groups(s, e);
     if !named.is_empty() {
         list = list.push(container(text(format!("Named {}", e.kind.title().to_lowercase())).size(t::T_SMALL).color(t::INK3)).padding(Padding { left: 8.0, top: 4.0, bottom: 2.0, ..Padding::ZERO }));
@@ -1278,6 +1625,63 @@ fn panel<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Element<'a, Messag
     container(col).width(PANEL_W).height(Length::Fill).style(style::fill(t::MOUNT)).into()
 }
 
+/// *Likely the same fursuit*, over the panel's lists: the groups the
+/// engine pairs with this one, nearest first.  Each row is a drop target
+/// (heads dropped go there, as on any row), its cover and name open it as
+/// a column, and three quiet controls: *Merge*, the review at that pair,
+/// × not the same.  Offered only: nothing merges without the click.
+fn pairs_section<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Option<Element<'a, Message>> {
+    let s = &app.subjects;
+    let shown = e.panel_pairs(&s.all);
+    if shown.is_empty() {
+        return None;
+    }
+    let shape = subj::shape(e.kind);
+    let cover_px = subj::px(app, COVER);
+    let free = e.follow.is_none();
+    let can = free && !e.changed();
+    let mut rows = column![].spacing(0);
+    for (i, other) in shown {
+        let g = s.group(other);
+        let crop = tile::crop(g.and_then(|g| s.crops.get(&g.cover.face, cover_px, Framing::Face)), COVER, shape);
+        let name = g.and_then(|g| g.name.clone());
+        let named = name.is_some();
+        let photos = g.map_or(0, |g| g.photos);
+        let sent = e.sent.iter().filter(|(x, _)| x == other).map(|(_, v)| v.len()).sum::<usize>();
+        let mut line = row![text(util::plural(photos as u64, "photo")).size(t::T_SMALL).color(t::INK3)].spacing(6);
+        if sent > 0 {
+            line = line.push(text(format!("+{sent}")).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::SIGNAL));
+        }
+        let words = column![text(name.unwrap_or_else(|| "Unnamed".into())).size(t::T_SMALL).font(paint::MEDIUM).color(if named { t::INK } else { t::INK2 }).wrapping(text::Wrapping::None), line].spacing(1).width(Length::Fill);
+        let open = button(row![crop, words].spacing(8).align_y(Alignment::Center)).padding(0).width(Length::Fill).style(|_t, _s| button::Style::default()).on_press(m(Msg::Expand(other.clone())));
+        let open = tip(open, "Open it as a column, to move heads between the two", true);
+        let merge_label = text("Merge").size(t::T_SMALL).font(paint::MEDIUM);
+        let merge = button(container(merge_label).center_y(Length::Fill)).height(24).padding(Padding::from([0.0, 9.0])).style(style::secondary().style()).on_press_maybe(can.then(|| m(Msg::PairMerge(i))));
+        let merge_tip = if can { "Merge it into this group now, as one step (Ctrl+Z takes it back)" } else { "Apply or cancel your changes first: a merge is made at once, as a change of its own" };
+        let review = kit::icon_btn(Glyph::Compare, t::INK2, style::ghost(), can.then(|| m(Msg::PairReview(i)))).width(24).height(24).padding(0);
+        let not = kit::icon_btn(Glyph::Close, t::INK3, style::ghost(), free.then(|| m(Msg::PairNotSame(i)))).width(24).height(24).padding(0);
+        let r = row![
+            open,
+            tip(merge, merge_tip, true),
+            tip(review, "Check the two side by side, large: Y merges, N says they're different", true),
+            tip(not, "Not the same fursuit: don't suggest them together again", true)
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .padding(Padding::from([4.0, 8.0]));
+        rows = rows.push(cols::drop_target(look, Target::Group(other.clone()), r.into()));
+    }
+    let all = e.shown_pairs(&s.all);
+    if let Some(&(next, _)) = all.get(PAIRS_N) {
+        let label = text(format!("{} more: review them", all.len() - PAIRS_N)).size(t::T_SMALL).color(if can { t::INK2 } else { t::INK4 });
+        let b = button(label).padding(Padding::from([4.0, 8.0])).style(style::ghost().style()).on_press_maybe(can.then(|| m(Msg::PairReview(next))));
+        rows = rows.push(b);
+    }
+    let head = row![icons::view(Glyph::Merge, 13.0, t::INK3), text("Likely the same fursuit").size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center);
+    let boxed = container(rows).width(Length::Fill).style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, t::R_CONTROL), ..Default::default() });
+    Some(column![container(head).padding(Padding { left: 8.0, top: 4.0, bottom: 2.0, right: 0.0 }), boxed, Space::new().height(6)].spacing(4).into())
+}
+
 pub fn debug_state(app: &App) -> String {
     let Some(e) = app.subjects.editor.as_ref() else { return "editor=none".into() };
     let cols: Vec<String> = e
@@ -1293,7 +1697,7 @@ pub fn debug_state(app: &App) -> String {
         .collect();
     let (stay, moved, removed, taken) = e.counts();
     format!(
-        "editor=[kind={:?} cols={:?} sent={:?} picked={}@{:?} counts=({stay},{moved},{removed},{taken}) edited={} near={} suggest={} note={:?} history={}]",
+        "editor=[kind={:?} cols={:?} sent={:?} picked={}@{:?} counts=({stay},{moved},{removed},{taken}) edited={} near={} suggest={} note={:?} history={} pairs={:?} changed={} follow={} lib={:?}]",
         e.kind,
         cols,
         e.sent.iter().map(|(g, v)| (super::people::short(g), v.len())).collect::<Vec<_>>(),
@@ -1307,7 +1711,11 @@ pub fn debug_state(app: &App) -> String {
             (Some(s), true) => format!("shown:{}", s.off.len()),
         },
         e.note,
-        e.history.len()
+        e.history.len(),
+        e.shown_pairs(&app.subjects.all).iter().map(|(_, g)| super::people::short(g)).collect::<Vec<_>>(),
+        e.changed(),
+        e.follow.is_some(),
+        e.lib_steps.iter().map(|s| if matches!(s, LibStep::NotSame) { "notsame" } else { "merged" }).collect::<Vec<_>>()
     )
 }
 

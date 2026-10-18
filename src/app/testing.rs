@@ -210,14 +210,16 @@
 //! merges open [2]             # "Possibly the same fursuit": the review (at
 //!                             # the tab's 3rd pair)
 //! merges y|n|x 1|x 2|x|xcancel|next|prev|at 3|undo|done|showleftout|checkmore
-//! merges similar merge 0|similar notsame 0   # a fursuit page's Similar groups
-//! merges dump                 # print the lists and the review
+//! merges dump                 # print the tab's list and the review
+//! cmd FursuitMerges           # the View menu's Review possible fursuit merges
 //! editor open 2|with 0 3      # the group editor on the tab's 3rd group / the 1st and 4th side by side
 //! editor pick 0 2|shiftpick 1 5   # pick a face of a column (0: Stays)
 //! editor send left|right|new|out|remove|group 0|col 2   # the picked faces there
 //! editor drag 0 2 col 1|drag 0 2 group 0|dragto 0 2 new  # drag a face (the picked with it)
 //! editor add|expand 0|collapse 1|name 1 Some name|mergename 1|search kib
-//! editor undo|apply|cancel|gonetonew|suggest|mark 2|dump   # suggest: lay out the suggested split; mark: the tile's split mark
+//! editor undo|apply|cancel|gonetonew|suggest|dump   # suggest: lay out the suggested split
+//! editor pair merge 0|pair notsame 0|pair review 0|pair open 0   # Likely the same fursuit's 1st pair
+//! editor undolib              # the status bar's Undo after a merge or "not the same" made there
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
@@ -374,6 +376,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "LabelFaces" => Some(Cmd::LabelFaces),
                 "SheetBigger" => Some(Cmd::SheetBigger),
                 "SheetSmaller" => Some(Cmd::SheetSmaller),
+                "FursuitMerges" => Some(Cmd::FursuitMerges),
                 "Analyse" => Some(Cmd::Analyse),
                 "KeepThisPruneRest" => Some(Cmd::KeepThisPruneRest),
                 "PruneSoft" => Some(Cmd::PruneSoft),
@@ -603,14 +606,25 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "search" => app.update(x(E::Search(rest.to_string()))),
                 "gonetonew" => app.update(x(E::GoneToNew)),
                 "suggest" => app.update(x(E::Suggest)),
-                // The split mark on the tab's 3rd tile: what its click sends.
-                "mark" => match tab(app, nums.first().copied().unwrap_or(0)) {
-                    Some(g) if app.subjects.all.seen_together.contains(&g) => app.update(x(E::Open(g, Preset::Plain))),
-                    _ => {
-                        eprintln!("[editor] no split mark on that tile");
-                        Task::none()
+                // *Likely the same fursuit*: `pair merge 0`, `pair notsame
+                // 0`, `pair review 0` on the 1st pair shown; `pair open 0`
+                // opens its group as a column.
+                "pair" => {
+                    let (act, _) = rest.split_once(' ').unwrap_or((rest, ""));
+                    let n = nums.first().copied().unwrap_or(0);
+                    let at = app.subjects.editor.as_ref().and_then(|e| e.shown_pairs(&app.subjects.all).get(n).map(|&(i, g)| (i, g.clone())));
+                    match (act, at) {
+                        ("merge", Some((i, _))) => app.update(x(E::PairMerge(i))),
+                        ("notsame", Some((i, _))) => app.update(x(E::PairNotSame(i))),
+                        ("review", Some((i, _))) => app.update(x(E::PairReview(i))),
+                        ("open", Some((_, g))) => app.update(x(E::Expand(g))),
+                        _ => {
+                            eprintln!("[editor] no pair {n} to {act}");
+                            Task::none()
+                        }
                     }
-                },
+                }
+                "undolib" => app.update(x(E::UndoLibrary)),
                 "undo" => super::subjects::undo(app),
                 "apply" => app.update(x(E::Apply)),
                 "cancel" => app.update(x(E::Cancel)),
@@ -647,8 +661,6 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 "done" => app.update(g(G::Done)),
                 "showleftout" => app.update(g(G::ShowLeftOut)),
                 "checkmore" => app.update(g(G::CheckMore)),
-                "similar" if rest.starts_with("merge") => app.update(g(G::SimilarMerge(n))),
-                "similar" if rest.starts_with("notsame") => app.update(g(G::SimilarNotSame(n))),
                 "dump" => {
                     eprintln!("[merges] {}", debug_state(app));
                     Task::none()

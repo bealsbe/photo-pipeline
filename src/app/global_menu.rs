@@ -260,6 +260,7 @@ fn icon_name(cmd: Cmd) -> &'static str {
         Cmd::LabelFaces => "tag",
         Cmd::SheetBigger => "zoom-in",
         Cmd::SheetSmaller => "zoom-out",
+        Cmd::FursuitMerges => "merge",
     }
 }
 

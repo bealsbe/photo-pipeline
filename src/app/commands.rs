@@ -18,6 +18,11 @@ pub enum Cmd {
     Search,
     /// Ctrl+4: people and fursuits, on the tab last used.
     Subjects,
+    /// "Same fursuit?" over the whole library: the pairs of fursuit groups
+    /// that may be one suit, one at a time.  No banner offers them: this,
+    /// the Fursuits tab's *Possible merges* and Y on that tab do.  No
+    /// shortcut of its own (Y is the tab's, and answers in every review).
+    FursuitMerges,
     SelectMode,
     QuickLook,
     PruneSelected,
@@ -80,6 +85,7 @@ impl Cmd {
             Cmd::CalendarView => "Library calendar",
             Cmd::Search => "Search the library",
             Cmd::Subjects => "People and fursuits",
+            Cmd::FursuitMerges => "Review possible fursuit merges",
             Cmd::SelectMode => "Select mode",
             Cmd::QuickLook => "Quick look",
             Cmd::PruneSelected => "Prune selected",
@@ -131,7 +137,7 @@ impl Cmd {
             Cmd::Subjects => "Ctrl+4",
             Cmd::SelectMode => "S",
             Cmd::QuickLook => "Space",
-            Cmd::PruneSelected | Cmd::MarkSelected => "",
+            Cmd::PruneSelected | Cmd::MarkSelected | Cmd::FursuitMerges => "",
             Cmd::Undo => "Ctrl+Z",
             Cmd::Redo => "Ctrl+Shift+Z",
             Cmd::Quit => "Ctrl+Q",
@@ -166,6 +172,7 @@ impl Cmd {
             Cmd::CalendarView => "Browse the library by date",
             Cmd::Search => "Find photos in the library by what they show",
             Cmd::Subjects => "Name the people found in your photos, then find them",
+            Cmd::FursuitMerges => "Pairs of fursuit groups that may be one suit, nearest first: merge them or tell them apart, one pair at a time",
             Cmd::SelectMode => "Select several photos with single clicks",
             Cmd::QuickLook => "See the selected photo large, over the grid",
             Cmd::PruneSelected => "Mark the selected photos to prune",
@@ -206,6 +213,7 @@ impl Cmd {
             Cmd::CalendarView => Glyph::Calendar,
             Cmd::Search => Glyph::Search,
             Cmd::Subjects => Glyph::Subjects,
+            Cmd::FursuitMerges => Glyph::Merge,
             Cmd::SelectMode => Glyph::Select,
             Cmd::QuickLook => Glyph::ZoomIn,
             Cmd::PruneSelected => Glyph::Prune,
@@ -240,6 +248,7 @@ impl Cmd {
         Cmd::CalendarView,
         Cmd::Search,
         Cmd::Subjects,
+        Cmd::FursuitMerges,
         Cmd::SelectMode,
         Cmd::QuickLook,
         Cmd::PruneSelected,
@@ -357,6 +366,7 @@ pub const MENUS: &[(&str, char, &[Option<Cmd>])] = &[
             Some(Cmd::CalendarView),
             Some(Cmd::Search),
             Some(Cmd::Subjects),
+            Some(Cmd::FursuitMerges),
             None,
             Some(Cmd::ToReview),
             Some(Cmd::ProblemsOnly),
@@ -496,6 +506,24 @@ mod tests {
                     assert!(!c.shortcut().is_empty() || matches!(c, Cmd::Redo), "{k:?} {m:?} gives {c:?}, which shows no shortcut");
                 }
             }
+        }
+    }
+
+    /// The whole library's "Same fursuit?" is reached by a command in the
+    /// View menu, after People and fursuits (no banner offers it), with no
+    /// shortcut: Y is the Fursuits tab's own key and every review's answer,
+    /// so no global key takes it.
+    #[test]
+    fn the_fursuit_merge_review_is_a_view_menu_command_without_a_shortcut() {
+        let c = Cmd::FursuitMerges;
+        assert_eq!((c.label(), c.shortcut(), c.icon()), ("Review possible fursuit merges", "", Some(Glyph::Merge)));
+        assert!(!c.tooltip().is_empty() && !c.viewer_only());
+        assert!(Cmd::ALL.contains(&c));
+        let (_, _, view) = MENUS.iter().find(|(t, _, _)| *t == "View").unwrap();
+        let at = view.iter().position(|x| *x == Some(c)).expect("in the View menu");
+        assert_eq!(view[at - 1], Some(Cmd::Subjects));
+        for m in [Modifiers::empty(), Modifiers::SHIFT, Modifiers::CTRL] {
+            assert_ne!(Cmd::from_key(&ch("y"), m), Some(c));
         }
     }
 
