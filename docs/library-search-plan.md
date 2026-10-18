@@ -3565,10 +3565,12 @@ average-linkage distance to the entry's first group (the step's space;
 | `edit` | `groups` (as they were: each group heads left or went to), `out`: `[{from, to, heads, moved}]`, one per (group left, destination); `to` is `{is: "group", group}` (an index into `groups`), `{is: "new", new, name}`, `{is: "removed"}` or `{is: "taken_out"}`; `covers` (absent when none): `[{group, head}]`, group photos chosen in the same *Apply* | per `out`: to a group: × it same, × rest of `from` different; new: × rest of `from` different; taken out: × rest of `from` different; removed: none.  The group editor's *Apply*, one entry |
 | `cover` | `group` (as it was), `head` (absent: back to the automatic photo) | none: a named group's photo chosen on its page (`at`: `faces` / `heads`), one entry |
 | `dissolve` | `group` (as it was; its name and sid when named), `heads` (every head, at most 200), `dissolved` (count), `named`, `spread` (the heads' mean cosine distance to their mean, in `lib`'s space) | none: the group is not one subject, but any two of its heads may be |
+| `reset_unnamed` | `groups` (each unnamed group reset, as it was: largest first, at most 200 (`RESET_GROUPS`), each with its 4 clearest heads (`RESET_SIDE_HEADS`)), `groups_reset` and `heads_reset` (counts, in full), `rejected` (heads answered No for them, dropped with them; absent: none), `hidden` (of them, hidden; absent: none) | none: the groups go back to the automatic grouping, nobody said they were wrong.  Preferences ▸ Fursuits, `how.at` `preferences`, one entry |
 | `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
 
 `how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,
-`side-by-side`, `faces`, `viewer`, `merge-review`, `similar`, `editor`),
+`side-by-side`, `faces`, `viewer`, `merge-review`, `similar`, `editor`,
+`preferences`),
 `distance` (a pair: its
 average linkage `d` and `sure`; a review answer: the nearest confirmed
 member's distance `d` and that head `pair`), `judge` (`judge`, the
@@ -3955,3 +3957,58 @@ feedback."
   export; it fails with the constraint switched off),
   `a_dissolve_is_one_line_with_its_heads_and_codes_its_name`, and the
   stand-in's `the_stand_in_dissolves_a_group_for_good_and_undoes_it`.
+
+## As built — resetting unnamed fursuit groups (2026-10-17)
+
+The user: "add the ability to do a reset of unnamed fursuits only".  In
+their file 183 of the fursuit subjects were unnamed, holding 10,136
+member heads and 1,614 rejected ones: a merge, a move or the group
+editor makes an unnamed subject that pins its heads together, so round
+2's grouping (the joining step, the blob floor, the lower bar for large
+heads) never reached them.
+
+- **What it does.**  `SubjectsFile::reset_unnamed(kind)` takes every
+  unnamed subject of the kind (members, rejected heads, cover, hidden
+  flag); named subjects, the other kinds and the optional lists
+  (`removed`, `added`, `not_same`, `dissolved`) are left byte for byte.
+  The heads become ordinary detections again and the regroup places
+  them (`step::regroup`, with the dissolved sets still kept apart).
+  The version rule is unchanged: nothing new is written to the file.
+  `SubjectsFile::unnamed(kind)` counts groups, heads, rejected heads and
+  hidden groups.
+- **Hidden unnamed groups are reset too** (they pin heads the same way);
+  the confirmation says how many.  Blob heads (small and blurred) that
+  only an unnamed group kept visible are hidden again by the blob floor
+  once free, as the floor intends.
+- **Where.**  Preferences ▸ Fursuits ▸ *Unnamed groups*: the count, and
+  *Reset unnamed groups…* (secondary), enabled while unnamed fursuit
+  groups exist and the head step is quiet (not scanning, asking or
+  regrouping: `HeadsStatus::unnamed`, published with the subjects).  A
+  confirmation with the counts and what is kept; the status bar then
+  offers *Undo*, and so does the row (ghost) while the reset is the
+  newest change.  Fursuits only in the app; the engine call takes a kind,
+  and a person's reset would touch people only.
+- **Engine.**  `Engine::reset_unnamed(kind)` (`Cmd::ResetUnnamed`) on the
+  engine's thread: `People::reset_unnamed` checkpoints the whole file (one
+  undo step, which restores it exactly, on disk too), saves it, records
+  the entry, and regroups that kind only (`regrouping` shown meanwhile).
+- **The record.**  `reset_unnamed`: `groups` (each group as a `Side`,
+  largest first, at most 200 with 4 heads each: a 200-group line is about
+  58 KB), `groups_reset`, `heads_reset`, `rejected`, `hidden`; `how` by
+  hand at `preferences`; `lib` with the grouping choice.  No pair.  Undo
+  appends an `undo` of it.  The export codes the subject ids
+  (`fursuit-12`), as for any side.
+- **Stand-in.**  `FakeFursuits` holds an unnamed group once merged into
+  or made by a move (`pinned`), counts and resets them, and the script's
+  `search fake fursuits-unnamed [n]` sets some up; `prefs reset-unnamed`,
+  `prefs confirm`, `prefs undo-reset` and `prefs show-unnamed` drive the
+  row.
+- **Tests:** `resetting_unnamed_groups_keeps_everything_else_byte_for_byte`
+  (model), `resetting_unnamed_groups_is_one_undo_step_of_its_kind`
+  (`People`), `resetting_unnamed_groups_regroups_their_heads_and_undoes_exactly`
+  (engine: the regroup, a dissolved set kept apart, the named fursuit
+  kept, the file byte for byte after undo, the record and the export),
+  `a_reset_of_unnamed_groups_is_one_capped_line_without_pairs`,
+  `the_stand_in_resets_unnamed_groups_and_undoes_it`,
+  `the_reset_button_waits_for_unnamed_groups_and_a_quiet_step`,
+  `the_reset_confirmation_counts_what_goes_and_says_what_stays`.

@@ -861,9 +861,27 @@ never shown, merged, suggested or completed together with people or pets.
   2 seconds; each on the graphics card only, one loaded at a time;
   choosing one not downloaded opens the download dialog with its row, a
   line under the list says where it stands, and a judge not chosen keeps
-  its files until deleted), and *Forget all…*, which forgets the
+  its files until deleted), *Unnamed groups* with *Reset unnamed
+  groups…* (below), and *Forget all…*, which forgets the
   heads found and the fursuit names given and leaves people alone
   (Preferences ▸ People's *Forget all…* likewise leaves fursuits alone).
+- **Reset unnamed groups.**  A merge, a move or the group editor makes a
+  group the user's own even without a name, and such a group holds its
+  heads through every regroup, whatever the *Grouping*.  Preferences ▸
+  Fursuits ▸ *Unnamed groups* counts them ("183 groups you merged or
+  sorted without naming hold their 10,136 heads together…") and
+  *Reset unnamed groups…* gives them back to the automatic grouping:
+  after a confirmation with the counts (hidden ones are reset too, and
+  it says so), every unnamed fursuit group goes, with its heads, its
+  "not this fursuit" answers and its photo, and the fursuits are grouped
+  again.  Named fursuits (their heads, answers, photo, hidden or not),
+  the heads marked not a fursuit head, drawn heads, "not the same"
+  answers and dissolved groups are kept exactly, and people are never
+  touched.  Enabled while unnamed groups exist and the head step is
+  quiet (not scanning, asking or regrouping).  One undo step: *Undo* in
+  the status bar, on the row while the reset is the newest change, or
+  Ctrl+Z on People and fursuits puts the file back exactly.  Recorded as
+  `reset_unnamed`.
   Preferences ▸ Storage shows the heads' size (with the close calls the
   judge checked) and each judge's model on a row of its own, with
   *Delete…* (deleting the chosen one turns the judge off; another's goes
@@ -943,7 +961,8 @@ decision is added to a file, one line each:
   were and where each set of heads went, new groups, taken out or not
   heads, with how many were moved by hand), dissolved groups (the group
   as it was, every head, whether it was named, how spread out its heads
-  were, and the grouping choice in force), review answers (Y,
+  were, and the grouping choice in force), unnamed groups reset
+  (Preferences ▸ Fursuits: each group as it was, with the counts), review answers (Y,
   N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
   names given to groups, group photos chosen (`cover`: the group and
   the head, none for the automatic one again; the editor's ride in its
