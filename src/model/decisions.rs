@@ -57,6 +57,12 @@ pub const SIDE_HEADS: usize = 16;
 /// Heads kept of the ones moved, answered or split off (they are what the
 /// decision is about; moves of more are rare and counted in full).
 pub const MOVED_HEADS: usize = 200;
+/// Groups kept in a `reset_unnamed` entry (the largest first; the count
+/// is in full), and heads kept of each: enough to recognise each group
+/// later, while a reset of a few hundred groups stays one line of tens
+/// of kilobytes rather than hundreds.
+pub const RESET_GROUPS: usize = MOVED_HEADS;
+pub const RESET_SIDE_HEADS: usize = 4;
 /// Past this size Preferences says the record is large.  Nothing is
 /// rotated or dropped: see the plan's "As built" section.
 pub const LARGE_BYTES: u64 = 64 * 1024 * 1024;
@@ -242,10 +248,32 @@ pub enum Act {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spread: Option<f32>,
     },
+    /// *Reset unnamed groups* (Preferences ▸ Fursuits): every unnamed
+    /// group of the kind (a subject a merge, move or edit made without a
+    /// name) given back to the automatic grouping, as one undo step.
+    /// `groups_reset` and `heads_reset` count them all (their member
+    /// heads), `rejected` the heads answered No for them (dropped with
+    /// them), `hidden` those hidden on the tab; `groups` are the groups as
+    /// they were, largest first (at most [`RESET_GROUPS`], each with its
+    /// clearest [`RESET_SIDE_HEADS`] heads).  No pair is labelled: nobody
+    /// said the groups were wrong, only that they should be made again.
+    ResetUnnamed {
+        groups: Vec<Side>,
+        groups_reset: usize,
+        heads_reset: usize,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        rejected: usize,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        hidden: usize,
+    },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
     Undo { undoes: String, of: String },
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Act {
@@ -264,6 +292,7 @@ impl Act {
             Act::Edit { .. } => "edit",
             Act::Cover { .. } => "cover",
             Act::Dissolve { .. } => "dissolve",
+            Act::ResetUnnamed { .. } => "reset_unnamed",
             Act::Undo { .. } => "undo",
         }
     }
@@ -339,6 +368,8 @@ pub enum At {
     Review,
     /// The group editor (Edit group, and what opens it).
     Editor,
+    /// The Preferences window (*Reset unnamed groups*).
+    Preferences,
 }
 
 /// How a decision came to be offered, as the page knows it; the engine
@@ -898,6 +929,8 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
             // A named group dissolved: its name becomes its code, `named`
             // says it had one.
             Act::Dissolve { group, .. } => c.side(k, group),
+            // Unnamed groups: a subject id each, coded like any other.
+            Act::ResetUnnamed { groups, .. } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Remove { .. } | Act::Undo { .. } => {}
         }
     }
@@ -1180,6 +1213,7 @@ groups as they were at the export, by the same codes (below).
 | `cover` | `group` (as it was), `head` (its photo now; absent: the automatic one again) | none |
 | `edit` | `groups` (as they were), `covers` (group photos chosen in the same *Apply*; absent: none), `out`: `[{"from": index into groups, "to": {"is": "group", "group"} / {"is": "new", "new", "name"} / {"is": "removed"} / {"is": "taken_out"}, "heads", "moved"}]` (the group editor's Apply) | each `out` read as a `move`, `split` or `remove_many` |
 | `dissolve` | `group` (as it was), `heads` (all of them, at most 200), `dissolved` (count), `named` (it had a name, which went: its code is `group.name`), `spread` (the heads' mean cosine distance to their mean) | none: the group is not one subject, but some of its heads may be |
+| `reset_unnamed` | `groups` (the unnamed groups reset, as they were, largest first: at most 200, each with its 4 clearest heads), `groups_reset` and `heads_reset` (counts, in full), `rejected` (heads answered No for them, dropped with them; absent: none), `hidden` (of them, hidden on the tab; absent: none) | none: the groups go back to the automatic grouping, nobody said they were wrong |
 | `undo` | `undoes` (an id), `of` (its act) | takes that entry's pairs back |
 
 ## How
@@ -1193,7 +1227,7 @@ groups as they were at the export, by the same codes (below).
   for a review answer `p` (P(yes), the mean of both orders) and
   `offered` (`false`: the judge left it out and the user asked to see it).
 - `at`: `drag`, `pick`, `menu`, `name`, `heads`, `side-by-side`, `editor`,
-  `faces`, `viewer`, `merge-review`, `similar`, `review`.
+  `faces`, `viewer`, `merge-review`, `similar`, `review`, `preferences`.
 
 ## groups.json: the named groups now
 
@@ -1401,6 +1435,43 @@ in {line}");
         let text = coded[0].line();
         assert!(!text.contains("Sparky") && !text.contains("aaaa"), "{text}");
         assert!(matches!(&coded[0].act, Act::Dissolve { group, named: true, .. } if group.name.as_deref() == Some("fursuit-1") && group.sid.as_deref() == Some("fursuit-1")));
+    }
+
+    /// A reset of unnamed groups is one line: each group as a side (its
+    /// subject id, size, counts, a few clearest heads), the counts in
+    /// full, by hand in Preferences, the library with the grouping choice.
+    /// It labels no pair, stays small for a few hundred groups (the
+    /// groups and their heads capped), reads back, and an export codes
+    /// the subject ids (and would code a name, were there one).
+    #[test]
+    fn a_reset_of_unnamed_groups_is_one_capped_line_without_pairs() {
+        let group = |n: u8, k: usize| Side { sid: Some(format!("{:032x}", n as u128 * 0x1234_5678_9abc)), photos: Some(k), bursts: Some(k / 2 + 1), days: Some(1), ..Side::new(k, None, None, (0..k as u16).map(|i| head(n, i * 3)).take(RESET_SIDE_HEADS)) };
+        let act = Act::ResetUnnamed { groups: vec![group(1, 40), group(2, 3)], groups_reset: 2, heads_reset: 43, rejected: 5, hidden: 1 };
+        let e = Entry::new(Kind::Fursuit, act, Some(How::hand(At::Preferences)), Some(lib()));
+        let line = e.line();
+        for part in [r#""kind":"fursuit","act":"reset_unnamed","groups":[{"n":40,"photos":40,"bursts":21,"days":1,"sid":""#, r#""groups_reset":2,"heads_reset":43,"rejected":5,"hidden":1,"how":{"by":"hand","at":"preferences"}"#, r#""grouping":"balanced""#] {
+            assert!(line.contains(part), "{part}\nin {line}");
+        }
+        assert_eq!(serde_json::from_str::<Entry>(&line).unwrap(), e);
+        assert!(pairs(std::slice::from_ref(&e)).is_empty(), "no pair is labelled");
+        // Nothing hidden or rejected: those fields are absent.
+        let plain = Entry::new(Kind::Fursuit, Act::ResetUnnamed { groups: vec![group(3, 2)], groups_reset: 1, heads_reset: 2, rejected: 0, hidden: 0 }, None, None).line();
+        assert!(!plain.contains("rejected") && !plain.contains("hidden"), "{plain}");
+        // The most a reset keeps: RESET_GROUPS sides of RESET_SIDE_HEADS.
+        let full = Act::ResetUnnamed { groups: (0..RESET_GROUPS).map(|i| group((i % 250) as u8, 80)).collect(), groups_reset: 900, heads_reset: 40_000, rejected: 4_000, hidden: 30 };
+        let big = Entry::new(Kind::Fursuit, full, Some(How::hand(At::Preferences)), Some(lib())).line().len();
+        eprintln!("bytes: a reset of {RESET_GROUPS} groups {big}");
+        assert!(big < 64 * 1024, "{big}");
+        // Exported: the subject ids are codes, one per subject.
+        let mut coded = vec![e.clone()];
+        code_entries(&mut coded, &mut Codes::default());
+        let Act::ResetUnnamed { groups, .. } = &coded[0].act else { panic!() };
+        assert_eq!((groups[0].sid.as_deref(), groups[1].sid.as_deref()), (Some("fursuit-1"), Some("fursuit-2")));
+        assert!(groups.iter().all(|g| g.name.as_deref() == g.sid.as_deref()), "a code stands for the subject");
+        let text = coded[0].line();
+        let Act::ResetUnnamed { groups: raw, .. } = &e.act else { panic!() };
+        assert!(raw.iter().all(|g| !text.contains(g.sid.as_deref().unwrap())), "{text}");
+        assert!(README.contains("| `reset_unnamed` |") && README.contains("`preferences`"));
     }
 
     /// A partial last line (a crash mid-write) and a line from a newer

@@ -850,6 +850,47 @@ impl Link {
         }
     }
 
+    /// *Reset unnamed groups…* (Preferences ▸ Fursuits): every unnamed
+    /// fursuit group a merge, move or edit made goes back to the
+    /// automatic grouping; named fursuits, answers, labels and people
+    /// stay.  One undo step, recorded as `reset_unnamed`.
+    pub fn reset_unnamed_fursuits(&self) {
+        match self {
+            Link::Engine(e) => e.reset_unnamed(Kind::Fursuit),
+            Link::Fake(f) => {
+                let before = f.decisions.is_on().then(|| {
+                    let s = f.state.lock();
+                    let u = s.fursuits.unnamed();
+                    let groups = s
+                        .fursuits
+                        .unnamed_ids()
+                        .iter()
+                        .take(decisions::RESET_GROUPS)
+                        .map(|id| {
+                            let mut side = s.side(id, &[]);
+                            side.heads.truncate(decisions::RESET_SIDE_HEADS);
+                            side
+                        })
+                        .collect();
+                    (Kind::Fursuit, Act::ResetUnnamed { groups, groups_reset: u.groups, heads_reset: u.heads, rejected: u.rejected, hidden: u.hidden })
+                });
+                let mut done = None;
+                f.change(|s| {
+                    match s.fursuits.reset_unnamed() {
+                        Ok(w) => {
+                            eprintln!("[fursuits] {w}");
+                            s.edits.push((Some(Kind::Fursuit), None));
+                            done = Some(Kind::Fursuit);
+                        }
+                        Err(e) => eprintln!("[fursuits] refused: {e}"),
+                    }
+                    s.refresh_people();
+                });
+                f.record(done, before, Via::Hand(decisions::At::Preferences), None);
+            }
+        }
+    }
+
     // ── the close-call judge (fursuit matching v2) ──
 
     /// Preferences ▸ Fursuits ▸ *Close-call judge*.  Off unloads it and
@@ -1239,6 +1280,10 @@ impl FakeState {
         }
         snap.groups.sort_by(|a, b| (b.name.is_some(), b.photos).cmp(&(a.name.is_some(), a.photos)).then(a.cover.capture.cmp(&b.cover.capture)));
         snap.generation += self.fursuits.generation();
+        // The newest edit, whichever kind made it, is what undo names.
+        if let Some((Some(Kind::Fursuit), _)) = self.edits.last() {
+            snap.undoable = self.fursuits.undoable();
+        }
         self.refresh_heads();
         if *self.subjects != snap {
             self.subjects = Arc::new(snap);
@@ -1252,6 +1297,7 @@ impl FakeState {
         h.scanned = self.fursuits.scanned.min(h.tagged);
         h.found = self.fursuits.found();
         h.named = self.fursuits.named();
+        h.unnamed = self.fursuits.unnamed();
         // Every head the stand-in finds has the search model's vectors.
         h.vectors = h.found;
         h.whitened = h.vectors >= crate::search::whiten::MIN_HEADS;
@@ -1779,14 +1825,20 @@ impl Fake {
                 // processor's answer, scans skipped, the card failing.
                 // `fursuits-many [n]`: as `fursuits-first`, with `n` more
                 // made-up groups (800 by default), for a tab of many tiles.
-                "fursuits" | "fursuits-first" | "fursuits-many" => {
+                // `fursuits-unnamed [n]`: as `fursuits`, with `n` unnamed
+                // groups held as if merged into (all by default), the
+                // last hidden: what *Reset unnamed groups…* offers.
+                "fursuits" | "fursuits-first" | "fursuits-many" | "fursuits-unnamed" => {
                     let indexed = s.indexed_shots;
                     s.heads = fursuits::HeadsStatus { on: true, models_installed: true, ..fursuits::HeadsStatus::default() };
                     st.fursuits.forget_all();
-                    st.fursuits.name_first = word == "fursuits";
+                    st.fursuits.name_first = word == "fursuits" || word == "fursuits-unnamed";
                     st.fursuits.many = if word == "fursuits-many" { if n > 0 { n } else { 800 } } else { 0 };
                     let tagged = st.fursuits.tagged_in(indexed);
                     st.fursuits.scan(tagged);
+                    if word == "fursuits-unnamed" {
+                        st.fursuits.hold_unnamed(if n > 0 { n } else { usize::MAX });
+                    }
                     st.refresh_people();
                 }
                 "heads-catchup" => {

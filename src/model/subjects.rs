@@ -658,6 +658,19 @@ pub struct Dissolved {
     pub heads: Vec<FaceRef>,
 }
 
+/// The unnamed subjects of one kind ([`SubjectsFile::unnamed`]): what
+/// *Reset unnamed groups* would give back to the automatic grouping.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct Unnamed {
+    pub groups: usize,
+    /// Their confirmed heads.
+    pub heads: usize,
+    /// Heads answered No for them (they go with them).
+    pub rejected: usize,
+    /// Of `groups`, those hidden on the tab.
+    pub hidden: usize,
+}
+
 /// The user's subjects file: everything that is theirs and not
 /// recomputable.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1019,6 +1032,33 @@ impl SubjectsFile {
     /// Subjects named, of `kind`.
     pub fn named_count(&self, kind: Kind) -> usize {
         self.subjects.iter().filter(|s| s.kind == kind && s.name.is_some()).count()
+    }
+
+    /// The unnamed subjects of `kind`: groups a merge, a move or the
+    /// group editor made without a name, which hold their heads together
+    /// through every regroup.  How many, their heads, and how many are
+    /// hidden.
+    pub fn unnamed(&self, kind: Kind) -> Unnamed {
+        let mut u = Unnamed::default();
+        for s in self.subjects.iter().filter(|s| s.kind == kind && s.name.is_none()) {
+            u.groups += 1;
+            u.heads += s.members.len();
+            u.rejected += s.rejected.len();
+            u.hidden += usize::from(s.hidden);
+        }
+        u
+    }
+
+    /// *Reset unnamed groups*: every unnamed subject of `kind` goes, with
+    /// its members, rejected heads, cover and hidden flag, so its heads
+    /// are free for the automatic grouping again.  Named subjects, the
+    /// other kinds, and the optional lists (`removed`, `added`,
+    /// `not_same`, `dissolved`) are left exactly as they were.  The
+    /// subjects taken, in file order.
+    pub fn reset_unnamed(&mut self, kind: Kind) -> Vec<Subject> {
+        let (gone, kept): (Vec<Subject>, Vec<Subject>) = std::mem::take(&mut self.subjects).into_iter().partition(|s| s.kind == kind && s.name.is_none());
+        self.subjects = kept;
+        gone
     }
 
     // ---- the viewer's labels (version 2) ----
@@ -2456,6 +2496,74 @@ mod tests {
         back.forget_kind(Kind::Person);
         assert_eq!(back.written_version(), FILE_VERSION_PLAIN);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// *Reset unnamed groups*: every unnamed subject of the kind goes
+    /// (hidden ones too, with their rejected heads and cover); named
+    /// subjects, the other kinds' subjects and the optional lists are
+    /// kept byte for byte, and the file's version rule is the same (a v1
+    /// file stays v1, an old file loads).
+    #[test]
+    fn resetting_unnamed_groups_keeps_everything_else_byte_for_byte() {
+        let mut f = SubjectsFile::default();
+        let named = f.create(Kind::Fursuit, Some("Sparky Dragon".into()), vec![face(1, 0.1), face(2, 0.1)]);
+        f.reject(&named, vec![face(3, 0.1)]).unwrap();
+        f.set_cover(&named, Some(face(2, 0.1))).unwrap();
+        f.set_hidden(&named, true).unwrap();
+        let a = f.create(Kind::Fursuit, None, vec![face(10, 0.1), face(11, 0.1), face(12, 0.1)]);
+        f.reject(&a, vec![face(13, 0.1)]).unwrap();
+        let b = f.create(Kind::Fursuit, None, vec![face(14, 0.1)]);
+        f.set_hidden(&b, true).unwrap();
+        let person = f.create(Kind::Person, None, vec![face(20, 0.1), face(21, 0.1)]);
+        f.create(Kind::Person, Some("Jane Example".into()), vec![face(22, 0.1)]);
+        assert_eq!(f.unnamed(Kind::Fursuit), Unnamed { groups: 2, heads: 4, rejected: 1, hidden: 1 });
+        assert_eq!(f.unnamed(Kind::Person), Unnamed { groups: 1, heads: 2, rejected: 0, hidden: 0 });
+        let v1 = f.clone();
+        assert_eq!(v1.written_version(), FILE_VERSION_PLAIN);
+        // A v1 file: still v1 after the reset.
+        let mut plain = v1.clone();
+        assert_eq!(plain.reset_unnamed(Kind::Fursuit).len(), 2);
+        assert_eq!(plain.written_version(), FILE_VERSION_PLAIN);
+        // With every optional list.
+        f.add_box(Kind::Fursuit, face(30, 0.1)).unwrap();
+        f.remove_box(Kind::Fursuit, face(31, 0.1)).unwrap();
+        f.add_not_same(Kind::Fursuit, vec![face(10, 0.1)], vec![face(1, 0.1)]).unwrap();
+        f.add_dissolved(Kind::Fursuit, vec![face(40, 0.1), face(41, 0.1)]).unwrap();
+        f.add_dissolved(Kind::Person, vec![face(42, 0.1), face(43, 0.1)]).unwrap();
+        let json = |x: &dyn erased::Json| x.text();
+        let before = f.clone();
+        let gone = f.reset_unnamed(Kind::Fursuit);
+        assert_eq!(gone.iter().map(|s| s.id.clone()).collect::<Vec<_>>(), [a.clone(), b.clone()], "both unnamed, the hidden one too");
+        assert!(gone.iter().any(|s| s.rejected == [face(13, 0.1)]), "their rejected heads go with them");
+        assert!(f.unnamed(Kind::Fursuit) == Unnamed::default() && f.get(&a).is_none() && f.get(&b).is_none());
+        // Kept, byte for byte: named subjects (members, rejected, cover,
+        // hidden), people's subjects, and every list.
+        let kept: Vec<&Subject> = before.subjects.iter().filter(|s| !(s.kind == Kind::Fursuit && s.name.is_none())).collect();
+        assert_eq!(json(&f.subjects.iter().collect::<Vec<_>>()), json(&kept));
+        assert_eq!(f.get(&person), before.get(&person), "people are untouched");
+        assert_eq!(f.unnamed(Kind::Person), before.unnamed(Kind::Person));
+        for (x, y) in [(json(&f.added), json(&before.added)), (json(&f.removed), json(&before.removed)), (json(&f.not_same), json(&before.not_same)), (json(&f.dissolved), json(&before.dissolved))] {
+            assert_eq!(x, y);
+        }
+        assert_eq!(f.written_version(), FILE_VERSION);
+        // Nothing to reset: nothing changes.
+        let again = f.clone();
+        assert!(f.reset_unnamed(Kind::Fursuit).is_empty() && f == again);
+        // An old file (no `hidden`, no `cover`) loads and resets.
+        let old: SubjectsFile = serde_json::from_str(r#"{"version":1,"subjects":[{"id":"5ca1ab1e","kind":"fursuit","members":[{"key":"01010101010101010101010101010101","box":[0.1,0.2,0.1,0.15]}]}]}"#).unwrap();
+        assert_eq!(old.unnamed(Kind::Fursuit).groups, 1);
+    }
+
+    /// Serialised text, for byte-for-byte comparisons.
+    mod erased {
+        pub trait Json {
+            fn text(&self) -> String;
+        }
+        impl<T: serde::Serialize> Json for T {
+            fn text(&self) -> String {
+                serde_json::to_string(self).unwrap()
+            }
+        }
     }
 
     /// The grouping keeps a dissolved set apart: no automatic group holds

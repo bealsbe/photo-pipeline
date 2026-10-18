@@ -295,6 +295,32 @@ impl Worker {
         Some(Before { kind, act: Act::Dissolve { group: side, dissolved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)), named, spread }, answered: None })
     }
 
+    /// *Reset unnamed groups*: every unnamed subject of `kind` as it was
+    /// (largest first, at most [`decisions::RESET_GROUPS`], each with its
+    /// clearest [`decisions::RESET_SIDE_HEADS`] heads), with the counts
+    /// in full.
+    pub(super) fn before_reset_unnamed(&mut self, kind: Kind) -> Option<Before> {
+        if !self.decisions.is_on() {
+            return None;
+        }
+        let u = self.people.file.unnamed(kind);
+        if u.groups == 0 {
+            return None;
+        }
+        let unnamed: Vec<crate::model::subjects::SubjectId> = self.people.file.subjects.iter().filter(|s| s.kind == kind && s.name.is_none()).map(|s| s.id.clone()).collect();
+        let mut groups: Vec<Side> = unnamed
+            .into_iter()
+            .filter_map(|id| self.record_side(&GroupId::Subject(id), &[]))
+            .map(|(_, mut side, _)| {
+                side.heads.truncate(decisions::RESET_SIDE_HEADS);
+                side
+            })
+            .collect();
+        groups.sort_by(|a, b| b.n.cmp(&a.n).then_with(|| a.sid.cmp(&b.sid)));
+        groups.truncate(decisions::RESET_GROUPS);
+        Some(Before { kind, act: Act::ResetUnnamed { groups, groups_reset: u.groups, heads_reset: u.heads, rejected: u.rejected, hidden: u.hidden }, answered: None })
+    }
+
     /// A review answer (Yes or No): the group as it was, the heads.
     pub(super) fn before_answer(&mut self, group: &GroupId, faces: &[FaceRef], yes: bool) -> Option<Before> {
         if !self.decisions.is_on() {
