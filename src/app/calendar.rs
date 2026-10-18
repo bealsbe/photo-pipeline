@@ -1250,10 +1250,7 @@ fn on_day_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
         }
         // The library's day grid shows no bursts.
         GridEvent::Chip(_) | GridEvent::SectionLink(_) | GridEvent::FooterLink | GridEvent::SelectDone | GridEvent::Scrolled(_) | GridEvent::ToggleBurst(_) => {}
-        GridEvent::ZoomStep(step) => {
-            cal.day_thumb = ((cal.day_thumb + step as f32 * 20.0) / 20.0).floor() * 20.0;
-            cal.day_thumb = cal.day_thumb.clamp(grid::MIN_SIZE, grid::MAX_SIZE);
-        }
+        GridEvent::ZoomStep { step, width } => cal.day_thumb = grid::zoom_step(width, cal.day_thumb, step),
         GridEvent::PinchTo(s) => cal.day_thumb = s.clamp(grid::MIN_SIZE, grid::MAX_SIZE),
         GridEvent::Thumbs { visible, nearby, settle } => {
             if settle {

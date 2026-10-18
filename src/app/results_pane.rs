@@ -196,7 +196,7 @@ impl Pane {
 
     /// A grid event: what the pane does itself, and what it asks of its
     /// owner.
-    pub fn on_grid(&mut self, ev: GridEvent, workers: &ThumbWorkers, zoom_step: f32) -> Ask {
+    pub fn on_grid(&mut self, ev: GridEvent, workers: &ThumbWorkers) -> Ask {
         match ev {
             GridEvent::Click { id, modifiers } => {
                 if modifiers.control() {
@@ -227,8 +227,8 @@ impl Pane {
             GridEvent::SectionLink(d) if d == res::FURSUITS_DAY => Ask::Fursuits(false),
             GridEvent::SectionLink(_) => Ask::Nothing,
             GridEvent::FooterLink => Ask::Fursuits(true),
-            GridEvent::ZoomStep(step) => {
-                self.thumb_size = (((self.thumb_size + step as f32 * zoom_step) / zoom_step).floor() * zoom_step).clamp(grid::MIN_SIZE, grid::MAX_SIZE);
+            GridEvent::ZoomStep { step, width } => {
+                self.thumb_size = grid::zoom_step(width, self.thumb_size, step);
                 Ask::Nothing
             }
             GridEvent::PinchTo(size) => {

@@ -458,7 +458,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Grid(ev) => {
             let Some(p) = app.subjects.person.as_mut() else { return Task::none() };
             p.menu = None;
-            match p.pane.on_grid(ev, &app.workers, super::ZOOM_STEP) {
+            match p.pane.on_grid(ev, &app.workers) {
                 Ask::Nothing | Ask::Fursuits(_) => Task::none(),
                 Ask::Viewer(id) => open_viewer(app, id),
                 Ask::Burst(id) => toggle_burst(app, id),
