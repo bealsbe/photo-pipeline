@@ -34,6 +34,11 @@
 //! column (the smaller side around the pair, the pair apart), taking only
 //! heads still in *Stays*, so nothing the user arranged is undone; Ctrl+Z
 //! takes it back.  Applied, it is recorded `by: "proposal"`.
+//!
+//! **Dissolve group** in the header (`subjects_dissolve`): the group is no
+//! one subject; its heads are kept apart from then on.  It acts on the
+//! group as it is in the library, not on the arrangement (which, if any,
+//! it says it drops).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;

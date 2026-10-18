@@ -9,6 +9,8 @@
 //!   the smallest size to show (5 photos by default, a burst counting as one) fold away under
 //!   *Smaller groups*, so an event's strangers stay out of sight; hidden
 //!   ones wait under *Hidden*.  Nothing is ever named for the user.
+//!   Heads a dissolve left on their own are counted beside the folds,
+//!   never a tile each (`subjects_dissolve`).
 //! - **Picking several** (S, or Ctrl+click) gives a strip with *Merge…*
 //!   and *Hide*; merging asks which name to keep.  Ctrl+Z takes back the
 //!   last change to people.

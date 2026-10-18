@@ -610,6 +610,19 @@ for you.
   *Not a face* removes one: never grouped, suggested or found again,
   even after Rebuild.  One Ctrl+Z takes the whole removal back.
   Fursuits have the same, *Not fursuit heads…*.
+- **Dissolve group: no one person, only lookalikes.**  *Dissolve group*
+  in the group editor's header, or ⋯ on a group's page, takes the group
+  apart: its faces leave it and are never grouped together again, even
+  after a regroup or a Rebuild.  They stay faces (unlike *Not faces*):
+  each can still join other faces' groups, be suggested for a person,
+  be found with *Find more*, or be sent to a group by hand.  An unnamed
+  group goes at once, with *Undo* in the status bar; a named one asks
+  first and says its name goes too (with the faces confirmed as them and
+  your answers); so does the editor when it holds moves not applied
+  (they aren't).  Faces left on their own aren't shown as groups of
+  one: the tab counts them beside *Smaller groups* ("21 faces on their
+  own"), so dissolving a large group adds no tiles.  One Ctrl+Z puts the
+  group back as it was.  Fursuits have the same.
 - **Forget:** *Forget this person…* removes one name and its answers (their
   faces go back to the groups to name); Preferences ▸ People ▸ *Forget all…*
   deletes every face found and every name, behind a plain confirmation.
@@ -722,6 +735,13 @@ never shown, merged, suggested or completed together with people or pets.
   groups, the suggestions, *Find more*, the merge suggestions and the
   split tools, and a rebuild doesn't find them again; one Ctrl+Z takes
   it all back.  Never across kinds.
+- **Dissolve group** (the editor's header, ⋯ on a group's page): a
+  group that is no one fursuit, only lookalikes, is taken apart, as on
+  People: its heads stay fursuit heads, free for other groups, *Find
+  more* and suggestions, and are never grouped together again, whatever
+  the *Grouping* choice or a Rebuild.  A named group asks first (its name
+  goes); heads left on their own are counted beside *Smaller groups*, not
+  shown as tiles; one Ctrl+Z undoes it.  Never across kinds.
 - **Find more**, on a fursuit's band and at the end of its review, looks
   again from every head you confirmed with a strict cut-off, so it brings
   a few at a time; when nothing more is close enough it says so.
@@ -838,8 +858,9 @@ bar under the top bar does the editing; L, *Done* or Esc hides them.
 - **Where it is kept.**  Names, removed boxes and drawn boxes are the
   user's own, in `subjects.json` (the drawn and removed boxes as two
   lists, `added` and `removed`, each a kind, a content key and a box;
-  the file says version 2 only when one of them holds something, so a
-  file never labelled keeps version 1's shape).  A drawn box's
+  the file says version 2 only when one of them, or `not_same` or
+  `dissolved` (the groups dissolved, by their heads), holds something,
+  so a file never labelled keeps version 1's shape).  A drawn box's
   landmarks, vector and tile are cache beside the index
   (`faces-drawn.bin`, `heads-drawn.bin`, with the other face and head
   files): *Clear* and *Rebuild* drop them and the boxes are matched
@@ -857,7 +878,9 @@ decision is added to a file, one line each:
   into…*, a suggested pair, *Similar groups*), "Not the same", splits and
   moves (each *Apply* of the group editor, one entry: the groups as they
   were and where each set of heads went, new groups, taken out or not
-  heads, with how many were moved by hand), review answers (Y,
+  heads, with how many were moved by hand), dissolved groups (the group
+  as it was, every head, whether it was named, how spread out its heads
+  were, and the grouping choice in force), review answers (Y,
   N, *Not this person*), *Not fursuit heads* / *Not faces* on groups,
   names given to groups, and the viewer's label edits (a name, *It's a
   person* / *It's a fursuit*, a drawn box, *Not a face*).  Ctrl+Z, or Z
@@ -888,8 +911,9 @@ decision is added to a file, one line each:
   throughout the copy (the record here keeps the names).  Beside it,
   `groups.json` holds your named groups as they are now (by the same
   codes): their faces or heads, the ones you said aren't them, their
-  counts, the boxes drawn and removed in the viewer, and the matching
-  settings in force; unnamed groups are left out.  *Delete the
+  counts, the boxes drawn and removed in the viewer, the groups you
+  dissolved (by their heads), and the matching settings in force;
+  unnamed groups are left out.  *Delete the
   record…* asks first.  The
   format is in `docs/library-search-plan.md` ("As built — the record of
   corrections") and `src/model/decisions.rs`.
