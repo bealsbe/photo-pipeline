@@ -122,6 +122,7 @@ struct Arrangement {
     removed: Vec<FaceRef>,
     taken: Vec<FaceRef>,
     start: HashMap<FaceRef, Place>,
+    covers: Vec<(GroupId, Option<FaceRef>)>,
 }
 
 /// A split the engine suggests for a group holding two heads of one
@@ -181,6 +182,8 @@ pub struct Editor {
     /// A named group *Apply* found gone.
     pub gone: Option<GroupId>,
     apply_seq: u64,
+    /// Group photos chosen here (`subjects_cover`), applied with the rest.
+    covers: Vec<(GroupId, Option<FaceRef>)>,
 }
 
 /// Where a head is in the arrangement.
@@ -245,6 +248,7 @@ impl Editor {
             pending: None,
             gone: None,
             apply_seq: 0,
+            covers: Vec::new(),
         }
     }
 
@@ -279,7 +283,22 @@ impl Editor {
     }
 
     fn snapshot(&self) -> Arrangement {
-        Arrangement { cols: self.cols.clone(), sent: self.sent.clone(), removed: self.removed.clone(), taken: self.taken.clone(), start: self.start.clone() }
+        Arrangement { cols: self.cols.clone(), sent: self.sent.clone(), removed: self.removed.clone(), taken: self.taken.clone(), start: self.start.clone(), covers: self.covers.clone() }
+    }
+
+    /// The group photo chosen here for an existing group (`Some(None)`:
+    /// the automatic one again), if any.
+    pub fn cover_choice(&self, g: &GroupId) -> Option<Option<FaceRef>> {
+        self.covers.iter().find(|(x, _)| x == g).map(|(_, f)| *f)
+    }
+
+    /// Choose column `col`'s group photo (an existing group's): one step.
+    pub fn set_cover(&mut self, col: usize, face: Option<FaceRef>) {
+        let Some(Origin::Existing { id, .. }) = self.cols.get(col).map(|c| c.origin.clone()) else { return };
+        self.history.push(self.snapshot());
+        self.covers.retain(|(x, _)| *x != id);
+        self.covers.push((id, face));
+        self.ui.clear();
     }
 
     fn col_of_group(&self, g: &GroupId) -> Option<usize> {
@@ -387,6 +406,7 @@ impl Editor {
         self.removed = a.removed;
         self.taken = a.taken;
         self.start = a.start;
+        self.covers = a.covers;
         self.ui.renumber(|c| (c < n).then_some(c));
         true
     }
@@ -460,7 +480,14 @@ impl Editor {
         }
         moves.extend(self.removed.iter().map(|f| (*f, EditDest::Removed)));
         moves.extend(self.taken.iter().map(|f| (*f, EditDest::TakenOut)));
-        GroupEdit { kind: self.kind, targets, new_names, moves, renames }
+        // Group photos, for groups still shown that hold the face chosen.
+        let mut covers = Vec::new();
+        for (g, face) in &self.covers {
+            if self.col_of_group(g).is_some_and(|i| face.is_none_or(|f| self.cols[i].heads.contains(&f))) {
+                covers.push((target(g, &mut targets), *face));
+            }
+        }
+        GroupEdit { kind: self.kind, targets, new_names, moves, renames, covers }
     }
 
     /// Lay out the preset, once the edited group's faces are in.
@@ -945,7 +972,7 @@ fn apply(app: &mut App) -> Task<Message> {
         return Task::none();
     }
     let edit = e.to_edit(&|g| s.group(g).map(|x| x.cover.face));
-    if edit.moves.is_empty() && edit.renames.is_empty() {
+    if edit.moves.is_empty() && edit.renames.is_empty() && edit.covers.is_empty() {
         return close(app);
     }
     let via = Via::Editor { proposal: e.suggestion_shown(), edited: e.edited() as u32 };
@@ -1100,7 +1127,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     .align_y(Alignment::Center);
     let header = container(header.padding(Padding::from([0.0, t::S3]))).height(subj::HEADER_H).center_y(subj::HEADER_H).width(Length::Fill).style(style::fill(t::MOUNT));
     let mut page = column![header, kit::hairline()];
-    if let Some(strip) = pick_strip(e) {
+    if let Some(strip) = pick_strip(app, e) {
         page = page.push(strip);
     }
     if let Some(note) = &e.note {
@@ -1181,7 +1208,8 @@ fn column_view<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>, i: usize, w: f3
         head = head.push(row![text(format!("{name} already exists.")).size(t::T_SMALL).color(t::PHOTO_INK2), kit::btn(format!("Merge into {name}"), style::secondary(), Some(m(Msg::MergeName(i, g.id.clone()))))].spacing(8).align_y(Alignment::Center));
     }
     head = head.push(text(if c.rank.is_empty() { String::new() } else { "Least like the rest first".to_string() }).size(t::T_SMALL).color(t::PHOTO_INK3));
-    let tiles = cols::grid(app, look, i, &order, marked, paired);
+    let cover = super::subjects_cover::editor_cover(app, e, i);
+    let tiles = cols::grid(app, look, i, &order, marked, paired, cover);
     let foot: Option<Element<'a, Message>> = if !c.loaded {
         Some(text("Reading…").size(t::T_SMALL).color(t::PHOTO_INK3).into())
     } else if order.is_empty() {
@@ -1206,11 +1234,14 @@ fn new_column<'a>(e: &'a Editor, look: &Look<'a>, w: f32) -> Element<'a, Message
     container(cols::drop_target(look, Target::New, b.into())).width(Length::Fixed(w)).height(Length::Fill).into()
 }
 
-fn pick_strip(e: &Editor) -> Option<Element<'_, Message>> {
+fn pick_strip<'a>(app: &'a App, e: &'a Editor) -> Option<Element<'a, Message>> {
     let col = e.ui.picked_in?;
     let crops = cols::crop_word(e.kind);
     let n = e.ui.picked.len();
     let mut r = row![icons::view(Glyph::Select, 16.0, t::SIGNAL), text(format!("{} picked", util::plural(n as u64, crops))).size(t::T_BODY).color(t::INK).width(Length::Fill)].spacing(t::S2).align_y(Alignment::Center);
+    if let Some(b) = super::subjects_cover::editor_action(app, e) {
+        r = r.push(b);
+    }
     if col > 0 {
         r = r.push(tip(kit::icon_text_btn(Glyph::ChevronLeft, "Left", t::INK, style::secondary(), Some(wrap(ColMsg::Step(false)))), "To the column on the left  (←)", true));
     }

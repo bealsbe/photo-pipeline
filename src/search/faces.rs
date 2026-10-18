@@ -971,6 +971,21 @@ impl People {
         Ok(sid)
     }
 
+    /// The group photo of a named group: one of its faces (`None`: the
+    /// automatic pick again).  One undo step; refused for an unnamed
+    /// group, a face it doesn't hold, or no change.  Nothing regroups.
+    pub fn set_cover(&mut self, id: &SubjectId, face: Option<FaceRef>) -> Result<String, Refused> {
+        let name = self.file.get(id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?.name.clone().unwrap_or_default();
+        let what = subjects::cover_words(&name, face.is_some());
+        self.checkpoint(what.clone());
+        if let Err(e) = self.file.set_cover(id, face) {
+            self.undo.pop();
+            return Err(e);
+        }
+        self.save();
+        Ok(what)
+    }
+
     /// Forget a subject: its faces become unnamed again.
     pub fn forget(&mut self, id: &SubjectId) -> Result<(), Refused> {
         let name = self.file.get(id).and_then(|s| s.name.clone());
@@ -1093,7 +1108,15 @@ impl People {
                 _ => None,
             })
             .collect();
-        Ok(EditPlan { kind, new_names, moves, renames, gone })
+        let covers = e
+            .covers
+            .iter()
+            .filter_map(|(i, face)| match targets.get(*i) {
+                Some(PlanDest::Group(g)) => Some((g.clone(), *face)),
+                _ => None,
+            })
+            .collect();
+        Ok(EditPlan { kind, new_names, moves, renames, covers, gone })
     }
 
     /// The group editor's *Apply*, planned (`plan_edit`): every move, the
@@ -1105,13 +1128,19 @@ impl People {
     /// Returns the words (the status line's and the undo's) and the new
     /// groups made.
     pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<(String, Vec<SubjectId>), Refused> {
-        if plan.moves.is_empty() && plan.renames.is_empty() {
+        if plan.moves.is_empty() && plan.renames.is_empty() && plan.covers.is_empty() {
             return Err(Refused::Nothing);
         }
         let words = self.edit_words(plan);
         let before = self.file.clone();
         self.checkpoint(words.clone());
         match self.apply_plan(plan) {
+            // Nothing changed (a group photo the group no longer holds):
+            // no undo step.
+            Ok(_) if self.file == before => {
+                self.undo.pop();
+                Err(Refused::Nothing)
+            }
             Ok(made) => {
                 self.save();
                 Ok((words, made))
@@ -1192,6 +1221,16 @@ impl People {
         for (g, name) in &plan.renames {
             self.file.rename(&as_subject[g], name.clone())?;
         }
+        // Group photos last, on the groups as the moves left them: a
+        // named group still holding the face (else nothing, as on its
+        // page).
+        for (g, face) in &plan.covers {
+            let sid = match (as_subject.get(g), g) {
+                (Some(s), _) | (None, GroupId::Subject(s)) => s.clone(),
+                (None, GroupId::Cluster(_)) => continue,
+            };
+            let _ = self.file.set_cover(&sid, *face);
+        }
         // A subject left with nothing goes (its name with it); so does a
         // new group nothing went to.
         let touched: HashSet<SubjectId> = plan
@@ -1215,7 +1254,7 @@ impl People {
     /// An edit in words: "Split into 3 groups, 4 heads to Kiba, 2
     /// removed".
     pub fn edit_words(&self, plan: &EditPlan) -> String {
-        subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.subject_of(g).and_then(|s| s.name.clone()))
+        subjects::plan_words(plan, |g| self.subject_of(g).and_then(|s| s.name.clone()))
     }
 
     /// A review answer for `group`: `Some(true)` confirms the faces as
@@ -1416,18 +1455,33 @@ impl People {
     /// [`Face`] with its shot (the engine's resolver); detections of
     /// photos no longer in the library resolve to nothing and are not
     /// counted.
+    #[cfg(test)]
     pub fn build_snapshot(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>) -> Arc<Subjects> {
+        self.build_snapshot_found(resolve, &|_, _| true)
+    }
+
+    /// [`People::build_snapshot`], a chosen group photo shown only while
+    /// `found` (kind, box) says its detection is still there (a rebuild
+    /// may not find it again); else the automatic pick.
+    pub fn build_snapshot_found(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>, found: &dyn Fn(Kind, &FaceRef) -> bool) -> Arc<Subjects> {
         let mut groups: Vec<Group> = Vec::new();
         let group_of = |id: GroupId, kind: Kind, name: Option<String>, hidden: bool, cover: Option<FaceRef>, members: &[FaceRef], suggestions: usize| -> Option<Group> {
             let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
-            let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
+            // A chosen photo counts only on a named group, while it holds it.
+            let cover = subjects::cover_of(cover.filter(|_| name.is_some()), &faces, |c| found(kind, c))?;
             let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
             let days = subjects::count_days(&faces);
             Some(Group { id, kind, name, hidden, photos, bursts: subjects::count_bursts(&faces), days, cover, suggestions })
         };
+        // The groups showing the photo the user chose (not the automatic one).
+        let mut chosen_covers = HashSet::new();
         for s in &self.file.subjects {
             let suggestions = self.grouped.suggestion_counts.get(&s.id).copied().unwrap_or(0);
-            groups.extend(group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions));
+            let Some(g) = group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions) else { continue };
+            if s.cover == Some(g.cover.face) {
+                chosen_covers.insert(g.id.clone());
+            }
+            groups.push(g);
         }
         if let Some(store) = &self.store {
             let refs = store.refs();
@@ -1439,7 +1493,7 @@ impl People {
         groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what, _)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
-        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new() })
+        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new(), chosen_covers })
     }
 
     /// Suggestions for review (UI 6): for a subject, the faces within

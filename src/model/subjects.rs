@@ -299,11 +299,23 @@ pub struct Subjects {
     /// Fursuit groups holding two heads of one photo, so at least two
     /// fursuits (`search::splitting`).  Never a person's.
     pub seen_together: HashSet<GroupId>,
+    /// Named groups whose `cover` is the photo the user chose (the rest
+    /// show the automatic pick).
+    pub chosen_covers: HashSet<GroupId>,
 }
 
 impl Subjects {
     pub fn group(&self, id: &GroupId) -> Option<&Group> {
         self.groups.iter().find(|g| &g.id == id)
+    }
+
+    /// The group photo the user chose for `id`, while it shows (`None`:
+    /// the automatic pick).
+    pub fn chosen_cover(&self, id: &GroupId) -> Option<FaceRef> {
+        if !self.chosen_covers.contains(id) {
+            return None;
+        }
+        self.group(id).map(|g| g.cover.face)
     }
 
     /// Named subjects of `kind`, shown or hidden.
@@ -394,6 +406,10 @@ pub struct GroupEdit {
     pub moves: Vec<(FaceRef, EditDest)>,
     /// Names given to existing groups (`targets[i]`).
     pub renames: Vec<(usize, String)>,
+    /// Group photos chosen for existing groups (`targets[i]`; `None`:
+    /// back to the automatic one).  Applied after the moves, and only to
+    /// a named group that still holds the face.
+    pub covers: Vec<(usize, Option<FaceRef>)>,
 }
 
 /// A [`GroupEdit`] resolved against the groups as they are now: each
@@ -408,6 +424,8 @@ pub struct EditPlan {
     /// (head, the group it is in now, where it goes).
     pub moves: Vec<(FaceRef, Option<GroupId>, PlanDest)>,
     pub renames: Vec<(GroupId, String)>,
+    /// Group photos chosen (`None`: automatic again).
+    pub covers: Vec<(GroupId, Option<FaceRef>)>,
     /// Automatic targets that were gone, sent to a new group instead.
     pub gone: usize,
 }
@@ -419,6 +437,20 @@ pub enum PlanDest {
     Removed,
     /// Out of the group it is in (the move's `from`), rejected for it.
     TakenOut,
+}
+
+/// The face a group's tile shows: the one the user chose while it is
+/// still one of `faces` (its members whose photos are in the library)
+/// and `found` (its detection is still there); else the clearest.  A
+/// lookup per group, so cheap enough for every snapshot.
+pub fn cover_of(chosen: Option<FaceRef>, faces: &[Face], found: impl Fn(&FaceRef) -> bool) -> Option<Face> {
+    chosen.filter(|c| found(c)).and_then(|c| faces.iter().find(|f| f.face == c)).or_else(|| faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity))).cloned()
+}
+
+/// "Set Kiba's group photo" / "Kiba's group photo is automatic again":
+/// the status line's and the undo's words for a cover change.
+pub fn cover_words(name: &str, set: bool) -> String {
+    if set { format!("Set {name}'s group photo") } else { format!("{name}'s group photo is automatic again") }
 }
 
 /// A planned edit in words, for the status line and the undo: "Split
@@ -462,6 +494,30 @@ pub fn edit_words(kind: Kind, moves: &[(FaceRef, Option<GroupId>, PlanDest)], re
     let s = parts.join(", ");
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// A whole plan in words ([`edit_words`], with the group photos it
+/// chooses): "2 heads to Kiba, new group photo for Kiba", or, with
+/// nothing else, "Set Kiba's group photo".
+pub fn plan_words(plan: &EditPlan, name_of: impl Fn(&GroupId) -> Option<String>) -> String {
+    let name = |g: &GroupId| name_of(g).or_else(|| plan.renames.iter().find(|(x, _)| x == g).map(|(_, n)| n.clone())).unwrap_or_else(|| "the group".to_string());
+    if plan.moves.is_empty() && plan.renames.is_empty() {
+        if let [(g, face)] = &plan.covers[..] {
+            return cover_words(&name(g), face.is_some());
+        }
+    }
+    let mut s = if plan.moves.is_empty() && plan.renames.is_empty() { String::new() } else { edit_words(plan.kind, &plan.moves, &plan.renames, &name_of) };
+    for (g, face) in &plan.covers {
+        let part = if face.is_some() { format!("new group photo for {}", name(g)) } else { format!("automatic group photo for {}", name(g)) };
+        if s.is_empty() {
+            let mut c = part.chars();
+            s = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+        } else {
+            s.push_str(", ");
+            s.push_str(&part);
+        }
+    }
+    s
 }
 
 /// A change made on a box in the viewer's labels.  Each is one undo step.
@@ -776,6 +832,23 @@ impl SubjectsFile {
         Ok(())
     }
 
+    /// The group photo: `face` (one of `id`'s confirmed members) is what
+    /// its tile, page and completions show; `None` goes back to the
+    /// automatic pick (the clearest member).  Named subjects only: an
+    /// unnamed group keeps the automatic pick.  `cover` is a field of the
+    /// first format, so the file's version doesn't change.
+    pub fn set_cover(&mut self, id: &SubjectId, face: Option<FaceRef>) -> Result<(), Refused> {
+        let s = self.get_mut(id)?;
+        if s.name.is_none() {
+            return Err(Refused::Nothing);
+        }
+        if face.is_some_and(|f| !s.members.contains(&f)) || s.cover == face {
+            return Err(Refused::Nothing);
+        }
+        s.cover = face;
+        Ok(())
+    }
+
     /// Forget a subject: its members become unnamed faces again.
     pub fn forget(&mut self, id: &SubjectId) -> Result<Subject, Refused> {
         let i = self.subjects.iter().position(|s| &s.id == id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?;
@@ -848,7 +921,7 @@ impl SubjectsFile {
 
     /// Merge `other` into `into` (the same kind): members and rejections
     /// move over, `other` goes.  `into` keeps its name, or takes `other`'s
-    /// when it has none.
+    /// when it has none; likewise its group photo (the kept name's wins).
     pub fn merge(&mut self, into: &SubjectId, other: &SubjectId) -> Result<(), Refused> {
         if into == other {
             return Err(Refused::Nothing);

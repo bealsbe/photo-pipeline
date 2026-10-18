@@ -246,13 +246,23 @@ impl Worker {
                 None => out.push((from, to, vec![*head])),
             }
         }
+        let covers = plan.covers.iter().map(|(g, face)| decisions::EditCover { group: index(g, &mut ids), head: face.map(decisions::Head) }).collect();
         let mut groups = Vec::with_capacity(ids.len());
         for g in &ids {
             let (_, side, _) = self.record_side(g, &[])?;
             groups.push(side);
         }
         let out = out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect();
-        Some(Before { kind: plan.kind, act: Act::Edit { groups, out }, answered: None })
+        Some(Before { kind: plan.kind, act: Act::Edit { groups, out, covers }, answered: None })
+    }
+
+    /// A group photo chosen (or automatic again): the group as it was.
+    pub(super) fn before_cover(&mut self, id: &crate::model::subjects::SubjectId, face: Option<FaceRef>) -> Option<Before> {
+        if !self.decisions.is_on() {
+            return None;
+        }
+        let (kind, side, _) = self.record_side(&GroupId::Subject(id.clone()), &[])?;
+        Some(Before { kind, act: Act::Cover { group: side, head: face.map(decisions::Head) }, answered: None })
     }
 
     /// A review answer (Yes or No): the group as it was, the heads.

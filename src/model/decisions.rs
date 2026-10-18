@@ -212,7 +212,21 @@ pub enum Act {
     /// (each group heads left or went to, once), and where heads went,
     /// one [`Out`] per group they left and where they went, so each reads
     /// as a `move` / `split` / `remove_many` does.
-    Edit { groups: Vec<Side>, out: Vec<Out> },
+    Edit {
+        groups: Vec<Side>,
+        out: Vec<Out>,
+        /// Group photos chosen in the same *Apply* (absent: none).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        covers: Vec<EditCover>,
+    },
+    /// A named group's photo (what its tile shows) chosen: `head`, one of
+    /// its own; absent, back to the automatic pick.  `group` as it was
+    /// before.  It says nothing about who is who, so it makes no pairs.
+    Cover {
+        group: Side,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<Head>,
+    },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -233,6 +247,7 @@ impl Act {
             Act::Remove { .. } => "remove",
             Act::RemoveMany { .. } => "remove_many",
             Act::Edit { .. } => "edit",
+            Act::Cover { .. } => "cover",
             Act::Undo { .. } => "undo",
         }
     }
@@ -247,6 +262,15 @@ pub struct Out {
     pub to: To,
     pub heads: Vec<Head>,
     pub moved: usize,
+}
+
+/// A group photo chosen in an edit: for `groups[group]`, `head` (absent:
+/// the automatic pick again).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditCover {
+    pub group: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Head>,
 }
 
 /// Where heads went in an edit.
@@ -816,7 +840,7 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
         match &mut e.act {
             Act::Merge { groups } | Act::NotSame { groups } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Split { from, .. } => c.side(k, from),
-            Act::Edit { groups, out } => {
+            Act::Edit { groups, out, .. } => {
                 groups.iter_mut().for_each(|g| c.side(k, g));
                 for o in out {
                     if let To::New { name, .. } = &mut o.to {
@@ -828,7 +852,7 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
                 c.side(k, from);
                 c.side(k, to);
             }
-            Act::Answer { group, .. } => c.side(k, group),
+            Act::Answer { group, .. } | Act::Cover { group, .. } => c.side(k, group),
             Act::Name { name, group, from, .. } => {
                 // A head named into a subject: its name and the subject's
                 // are one, so they share the code.

@@ -243,6 +243,8 @@ struct FakeGroup {
     confirmed: HashSet<Key>,
     /// "Not this person": never suggested again.
     rejected: HashSet<Key>,
+    /// The group photo chosen (a member's shot), if any.
+    cover: Option<Key>,
     /// The person most of it shows (its look, and whose held-back faces
     /// are its suggestions).
     person: usize,
@@ -344,7 +346,7 @@ impl FakePeople {
                 GroupId::Cluster(p as u64 + 1000 * (self.generation + 1))
             };
             let confirmed = if named { keys.iter().copied().collect() } else { HashSet::new() };
-            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[p].to_string()), hidden: false, members: keys, confirmed, rejected: HashSet::new(), person: p });
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[p].to_string()), hidden: false, members: keys, confirmed, rejected: HashSet::new(), cover: None, person: p });
         }
         self.generation += 1;
     }
@@ -370,9 +372,14 @@ impl FakePeople {
     /// Every group, as the tabs list them.
     pub fn snapshot(&self) -> Subjects {
         let mut groups = Vec::new();
+        let mut chosen_covers = HashSet::new();
         for g in &self.groups {
             let faces: Vec<Face> = g.members.iter().filter_map(|&k| self.face_of(k, g.confirmed.contains(&k))).collect();
-            let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
+            let chosen = g.cover.filter(|_| g.name.is_some()).and_then(|k| faces.iter().find(|f| f.face.key == k)).map(|f| f.face);
+            let Some(cover) = crate::model::subjects::cover_of(chosen, &faces, |_| true) else { continue };
+            if chosen.is_some() {
+                chosen_covers.insert(g.id.clone());
+            }
             let days = crate::model::subjects::count_days(&faces);
             let suggestions = if g.name.is_some() { self.suggestions_of(g, usize::MAX).len() } else { 0 };
             groups.push(Group { id: g.id.clone(), kind: Kind::Person, name: g.name.clone(), hidden: g.hidden, photos: faces.len(), bursts: crate::model::subjects::count_bursts(&faces), days, cover, suggestions });
@@ -380,7 +387,7 @@ impl FakePeople {
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
         let faces_found = self.groups.iter().map(|g| g.members.len()).sum::<usize>()
             + self.shots[..self.looked_at].iter().filter(|s| true_person(&s.key, s.burst).is_some_and(|p| placed(&s.key, p) == Placed::Held)).count();
-        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()), seen_together: HashSet::new() }
+        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()), seen_together: HashSet::new(), chosen_covers }
     }
 
     /// Photos with a face found in them so far.
@@ -448,15 +455,19 @@ impl FakePeople {
             Some(PlanDest::Group(g)) => Some((g.clone(), n.clone())),
             _ => None,
         }).collect();
-        Ok(EditPlan { kind: e.kind, new_names, moves, renames, gone })
+        let covers = e.covers.iter().filter_map(|(i, f)| match targets.get(*i) {
+            Some(PlanDest::Group(g)) => Some((g.clone(), *f)),
+            _ => None,
+        }).collect();
+        Ok(EditPlan { kind: e.kind, new_names, moves, renames, covers, gone })
     }
 
     /// The group editor's *Apply*, planned: one undo step.  Its words.
     pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<String, String> {
-        if plan.moves.is_empty() && plan.renames.is_empty() {
+        if plan.moves.is_empty() && plan.renames.is_empty() && plan.covers.is_empty() {
             return Err("nothing to do".into());
         }
-        let words = crate::model::subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.group(g).and_then(|x| x.name.clone()));
+        let words = crate::model::subjects::plan_words(plan, |g| self.group(g).and_then(|x| x.name.clone()));
         self.remember(words.clone());
         let mut made: Vec<Option<GroupId>> = vec![None; plan.new_names.len()];
         for (head, from, to) in &plan.moves {
@@ -492,6 +503,11 @@ impl FakePeople {
                 x.name = Some(name.clone());
             }
         }
+        for (g, face) in &plan.covers {
+            if let Some(x) = self.group_mut(g).filter(|x| x.name.is_some() && face.is_none_or(|f| x.members.contains(&f.key))) {
+                x.cover = face.map(|f| f.key);
+            }
+        }
         self.groups.retain(|g| !g.members.is_empty());
         Ok(words)
     }
@@ -500,7 +516,7 @@ impl FakePeople {
         self.next_id += 1;
         let id = GroupId::Cluster(1_000_000 + self.next_id);
         let person = self.by_key.get(&first.key).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)).unwrap_or(0);
-        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), person });
+        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), cover: None, person });
         id
     }
 
@@ -695,6 +711,10 @@ impl FakePeople {
             if g.name.is_none() {
                 g.name = m.name;
             }
+            // The kept name's group photo wins; else the other's comes along.
+            if g.cover.is_none() {
+                g.cover = m.cover;
+            }
         }
         Ok(())
     }
@@ -710,6 +730,21 @@ impl FakePeople {
         }
     }
 
+    /// A named group's photo: one of its faces (`None`: automatic again);
+    /// one undo step.
+    pub fn set_cover(&mut self, id: &GroupId, face: Option<FaceRef>) -> Result<(), String> {
+        let g = self.group(id).ok_or("That group changed: look again.")?;
+        let name = g.name.clone().ok_or("Only a named group has a group photo to choose.")?;
+        if face.is_some_and(|f| !g.members.contains(&f.key)) || g.cover == face.map(|f| f.key) {
+            return Err("nothing to do".into());
+        }
+        self.remember(crate::model::subjects::cover_words(&name, face.is_some()));
+        if let Some(g) = self.group_mut(id) {
+            g.cover = face.map(|f| f.key);
+        }
+        Ok(())
+    }
+
     /// Forget a named subject: its name, and what was confirmed.  Its faces
     /// go back to an unnamed group.
     pub fn forget(&mut self, id: &GroupId) {
@@ -718,6 +753,7 @@ impl FakePeople {
         let generation = self.generation;
         if let Some(g) = self.group_mut(id) {
             g.name = None;
+            g.cover = None;
             g.confirmed.clear();
             g.rejected.clear();
             g.hidden = false;
@@ -758,7 +794,7 @@ impl FakePeople {
                 let id = GroupId::Cluster(1_000_000 + self.next_id);
                 // Its look: whoever the first face shows.
                 let p = keys.iter().next().and_then(|k| self.by_key.get(k)).and_then(|&i| true_person(&self.shots[i].key, self.shots[i].burst)).unwrap_or(person);
-                self.groups.push(FakeGroup { id, name: None, hidden: false, members: keys.iter().copied().collect(), confirmed: HashSet::new(), rejected: HashSet::new(), person: p });
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: keys.iter().copied().collect(), confirmed: HashSet::new(), rejected: HashSet::new(), cover: None, person: p });
             }
         }
         Ok(())

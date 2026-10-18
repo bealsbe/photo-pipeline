@@ -81,6 +81,7 @@ enum Cmd {
     Rename(SubjectId, String),
     Merge { into: GroupId, others: Vec<GroupId>, via: Via },
     SetHidden(GroupId, bool),
+    SetCover(SubjectId, Option<FaceRef>, crate::model::decisions::At),
     Forget(SubjectId),
     ForgetKind(Kind),
     Faces { seq: u64, group: GroupId },
@@ -482,6 +483,13 @@ impl Engine {
     /// come up by name), or show it again.
     pub fn set_hidden(&self, id: GroupId, hidden: bool) {
         self.send(Cmd::SetHidden(id, hidden));
+    }
+
+    /// A named group's photo: one of its faces, or `None` for the
+    /// automatic pick again.  One undo step, recorded as `cover` (made
+    /// `at` there); the tile changes at once (nothing regroups).
+    pub fn set_cover(&self, id: SubjectId, face: Option<FaceRef>, at: crate::model::decisions::At) {
+        self.send(Cmd::SetCover(id, face, at));
     }
 
     /// *Forget this person*: the subject goes; its faces are unnamed
@@ -1289,6 +1297,17 @@ impl Worker {
                 Cmd::SetHidden(id, hidden) => {
                     let r = self.people.set_hidden(&id, hidden);
                     self.after_edit(r.map(|_| ()));
+                }
+                Cmd::SetCover(id, face, at) => {
+                    let before = self.before_cover(&id, face);
+                    match self.people.set_cover(&id, face) {
+                        Ok(_) => {
+                            self.record(before, Via::Hand(at));
+                            // Only the tile changes: no regroup.
+                            self.publish_subjects();
+                        }
+                        Err(e) => eprintln!("subjects: refused: {e}"),
+                    }
                 }
                 Cmd::Forget(id) => {
                     let r = self.people.forget(&id);
@@ -2647,7 +2666,13 @@ impl Worker {
     fn publish_subjects(&mut self) {
         self.subjects_sent = Some(Instant::now());
         self.ensure_resolver();
-        let mut snapshot = (*self.people.build_snapshot(&|f| self.resolve_face(f))).clone();
+        // A chosen group photo shows while its detection is still found.
+        let found = |kind: Kind, f: &FaceRef| match kind {
+            Kind::Person => self.people.store.as_ref().is_none_or(|s| s.detection(f).is_some()),
+            Kind::Fursuit => self.fursuits.store.as_ref().is_none_or(|s| s.detection(f).is_some()),
+            Kind::Pet => true,
+        };
+        let mut snapshot = (*self.people.build_snapshot_found(&|f| self.resolve_face(f), &found)).clone();
         self.fursuits.extend_snapshot(&mut snapshot, &|f| self.resolve_face(f));
         snapshot.seen_together = self.fursuits.seen_together(&self.people.file);
         let snapshot = Arc::new(snapshot);

@@ -226,6 +226,8 @@ struct FakeGroup {
     rounds: usize,
     /// The judge's verdicts on close calls, by the press's first head.
     judged: HashMap<FaceRef, bool>,
+    /// The group photo chosen, if any.
+    cover: Option<FaceRef>,
 }
 
 /// The stand-in's fursuits: groups of heads made up from the library,
@@ -359,7 +361,7 @@ impl FakeFursuits {
             let named = self.name_first && suit < NAMES.len() && part == 0;
             let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 100 * part as u64 + 1000 * (self.generation + 1)) };
             let confirmed = if named { heads.iter().copied().collect() } else { HashSet::new() };
-            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, part, rounds: 0, judged: HashMap::new() });
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, part, rounds: 0, judged: HashMap::new(), cover: None });
         }
         // Groups the user made by moving heads out stay.
         for g in old {
@@ -399,7 +401,7 @@ impl FakeFursuits {
         let mut out = Vec::new();
         for g in &self.groups {
             let faces: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
-            let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
+            let Some(cover) = crate::model::subjects::cover_of(g.cover.filter(|_| g.name.is_some()), &faces, |_| true) else { continue };
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
             let days = crate::model::subjects::count_days(&faces);
             let suggestions = if g.name.is_some() { self.suggestions_of(g).len() } else { 0 };
@@ -407,6 +409,11 @@ impl FakeFursuits {
         }
         out.extend((0..self.many).map(many_group));
         out
+    }
+
+    /// The named groups showing the head the user chose.
+    pub fn chosen_covers(&self) -> HashSet<GroupId> {
+        self.groups.iter().filter(|g| g.name.is_some() && g.cover.is_some_and(|c| g.members.contains(&c))).map(|g| g.id.clone()).collect()
     }
 
     /// Heads found so far.
@@ -622,15 +629,19 @@ impl FakeFursuits {
             Some(PlanDest::Group(g)) => Some((g.clone(), n.clone())),
             _ => None,
         }).collect();
-        Ok(EditPlan { kind: e.kind, new_names, moves, renames, gone })
+        let covers = e.covers.iter().filter_map(|(i, f)| match targets.get(*i) {
+            Some(PlanDest::Group(g)) => Some((g.clone(), *f)),
+            _ => None,
+        }).collect();
+        Ok(EditPlan { kind: e.kind, new_names, moves, renames, covers, gone })
     }
 
     /// The group editor's *Apply*, planned: one undo step.  Its words.
     pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<String, String> {
-        if plan.moves.is_empty() && plan.renames.is_empty() {
+        if plan.moves.is_empty() && plan.renames.is_empty() && plan.covers.is_empty() {
             return Err("nothing to do".into());
         }
-        let words = crate::model::subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.group(g).and_then(|x| x.name.clone()));
+        let words = crate::model::subjects::plan_words(plan, |g| self.group(g).and_then(|x| x.name.clone()));
         self.remember(words.clone());
         let mut made: Vec<Option<GroupId>> = vec![None; plan.new_names.len()];
         for (head, from, to) in &plan.moves {
@@ -666,6 +677,11 @@ impl FakeFursuits {
                 x.name = Some(name.clone());
             }
         }
+        for (g, face) in &plan.covers {
+            if let Some(x) = self.group_mut(g).filter(|x| x.name.is_some() && face.is_none_or(|f| x.members.contains(&f))) {
+                x.cover = *face;
+            }
+        }
         self.groups.retain(|g| !g.members.is_empty());
         Ok(words)
     }
@@ -674,7 +690,7 @@ impl FakeFursuits {
         self.next_id += 1;
         let id = if name.is_some() { self.fresh_subject() } else { GroupId::Cluster(made_id(self.next_id)) };
         let suit = self.look_of(first).unwrap_or(0);
-        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), suit, part: 0, rounds: 0, judged: HashMap::new() });
+        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), suit, part: 0, rounds: 0, judged: HashMap::new(), cover: None });
         id
     }
 
@@ -821,6 +837,25 @@ impl FakeFursuits {
             if g.name.is_none() {
                 g.name = m.name;
             }
+            // The kept name's group photo wins; else the other's comes along.
+            if g.cover.is_none() {
+                g.cover = m.cover;
+            }
+        }
+        Ok(())
+    }
+
+    /// A named group's photo: one of its heads (`None`: automatic
+    /// again); one undo step.
+    pub fn set_cover(&mut self, id: &GroupId, face: Option<FaceRef>) -> Result<(), String> {
+        let g = self.group(id).ok_or("That group changed: look again.")?;
+        let name = g.name.clone().ok_or("Only a named group has a group photo to choose.")?;
+        if face.is_some_and(|f| !g.members.contains(&f)) || g.cover == face {
+            return Err("nothing to do".into());
+        }
+        self.remember(crate::model::subjects::cover_words(&name, face.is_some()));
+        if let Some(g) = self.group_mut(id) {
+            g.cover = face;
         }
         Ok(())
     }
@@ -842,6 +877,7 @@ impl FakeFursuits {
         let generation = self.generation;
         if let Some(g) = self.group_mut(id) {
             g.name = None;
+            g.cover = None;
             g.confirmed.clear();
             g.rejected.clear();
             g.hidden = false;
@@ -962,7 +998,7 @@ impl FakeFursuits {
                 self.next_id += 1;
                 let id = GroupId::Cluster(made_id(self.next_id));
                 let s = faces.first().and_then(|f| self.look_of(f)).unwrap_or(suit);
-                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, part: 0, rounds: 0, judged: HashMap::new() });
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, part: 0, rounds: 0, judged: HashMap::new(), cover: None });
             }
         }
         Ok(())
