@@ -708,16 +708,18 @@ fn date_popup<'a>(app: &'a App, p: &'a super::DatePopup) -> Element<'a, Message>
     let weeks = crate::ui::calendar_stage::month_weeks(p.year, p.month, first);
     let current = if p.from { app.filter.date_from } else { app.filter.date_to };
     let today = Local::now().date_naive();
-    let nav = |g: Glyph, delta: i32| kit::icon_btn(g, t::INK2, style::ghost(), Some(Message::Filter(FilterMsg::DatePopupMonth(delta))));
+    let nav = |g: Glyph, delta: i32, label: &'static str| {
+        tip(kit::icon_btn(g, t::INK2, style::ghost(), Some(Message::Filter(FilterMsg::DatePopupMonth(delta)))), label, false)
+    };
     let header = row![
-        nav(Glyph::ChevronLeft, -1),
+        nav(Glyph::ChevronLeft, -1, "Previous month"),
         text(format!("{} {}", MONTH_NAME[(p.month - 1) as usize], p.year))
             .size(t::T_BODY)
             .font(paint::SEMIBOLD)
             .color(t::INK)
             .width(Length::Fill)
             .center(),
-        nav(Glyph::ChevronRight, 1),
+        nav(Glyph::ChevronRight, 1, "Next month"),
     ]
     .align_y(Alignment::Center);
     let mut grid = column![header, Space::new().height(4)].spacing(2);
@@ -822,7 +824,11 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     if let Some(slot) = search_setup::status_slot(app) {
         r = r.push(slot);
     }
-    r = r.push(counts);
+    // The working folder's counts, once there is one (a row of zeros says
+    // nothing).
+    if s.total > 0 {
+        r = r.push(counts);
+    }
     if let Some(p) = review_progress(app) {
         r = r.push(Space::new().width(t::S3)).push(kit::vrule(12.0)).push(Space::new().width(t::S2)).push(p);
     }
