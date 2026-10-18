@@ -5,7 +5,7 @@
 //! view, filled with the accent), `danger`, `segment` (one option of a
 //! segmented control) and `toggle` (an on/off filter).
 
-use iced::widget::{button, checkbox, container, progress_bar, radio, scrollable, slider, text_input};
+use iced::widget::{button, checkbox, container, radio, scrollable, slider, text_input};
 use iced::{Background, Border, Color, Shadow, Theme, Vector};
 
 use crate::ui::theme::{self as t, alpha};
@@ -292,14 +292,6 @@ pub fn zoom_slider(enabled: bool) -> impl Fn(&Theme, slider::Status) -> slider::
                 border_color: Color::TRANSPARENT,
             },
         }
-    }
-}
-
-pub fn progress(_t: &Theme) -> progress_bar::Style {
-    progress_bar::Style {
-        background: Background::Color(t::RAISED),
-        bar: Background::Color(t::SIGNAL),
-        border: border(Color::TRANSPARENT, 0.0, 2.0),
     }
 }
 

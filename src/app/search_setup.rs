@@ -18,7 +18,7 @@
 //!   the way to Preferences, and nothing moves to the processor.
 
 use iced::keyboard::{Key, key::Named};
-use iced::widget::{Space, button, column, container, mouse_area, opaque, progress_bar, row, space, stack, text};
+use iced::widget::{Space, button, column, container, mouse_area, opaque, row, space, stack, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::fursuits;
@@ -27,6 +27,7 @@ use super::kit::{self, tip};
 use super::search::{Dialog, DialogMsg, Download, Msg, Stage, search_models};
 use super::style;
 use super::{App, Message, dialogs};
+use crate::ui::motion::SmoothBar;
 use crate::ml::download::DownloadState;
 use crate::ml::models::{self, ModelId};
 use crate::ml::{CardFailure, Device};
@@ -890,11 +891,7 @@ fn speed_note<'a>(r: speed::Reading, remaining: u64, sentence: bool) -> Element<
 
 /// A thin progress bar.  `width` None fills the row.
 fn bar<'a>(frac: f32, width: Option<f32>) -> Element<'a, Message> {
-    let b = progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0)).girth(4).style(|_| progress_bar::Style {
-        background: Background::Color(t::RAISED),
-        bar: Background::Color(t::FLOW),
-        border: Border { radius: 2.0.into(), ..Border::default() },
-    });
+    let b = SmoothBar::new(frac).colors(t::RAISED, t::FLOW);
     match width {
         Some(w) => b.length(w).into(),
         None => b.into(),
@@ -981,11 +978,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         match p.kind {
             PassKind::NewExports => {
                 // Quiet: no ×, a grey bar.
-                let b = progress_bar(0.0..=1.0, frac).length(48).girth(3).style(|_| progress_bar::Style {
-                    background: Background::Color(t::RAISED),
-                    bar: Background::Color(t::INK3),
-                    border: Border { radius: 2.0.into(), ..Border::default() },
-                });
+                let b = SmoothBar::new(frac).length(48).girth(3.0).colors(t::RAISED, t::INK3);
                 row![words("Adding new photos to search".into()), text(of).size(t::T_SMALL).color(t::INK2), b].spacing(t::S2).align_y(Alignment::Center).into()
             }
             kind => {

@@ -13,13 +13,14 @@ use std::time::Instant;
 
 use chrono::NaiveDateTime;
 use iced::keyboard::{self, Key, key::Named};
-use iced::widget::{Space, button, checkbox, column, container, opaque, progress_bar, radio, row, scrollable, text, text_input};
+use iced::widget::{Space, button, checkbox, column, container, opaque, radio, row, scrollable, text, text_input};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task};
 
 use super::kit;
 use super::style;
 use super::transfer_speed;
 use super::{App, FolderTarget, Message};
+use crate::ui::motion::SmoothBar;
 use crate::bus::{BgEvent, SortResult};
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
@@ -1280,7 +1281,7 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
         }
     }
     if let Some(run) = &ex.running {
-        col = col.push(column![progress_bar(0.0..=1.0, run.fraction()).girth(6).style(style::progress), kit::caption(run.caption())].spacing(t::S1));
+        col = col.push(column![SmoothBar::new(run.fraction()).girth(6.0), kit::caption(run.caption())].spacing(t::S1));
     }
     let go: Element<'a, Message> = if ex.done.is_some() {
         kit::btn("Open library folder", style::primary(), ex.library.as_ref().map(|_| d(Msg::ExOpenLibrary))).into()
@@ -1519,7 +1520,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     .spacing(t::S4);
     if let Some(run) = &ec.running {
         let label = if ec.stopping { "Stopping after the current file\u{2026}".to_string() } else { run.caption() };
-        col = col.push(column![progress_bar(0.0..=1.0, run.fraction()).girth(6).style(style::progress), kit::caption(label)].spacing(t::S1));
+        col = col.push(column![SmoothBar::new(run.fraction()).girth(6.0), kit::caption(label)].spacing(t::S1));
     }
     let go = ec.go();
     let go_label = match go {

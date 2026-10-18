@@ -19,8 +19,8 @@
 //!   were told apart by the search model need its vectors once.  The tab
 //!   and Preferences say what that costs; it runs only when asked.
 
-use iced::widget::{Space, button, column, container, progress_bar, row, scrollable, text};
-use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
+use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::{Alignment, Element, Length, Padding, Task};
 
 use super::fursuits::{self, HeadsStatus, Offer, Step, Why};
 use super::kit::{self, tip};
@@ -28,6 +28,7 @@ use super::people::Kind;
 use super::style;
 use super::subjects::{self as subj};
 use super::{App, Message, View};
+use crate::ui::motion::SmoothBar;
 use crate::ml::Device;
 use crate::search::estimate;
 use crate::ui::icons::{self, Glyph};
@@ -387,11 +388,7 @@ pub(super) fn quiet_line<'a>(glyph: Glyph, title: String, detail: String, tail: 
 }
 
 fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
-    progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
-        .length(w)
-        .girth(4)
-        .style(move |_| progress_bar::Style { background: Background::Color(ground), bar: Background::Color(t::SIGNAL), border: Border { radius: 2.0.into(), ..Border::default() } })
-        .into()
+    SmoothBar::new(frac).length(w).colors(ground, t::SIGNAL).into()
 }
 
 /// Over the groups (or alone): a scan's progress, the processor's question,

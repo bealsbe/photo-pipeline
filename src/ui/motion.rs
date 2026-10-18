@@ -282,3 +282,143 @@ impl<'a, Message: 'a> From<ActivityBar> for Element<'a, Message, iced::Theme, Re
     }
 }
 
+// ── SmoothBar ───────────────────────────────────────────────────────────────
+
+/// A determinate progress bar that glides to each new value instead of
+/// jumping: from where it stands it eases to the value over [`GLIDE_MS`],
+/// never ahead of it (nothing is extrapolated past what is done; a value
+/// that falls, a new run, is taken at once).  It asks for frames only
+/// while catching up, then goes idle.  A drop-in for `progress_bar` on
+/// 0–1: `length`, `girth`, the ground and bar colours, a 2 px radius.
+pub struct SmoothBar {
+    value: f32,
+    length: Length,
+    girth: f32,
+    ground: Color,
+    bar: Color,
+    radius: f32,
+}
+
+struct SmoothState {
+    from: f32,
+    to: f32,
+    changed: Instant,
+}
+
+/// How long the bar takes to reach a new value.
+const GLIDE_MS: f32 = 200.0;
+
+impl SmoothState {
+    fn level(&self, now: Instant) -> f32 {
+        self.from + (self.to - self.from) * paint::out_cubic(progress(self.changed, now, GLIDE_MS))
+    }
+
+    fn settled(&self, now: Instant) -> bool {
+        progress(self.changed, now, GLIDE_MS) >= 1.0
+    }
+}
+
+impl SmoothBar {
+    /// `value` is the share done, 0–1.
+    pub fn new(value: f32) -> Self {
+        Self { value: value.clamp(0.0, 1.0), length: Length::Fill, girth: 4.0, ground: t::RAISED, bar: t::SIGNAL, radius: 2.0 }
+    }
+
+    pub fn length(mut self, length: impl Into<Length>) -> Self {
+        self.length = length.into();
+        self
+    }
+
+    pub fn girth(mut self, girth: f32) -> Self {
+        self.girth = girth;
+        self
+    }
+
+    /// The track and the filled part.
+    pub fn colors(mut self, ground: Color, bar: Color) -> Self {
+        self.ground = ground;
+        self.bar = bar;
+        self
+    }
+}
+
+impl<Message> Widget<Message, iced::Theme, Renderer> for SmoothBar {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<SmoothState>()
+    }
+
+    fn state(&self) -> tree::State {
+        // Starts settled on its value: nothing glides at first sight.
+        tree::State::new(SmoothState { from: self.value, to: self.value, changed: Instant::now() - Duration::from_secs(1) })
+    }
+
+    fn diff(&self, tree: &mut Tree) {
+        let st = tree.state.downcast_mut::<SmoothState>();
+        if (self.value - st.to).abs() < 1e-4 {
+            return;
+        }
+        let now = Instant::now();
+        if self.value < st.to {
+            // Back to less (a new run): no glide backwards.
+            *st = SmoothState { from: self.value, to: self.value, changed: now - Duration::from_secs(1) };
+        } else {
+            *st = SmoothState { from: st.level(now), to: self.value, changed: now };
+        }
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(self.length, Length::Fixed(self.girth))
+    }
+
+    fn layout(&mut self, _tree: &mut Tree, _renderer: &Renderer, limits: &layout::Limits) -> layout::Node {
+        layout::atomic(limits, self.length, Length::Fixed(self.girth))
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        _layout: Layout<'_>,
+        _cursor: Cursor,
+        _renderer: &Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        if let Event::Window(window::Event::RedrawRequested(now)) = event {
+            let st = tree.state.downcast_ref::<SmoothState>();
+            if !st.settled(*now) {
+                shell.request_redraw();
+            }
+        }
+    }
+
+    fn mouse_interaction(&self, _t: &Tree, _l: Layout<'_>, _c: Cursor, _v: &Rectangle, _r: &Renderer) -> mouse::Interaction {
+        mouse::Interaction::None
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        r: &mut Renderer,
+        _theme: &iced::Theme,
+        _style: &iced::advanced::renderer::Style,
+        layout: Layout<'_>,
+        _cursor: Cursor,
+        _viewport: &Rectangle,
+    ) {
+        let st = tree.state.downcast_ref::<SmoothState>();
+        let b = layout.bounds();
+        paint::rounded(r, b, self.radius, self.ground);
+        let w = (b.width * st.level(Instant::now()).clamp(0.0, 1.0)).round();
+        if w > 0.0 {
+            paint::rounded(r, rect(b.x, b.y, w, b.height), self.radius, self.bar);
+        }
+    }
+}
+
+impl<'a, Message: 'a> From<SmoothBar> for Element<'a, Message, iced::Theme, Renderer> {
+    fn from(b: SmoothBar) -> Self {
+        Element::new(b)
+    }
+}
