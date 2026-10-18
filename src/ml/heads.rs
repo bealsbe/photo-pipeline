@@ -44,6 +44,18 @@ pub const PROMPT: &str = "a fursuit head";
 pub const TOKENS: usize = 16;
 /// A head's lowest score (the study's; its sheets were made at this).
 pub const SCORE_MIN: f32 = 0.3;
+/// A large head needs less certainty: a box at least [`BIG_SIDE`] of the
+/// preview's long edge is kept from this score.  Round 2 (2026-10-17): a
+/// quarter of the library's fursuit photos had no head at 0.3, and most
+/// of them showed one large, clear head (white and pale suits, stage
+/// light, heads filling the frame) scoring 0.2–0.3: on 400 such photos
+/// the best box was at least 0.2 in 77 % and at least 0.13 of the long
+/// edge in 90 % (median 0.30); 85–90 % of the boxes in the band were
+/// heads by eye.  The band's small boxes are backs, paws and shadows,
+/// so the size condition keeps most of the gain (63 % of those photos)
+/// for half the extra boxes on photos that already had heads.
+pub const BIG_SCORE_MIN: f32 = 0.2;
+pub const BIG_SIDE: f32 = 0.15;
 /// Boxes overlapping more than this (intersection over union) are one head.
 pub const NMS_OVERLAP: f32 = 0.4;
 /// A head's box must be at least this share of the preview's long edge
@@ -351,15 +363,17 @@ pub fn owl_input(px: &Pixels) -> Vec<f32> {
 /// OWLv2's anchors into heads: `scores` per anchor, `boxes` as `(cx, cy,
 /// w, h)` fractions of the padded square whose side is the preview's long
 /// edge; out come boxes as `[x, y, w, h]` fractions of the `w`×`h`
-/// preview, clamped to it, above [`SCORE_MIN`], one per head, at least
-/// [`MIN_SIDE`] of an edge, best first.
+/// preview, clamped to it, above [`SCORE_MIN`] (or above
+/// [`BIG_SCORE_MIN`] when at least [`BIG_SIDE`] of the long edge), one
+/// per head, at least [`MIN_SIDE`] of an edge, best first.
 pub fn decode(scores: &[f32], boxes: &[f32], w: u32, h: u32) -> Vec<Det> {
     let side = w.max(h).max(1) as f32;
     let (sx, sy) = (side / w.max(1) as f32, side / h.max(1) as f32);
+    let longer = |d: &Det| (d.bbox[2] * w as f32).max(d.bbox[3] * h as f32);
     let mut dets: Vec<Det> = scores
         .iter()
         .zip(boxes.chunks_exact(4))
-        .filter(|(s, _)| **s >= SCORE_MIN)
+        .filter(|(s, _)| **s >= BIG_SCORE_MIN)
         .map(|(&score, b)| {
             let x0 = ((b[0] - b[2] / 2.0) * sx).clamp(0.0, 1.0);
             let y0 = ((b[1] - b[3] / 2.0) * sy).clamp(0.0, 1.0);
@@ -368,12 +382,15 @@ pub fn decode(scores: &[f32], boxes: &[f32], w: u32, h: u32) -> Vec<Det> {
             Det { bbox: [x0, y0, x1 - x0, y1 - y0], score }
         })
         .filter(|d| d.bbox[2] > 0.0 && d.bbox[3] > 0.0)
+        // A box in the band earns its place by size, before NMS, so a
+        // small uncertain box never suppresses a head.
+        .filter(|d| d.score >= SCORE_MIN || longer(d) >= BIG_SIDE * side)
         .collect();
     dets = nms(dets, NMS_OVERLAP);
     // The size gate is in pixels of the long edge, whichever way the box
     // lies (a fraction of the short edge is fewer pixels).
     let floor = MIN_SIDE * side;
-    dets.retain(|d| (d.bbox[2] * w as f32).max(d.bbox[3] * h as f32) >= floor);
+    dets.retain(|d| longer(d) >= floor);
     dets
 }
 
@@ -620,8 +637,8 @@ mod tests {
         // A 1600×1000 preview: the square's side is 1600, so a box's y
         // stretches by 1.6 and x not at all.  Anchor 0 scores high, anchor
         // 1 overlaps it (dropped by NMS), anchor 2 is tiny, anchor 3 is
-        // under the score floor.
-        let scores = [0.9, 0.5, 0.8, 0.2];
+        // under the score floor (large, but under the lower bar too).
+        let scores = [0.9, 0.5, 0.8, 0.19];
         let boxes = [
             0.25, 0.25, 0.2, 0.2, // → x 0.15..0.35, y 0.24..0.56
             0.26, 0.25, 0.2, 0.2, // the same head
@@ -636,8 +653,16 @@ mod tests {
         // A box hanging over the edge is clamped.
         let out = decode(&[0.9], &[0.0, 0.0, 0.4, 0.4], 1000, 1000);
         assert_eq!(out[0].bbox, [0.0, 0.0, 0.2, 0.2]);
-        // Nothing above the floor: nothing.
-        assert!(decode(&[0.29], &[0.5, 0.5, 0.5, 0.5], 1000, 1000).is_empty());
+        // Under the floor: a large box (half the edge) is kept from 0.2, a
+        // small one (a tenth) is not; under 0.2 nothing is.
+        assert_eq!(decode(&[0.29], &[0.5, 0.5, 0.5, 0.5], 1000, 1000).len(), 1);
+        assert_eq!(decode(&[0.2], &[0.5, 0.5, 0.16, 0.16], 1000, 1000).len(), 1, "just over BIG_SIDE of the edge, at the lower bar's score");
+        assert!(decode(&[0.29], &[0.5, 0.5, 0.1, 0.1], 1000, 1000).is_empty());
+        assert!(decode(&[0.19], &[0.5, 0.5, 0.5, 0.5], 1000, 1000).is_empty());
+        // A small uncertain box overlapping a large one never takes its
+        // place in NMS: it is out before NMS runs.
+        let out = decode(&[0.29, 0.25], &[0.5, 0.5, 0.1, 0.1, 0.5, 0.5, 0.5, 0.5], 1000, 1000);
+        assert_eq!((out.len(), out[0].score), (1, 0.25), "{out:?}");
         // The size gate counts pixels of the long edge: on 1600×1000, a box
         // 7 % of the height tall (70 px, 4.4 % of 1600) is too small, one
         // 7 % of the width wide (112 px) is not.
@@ -830,7 +855,8 @@ mod tests {
                 for h in hs {
                     assert_eq!(h.vector.len(), DIM);
                     assert!((h.vector.iter().map(|x| x * x).sum::<f32>() - 1.0).abs() < 1e-3);
-                    assert!(h.score >= SCORE_MIN && h.size >= (MIN_SIDE * f.width.max(f.height) as f32) as u32 - 1);
+                    let long = f.width.max(f.height) as f32;
+                    assert!((h.score >= SCORE_MIN || (h.score >= BIG_SCORE_MIN && h.size as f32 >= BIG_SIDE * long - 1.0)) && h.size >= (MIN_SIDE * long) as u32 - 1);
                 }
                 if let Some(r) = &refs {
                     let name = format!("prev/{}/{}", previews.file_name().unwrap().to_string_lossy(), file.file_name().unwrap().to_string_lossy());

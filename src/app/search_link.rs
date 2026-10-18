@@ -944,6 +944,20 @@ impl Link {
         }
     }
 
+    /// Round 2: look again at the photos where no head was found, with the
+    /// detector's lower bar for large heads (asked for, never automatic).
+    pub fn look_again_for_heads(&self) {
+        match self {
+            Link::Engine(e) => e.look_again_for_heads(),
+            Link::Fake(f) => f.change(|s| {
+                let total = s.status.heads.no_head;
+                if total > 0 && !s.status.heads.scanning() {
+                    s.status.heads.step = fursuits::Step::Scanning { why: fursuits::Why::CatchUp, done: 0, total };
+                }
+            }),
+        }
+    }
+
     /// What draws crops: on a worker, never the UI thread.
     pub fn cropper(&self) -> Cropper {
         match self {

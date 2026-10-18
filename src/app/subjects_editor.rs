@@ -1888,7 +1888,7 @@ mod tests {
     }
 
     fn found(groups: Vec<Group>) -> Found {
-        Found { generation: 1, groups, faces_found: 0, undoable: None, seen_together: Default::default(), chosen_covers: Default::default() }
+        Found { generation: 1, groups, faces_found: 0, undoable: None, seen_together: Default::default(), chosen_covers: Default::default(), loose: Default::default() }
     }
 
     fn pair(a: u64, b: u64, distance: f32) -> GroupPair {

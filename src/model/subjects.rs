@@ -1284,8 +1284,13 @@ pub enum Linkage {
     /// stops a centroid drifting away from what it started as.
     Centroid { merge: bool, seed_cap: Option<f32> },
     /// A row joins the cluster whose members lie on average within the
-    /// cut of it, the closest such; no merge pass.  Fursuits' grouping.
-    Average,
+    /// cut of it, the closest such.  Fursuits' grouping.  With `join`,
+    /// clusters whose members lie within that of each other on average
+    /// are joined afterwards, nearest pair first and measured again as
+    /// they grow ([`join_average`]): the greedy pass leaves clusters of
+    /// one suit side by side when they grow in the wrong order (155 of
+    /// the user's 160 merges were of groups already under the cut).
+    Average { join: Option<f32> },
     /// As [`Linkage::Average`], but every member must lie within the cut.
     #[allow(dead_code)] // Scored in the phase 4 tune (`heads.rs` tests); no kind uses it.
     Complete,
@@ -1383,8 +1388,10 @@ pub fn cluster_apart(rows: &Rows<'_>, order: &[usize], cutoff: f32, linkage: Lin
             owner.entry(*s).or_default().push(k);
         }
     }
-    if let Linkage::Centroid { merge: true, .. } = linkage {
-        merge_close(&mut clusters, rows, cutoff, apart);
+    match linkage {
+        Linkage::Centroid { merge: true, .. } => merge_close(&mut clusters, rows, cutoff, apart),
+        Linkage::Average { join: Some(join) } => join_average(&mut clusters, sums, rows.dim(), join, apart),
+        _ => {}
     }
     clusters.sort_by(|a, b| b.members.len().cmp(&a.members.len()).then_with(|| a.members.first().cmp(&b.members.first())));
     clusters
@@ -1417,7 +1424,7 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
                 None => Some(k),
             }
         }
-        Linkage::Average | Linkage::Complete => {
+        Linkage::Average { .. } | Linkage::Complete => {
             // For unit vectors the mean distance to the members is
             // 1 − v·(sum/n) ≥ 1 − v·centroid (the centroid is the unit
             // sum, and ‖sum‖/n ≤ 1), and the largest distance is at least
@@ -1433,7 +1440,7 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
                 let c = &clusters[k];
                 let ds = c.members.iter().filter(|&&m| m < rows.len()).map(|&m| 1.0 - rows.dot(m, v));
                 let score = match linkage {
-                    Linkage::Average => {
+                    Linkage::Average { .. } => {
                         let (n, sum) = ds.fold((0usize, 0f32), |(n, s), d| (n + 1, s + d));
                         if n == 0 { continue } else { sum / n as f32 }
                     }
@@ -1445,6 +1452,118 @@ fn join(clusters: &[Cluster], rows: &Rows<'_>, v: &[f32], cutoff: f32, linkage: 
             }
             best.map(|(k, _)| k)
         }
+    }
+}
+
+/// The joining step of [`Linkage::Average`]: two clusters whose members
+/// lie within `cut` of each other on average are one cluster.  For unit
+/// rows that mean is exact from the sums alone (`1 − sum_a·sum_b /
+/// (n_a·n_b)`), so the pass costs clusters², not heads².  Nearest pair
+/// first, and a pair is measured again once either side has grown (a
+/// heap of candidates with each side's version; a stale one is scored
+/// again before it counts), so a chain of small steps can't join what
+/// the grown clusters are not near on average.  A pair whose unit
+/// centroids lie beyond `cut` can't qualify (the mean of two sums is at
+/// least the distance of their directions), so that is the shortlist.
+/// `sums`: each cluster's raw sum, as [`cluster_with`] kept them.  Never
+/// two clusters holding rows of one dissolved set (`apart`).
+fn join_average(clusters: &mut Vec<Cluster>, mut sums: Vec<Vec<f32>>, dim: usize, cut: f32, apart: &Apart) {
+    use rayon::prelude::*;
+    use std::cmp::Ordering;
+    use std::collections::BinaryHeap;
+
+    #[derive(PartialEq)]
+    struct Pair(f32, usize, usize, u32, u32);
+    impl Eq for Pair {}
+    impl PartialOrd for Pair {
+        fn partial_cmp(&self, o: &Pair) -> Option<Ordering> {
+            Some(self.cmp(o))
+        }
+    }
+    impl Ord for Pair {
+        // The heap pops the nearest pair first.
+        fn cmp(&self, o: &Pair) -> Ordering {
+            o.0.total_cmp(&self.0).then(o.1.cmp(&self.1)).then(o.2.cmp(&self.2))
+        }
+    }
+
+    let n = clusters.len();
+    if n < 2 || dim == 0 {
+        return;
+    }
+    let mut counts: Vec<usize> = clusters.iter().map(|c| c.members.len()).collect();
+    // Each cluster's dissolved sets (all empty without any).
+    let mut tags: Vec<HashSet<u32>> = clusters.iter().map(|c| apart.tags(&c.members)).collect();
+    let mean_distance = |sums: &[Vec<f32>], counts: &[usize], a: usize, b: usize| 1.0 - dot(&sums[a], &sums[b]) / (counts[a] as f32 * counts[b] as f32);
+    // Candidates: pairs within the centroid bound, measured exactly.
+    let cents: Vec<&[f32]> = clusters.iter().map(|c| c.centroid.as_slice()).collect();
+    let mut heap: BinaryHeap<Pair> = (0..n)
+        .into_par_iter()
+        .flat_map_iter(|a| {
+            let (cents, sums, counts) = (&cents, &sums, &counts);
+            (a + 1..n).filter_map(move |b| {
+                if 1.0 - dot(cents[a], cents[b]) > cut {
+                    return None;
+                }
+                let d = mean_distance(sums, counts, a, b);
+                (d <= cut).then_some(Pair(d, a, b, 0, 0))
+            })
+        })
+        .collect();
+    let mut alive = vec![true; n];
+    let mut version = vec![0u32; n];
+    let mut joined = false;
+    while let Some(Pair(_, a, b, va, vb)) = heap.pop() {
+        if !alive[a] || !alive[b] {
+            continue;
+        }
+        if version[a] != va || version[b] != vb {
+            let d = mean_distance(&sums, &counts, a, b);
+            if d <= cut {
+                heap.push(Pair(d, a, b, version[a], version[b]));
+            }
+            continue;
+        }
+        if !tags[a].is_disjoint(&tags[b]) {
+            continue;
+        }
+        // The larger keeps its place and order; the smaller joins it.
+        let (keep, gone) = if counts[a] >= counts[b] { (a, b) } else { (b, a) };
+        if !tags[gone].is_empty() {
+            let moved = std::mem::take(&mut tags[gone]);
+            tags[keep].extend(moved);
+        }
+        let members = std::mem::take(&mut clusters[gone].members);
+        clusters[keep].members.extend(members);
+        let gone_sum = std::mem::take(&mut sums[gone]);
+        for (s, x) in sums[keep].iter_mut().zip(&gone_sum) {
+            *s += x;
+        }
+        counts[keep] += counts[gone];
+        counts[gone] = 0;
+        alive[gone] = false;
+        version[keep] += 1;
+        joined = true;
+        let cent = unit(sums[keep].clone());
+        for c in (0..n).filter(|&c| c != keep && alive[c]) {
+            if 1.0 - dot(&cent, &clusters[c].centroid) > cut {
+                continue;
+            }
+            let d = mean_distance(&sums, &counts, keep, c);
+            if d <= cut {
+                heap.push(Pair(d, keep.min(c), keep.max(c), version[keep.min(c)], version[keep.max(c)]));
+            }
+        }
+        clusters[keep].centroid = cent;
+    }
+    if joined {
+        let mut out = Vec::with_capacity(alive.iter().filter(|&&a| a).count());
+        for (i, c) in clusters.drain(..).enumerate() {
+            if alive[i] {
+                out.push(c);
+            }
+        }
+        *clusters = out;
     }
 }
 
@@ -2194,8 +2313,58 @@ mod tests {
         // The same rows under the fursuits' linkage: the in-between face
         // still goes with the first bunch, whose members it is nearest on
         // average; no merge pass runs.
-        let suits = cluster_with(&rows, &order, 0.5, Linkage::Average);
+        let suits = cluster_with(&rows, &order, 0.5, Linkage::Average { join: None });
         assert_eq!(suits.iter().map(|c| c.members.clone()).collect::<Vec<_>>(), members);
+    }
+
+    /// The joining step of average linkage: two clusters of one suit that
+    /// the greedy pass left side by side (the order made the second
+    /// start on its own, and later rows chose by average) are joined
+    /// when their members lie within the join cut on average; a cluster
+    /// that is near only in part (a chain) stays apart, because the
+    /// pair is measured again once a side has grown.
+    #[test]
+    fn average_linkage_joins_clusters_left_side_by_side_but_not_chains() {
+        let dim = 2;
+        let unit = |a: f32| [a.cos(), a.sin()];
+        // Angles on the circle; cosine distance 1 − cos(angle between).
+        // Bunch P around 0, bunch Q around 0.42 (its seed arrives second
+        // and starts its own cluster at d 0.087 > the cut 0.06), bunch
+        // R around 0.9: far from both.
+        let angles = [0.0f32, 0.42, 0.02, 0.40, 0.01, 0.44, 0.9, 0.92];
+        let mut data = Vec::new();
+        for a in angles {
+            data.extend_from_slice(&unit(a));
+        }
+        let rows = Rows::F32 { dim, data: &data };
+        let order: Vec<usize> = (0..angles.len()).collect();
+        let plain = cluster_with(&rows, &order, 0.06, Linkage::Average { join: None });
+        assert_eq!(plain.len(), 3, "{plain:?}");
+        // P and Q lie 0.42 apart on average: d ≈ 0.087, over the cut.
+        let same = cluster_with(&rows, &order, 0.06, Linkage::Average { join: Some(0.06) });
+        assert_eq!(same.len(), 3, "a join cut equal to the group cut joins nothing here: {same:?}");
+        // At a join cut of 0.1, P and Q are one cluster; R stays apart (d ≈ 0.33).
+        let joined = cluster_with(&rows, &order, 0.06, Linkage::Average { join: Some(0.1) });
+        assert_eq!(joined.len(), 2, "{joined:?}");
+        let big = joined.iter().find(|c| c.members.len() == 6).expect("P and Q joined");
+        assert_eq!({ let mut m = big.members.clone(); m.sort(); m }, vec![0, 1, 2, 3, 4, 5]);
+        assert!(big.members.windows(2).all(|w| w[0] != w[1]));
+        let c = &big.centroid;
+        assert!((c[0] * c[0] + c[1] * c[1] - 1.0).abs() < 1e-4, "the centroid is unit length");
+        // A chain: three bunches each 0.3 apart in angle (d ≈ 0.045 between
+        // neighbours, 0.17 between the ends).  A join cut of 0.05 takes
+        // one step; once joined, the pair's mean distance to the third
+        // bunch (≈ 0.11) is measured again and refused.
+        let chain = [0.0f32, 0.01, 0.3, 0.31, 0.6, 0.61];
+        let mut data = Vec::new();
+        for a in chain {
+            data.extend_from_slice(&unit(a));
+        }
+        let rows = Rows::F32 { dim, data: &data };
+        let order: Vec<usize> = (0..6).collect();
+        let out = cluster_with(&rows, &order, 0.02, Linkage::Average { join: Some(0.05) });
+        assert_eq!(out.len(), 2, "one join, not a chain: {out:?}");
+        assert_eq!(out[0].members.len(), 4);
     }
 
     #[test]
@@ -2299,7 +2468,7 @@ mod tests {
         let (data, dim) = people_rows(8, 3);
         let rows = Rows::F32 { dim, data: &data };
         let order: Vec<usize> = (0..rows.len()).collect();
-        for linkage in [Linkage::PEOPLE, Linkage::Average] {
+        for linkage in [Linkage::PEOPLE, Linkage::Average { join: None }, Linkage::Average { join: Some(0.47) }] {
             let plain = cluster_with(&rows, &order, 0.5, linkage);
             assert_eq!(cluster_apart(&rows, &order, 0.5, linkage, &Apart::default()), plain, "no set: unchanged");
             // Person 0's eight faces dissolved.

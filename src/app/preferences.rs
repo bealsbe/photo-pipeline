@@ -112,6 +112,9 @@ pub enum Control {
     JudgeDownload,
     /// Give the heads found before v2 the search model's vectors.
     UpdateHeads,
+    /// Round 2: look again at the photos where no head was found, with
+    /// the detector's lower bar for large heads.
+    LookAgainHeads,
     /// Storage ▸ a judge's row: open its folder, delete it.
     JudgeOpen(JudgeChoice),
     JudgeDelete(JudgeChoice),
@@ -170,6 +173,7 @@ impl Control {
             Control::Judge(JudgeChoice::Qwen3VlReranker) => "pref-judge-qwen",
             Control::JudgeDownload => "pref-judge-download",
             Control::UpdateHeads => "pref-update-heads",
+            Control::LookAgainHeads => "pref-look-again-heads",
             Control::JudgeOpen(JudgeChoice::Qwen3VlReranker) => "pref-judge-open-qwen",
             Control::JudgeOpen(_) => "pref-judge-open-gemma4",
             Control::JudgeDelete(JudgeChoice::Qwen3VlReranker) => "pref-judge-delete-qwen",
@@ -759,6 +763,15 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             super::subjects_fursuits::update(app, super::subjects_fursuits::Msg::UpdateHeads)
         }
+        Control::LookAgainHeads => {
+            if !heads_to_look_again(app) {
+                return Task::none();
+            }
+            let n = app.search.status.heads.no_head;
+            let device = app.search.status.device.chosen;
+            app.search.link.look_again_for_heads();
+            app.show_status(format!("Looking again at {} where no fursuit head was found: {}.", util::plural(n as u64, "photo"), super::fursuits::describe_cost(n, device)), 6000)
+        }
         Control::JudgeOpen(c) => {
             if let Some(d) = judge_dir(c).filter(|_| judge_exists(&app.prefs, c)) {
                 dialogs::open_folder(&d);
@@ -957,6 +970,14 @@ fn heads_to_update(app: &App) -> bool {
     h.vectors_missing > 0 && matches!(h.step, super::fursuits::Step::Idle)
 }
 
+/// Photos looked at where no head was found, which *Look again* reads
+/// again with the lower bar for large heads (round 2); the scan needs
+/// the step on, the models, and a quiet step.
+fn heads_to_look_again(app: &App) -> bool {
+    let h = &app.search.status.heads;
+    app.settings.find_heads && h.models_installed && h.no_head > 0 && matches!(h.step, super::fursuits::Step::Idle) && app.search.status.indexed_shots > 0
+}
+
 /// A judge's model folder.
 fn judge_dir(c: JudgeChoice) -> Option<PathBuf> {
     c.model().and_then(crate::ml::models::model_dir)
@@ -1047,6 +1068,9 @@ fn controls(app: &App) -> Vec<Control> {
     }
     if heads_to_update(app) {
         v.push(Control::UpdateHeads);
+    }
+    if heads_to_look_again(app) {
+        v.push(Control::LookAgainHeads);
     }
     v.extend(crate::search::heads::Grouping::ALL.iter().map(|&g| Control::Grouping(g)));
     v.extend(JudgeChoice::ALL.iter().map(|&c| Control::Judge(c)));
@@ -1824,6 +1848,20 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
         rows.push(setting(
             "Photos not looked at yet",
             about(format!("{} Looking at them takes {}.", not_looked_at(n, h.skipped), fursuits::describe_cost(n, device))),
+            go,
+        ));
+    }
+    if heads_to_look_again(app) {
+        let n = h.no_head;
+        let go = focusable(p, Control::LookAgainHeads, kit::btn("Look again…", style::secondary(), Some(m(Msg::Press(Control::LookAgainHeads)))));
+        rows.push(setting(
+            "Photos where no head was found",
+            about(format!(
+                "{} with fursuits {} looked at and nothing was found. Looking again accepts a large head the finder was less sure of (most of these show one filling the frame); heads already found stay as they are. It takes {}.",
+                util::plural(n as u64, "photo"),
+                if n == 1 { "was" } else { "were" },
+                fursuits::describe_cost(n, device)
+            )),
             go,
         ));
     }

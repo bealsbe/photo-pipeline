@@ -3313,6 +3313,96 @@ review's and *Find more*'s per-head cut-offs, and the judge's sure-yes.
   to name (and smaller groups) Tighter 18 (186), Balanced 22 (144),
   Looser 24 (132).
 
+## As built — fursuit heads, round 2 (2026-10-17): the feedback read back
+
+The user's corrections (2 358 fursuit entries of `decisions.jsonl`, and
+`subjects.json`: 203 subjects, 20 named with 6 376 confirmed members and
+12 282 rejected, 1 098 removed boxes, 44 not-the-same pairs, 4 drawn
+boxes) were read against the live cache (54 136 heads in 46 612 photos
+over 49 days, whitened).  Scripts in the research scratch; nothing of the
+library in the repository.  Three findings, three changes:
+
+1. **The cut split one suit 155 times in 160 merges: both groups were
+   already under the group cut.**  Average linkage is greedy (a head joins
+   the best cluster so far, in clarity order), so two clusters of one
+   suit grow side by side when the order puts the second seed first.
+   141 of the merges were same-day; 64 were cluster-to-cluster (the
+   rest involved a named subject, which only a suggestion can join: nothing
+   is named for you).  Replicating the grouping over the library with
+   nothing confirmed: a subject's members fell into 4.9 clusters on
+   average (612 merges needed over 155 subjects of 2+ members); 64 % of
+   a suit's same-hour head pairs shared a cluster, 41 % same-day, 32 % on
+   different days.  **The joining step** (`Linkage::Average { join }`,
+   `subjects::join_average`): clusters whose members lie within the join
+   cut of each other on average are one cluster, nearest pair first and
+   measured again as they grow (a heap of candidate pairs with each
+   side's version; the unit-centroid distance is an exact lower bound,
+   so the shortlist costs clusters², about a second at 2 300 clusters).
+   Swept on the replica, chosen on even days, held on odd:
+
+   | join cut (group 0.72) | merges needed, even / odd | same-day pairs joined, odd | other-day, odd | rejected heads joined with their suit, odd (of 11 222) | largest cluster |
+   |---|---|---|---|---|---|
+   | none | 165 / 469 | 35 % | 28 % | 611 | 393 |
+   | 0.66 | 146 / 434 | 45 % | 46 % | 611 | 1 246 |
+   | **0.69** | 138 / 413 | 47 % | 54 % | 614 | 1 246 |
+   | 0.72 (the group cut) | 121 / 379 | 47 % | 64 % | 677 | 1 246 |
+
+   Past 0.69 the joins start taking in heads the user had rejected, so
+   the join cut sits 0.03 under the group cut (`heads::JOIN_MARGIN`;
+   raw 0.005, the same share, unmeasured: this library was whitened).
+   The 115 joins up to 0.69 were, by the user's subjects, all of one suit
+   (Nyka 383+157, Krogen 377+186, Blazi 205+258, …); the one cluster
+   that mixed two named suits was mixed in the greedy pass already.
+   Looser (0.75, no join) was worse on both counts (634 merges needed,
+   1 211 rejected heads joined), and a same-press track prior gained
+   little (600) for more mixing (1 061): neither is used.  A linear
+   metric learned from the pair labels gained on odd days (AUC 0.80 →
+   0.90) but the suits are the same on both sides; held out by subject
+   it is worse than plain whitening (0.87 → 0.85): it learns this
+   library's suits, not a better distance, so it is not built.
+2. **The removed heads are blobs.**  Median 114 px and sharpness 0.021
+   against 540 px and 0.088 for the kept named heads; the detector's
+   score says nothing (AUC 0.36); 961 of the 1 098 were one event day,
+   about 500 of them one out-of-focus background suit.  **The blob
+   floor** (`HeadDetection::is_blob`: under 180 px *and* sharpness under
+   0.04; `KindStep::below_floor`, applied by `step::Exclusion` to the
+   grouping, suggestions, group pages and merge covers, and by the
+   viewer's labels) hides 94 % of that day's removals, 18 % of the other
+   days' (dark stage-lit heads of real suits, which no size or blur rule
+   separates from kept heads), 1 of 1 200 named members, 5.6 % of the
+   library's heads.  Chosen on the removal day against kept heads of
+   every day.  A confirmed member is never hidden; a drawn box is never
+   a blob; the cache keeps every detection, so the floor can move.
+3. **The detector missed a quarter of the photos' heads.**  11 673 of
+   46 612 fursuit photos had no head; a random 48 showed about 38 large,
+   clear heads (white and pale suits, stage light, heads filling the
+   frame).  OWLv2 (the same weights, PyTorch fp16 on the card) over 400
+   of them and 400 with heads: the best box scored 0.2–0.3 on 77 % of
+   the empty photos, at least 0.13 of the long edge on 90 % (median
+   0.30); by eye 46 of 48 boxes at 0.28–0.29 were heads, about 40 of 48
+   at 0.18–0.25, a third under 0.13.  On photos with heads a plain 0.2
+   floor added 378 boxes over 400 photos (three quarters real second
+   heads; the rest backs, paws, shadows, a tail).  **A large head needs
+   less certainty** (`ml::heads::BIG_SCORE_MIN` 0.2 for boxes at least
+   `BIG_SIDE` 0.15 of the long edge, applied before NMS): 63 % of the
+   empty photos gain their head for half the extra boxes on the others.
+   Old detections stay valid (a subset of the new rule's, so no rescan
+   is forced: `DETECTOR_VERSION` unchanged); **Look again** (Preferences
+   ▸ Fursuits; `Engine::look_again_for_heads`, `HeadStore::add_more`)
+   reads the photos where nothing was found and adds heads that overlap
+   none kept, so every name and answer still points at its head.  Asked
+   for, never automatic, card rules as any scan; about 0.12 s a photo on
+   the card (11 673 photos: about 25 minutes, 4 GB read).  Other
+   queries ("a fursuit", "a stuffed animal") score every suit high and
+   tell nothing; negative queries didn't help.
+
+Sharpness here means the whole head crop: the measure the step already
+caches (mean |Laplacian| at 64 px) told the removed blobs from kept heads
+best (AUC 0.970; with size 0.985); native-resolution measures were worse
+because they are not size-normalised.  On upgrade the user's groups are
+made again at the next regroup (the joining step and the floor), names
+and answers kept; *Look again* waits in Preferences until asked.
+
 ## As built — not fursuit heads (or faces) for whole groups, and the labels' quick removal
 
 The user (2026-10-10): "I should be able to label an entire group as

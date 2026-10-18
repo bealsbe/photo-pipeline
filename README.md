@@ -811,7 +811,26 @@ never shown, merged, suggested or completed together with people or pets.
   first index (the download dialog's *Find fursuit heads*, ticked unless
   the processor is chosen) and on each export's new fursuit photos, with
   its progress on the tab and in the status bar (× stops it; what was
-  found is kept).
+  found is kept).  A large head (a sixth of the frame or more) is kept
+  from a lower certainty than a small one, since the heads the finder
+  was unsure of were mostly the big, clear ones under stage light.
+- **Blobs.**  A head both small (under 180 px of the preview) and
+  blurred is kept in the cache but shown nowhere: not in the groups,
+  the suggestions, *Find more* or the viewer's labels, unless you
+  confirmed it into a fursuit.  (Of the 1 098 heads one library's owner
+  took out, 950 were such blobs: a background suit out of focus in
+  hundreds of frames.)  Joining a group makes a head yours, so the floor
+  never hides a head you kept.
+- **Groups of one suit left side by side are joined.**  Heads join
+  groups one at a time, so two groups of one suit can grow next to each
+  other; after a regroup, groups whose heads lie within the joining cut
+  of each other on average (just under the group cut) are one group.
+  Nothing is named by it.
+- **Look again** (Preferences ▸ Fursuits, when photos with fursuits were
+  looked at and nothing was found): reads those photos again with the
+  lower bar for large heads and adds the heads it finds; heads already
+  found, and so your names and answers, stay as they are.  It runs only
+  when asked, on the device chosen, with its cost shown; × stops it.
 - **On the processor it asks first, every time.**  A head scan there is
   long (hours for a library, over an hour an event day), so whenever one
   would start (after the first index, after an export, when carrying on)
@@ -835,7 +854,8 @@ never shown, merged, suggested or completed together with people or pets.
   *Preferences*; nothing moves to the processor.
 - **Preferences ▸ Fursuits:** *Find fursuit heads* (on), what it costs on
   the device chosen, the photos not looked at yet with *Find their
-  heads…*, heads to update with *Update them*, *Grouping* (*Tighter*: more, smaller groups, rarely mixing suits; *Balanced*, the default: fewer split-up suits; *Looser*: the fewest small groups, check them for strays; a change groups the fursuits again, keeping names and answers), *Close-call judge* (a
+  heads…*, heads to update with *Update them*, photos where no head was
+  found with *Look again…*, *Grouping* (*Tighter*: more, smaller groups, rarely mixing suits; *Balanced*, the default: fewer split-up suits; *Looser*: the fewest small groups, check them for strays; a change groups the fursuits again, keeping names and answers), *Close-call judge* (a
   choice list: *Off*, the default; *Qwen3-VL-Reranker*, about 10 GB and
   about 1 second a close call; or *Gemma 4*, about 18 GB and about
   2 seconds; each on the graphics card only, one loaded at a time;
