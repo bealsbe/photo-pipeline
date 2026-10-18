@@ -67,11 +67,10 @@ use crate::model::hints::{self, HintFilter, Hints};
 use crate::model::sidecar;
 use crate::scan::{self, ScanHandle};
 use crate::settings::Settings;
-use crate::ui::grid::{GridEvent, MAX_SIZE, MIN_SIZE, Section};
+use crate::ui::grid::{GridEvent, MAX_SIZE, MIN_SIZE, Section, ZOOM_STEP};
 use crate::util;
 use commands::Cmd;
 
-const ZOOM_STEP: f32 = 20.0;
 const MAIN_CACHE_BYTES: usize = 192 * 1024 * 1024;
 const CALENDAR_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
@@ -2094,9 +2093,8 @@ impl App {
                 }
                 Task::none()
             }
-            GridEvent::ZoomStep(step) => {
-                let new = ((self.thumb_size + step as f32 * ZOOM_STEP) / ZOOM_STEP).floor() * ZOOM_STEP;
-                self.thumb_size = new.clamp(MIN_SIZE, MAX_SIZE);
+            GridEvent::ZoomStep { step, width } => {
+                self.thumb_size = crate::ui::grid::zoom_step(width, self.thumb_size, step);
                 Task::none()
             }
             GridEvent::PinchTo(size) => {

@@ -897,7 +897,7 @@ fn show_fursuits(app: &mut App, on: bool) -> Task<Message> {
 
 fn on_grid(app: &mut App, ev: GridEvent) -> Task<Message> {
     app.search.completions = false;
-    match app.search.pane.on_grid(ev, &app.workers, super::ZOOM_STEP) {
+    match app.search.pane.on_grid(ev, &app.workers) {
         Ask::Nothing => Task::none(),
         Ask::Viewer(id) => open_viewer(app, id),
         Ask::Burst(id) => toggle_burst(app, id),

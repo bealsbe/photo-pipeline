@@ -117,7 +117,9 @@ pub enum GridEvent {
     SectionLink(NaiveDate),
     /// The link in the end note (`Footer::note`).
     FooterLink,
-    ZoomStep(i32),
+    /// Ctrl+scroll: one step in or out, with the grid's width (the step
+    /// that fills it is chosen with [`zoom_step`]).
+    ZoomStep { step: i32, width: f32 },
     PinchTo(f32),
     /// Thumbnails wanted: `visible` on screen now, `nearby` one screen either
     /// side.  `settle` means scrolling stopped — reprioritise the queue.
@@ -353,9 +355,53 @@ fn tab_rect(mount: Rectangle, run: RunMark) -> Rectangle {
     rect(mount.x + PAD, mount.y - TAB_RISE, w.min(mount.width - PAD), TAB_H)
 }
 
-fn cols_for(width: f32, ts: f32) -> usize {
+/// The zoom's step: the sizes the slider and Ctrl+scroll land on.
+pub const ZOOM_STEP: f32 = 20.0;
+
+/// The room a row has for its cells: between the left margin and a right
+/// margin to match (the last cell's trailing gutter counts as the right
+/// margin).
+fn row_room(width: f32) -> f32 {
+    width - 2.0 * LEFT + GAP
+}
+
+/// How many columns a chosen size `ts` gets across `width`: the count
+/// nearest to what `ts` would fill, at least one.
+pub fn cols_for(width: f32, ts: f32) -> usize {
     let cw = cell_size(ts, 0.0).width;
-    ((width - LEFT).max(cw) / cw).floor().max(1.0) as usize
+    (row_room(width) / cw).round().max(1.0) as usize
+}
+
+/// The columns and the tile size that fill `width` for a chosen size:
+/// rows always span the width, so there is no strip of empty ground
+/// beside the last column, at any size.  The slider keeps its value; the
+/// tile shown is a little bigger or smaller so its columns fit exactly.
+pub fn fit(width: f32, ts: f32) -> (usize, f32) {
+    let cols = cols_for(width, ts);
+    // Whole pixels, so mounts sit on the pixel grid; the odd pixels left
+    // over (fewer than there are columns) go to the right margin.
+    let cw = (row_room(width) / cols as f32).floor();
+    (cols, (cw - PAD * 2.0 - GAP).max(32.0))
+}
+
+/// The next size on the zoom's lattice from `ts`, `step` steps away (±1),
+/// clamped to the range: a step that would change nothing on screen (the
+/// same column count fills the width the same way) is passed over, so
+/// every step shows, and the large end snaps to column counts.
+pub fn zoom_step(width: f32, ts: f32, step: i32) -> f32 {
+    let lattice = |v: f32| ((v / ZOOM_STEP).floor() * ZOOM_STEP).clamp(MIN_SIZE, MAX_SIZE);
+    let was = cols_for(width, ts);
+    let mut v = lattice(ts);
+    loop {
+        let next = lattice(v + step as f32 * ZOOM_STEP);
+        if next == v {
+            return v;
+        }
+        v = next;
+        if cols_for(width, v) != was {
+            return v;
+        }
+    }
 }
 
 fn grid_height(n: usize, cols: usize, row_h: f32) -> f32 {
@@ -381,7 +427,7 @@ struct Metrics {
 impl Metrics {
     fn new(sections: &[Section], width: f32, ts: f32, label_h: f32, openness: &dyn Fn(NaiveDate) -> f32) -> Metrics {
         let content_w = (width - SCROLLBAR_W).max(1.0);
-        let cols = cols_for(content_w, ts);
+        let (cols, ts) = fit(content_w, ts);
         let cell = cell_size(ts, label_h);
         let mut y = TOP_MARGIN;
         let mut tops = Vec::with_capacity(sections.len());
@@ -945,7 +991,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                 };
                 if mods.control() {
                     if dy != 0.0 {
-                        shell.publish((self.on)(GridEvent::ZoomStep(if dy > 0.0 { 1 } else { -1 })));
+                        shell.publish((self.on)(GridEvent::ZoomStep { step: if dy > 0.0 { 1 } else { -1 }, width: (bounds.width - SCROLLBAR_W).max(1.0) }));
                     }
                 } else if lines {
                     let base = st.target_scroll();
@@ -2584,6 +2630,79 @@ mod tests {
     }
 
     #[test]
+    fn rows_fill_the_width_at_every_size() {
+        let ids: Vec<RecordId> = (0..40).collect();
+        let sections = day(&ids, ids.len());
+        // Window content widths: a narrow window, about 1000 px, the
+        // default 1200 px window less the rail, a 1600 px one, a wide one.
+        for width in [600.0, 952.0, 1152.0, 1552.0, 2500.0] {
+            let content_w = width - SCROLLBAR_W;
+            let mut size = MIN_SIZE;
+            while size <= MAX_SIZE {
+                let m = Metrics::new(&sections, width, size, LABEL_H, &|_| 1.0);
+                // The last column's mount ends a left margin short of the
+                // right edge (give or take the pixels that don't divide):
+                // no strip of empty ground beside it.
+                let last = mount_rect(m.cell_rect(0, m.cols - 1));
+                let right = last.x + last.width;
+                let short = (content_w - LEFT) - right;
+                assert!((0.0..m.cols as f32).contains(&short), "width {width} size {size}: cols {} right edge {right} of {content_w}", m.cols);
+                assert_eq!(m.cell.width.fract(), 0.0, "whole pixels");
+                assert!(m.cols >= 1 && m.ts >= 32.0, "width {width} size {size}");
+                // The tile shown stays near the chosen size: within half a
+                // column's worth either way.
+                let cw = cell_size(size, 0.0).width;
+                assert!((m.ts - size).abs() <= cw / (2.0 * m.cols as f32) + 1.0, "width {width} size {size}: shown {}", m.ts);
+                size += ZOOM_STEP;
+            }
+        }
+        // The largest size: two columns at about 1000 px, three on the
+        // default window, one on a narrow one; never a lone tile with a
+        // gap beside it.
+        assert_eq!(Metrics::new(&sections, 952.0, MAX_SIZE, LABEL_H, &|_| 1.0).cols, 2);
+        assert_eq!(Metrics::new(&sections, 1152.0, MAX_SIZE, LABEL_H, &|_| 1.0).cols, 2);
+        assert_eq!(Metrics::new(&sections, 1552.0, MAX_SIZE, LABEL_H, &|_| 1.0).cols, 3);
+        assert_eq!(Metrics::new(&sections, 600.0, MAX_SIZE, LABEL_H, &|_| 1.0).cols, 1);
+    }
+
+    #[test]
+    fn every_zoom_step_shows_and_the_large_end_snaps_to_columns() {
+        for width in [600.0, 952.0, 1152.0, 1552.0, 2500.0] {
+            let w = width - SCROLLBAR_W;
+            // Stepping out from the smallest to the largest: each step
+            // changes the column count, and the walk ends at MAX_SIZE.
+            let mut size = MIN_SIZE;
+            let mut steps = 0;
+            loop {
+                let next = zoom_step(w, size, 1);
+                if next == size {
+                    break;
+                }
+                assert!(next > size && next <= MAX_SIZE, "width {width}: {size} → {next}");
+                // A step shows a new column count, or is the snap to the end.
+                assert!(cols_for(w, next) != cols_for(w, size) || next == MAX_SIZE, "width {width}: a dead step at {size} → {next}");
+                size = next;
+                steps += 1;
+            }
+            assert_eq!(size, MAX_SIZE, "width {width}");
+            assert!(steps >= 3, "width {width}: only {steps} steps");
+            // And back in, the same way, down to MIN_SIZE.
+            loop {
+                let next = zoom_step(w, size, -1);
+                if next == size {
+                    break;
+                }
+                assert!(next < size && next >= MIN_SIZE);
+                assert!(cols_for(w, next) != cols_for(w, size) || next == MIN_SIZE, "width {width}: a dead step at {size} → {next}");
+                size = next;
+            }
+            assert_eq!(size, MIN_SIZE, "width {width}");
+        }
+        // Values off the lattice (an old setting) land on it.
+        assert_eq!(zoom_step(1140.0, 250.0, 1) % ZOOM_STEP, 0.0);
+    }
+
+    #[test]
     fn strips_never_leave_the_columns() {
         // Singles, a burst wrapping rows, 2-frame bursts side by side, a
         // very long burst, a stack: at many widths, sizes, names on and off.
@@ -2728,7 +2847,9 @@ mod tests {
             links: &[],
         };
         let open = |_: NaiveDate| 1.0;
-        let width = 1000.0;
+        // Four columns at 180 px (rows fill the width: 900 px is nearest
+        // to four), so the burst folds over the rows the checks expect.
+        let width = 900.0;
         let m0 = Metrics::new(&before, width, 180.0, LABEL_H, &open);
         let m1 = Metrics::new(&after, width, 180.0, LABEL_H, &open);
         let y = |m: &Metrics, secs: &[Section], id: RecordId| m.cell_rect(0, secs[0].ids.iter().position(|&x| x == id).unwrap()).y;

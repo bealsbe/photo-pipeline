@@ -1369,6 +1369,12 @@ These are deliberate:
   - RAW EXIF panels show more fields.
 - **Not yet supported:** trackpad pinch-to-zoom on Wayland (winit has no
   gesture events on Linux).  Ctrl+scroll zooms.
+- **Rows fill the width.**  The thumbnail size you set picks the number of
+  columns (the nearest count that fits), and the tiles are then sized so
+  those columns span the grid exactly, so zooming in never leaves a strip
+  of empty ground beside the last column: the largest size is two or three
+  columns on a usual window, one on a narrow one.  A zoom step that would
+  change nothing on screen is passed over, so each step shows.
 
 ## Testing
 
