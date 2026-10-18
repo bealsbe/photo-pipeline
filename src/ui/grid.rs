@@ -2148,8 +2148,12 @@ fn paint_cell_marks(
         paint::framed(r, ring, t::R_CELL + grow, Color::TRANSPARENT, c(t::alpha(tone, 0.9 * (1.0 - k))), 2.0);
     }
 
-    // Selection: an accent outline around the whole mount.
+    // Selection: an accent outline around the whole mount, with a soft
+    // halo just outside it so it lifts off the ground rather than cuts
+    // into it.
     if selected {
+        let halo = rect(mount.x - 2.0, mount.y - 2.0, mount.width + 4.0, mount.height + 4.0);
+        paint::framed(r, halo, t::R_CELL + 2.0, Color::TRANSPARENT, c(t::alpha(t::SIGNAL, 0.28)), 2.0);
         paint::framed(r, mount, t::R_CELL, Color::TRANSPARENT, c(t::SIGNAL), 2.0);
     }
 }
