@@ -147,7 +147,7 @@ impl SeparationPlan {
             let result = fsutil::ensure_parent(&op.final_dest)
                 .and_then(|_| fsutil::safe_move(&op.src, &op.final_dest, &meta, false));
             match result {
-                Ok(()) => ok.push((op.id, op.final_dest.clone())),
+                Ok(_) => ok.push((op.id, op.final_dest.clone())),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => failed.push((
                     op.id,
                     op.filename.clone(),

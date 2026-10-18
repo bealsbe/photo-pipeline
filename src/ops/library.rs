@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, Timelike};
 
 use super::crop_export::{remove_xmp_crop, render_cropped_jpeg, write_xmp_crop};
-use super::fsutil;
+use super::{Progress, fsutil};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::crop::Crop;
 use crate::model::library_index::MONTH_ABBR;
@@ -145,6 +145,8 @@ pub struct PlannedOp {
     pub conflict: bool,
     pub resolution: Resolution,
     pub final_dest: PathBuf,
+    /// The source's size as the record knows it (for progress; not a stat).
+    pub file_size: u64,
 }
 
 impl PlannedOp {
@@ -266,6 +268,7 @@ impl LibraryPlan {
                     date: d,
                     conflict,
                     resolution: Resolution::Skip,
+                    file_size: r.file_size,
                 };
                 // Clean ops are ready to go; conflicts wait for the user.
                 if !conflict {
@@ -283,6 +286,20 @@ impl LibraryPlan {
 
     pub fn conflict_count(&self) -> usize {
         self.ops.iter().filter(|o| o.conflict).count()
+    }
+
+    /// The ops that will run (not skipped).
+    fn active(&self) -> impl Iterator<Item = &PlannedOp> {
+        self.ops.iter().filter(|o| o.resolution != Resolution::Skip)
+    }
+
+    pub fn active_count(&self) -> usize {
+        self.active().count()
+    }
+
+    /// The bytes of the files that will run, as the records know them.
+    pub fn active_bytes(&self) -> u64 {
+        self.active().map(|o| o.file_size).sum()
     }
 
     pub fn cropped_count(&self) -> usize {
@@ -328,16 +345,17 @@ impl LibraryPlan {
     /// Execute every non-skipped op.
     ///
     /// `source_root` bounds the empty-folder cleanup after a move; without it
-    /// no folders are removed.
+    /// no folders are removed.  `progress` is told after each file, with
+    /// the bytes that went over (none for a same-device move).
     pub fn execute(
         &self,
         mode: Mode,
         source_root: Option<&Path>,
         cancel: &AtomicBool,
-        progress: &dyn Fn(usize, usize),
+        progress: &dyn Fn(Progress),
     ) -> ExportReport {
-        let active: Vec<&PlannedOp> = self.ops.iter().filter(|o| o.resolution != Resolution::Skip).collect();
-        let total = active.len();
+        let active: Vec<&PlannedOp> = self.active().collect();
+        let mut p = Progress { files_total: active.len(), bytes_total: active.iter().map(|o| o.file_size).sum(), ..Progress::default() };
         let mut report = ExportReport { mode, ..Default::default() };
 
         for (n, op) in active.iter().enumerate() {
@@ -345,10 +363,18 @@ impl LibraryPlan {
                 break;
             }
             match execute_one(op, mode) {
-                Ok(()) => report.succeeded.push(OpOutcome::of(op)),
+                Ok(moved) => {
+                    report.succeeded.push(OpOutcome::of(op));
+                    if moved == fsutil::Moved::Copied {
+                        p.transferred += op.file_size;
+                    }
+                }
                 Err(e) => report.failed.push((OpOutcome::of(op), e)),
             }
-            progress(n + 1, total);
+            p.files = n + 1;
+            p.bytes += op.file_size;
+            p.next = active.get(n + 1).map_or(0, |o| o.file_size);
+            progress(p);
         }
 
         if mode == Mode::Move && !report.succeeded.is_empty() {
@@ -360,7 +386,8 @@ impl LibraryPlan {
     }
 }
 
-fn execute_one(op: &PlannedOp, mode: Mode) -> Result<(), String> {
+/// Runs one op; says whether its bytes were copied or only renamed.
+fn execute_one(op: &PlannedOp, mode: Mode) -> Result<fsutil::Moved, String> {
     let dest = &op.final_dest;
     let overwrite = op.may_overwrite();
     if !overwrite && fsutil::lexists(dest) {
@@ -393,20 +420,23 @@ fn execute_one(op: &PlannedOp, mode: Mode) -> Result<(), String> {
             fs::remove_file(&op.src).map_err(|e| format!("exported, but the original could not be removed: {e}"))?;
             fsutil::sync_parent(&op.src);
         }
-        return Ok(());
+        return Ok(fsutil::Moved::Copied);
     }
 
-    match mode {
-        Mode::Copy => fsutil::safe_copy(&op.src, dest, &meta, overwrite).map_err(appeared)?,
+    let moved = match mode {
+        Mode::Copy => {
+            fsutil::safe_copy(&op.src, dest, &meta, overwrite).map_err(appeared)?;
+            fsutil::Moved::Copied
+        }
         Mode::Move => fsutil::safe_move(&op.src, dest, &meta, overwrite).map_err(appeared)?,
-    }
+    };
     fsutil::copy_times(dest, &meta);
     // A deliberate overwrite of a RAW must not inherit a crop the earlier
     // export left in its sidecar.
     if op.file_type == FileType::Raw && overwrite {
         remove_xmp_crop(dest);
     }
-    Ok(())
+    Ok(moved)
 }
 
 /// Remove source folders emptied by a move, bottom-up, never at or above
@@ -507,7 +537,7 @@ mod tests {
         assert_eq!(name(a_raw), "20250302_1000_0006.ARW");
         assert_eq!(name(a_jpg), "20250302_1000_0006.JPG");
 
-        let report = plan.execute(Mode::Move, Some(&src), &AtomicBool::new(false), &|_, _| {});
+        let report = plan.execute(Mode::Move, Some(&src), &AtomicBool::new(false), &|_| {});
         assert_eq!(report.succeeded.len(), 3, "{:?}", report.failed);
         assert!(day_dir(&lib, d).join("RAW/20250302_1000_0006.ARW").exists());
         assert!(!src.join("A.ARW").exists());
@@ -524,8 +554,44 @@ mod tests {
         let dest = plan.ops[0].final_dest.clone();
         fs::create_dir_all(dest.parent().unwrap()).unwrap();
         fs::write(&dest, b"someone else's").unwrap();
-        let report = plan.execute(Mode::Copy, None, &AtomicBool::new(false), &|_, _| {});
+        let report = plan.execute(Mode::Copy, None, &AtomicBool::new(false), &|_| {});
         assert_eq!(report.failed.len(), 1);
         assert_eq!(fs::read(&dest).unwrap(), b"someone else's");
+    }
+
+    #[test]
+    fn progress_carries_the_bytes_of_each_finished_file() {
+        let src = tmp("src3");
+        let lib = tmp("lib3");
+        let mut c = Collection::new();
+        let a = c.add(rec(&src.join("A.ARW"), "2025-03-02 10:00:00"));
+        let b = c.add(rec(&src.join("B.JPG"), "2025-03-02 10:01:00"));
+        let plan = LibraryPlan::new(&[a, b], &c, &lib, false);
+        assert_eq!(plan.active_count(), 2);
+        assert_eq!(plan.active_bytes(), 8, "the records' sizes, not a stat");
+
+        let seen = std::sync::Mutex::new(Vec::new());
+        let report = plan.execute(Mode::Copy, None, &AtomicBool::new(false), &|p| seen.lock().unwrap().push(p));
+        assert_eq!(report.succeeded.len(), 2, "{:?}", report.failed);
+        let seen = seen.into_inner().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0], Progress { files: 1, files_total: 2, bytes: 4, bytes_total: 8, transferred: 4, next: 4 });
+        assert_eq!(seen[1], Progress { files: 2, files_total: 2, bytes: 8, bytes_total: 8, transferred: 8, next: 0 });
+    }
+
+    #[test]
+    fn a_move_on_one_device_transfers_no_bytes() {
+        let src = tmp("src4");
+        let lib = tmp("lib4");
+        let mut c = Collection::new();
+        let a = c.add(rec(&src.join("A.JPG"), "2025-03-02 10:00:00"));
+        let plan = LibraryPlan::new(&[a], &c, &lib, false);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let report = plan.execute(Mode::Move, Some(&src), &AtomicBool::new(false), &|p| seen.lock().unwrap().push(p));
+        assert_eq!(report.succeeded.len(), 1, "{:?}", report.failed);
+        let seen = seen.into_inner().unwrap();
+        // The file counts as done, but a rename is instant: no speed can be
+        // read from it.
+        assert_eq!(seen, vec![Progress { files: 1, files_total: 1, bytes: 4, bytes_total: 4, transferred: 0, next: 0 }]);
     }
 }

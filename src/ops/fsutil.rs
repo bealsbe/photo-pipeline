@@ -163,14 +163,23 @@ fn copy_xattrs(src: &Path, dest: &Path) {
     let _ = (src, dest);
 }
 
+/// How [`safe_move`] moved a file: a rename carries no bytes, a copy
+/// carries them all (so a progress readout can tell an instant move from
+/// a transfer).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Moved {
+    Renamed,
+    Copied,
+}
+
 /// Move `src` → `dest`.  Same filesystem: one atomic rename.  Across
 /// devices: [`safe_copy`], then the source is removed.
-pub fn safe_move(src: &Path, dest: &Path, src_meta: &fs::Metadata, overwrite: bool) -> io::Result<()> {
+pub fn safe_move(src: &Path, dest: &Path, src_meta: &fs::Metadata, overwrite: bool) -> io::Result<Moved> {
     match rename(src, dest, overwrite) {
         Ok(()) => {
             sync_parent(dest);
             set_times_from(dest, src_meta);
-            Ok(())
+            Ok(Moved::Renamed)
         }
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
         Err(_) => {
@@ -179,7 +188,7 @@ pub fn safe_move(src: &Path, dest: &Path, src_meta: &fs::Metadata, overwrite: bo
             safe_copy(src, dest, src_meta, overwrite)?;
             fs::remove_file(src)?;
             sync_parent(src);
-            Ok(())
+            Ok(Moved::Copied)
         }
     }
 }

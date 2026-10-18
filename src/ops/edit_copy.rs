@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use chrono::NaiveDateTime;
 
 use super::crop_export::write_xmp_crop;
-use super::fsutil;
+use super::{Progress, fsutil};
 use crate::model::collection::{Collection, RecordId};
 use crate::model::crop::Crop;
 use crate::model::record::FileType;
@@ -198,11 +198,11 @@ impl EditCopyPlan {
     }
 
     /// Copy every op that isn't already there.  A cancel stops between
-    /// files; whatever was copied stays.
-    pub fn execute(&self, cancel: &AtomicBool, progress: &dyn Fn(usize, usize, u64, u64)) -> CopyReport {
+    /// files; whatever was copied stays.  `progress` is told after each
+    /// file, with its bytes (every file here is a real copy).
+    pub fn execute(&self, cancel: &AtomicBool, progress: &dyn Fn(Progress)) -> CopyReport {
         let todo: Vec<&CopyOp> = self.to_copy().collect();
-        let total_bytes: u64 = todo.iter().map(|o| o.file_size).sum();
-        let mut done_bytes = 0;
+        let mut p = Progress { files_total: todo.len(), bytes_total: todo.iter().map(|o| o.file_size).sum(), ..Progress::default() };
         let mut report = CopyReport::default();
         for (n, op) in todo.iter().enumerate() {
             if cancel.load(Ordering::Relaxed) {
@@ -210,11 +210,16 @@ impl EditCopyPlan {
                 return report;
             }
             match copy_one(op) {
-                Ok(()) => report.copied.push((*op).clone()),
+                Ok(()) => {
+                    report.copied.push((*op).clone());
+                    p.transferred += op.file_size;
+                }
                 Err(e) => report.failed.push(((*op).clone(), e)),
             }
-            done_bytes += op.file_size;
-            progress(n + 1, todo.len(), done_bytes, total_bytes);
+            p.files = n + 1;
+            p.bytes += op.file_size;
+            p.next = todo.get(n + 1).map_or(0, |o| o.file_size);
+            progress(p);
         }
         report
     }

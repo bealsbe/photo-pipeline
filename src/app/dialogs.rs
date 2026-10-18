@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use chrono::NaiveDateTime;
 use iced::keyboard::{self, Key, key::Named};
@@ -17,11 +18,13 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Task}
 
 use super::kit;
 use super::style;
+use super::transfer_speed;
 use super::{App, FolderTarget, Message};
 use crate::bus::{BgEvent, SortResult};
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
 use crate::ops::edit_copy::{self, CopyReport, EditCopyPlan, MarkedFiles};
+use crate::ops::Progress;
 use crate::ops::library::{self, ExportReport, LibraryPlan, Mode, Resolution};
 use crate::ops::separate::{SeparationPlan, Strategy};
 use crate::ops::trash;
@@ -50,6 +53,42 @@ pub struct Confirm {
     pub ok: &'static str,
     pub cancel: &'static str,
     pub action: Msg,
+}
+
+/// A copy or move under way: where it stands, and its speed read from the
+/// files finished so far (memory only, on the UI thread).
+pub struct Run {
+    progress: Progress,
+    speed: transfer_speed::Speed,
+}
+
+impl Run {
+    fn start(files_total: usize, bytes_total: u64) -> Self {
+        let progress = Progress { files_total, bytes_total, ..Progress::default() };
+        Run { progress, speed: transfer_speed::Speed::start(Instant::now()) }
+    }
+
+    fn observe(&mut self, p: Progress) {
+        self.speed.observe(p, Instant::now());
+        self.progress = p;
+    }
+
+    /// "12 of 40 files, 310 of 980 MB · 38 MB/s · about 2 minutes left";
+    /// "Starting…" before the first file.
+    fn caption(&self) -> String {
+        let p = self.progress;
+        if p.files == 0 {
+            return "Starting\u{2026}".into();
+        }
+        let words = format!("{} of {} files, {} of {}", p.files, p.files_total, util::fmt_bytes(p.bytes), util::fmt_bytes(p.bytes_total));
+        transfer_speed::caption(words, self.speed.reading(Instant::now()), p.bytes_total.saturating_sub(p.bytes))
+    }
+
+    /// The share done, for the bar.
+    fn fraction(&self) -> f32 {
+        let p = self.progress;
+        if p.bytes_total > 0 { p.bytes as f32 / p.bytes_total as f32 } else if p.files_total > 0 { p.files as f32 / p.files_total as f32 } else { 1.0 }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -109,7 +148,7 @@ pub struct Export {
     dates: HashMap<RecordId, NaiveDateTime>,
     plan: Option<LibraryPlan>,
     bulk: Option<Resolution>,
-    running: Option<(usize, usize)>,
+    running: Option<Run>,
     done: Option<Arc<ExportReport>>,
 }
 
@@ -195,9 +234,20 @@ pub fn export_library_changed(app: &mut App, path: PathBuf) {
     app.modal = Some(Modal { kind: Kind::Export(ex), confirm: None });
 }
 
-pub fn on_export_progress(app: &mut App, done: usize, total: usize) {
+/// A copy or move is under way in a dialog (its speed line wants a clock).
+pub fn copy_running(app: &App) -> bool {
+    match &app.modal {
+        Some(Modal { kind: Kind::Export(ex), .. }) => ex.running.is_some(),
+        Some(Modal { kind: Kind::EditCopy(ec), .. }) => ec.running.is_some(),
+        _ => false,
+    }
+}
+
+pub fn on_export_progress(app: &mut App, p: Progress) {
     if let Some(Modal { kind: Kind::Export(ex), .. }) = &mut app.modal {
-        ex.running = Some((done, total));
+        if let Some(run) = &mut ex.running {
+            run.observe(p);
+        }
     }
 }
 
@@ -247,7 +297,7 @@ pub struct EditCopy {
     base: Option<PathBuf>,
     subfolder: bool,
     plan: Option<EditCopyPlan>,
-    running: Option<(usize, usize, u64, u64)>,
+    running: Option<Run>,
     stopping: bool,
     cancel: Arc<AtomicBool>,
     done: Option<Arc<CopyReport>>,
@@ -375,9 +425,11 @@ pub fn edit_copy_settings_changed(app: &mut App) {
     ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
 }
 
-pub fn on_copy_progress(app: &mut App, f: usize, ft: usize, b: u64, bt: u64) {
+pub fn on_copy_progress(app: &mut App, p: Progress) {
     if let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal {
-        ec.running = Some((f, ft, b, bt));
+        if let Some(run) = &mut ec.running {
+            run.observe(p);
+        }
     }
 }
 
@@ -629,15 +681,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 Msg::ExGo => {
                     if let (Some(plan), None) = (ex.plan.clone(), &ex.done) {
                         if plan.total() > 0 && ex.running.is_none() {
-                            ex.running = Some((0, plan.ops.iter().filter(|o| o.resolution != Resolution::Skip).count()));
+                            ex.running = Some(Run::start(plan.active_count(), plan.active_bytes()));
                             let mode = ex.mode;
                             let source_root = ex.working.clone();
                             let bus = bus.clone();
                             std::thread::spawn(move || {
                                 let pbus = bus.clone();
                                 let cancel = AtomicBool::new(false);
-                                let report = plan.execute(mode, source_root.as_deref(), &cancel, &move |d, t| {
-                                    let _ = pbus.unbounded_send(BgEvent::ExportProgress { done: d, total: t });
+                                let report = plan.execute(mode, source_root.as_deref(), &cancel, &move |p| {
+                                    let _ = pbus.unbounded_send(BgEvent::ExportProgress(p));
                                 });
                                 let _ = bus.unbounded_send(BgEvent::ExportDone(Arc::new(report)));
                             });
@@ -696,15 +748,15 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                             // Re-plan: the folder may have changed while the dialog sat open.
                             let plan = EditCopyPlan::new(&ec.sel.files, &app.coll, &dest);
                             if plan.to_copy_count() > 0 {
-                                ec.running = Some((0, plan.to_copy_count(), 0, plan.total_bytes()));
+                                ec.running = Some(Run::start(plan.to_copy_count(), plan.total_bytes()));
                                 ec.cancel = Arc::new(AtomicBool::new(false));
                                 let cancel = ec.cancel.clone();
                                 let run_plan = plan.clone();
                                 let bus = bus.clone();
                                 std::thread::spawn(move || {
                                     let pbus = bus.clone();
-                                    let report = run_plan.execute(&cancel, &move |f, ft, b, bt| {
-                                        let _ = pbus.unbounded_send(BgEvent::CopyProgress { files: f, files_total: ft, bytes: b, bytes_total: bt });
+                                    let report = run_plan.execute(&cancel, &move |p| {
+                                        let _ = pbus.unbounded_send(BgEvent::CopyProgress(p));
                                     });
                                     let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
                                 });
@@ -1222,14 +1274,8 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
             }));
         }
     }
-    if let Some((done, total)) = ex.running {
-        col = col.push(
-            column![
-                progress_bar(0.0..=total.max(1) as f32, done as f32).girth(6).style(style::progress),
-                kit::caption(if done == 0 { "Starting…".to_string() } else { format!("{done} of {total} files") }),
-            ]
-            .spacing(t::S1),
-        );
+    if let Some(run) = &ex.running {
+        col = col.push(column![progress_bar(0.0..=1.0, run.fraction()).girth(6).style(style::progress), kit::caption(run.caption())].spacing(t::S1));
     }
     let go: Element<'a, Message> = if ex.done.is_some() {
         kit::btn("Open library folder", style::primary(), ex.library.as_ref().map(|_| d(Msg::ExOpenLibrary))).into()
@@ -1466,18 +1512,9 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         list_box(list.into()),
     ]
     .spacing(t::S4);
-    if let Some((f, ft, b, bt)) = ec.running {
-        let label = if ec.stopping {
-            "Stopping after the current file…".to_string()
-        } else if f == 0 {
-            "Starting…".into()
-        } else {
-            format!("{f} of {ft} files, {} of {}", util::fmt_bytes(b), util::fmt_bytes(bt))
-        };
-        col = col.push(
-            column![progress_bar(0.0..=1000.0, if bt > 0 { 1000.0 * b as f32 / bt as f32 } else { 1000.0 }).girth(6).style(style::progress), kit::caption(label)]
-                .spacing(t::S1),
-        );
+    if let Some(run) = &ec.running {
+        let label = if ec.stopping { "Stopping after the current file\u{2026}".to_string() } else { run.caption() };
+        col = col.push(column![progress_bar(0.0..=1.0, run.fraction()).girth(6).style(style::progress), kit::caption(label)].spacing(t::S1));
     }
     let go = ec.go();
     let go_label = match go {

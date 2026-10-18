@@ -90,6 +90,7 @@ src/app/               the application: state, update, views
                        completions, recent searches
   search_setup.rs      the download dialog, indexing in the status bar, banners
   download_speed.rs    a download's speed and time left, from its progress events
+  transfer_speed.rs    the same for an export or edit copy, a file at a time
   search_link.rs       the page's link to the search engine (and its test stand-in)
   dialogs.rs           Export, Edit Copy, Sort, Prune Review, shortcuts
   quality.rs           the analysis as the app holds it (runs on request)
@@ -1300,6 +1301,14 @@ remembered).  A marked file brings its partner of the wanted kind, a shot with
 none of it is listed and not copied, and pruned shots are left out.  Nothing
 is overwritten; a taken name gets `_1`, `_2`.  A crop is written as an `.xmp`
 sidecar for a RAW only, and a JPG is copied as it is.
+
+While an export or an edit copy runs, its dialog shows the files and bytes
+done with the transfer speed and the time left ("72 of 132 files, 1.8 GB of
+3.3 GB · 265 MB/s · under a minute left"), read on the UI thread from the
+files finished so far, the same way as a download's: averaged over a few
+seconds, "starting…" until there is enough to go on, and "stalled" when no
+file has finished for longer than the one under way should take.  A move
+within one drive is a rename, so it shows no speed.
 
 ## Differences from the Python app
 

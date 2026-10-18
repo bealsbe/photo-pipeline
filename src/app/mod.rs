@@ -8,6 +8,7 @@ pub mod commands;
 pub mod compare;
 pub mod dialogs;
 pub mod download_speed;
+pub mod transfer_speed;
 pub mod fursuit_art;
 pub mod fursuit_judge;
 pub mod fursuits;
@@ -694,6 +695,10 @@ impl App {
         // A download's speed, and a stall (when no progress comes at all).
         if self.search.downloads.iter().any(|d| d.state == crate::ml::download::DownloadState::Downloading) {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Search(search::Msg::Clock)));
+        }
+        // A copy's speed line: its time left and a stall move with the clock.
+        if dialogs::copy_running(self) {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
     }
@@ -2230,11 +2235,9 @@ impl App {
                 BgEvent::DayRecords { date, generation, data, complete } => {
                     self.calendar.on_day_records(date, generation, data, complete)
                 }
-                BgEvent::ExportProgress { done, total } => dialogs::on_export_progress(self, done, total),
+                BgEvent::ExportProgress(p) => dialogs::on_export_progress(self, p),
                 BgEvent::ExportDone(report) => tasks.push(dialogs::on_export_done(self, report)),
-                BgEvent::CopyProgress { files, files_total, bytes, bytes_total } => {
-                    dialogs::on_copy_progress(self, files, files_total, bytes, bytes_total)
-                }
+                BgEvent::CopyProgress(p) => dialogs::on_copy_progress(self, p),
                 BgEvent::CopyDone(report) => tasks.push(dialogs::on_copy_done(self, report)),
                 BgEvent::Trashed(result) => tasks.push(dialogs::on_trashed(self, result)),
                 BgEvent::Sorted(result) => tasks.push(self.on_sorted_event(result)),
