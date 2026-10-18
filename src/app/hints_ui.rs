@@ -8,12 +8,13 @@
 //! side rail, or the Hints menu.  What an earlier pass measured is shown as
 //! soon as a folder opens (from the cache, reading no photo).
 
-use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, progress_bar, row, space, stack, text};
+use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, row, space, stack, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task};
 
 use super::kit::{self, tip};
 use super::style::{self, Look};
 use super::{App, FilterMsg, Message, Show, quality};
+use crate::ui::motion::SmoothBar;
 use crate::analysis::Mode;
 use crate::model::hints::HintFilter;
 use crate::ui::icons::{self, Glyph};
@@ -193,11 +194,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     }
     let (done, total) = app.quality.progress.unwrap_or((0, 0));
     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-    let bar = progress_bar(0.0..=1.0, frac).length(BAR_W).girth(4).style(|_| progress_bar::Style {
-        background: Background::Color(t::RAISED),
-        bar: Background::Color(t::FLOW),
-        border: Border { radius: 2.0.into(), ..Border::default() },
-    });
+    let bar = SmoothBar::new(frac).length(BAR_W).colors(t::RAISED, t::FLOW);
     let stop = button(container(icons::view(Glyph::Close, 11.0, t::INK2)).center(Length::Fill))
         .width(20)
         .height(20)

@@ -93,6 +93,8 @@
 //! history                     # print the undo and redo stacks
 //! sh ls -R /tmp/x             # run a shell command (set up a test's files)
 //! shot main out.png           # screenshot: main | viewer | compare | shortcuts
+//!                             # (PP_GLOW_ALL=1 lights every button's hover
+//!                             # glow, there being no pointer headless)
 //! cdump                       # print the compare view's state
 //! netdump                     # print network-share state and unsaved saves
 //! nettry                      # press the banner's Try again

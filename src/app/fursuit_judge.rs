@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use iced::widget::{Space, button, column, container, progress_bar, row, text};
+use iced::widget::{Space, button, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
@@ -29,6 +29,7 @@ use super::people::{Face, FaceRef, GroupId, Kind};
 use super::style;
 use super::subjects::{self as subj};
 use super::{App, Message};
+use crate::ui::motion::SmoothBar;
 use crate::ml::judge::JudgeState;
 use crate::ui::icons::{self, Glyph};
 use crate::ui::paint;
@@ -293,11 +294,7 @@ pub fn choice_words(c: crate::ml::judge::JudgeChoice) -> Option<String> {
 // ── the review's line ───────────────────────────────────────────────────────
 
 pub(super) fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
-    progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
-        .length(w)
-        .girth(3)
-        .style(move |_| progress_bar::Style { background: Background::Color(ground), bar: Background::Color(t::PHOTO_INK3), border: Border { radius: 2.0.into(), ..Border::default() } })
-        .into()
+    SmoothBar::new(frac).length(w).girth(3.0).colors(ground, t::PHOTO_INK3).into()
 }
 
 pub(super) fn stop_btn<'a>(ink: iced::Color) -> Element<'a, Message> {
@@ -505,11 +502,7 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
 }
 
 fn status_bar<'a>(frac: f32) -> Element<'a, Message> {
-    progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
-        .length(56)
-        .girth(4)
-        .style(|_| progress_bar::Style { background: Background::Color(t::RAISED), bar: Background::Color(t::SIGNAL), border: Border { radius: 2.0.into(), ..Border::default() } })
-        .into()
+    SmoothBar::new(frac).length(56).colors(t::RAISED, t::SIGNAL).into()
 }
 
 /// The fursuit's band: the quiet count of what was left out, after the

@@ -795,11 +795,7 @@ fn header<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
     let caption = if n == 0 { String::new() } else { format!("{} of {}. {merged} merged, {not} not the same.", (r.at + 1).min(n), util::plural(n as u64, "pair")) };
     let answered = r.answers.iter().filter(|a| a.is_some()).count();
     let frac = if n == 0 { 0.0 } else { answered as f32 / n as f32 };
-    let bar = iced::widget::progress_bar(0.0..=1.0, frac).length(160).girth(4).style(|_| iced::widget::progress_bar::Style {
-        background: Background::Color(t::RAISED),
-        bar: Background::Color(t::SIGNAL),
-        border: Border { radius: 2.0.into(), ..Border::default() },
-    });
+    let bar = crate::ui::motion::SmoothBar::new(frac).length(160).colors(t::RAISED, t::SIGNAL);
     let on = app.settings.viewer_advance;
     let advance = tip(
         kit::icon_text_btn(Glyph::Skip, "Auto-advance", if on { t::SIGNAL } else { t::INK2 }, style::toggle(on, t::SIGNAL), Some(subj::m(subj::Msg::Review(super::subjects_review::Msg::Advance)))),

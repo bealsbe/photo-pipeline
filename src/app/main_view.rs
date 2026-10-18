@@ -3,7 +3,7 @@
 
 use chrono::{Datelike, Local, NaiveDate};
 use iced::keyboard::{Key, key::Named};
-use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, progress_bar, row, slider, space, stack, text};
+use iced::widget::{Space, button, column, container, mouse_area, opaque, pin, row, slider, space, stack, text};
 use iced::{Alignment, Background, Border, Color, Element, Length, Padding, Point, Task};
 
 use super::commands::{Cmd, MENUS};
@@ -14,7 +14,7 @@ use crate::model::filter::{FilterState, SortKey};
 use crate::model::library_index::{MONTH_ABBR, MONTH_NAME};
 use crate::ui::grid::{Grid, GridData, Restack};
 use crate::ui::icons::{self, Glyph};
-use crate::ui::motion::{ActivityBar, Appear};
+use crate::ui::motion::{ActivityBar, Appear, SmoothBar};
 use crate::ui::paint;
 use crate::ui::side_menu::{Entry, Item, RAIL_W, SideMenu};
 use crate::ui::theme::{self as t, alpha};
@@ -995,11 +995,7 @@ fn review_progress(app: &App) -> Option<Element<'_, Message>> {
         .spacing(4)
         .into()
     };
-    let bar = progress_bar(0.0..=1.0, p.fraction()).length(PROGRESS_W).girth(4).style(|_| progress_bar::Style {
-        background: Background::Color(t::RAISED),
-        bar: Background::Color(t::FLOW),
-        border: Border { radius: 2.0.into(), ..Border::default() },
-    });
+    let bar = SmoothBar::new(p.fraction()).length(PROGRESS_W).colors(t::RAISED, t::FLOW);
     let content = row![words, bar].spacing(t::S2).align_y(Alignment::Center);
     let b = button(container(content).center_y(Length::Fill))
         .height(STATUS_H - 6.0)

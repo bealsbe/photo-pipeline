@@ -1454,11 +1454,7 @@ fn progress_strip(app: &App, kind: Kind, over_groups: bool) -> Option<Element<'_
     };
     let left = estimate::describe_seconds(estimate::seconds(total.saturating_sub(done), st.device.chosen));
     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-    let bar = iced::widget::progress_bar(0.0..=1.0, frac).length(if over_groups { 96 } else { 120 }).girth(4).style(|_| iced::widget::progress_bar::Style {
-        background: Background::Color(t::PHOTO_RAISED),
-        bar: Background::Color(t::SIGNAL),
-        border: iced::Border { radius: 2.0.into(), ..iced::Border::default() },
-    });
+    let bar = crate::ui::motion::SmoothBar::new(frac).length(if over_groups { 96 } else { 120 }).colors(t::PHOTO_RAISED, t::SIGNAL);
     if over_groups {
         return Some(super::subjects_fursuits::quiet_line(Glyph::Person, line, format!("{} left. Groups appear as they are found.", super::search_setup::capital(&left)), bar.into()));
     }
