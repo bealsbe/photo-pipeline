@@ -198,3 +198,52 @@ pub fn editor_action<'a>(app: &'a App, e: &'a Editor) -> Option<Element<'a, Mess
         tip(kit::icon_text_btn(MARK, "Set as group photo", t::INK, style::secondary(), Some(m(Msg::Editor(true)))), format!("Show this {} for the group once you apply: its tile, its page, the search field", crop_word(e.kind)), true)
     })
 }
+
+// ── the test script (`cover …`, `app::testing`) ─────────────────────────────
+
+pub fn script(app: &mut App, arg: &str) -> Task<Message> {
+    let words: Vec<&str> = arg.split_whitespace().collect();
+    match words[..] {
+        ["set"] => update(app, Msg::SetPicked),
+        ["auto"] => update(app, Msg::Automatic),
+        ["choose"] => update(app, Msg::Choose),
+        ["editor", "set"] => update(app, Msg::Editor(true)),
+        ["editor", "auto"] => update(app, Msg::Editor(false)),
+        ["dump"] => {
+            println!("[cover] {}", debug_state(app));
+            Task::none()
+        }
+        _ => {
+            eprintln!("[script] unknown cover action {arg}");
+            Task::none()
+        }
+    }
+}
+
+fn short_face(f: &FaceRef) -> String {
+    format!("{:02x}{:02x}@{}", f.key.0[0], f.key.0[1], f.thousandths()[0])
+}
+
+/// Each named group of the tab's kind and its photo (`*`: chosen); on a
+/// page, the face shown marked and its place among the faces; in the
+/// editor, each named column's photo.
+pub fn debug_state(app: &App) -> String {
+    let s = &app.subjects;
+    let groups: Vec<String> = s
+        .all
+        .named(s.tab)
+        .map(|g| format!("{}={}{}", g.name.clone().unwrap_or_default(), short_face(&g.cover.face), if s.all.chosen_covers.contains(&g.id) { "*" } else { "" }))
+        .collect();
+    let page = s.person.as_ref().map(|p| {
+        let at = page_cover(app, p).and_then(|(c, chosen)| {
+            let i = p.faces.as_ref()?.iter().position(|f| f.face == c)?;
+            Some(format!("{i}{}", if chosen { "*" } else { "" }))
+        });
+        format!(" page=[marked={at:?} menu={:?} strip={}]", menu_rows(app, p).iter().map(|r| r.1).collect::<Vec<_>>(), strip_action(app, p).is_some())
+    });
+    let editor = s.editor.as_ref().map(|e| {
+        let cols: Vec<String> = (0..e.cols.len()).map(|i| editor_cover(app, e, i).map_or("-".into(), |(f, chosen)| format!("{}{}", short_face(&f), if chosen { "*" } else { "" }))).collect();
+        format!(" editor=[{}] action={}", cols.join(" "), editor_action(app, e).is_some())
+    });
+    format!("groups={groups:?}{}{}", page.unwrap_or_default(), editor.unwrap_or_default())
+}

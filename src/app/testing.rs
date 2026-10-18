@@ -218,6 +218,10 @@
 //! editor drag 0 2 col 1|drag 0 2 group 0|dragto 0 2 new  # drag a face (the picked with it)
 //! editor add|expand 0|collapse 1|name 1 Some name|mergename 1|search kib
 //! editor undo|apply|cancel|gonetonew|suggest|mark 2|dump   # suggest: lay out the suggested split; mark: the tile's split mark
+//! cover set|auto|choose       # a group's page: Set as group photo (one face
+//!                             # picked), Use the automatic photo, ⋯ ▸ Change group photo…
+//! cover editor set|auto       # the same in the group editor's pick strip
+//! cover dump                  # print each named group's photo, and the page's / editor's
 //! split order far|clear       # a fursuit's Heads: least like the rest / clearest
 //! split pick 3|shiftpick 7    # click / Shift+click the 4th / 8th head shown
 //! split splitpicked           # Split into a new group (the pick strip)
@@ -475,6 +479,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 }
             }
         }
+        "cover" => super::subjects_cover::script(app, &arg),
         "split" => {
             use super::subjects_split::{Msg as X, Order};
             let x = |m: X| Message::Subjects(super::subjects::Msg::Split(m));

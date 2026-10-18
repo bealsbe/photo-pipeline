@@ -1114,6 +1114,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
     if taken > 0 {
         counter.push_str(&format!(" · {taken} taken out"));
     }
+    if !e.covers.is_empty() {
+        counter.push_str(" · group photo");
+    }
     let busy = e.apply_seq != 0;
     let header = row![
         tip(kit::icon_text_btn(Glyph::ChevronLeft, "Cancel", t::INK2, style::secondary(), Some(m(Msg::Cancel))), "Leave without changing anything  (Esc)", true),
