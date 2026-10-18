@@ -32,6 +32,7 @@ pub mod subjects_fursuits;
 pub mod columns;
 pub mod subjects_merge;
 pub mod subjects_editor;
+pub mod subjects_cover;
 pub mod subjects_split;
 pub mod subjects_person;
 pub mod subjects_remove;

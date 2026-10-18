@@ -3472,7 +3472,8 @@ average-linkage distance to the entry's first group (the step's space;
 | `draw` | `head`, `name` | none |
 | `remove` | `head` | none |
 | `remove_many` | `groups` (as they were), `heads`, `removed` | none: "Not fursuit heads" / "Not faces" on whole groups or picked heads, one entry |
-| `edit` | `groups` (as they were: each group heads left or went to), `out`: `[{from, to, heads, moved}]`, one per (group left, destination); `to` is `{is: "group", group}` (an index into `groups`), `{is: "new", new, name}`, `{is: "removed"}` or `{is: "taken_out"}` | per `out`: to a group: × it same, × rest of `from` different; new: × rest of `from` different; taken out: × rest of `from` different; removed: none.  The group editor's *Apply*, one entry |
+| `edit` | `groups` (as they were: each group heads left or went to), `out`: `[{from, to, heads, moved}]`, one per (group left, destination); `to` is `{is: "group", group}` (an index into `groups`), `{is: "new", new, name}`, `{is: "removed"}` or `{is: "taken_out"}`; `covers` (absent when none): `[{group, head}]`, group photos chosen in the same *Apply* | per `out`: to a group: × it same, × rest of `from` different; new: × rest of `from` different; taken out: × rest of `from` different; removed: none.  The group editor's *Apply*, one entry |
+| `cover` | `group` (as it was), `head` (absent: back to the automatic photo) | none: a named group's photo chosen on its page (`at`: `faces` / `heads`), one entry |
 | `undo` | `undoes`, `of` | takes the named entry back (an undo of an undo restores it) |
 
 `how.by`: `hand` (with `at`: `drag`, `pick`, `menu`, `name`, `heads`,

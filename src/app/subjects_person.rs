@@ -9,7 +9,8 @@
 //! that already exists offers to merge into it first), how many photos and
 //! suggestions, *Photos | Faces*, the review (Y), and ⋯ for merging,
 //! hiding and forgetting.  *Faces* shows every face, clearest first, to
-//! pick wrong ones and move them to someone else or out ("Not Person A").
+//! pick wrong ones and move them to someone else or out ("Not Person A"),
+//! or, on a named group, one to be its group photo (`subjects_cover`).
 
 use std::sync::Arc;
 
@@ -1083,6 +1084,9 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
                     Some(subj::m(subj::Msg::Remove(super::subjects_remove::Msg::AskPage))),
                 ),
             ];
+            for (i, (glyph, words, on)) in super::subjects_cover::menu_rows(app, p).into_iter().enumerate() {
+                rows.insert(2 + i, menu_row(icons::view(glyph, 15.0, t::INK2), words.into(), String::new(), Some(on)));
+            }
             if g.name.is_some() {
                 rows.push(menu_row(icons::view(Glyph::Close, 15.0, t::REJECT), format!("Forget this {one}…"), String::new(), Some(pm(Msg::Forget))));
             }
@@ -1113,6 +1117,10 @@ fn faces_strip<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     .spacing(t::S3)
     .align_y(Alignment::Center)
     .padding(Padding { top: 4.0, bottom: 4.0, left: 12.0, right: 8.0 });
+    // One picked on a named group: it can be the group photo.
+    if let Some(b) = super::subjects_cover::strip_action(app, p) {
+        r = r.push(b);
+    }
     // Split them off: the editor, with them in a new column to adjust.
     r = r.push(tip(kit::icon_text_btn(Glyph::Split, "Split into a new group", t::INK, style::secondary(), Some(super::subjects_split::m(super::subjects_split::Msg::SplitPicked))), "The group editor, these in a new column, to adjust before applying  (E for the editor as it is)", true));
     // Not heads at all (a mask, a plush, a sign): removed for good.
@@ -1151,7 +1159,7 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     for f in shown.into_iter().take(p.faces_shown) {
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, subj::shape(p.kind));
-        let badge = if fursuit { super::subjects_split::badge(p, &f.face) } else { None };
+        let badge = super::subjects_cover::badge(app, p, &f.face).or(if fursuit { super::subjects_split::badge(p, &f.face) } else { None });
         let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked: p.picked.contains(&f.face), small: true, badge: badge.map(|b| b.0), on: pm(Msg::FacePick(f.face)), badge_on: None }.into();
         let words = format!("{}{}{}", super::search::long_date(f.day), if f.confirmed { ", confirmed" } else { "" }, badge.map(|b| format!(". {}", b.1)).unwrap_or_default());
         r = r.push(tip(el, words, true));
@@ -1212,6 +1220,7 @@ mod tests {
             groups: vec![g(1, Kind::Person, Some("Person A"), 312), g(2, Kind::Person, Some("Pat"), 20), g(3, Kind::Person, None, 58), g(4, Kind::Fursuit, Some("Patches"), 90)],
             faces_found: 400,
             undoable: None, seen_together: Default::default(),
+            chosen_covers: Default::default(),
         }
     }
 

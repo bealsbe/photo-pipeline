@@ -299,11 +299,23 @@ pub struct Subjects {
     /// Fursuit groups holding two heads of one photo, so at least two
     /// fursuits (`search::splitting`).  Never a person's.
     pub seen_together: HashSet<GroupId>,
+    /// Named groups whose `cover` is the photo the user chose (the rest
+    /// show the automatic pick).
+    pub chosen_covers: HashSet<GroupId>,
 }
 
 impl Subjects {
     pub fn group(&self, id: &GroupId) -> Option<&Group> {
         self.groups.iter().find(|g| &g.id == id)
+    }
+
+    /// The group photo the user chose for `id`, while it shows (`None`:
+    /// the automatic pick).
+    pub fn chosen_cover(&self, id: &GroupId) -> Option<FaceRef> {
+        if !self.chosen_covers.contains(id) {
+            return None;
+        }
+        self.group(id).map(|g| g.cover.face)
     }
 
     /// Named subjects of `kind`, shown or hidden.
@@ -394,6 +406,10 @@ pub struct GroupEdit {
     pub moves: Vec<(FaceRef, EditDest)>,
     /// Names given to existing groups (`targets[i]`).
     pub renames: Vec<(usize, String)>,
+    /// Group photos chosen for existing groups (`targets[i]`; `None`:
+    /// back to the automatic one).  Applied after the moves, and only to
+    /// a named group that still holds the face.
+    pub covers: Vec<(usize, Option<FaceRef>)>,
 }
 
 /// A [`GroupEdit`] resolved against the groups as they are now: each
@@ -408,6 +424,8 @@ pub struct EditPlan {
     /// (head, the group it is in now, where it goes).
     pub moves: Vec<(FaceRef, Option<GroupId>, PlanDest)>,
     pub renames: Vec<(GroupId, String)>,
+    /// Group photos chosen (`None`: automatic again).
+    pub covers: Vec<(GroupId, Option<FaceRef>)>,
     /// Automatic targets that were gone, sent to a new group instead.
     pub gone: usize,
 }
@@ -419,6 +437,20 @@ pub enum PlanDest {
     Removed,
     /// Out of the group it is in (the move's `from`), rejected for it.
     TakenOut,
+}
+
+/// The face a group's tile shows: the one the user chose while it is
+/// still one of `faces` (its members whose photos are in the library)
+/// and `found` (its detection is still there); else the clearest.  A
+/// lookup per group, so cheap enough for every snapshot.
+pub fn cover_of(chosen: Option<FaceRef>, faces: &[Face], found: impl Fn(&FaceRef) -> bool) -> Option<Face> {
+    chosen.filter(|c| found(c)).and_then(|c| faces.iter().find(|f| f.face == c)).or_else(|| faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity))).cloned()
+}
+
+/// "Set Kiba's group photo" / "Kiba's group photo is automatic again":
+/// the status line's and the undo's words for a cover change.
+pub fn cover_words(name: &str, set: bool) -> String {
+    if set { format!("Set {name}'s group photo") } else { format!("{name}'s group photo is automatic again") }
 }
 
 /// A planned edit in words, for the status line and the undo: "Split
@@ -462,6 +494,30 @@ pub fn edit_words(kind: Kind, moves: &[(FaceRef, Option<GroupId>, PlanDest)], re
     let s = parts.join(", ");
     let mut c = s.chars();
     c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
+/// A whole plan in words ([`edit_words`], with the group photos it
+/// chooses): "2 heads to Kiba, new group photo for Kiba", or, with
+/// nothing else, "Set Kiba's group photo".
+pub fn plan_words(plan: &EditPlan, name_of: impl Fn(&GroupId) -> Option<String>) -> String {
+    let name = |g: &GroupId| name_of(g).or_else(|| plan.renames.iter().find(|(x, _)| x == g).map(|(_, n)| n.clone())).unwrap_or_else(|| "the group".to_string());
+    if plan.moves.is_empty() && plan.renames.is_empty() {
+        if let [(g, face)] = &plan.covers[..] {
+            return cover_words(&name(g), face.is_some());
+        }
+    }
+    let mut s = if plan.moves.is_empty() && plan.renames.is_empty() { String::new() } else { edit_words(plan.kind, &plan.moves, &plan.renames, &name_of) };
+    for (g, face) in &plan.covers {
+        let part = if face.is_some() { format!("new group photo for {}", name(g)) } else { format!("automatic group photo for {}", name(g)) };
+        if s.is_empty() {
+            let mut c = part.chars();
+            s = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+        } else {
+            s.push_str(", ");
+            s.push_str(&part);
+        }
+    }
+    s
 }
 
 /// A change made on a box in the viewer's labels.  Each is one undo step.
@@ -558,8 +614,10 @@ pub struct Subject {
     pub kind: Kind,
     #[serde(default)]
     pub hidden: bool,
-    /// The face its tile shows, when the user chose one; else the clearest
-    /// member.
+    /// The face its tile shows (the group photo), when the user chose one:
+    /// named subjects only, one of `members`; cleared when it leaves them
+    /// or is removed, and shown only while its detection is found
+    /// ([`cover_of`]).  Else the clearest member.
     #[serde(default)]
     pub cover: Option<FaceRef>,
     /// Confirmed members: named into it, moved into it, answered Yes.
@@ -776,6 +834,23 @@ impl SubjectsFile {
         Ok(())
     }
 
+    /// The group photo: `face` (one of `id`'s confirmed members) is what
+    /// its tile, page and completions show; `None` goes back to the
+    /// automatic pick (the clearest member).  Named subjects only: an
+    /// unnamed group keeps the automatic pick.  `cover` is a field of the
+    /// first format, so the file's version doesn't change.
+    pub fn set_cover(&mut self, id: &SubjectId, face: Option<FaceRef>) -> Result<(), Refused> {
+        let s = self.get_mut(id)?;
+        if s.name.is_none() {
+            return Err(Refused::Nothing);
+        }
+        if face.is_some_and(|f| !s.members.contains(&f)) || s.cover == face {
+            return Err(Refused::Nothing);
+        }
+        s.cover = face;
+        Ok(())
+    }
+
     /// Forget a subject: its members become unnamed faces again.
     pub fn forget(&mut self, id: &SubjectId) -> Result<Subject, Refused> {
         let i = self.subjects.iter().position(|s| &s.id == id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?;
@@ -848,7 +923,7 @@ impl SubjectsFile {
 
     /// Merge `other` into `into` (the same kind): members and rejections
     /// move over, `other` goes.  `into` keeps its name, or takes `other`'s
-    /// when it has none.
+    /// when it has none; likewise its group photo (the kept name's wins).
     pub fn merge(&mut self, into: &SubjectId, other: &SubjectId) -> Result<(), Refused> {
         if into == other {
             return Err(Refused::Nothing);
@@ -1650,6 +1725,94 @@ mod tests {
         assert!(f.subjects.is_empty());
         assert_eq!(f.rename(&a, "x".into()), Err(Refused::NoSuchSubject(a.clone())));
         assert!(matches!(f.forget(&a), Err(Refused::NoSuchSubject(_))));
+    }
+
+    /// The group photo: a named group's own member only; it goes back to
+    /// automatic when its face moves to another group, is taken out or
+    /// removed; a merge keeps the kept name's photo (and takes the other's
+    /// when the kept one had none).  Never another kind's.
+    #[test]
+    fn a_group_photo_is_a_named_groups_own_face() {
+        let mut f = SubjectsFile::default();
+        let unnamed = f.create(Kind::Fursuit, None, vec![face(1, 0.1), face(2, 0.1)]);
+        assert_eq!(f.set_cover(&unnamed, Some(face(1, 0.1))), Err(Refused::Nothing), "an unnamed group keeps the automatic photo");
+        let kiba = f.create(Kind::Fursuit, Some("Kiba".into()), vec![face(3, 0.1), face(4, 0.1), face(5, 0.1)]);
+        assert_eq!(f.set_cover(&kiba, Some(face(1, 0.1))), Err(Refused::Nothing), "not one of its heads");
+        let person = f.create(Kind::Person, Some("Someone".into()), vec![face(6, 0.1)]);
+        assert_eq!(f.set_cover(&person, Some(face(3, 0.1))), Err(Refused::Nothing), "another kind's head is never its photo");
+        f.set_cover(&kiba, Some(face(4, 0.1))).unwrap();
+        assert_eq!(f.set_cover(&kiba, Some(face(4, 0.1))), Err(Refused::Nothing), "no change");
+        assert_eq!(f.get(&kiba).unwrap().cover, Some(face(4, 0.1)));
+        // Moved to another group: automatic again.
+        f.add_members(&unnamed, vec![face(4, 0.1)]).unwrap();
+        assert!(f.get(&kiba).unwrap().cover.is_none());
+        // Taken out ("Not Kiba"), and removed: automatic again.
+        f.set_cover(&kiba, Some(face(5, 0.1))).unwrap();
+        f.reject(&kiba, vec![face(5, 0.1)]).unwrap();
+        assert!(f.get(&kiba).unwrap().cover.is_none());
+        f.set_cover(&kiba, Some(face(3, 0.1))).unwrap();
+        f.remove_box(Kind::Fursuit, face(3, 0.1)).unwrap();
+        assert!(f.get(&kiba).unwrap().cover.is_none());
+        // A merge of two named groups: the kept name's photo wins.
+        let rook = f.create(Kind::Fursuit, Some("Rook".into()), vec![face(7, 0.1), face(8, 0.1)]);
+        f.add_members(&kiba, vec![face(9, 0.1)]).unwrap();
+        f.set_cover(&kiba, Some(face(9, 0.1))).unwrap();
+        f.set_cover(&rook, Some(face(8, 0.1))).unwrap();
+        let mut g = f.clone();
+        g.merge(&rook, &kiba).unwrap();
+        assert_eq!(g.get(&rook).unwrap().cover, Some(face(8, 0.1)), "Rook kept: Rook's photo");
+        let mut g = f.clone();
+        g.merge(&kiba, &rook).unwrap();
+        assert_eq!(g.get(&kiba).unwrap().cover, Some(face(9, 0.1)), "Kiba kept: Kiba's photo");
+        // The kept one automatic: the other's chosen photo comes along.
+        f.set_cover(&kiba, None).unwrap();
+        f.merge(&kiba, &rook).unwrap();
+        assert_eq!(f.get(&kiba).unwrap().cover, Some(face(8, 0.1)));
+        // Automatic again.
+        f.set_cover(&kiba, None).unwrap();
+        assert_eq!(f.set_cover(&kiba, None), Err(Refused::Nothing));
+    }
+
+    /// The face a tile shows: the chosen one while the group holds it and
+    /// its detection is found; else the clearest.
+    #[test]
+    fn the_shown_photo_falls_back_to_the_clearest() {
+        let day = NaiveDate::from_ymd_opt(2025, 3, 12).unwrap();
+        let at = |n: u8, clarity: f32| Face { face: face(n, 0.1), jpg: None, raw: None, day, capture: day.and_hms_opt(12, 0, 0).unwrap(), burst: None, clarity, confirmed: true };
+        let faces = [at(1, 0.2), at(2, 0.9), at(3, 0.5)];
+        assert_eq!(cover_of(None, &faces, |_| true).unwrap().face, face(2, 0.1), "automatic: the clearest");
+        assert_eq!(cover_of(Some(face(3, 0.1)), &faces, |_| true).unwrap().face, face(3, 0.1), "chosen");
+        assert_eq!(cover_of(Some(face(3, 0.1)), &faces, |_| false).unwrap().face, face(2, 0.1), "its detection is gone");
+        assert_eq!(cover_of(Some(face(9, 0.1)), &faces, |_| true).unwrap().face, face(2, 0.1), "not in the group (or its photo left the library)");
+        assert!(cover_of(Some(face(3, 0.1)), &[], |_| true).is_none());
+        assert_eq!(cover_words("Kiba", true), "Set Kiba's group photo");
+        assert_eq!(cover_words("Kiba", false), "Kiba's group photo is automatic again");
+    }
+
+    /// An old file loads as it was (a subject written before `cover`
+    /// existed has none), and a chosen photo keeps the first format's
+    /// shape: `cover` is one of its fields, so the version stays 1 and an
+    /// older app reads it.
+    #[test]
+    fn a_group_photo_keeps_the_files_version() {
+        let d = std::env::temp_dir().join(format!("pp-subjects-cover-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let path = d.join("subjects.json");
+        let old = r#"{"version":1,"subjects":[{"id":"0123456789abcdef0123456789abcdef","name":"Someone","kind":"person","members":[{"key":"01010101010101010101010101010101","box":[0.1,0.2,0.1,0.15]},{"key":"02020202020202020202020202020202","box":[0.1,0.2,0.1,0.15]}]}]}"#;
+        std::fs::write(&path, old).unwrap();
+        let mut f = SubjectsFile::load(&path);
+        assert_eq!((f.version, f.subjects.len()), (1, 1));
+        assert!(f.subjects[0].cover.is_none() && f.subjects[0].rejected.is_empty());
+        let id = f.subjects[0].id.clone();
+        let chosen = FaceRef::new(Key([2; 16]), [0.1, 0.2, 0.1, 0.15]);
+        f.set_cover(&id, Some(chosen)).unwrap();
+        assert_eq!(f.written_version(), FILE_VERSION_PLAIN);
+        f.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 1") && text.contains("\"cover\": {"), "{text}");
+        assert_eq!(SubjectsFile::load(&path).subjects[0].cover, Some(chosen), "read back");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Decision 12: people, fursuits and pets are never combined, by

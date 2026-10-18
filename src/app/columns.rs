@@ -254,8 +254,9 @@ pub fn section(col: usize) -> subj::Section {
 
 /// One column's faces as tiles: the first `marked` are the least like the
 /// rest; `paired` ones (another head of their photo is in the edit) carry
-/// the pin.  Only the tiles on screen (or near) load their crops.
-pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], marked: usize, paired: &dyn Fn(&FaceRef) -> bool) -> Element<'a, Message> {
+/// the pin; `cover` (the group photo, and whether it was chosen) its mark.
+/// Only the tiles on screen (or near) load their crops.
+pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], marked: usize, paired: &dyn Fn(&FaceRef) -> bool, cover: Option<(FaceRef, bool)>) -> Element<'a, Message> {
     let s = &app.subjects;
     let shape = subj::shape(look.kind);
     let small = subj::px(app, tile::SMALL_CROP);
@@ -267,7 +268,14 @@ pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], m
         keys.push(subj::Crops::key(&f.face, small, Framing::Face));
         let crop = tile::crop(s.crops.get(&f.face, small, Framing::Face), tile::SMALL_CROP, shape);
         let pinned = paired(&f.face);
-        let badge = if pinned { Some(Glyph::Pin) } else { (i < marked).then_some(Glyph::Split) };
+        let is_cover = cover.filter(|(c, _)| *c == f.face);
+        let badge = if pinned {
+            Some(Glyph::Pin)
+        } else if is_cover.is_some() {
+            Some(super::subjects_cover::MARK)
+        } else {
+            (i < marked).then_some(Glyph::Split)
+        };
         let picked = look.cols.picked_in == Some(col) && look.cols.picked.contains(&f.face);
         let el: Element<'a, Message> = Tile { crop, name: None, count: f.day.format("%b %-d, %Y").to_string(), picked, small: true, badge, on: wrap(ColMsg::Pick(col, f.face)), badge_on: None }.into();
         let messages = crate::ui::drag::DragMessages { start: wrap(ColMsg::DragStart(col, f.face)), enter: wrap(ColMsg::Nothing), leave: wrap(ColMsg::Nothing), drop: wrap(ColMsg::DragDrop) };
@@ -275,7 +283,12 @@ pub fn grid<'a>(app: &'a App, look: &Look<'a>, col: usize, order: &[&'a Face], m
         let words = if pinned {
             format!("{}. Another {} of this photo is in the edit: the two can't share a column", super::search::long_date(f.day), crop_word(look.kind))
         } else {
-            format!("{}{}", super::search::long_date(f.day), if i < marked { ". Among the least like the rest" } else { "" })
+            let photo = match is_cover {
+                Some((_, true)) => ". The group photo",
+                Some((_, false)) => ". The group photo, picked automatically: the clearest",
+                None => "",
+            };
+            format!("{}{}{}", super::search::long_date(f.day), if i < marked { ". Among the least like the rest" } else { "" }, photo)
         };
         r = r.push(tip(el, words, true));
     }

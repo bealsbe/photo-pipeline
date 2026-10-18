@@ -971,6 +971,21 @@ impl People {
         Ok(sid)
     }
 
+    /// The group photo of a named group: one of its faces (`None`: the
+    /// automatic pick again).  One undo step; refused for an unnamed
+    /// group, a face it doesn't hold, or no change.  Nothing regroups.
+    pub fn set_cover(&mut self, id: &SubjectId, face: Option<FaceRef>) -> Result<String, Refused> {
+        let name = self.file.get(id).ok_or_else(|| Refused::NoSuchSubject(id.clone()))?.name.clone().unwrap_or_default();
+        let what = subjects::cover_words(&name, face.is_some());
+        self.checkpoint(what.clone());
+        if let Err(e) = self.file.set_cover(id, face) {
+            self.undo.pop();
+            return Err(e);
+        }
+        self.save();
+        Ok(what)
+    }
+
     /// Forget a subject: its faces become unnamed again.
     pub fn forget(&mut self, id: &SubjectId) -> Result<(), Refused> {
         let name = self.file.get(id).and_then(|s| s.name.clone());
@@ -1093,7 +1108,15 @@ impl People {
                 _ => None,
             })
             .collect();
-        Ok(EditPlan { kind, new_names, moves, renames, gone })
+        let covers = e
+            .covers
+            .iter()
+            .filter_map(|(i, face)| match targets.get(*i) {
+                Some(PlanDest::Group(g)) => Some((g.clone(), *face)),
+                _ => None,
+            })
+            .collect();
+        Ok(EditPlan { kind, new_names, moves, renames, covers, gone })
     }
 
     /// The group editor's *Apply*, planned (`plan_edit`): every move, the
@@ -1105,13 +1128,19 @@ impl People {
     /// Returns the words (the status line's and the undo's) and the new
     /// groups made.
     pub fn apply_edit(&mut self, plan: &EditPlan) -> Result<(String, Vec<SubjectId>), Refused> {
-        if plan.moves.is_empty() && plan.renames.is_empty() {
+        if plan.moves.is_empty() && plan.renames.is_empty() && plan.covers.is_empty() {
             return Err(Refused::Nothing);
         }
         let words = self.edit_words(plan);
         let before = self.file.clone();
         self.checkpoint(words.clone());
         match self.apply_plan(plan) {
+            // Nothing changed (a group photo the group no longer holds):
+            // no undo step.
+            Ok(_) if self.file == before => {
+                self.undo.pop();
+                Err(Refused::Nothing)
+            }
             Ok(made) => {
                 self.save();
                 Ok((words, made))
@@ -1192,6 +1221,16 @@ impl People {
         for (g, name) in &plan.renames {
             self.file.rename(&as_subject[g], name.clone())?;
         }
+        // Group photos last, on the groups as the moves left them: a
+        // named group still holding the face (else nothing, as on its
+        // page).
+        for (g, face) in &plan.covers {
+            let sid = match (as_subject.get(g), g) {
+                (Some(s), _) | (None, GroupId::Subject(s)) => s.clone(),
+                (None, GroupId::Cluster(_)) => continue,
+            };
+            let _ = self.file.set_cover(&sid, *face);
+        }
         // A subject left with nothing goes (its name with it); so does a
         // new group nothing went to.
         let touched: HashSet<SubjectId> = plan
@@ -1215,7 +1254,7 @@ impl People {
     /// An edit in words: "Split into 3 groups, 4 heads to Kiba, 2
     /// removed".
     pub fn edit_words(&self, plan: &EditPlan) -> String {
-        subjects::edit_words(plan.kind, &plan.moves, &plan.renames, |g| self.subject_of(g).and_then(|s| s.name.clone()))
+        subjects::plan_words(plan, |g| self.subject_of(g).and_then(|s| s.name.clone()))
     }
 
     /// A review answer for `group`: `Some(true)` confirms the faces as
@@ -1416,18 +1455,33 @@ impl People {
     /// [`Face`] with its shot (the engine's resolver); detections of
     /// photos no longer in the library resolve to nothing and are not
     /// counted.
+    #[cfg(test)]
     pub fn build_snapshot(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>) -> Arc<Subjects> {
+        self.build_snapshot_found(resolve, &|_, _| true)
+    }
+
+    /// [`People::build_snapshot`], a chosen group photo shown only while
+    /// `found` (kind, box) says its detection is still there (a rebuild
+    /// may not find it again); else the automatic pick.
+    pub fn build_snapshot_found(&self, resolve: &dyn Fn(&FaceRef) -> Option<Face>, found: &dyn Fn(Kind, &FaceRef) -> bool) -> Arc<Subjects> {
         let mut groups: Vec<Group> = Vec::new();
         let group_of = |id: GroupId, kind: Kind, name: Option<String>, hidden: bool, cover: Option<FaceRef>, members: &[FaceRef], suggestions: usize| -> Option<Group> {
             let faces: Vec<Face> = members.iter().filter_map(resolve).collect();
-            let cover = cover.and_then(|c| resolve(&c)).or_else(|| faces.iter().cloned().max_by(|a, b| a.clarity.total_cmp(&b.clarity)))?;
+            // A chosen photo counts only on a named group, while it holds it.
+            let cover = subjects::cover_of(cover.filter(|_| name.is_some()), &faces, |c| found(kind, c))?;
             let photos = faces.iter().map(|f| f.face.key).collect::<HashSet<_>>().len();
             let days = subjects::count_days(&faces);
             Some(Group { id, kind, name, hidden, photos, bursts: subjects::count_bursts(&faces), days, cover, suggestions })
         };
+        // The groups showing the photo the user chose (not the automatic one).
+        let mut chosen_covers = HashSet::new();
         for s in &self.file.subjects {
             let suggestions = self.grouped.suggestion_counts.get(&s.id).copied().unwrap_or(0);
-            groups.extend(group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions));
+            let Some(g) = group_of(GroupId::Subject(s.id.clone()), s.kind, s.name.clone(), s.hidden, s.cover, &s.members, suggestions) else { continue };
+            if s.cover == Some(g.cover.face) {
+                chosen_covers.insert(g.id.clone());
+            }
+            groups.push(g);
         }
         if let Some(store) = &self.store {
             let refs = store.refs();
@@ -1439,7 +1493,7 @@ impl People {
         groups.sort_by(|a, b| b.name.is_some().cmp(&a.name.is_some()).then(matches!(b.id, GroupId::Subject(_)).cmp(&matches!(a.id, GroupId::Subject(_)))).then(b.photos.cmp(&a.photos)).then_with(|| a.name.cmp(&b.name)));
         let undoable = self.undo.last().map(|(_, what, _)| what.clone());
         let faces_found = self.store.as_ref().map_or(0, FaceStore::found);
-        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new() })
+        Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new(), chosen_covers })
     }
 
     /// Suggestions for review (UI 6): for a subject, the faces within
@@ -2042,6 +2096,7 @@ mod tests {
             new_names: vec![Some("Rook".into()), None],
             moves: vec![(h(2), EditDest::New(0)), (h(3), EditDest::Group(0)), (h(4), EditDest::Removed), (h(1), EditDest::Group(1)), (h(5), EditDest::Group(0)), (h(10), EditDest::Group(0))],
             renames: vec![(2, "Ash".into())],
+            covers: Vec::new(),
         };
         let plan = p.plan_edit(&edit).unwrap();
         assert!(!plan.moves.iter().any(|m| m.0 == h(5)), "the viewer removed it");
@@ -2061,6 +2116,113 @@ mod tests {
         p.undo().unwrap();
         assert_eq!(p.file.subjects, before.subjects, "every part back");
         assert!(!p.file.removed_index(k).covers(&h(4)));
+    }
+
+    /// The group photo, through the people state: a named group's own
+    /// face, one undo step; the snapshot shows it at once and says it was
+    /// chosen; it holds through a regroup; it goes back to the clearest
+    /// when its face leaves (one edit, its own undo), or its detection
+    /// isn't found again; an unnamed group can't have one.
+    #[test]
+    fn a_group_photo_is_one_step_and_survives_a_regroup() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2), h(9)]);
+        let id = GroupId::Subject(kiba.clone());
+        let unnamed = p.file.create(k, None, vec![h(4), h(5)]);
+        p.set_other_clusters(k, vec![(7, vec![h(20), h(21)])]);
+        assert_eq!(p.set_cover(&unnamed, Some(h(4))), Err(Refused::Nothing), "unnamed: automatic only");
+        assert_eq!(p.set_cover(&kiba, Some(h(20))), Err(Refused::Nothing), "not its own");
+        assert!(p.undo.is_empty(), "a refusal leaves no undo step");
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!(snap.group(&id).unwrap().cover.face, h(9), "automatic: the clearest");
+        assert!(snap.chosen_cover(&id).is_none());
+        assert_eq!(p.set_cover(&kiba, Some(h(1))).unwrap(), "Set Kiba's group photo");
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!((snap.group(&id).unwrap().cover.face, snap.chosen_cover(&id)), (h(1), Some(h(1))), "shown at once");
+        assert_eq!(snap.undoable.as_deref(), Some("Set Kiba's group photo"));
+        // A regroup: other clusters, a new generation; the photo stays.
+        p.set_other_clusters(k, vec![(70, vec![h(20)]), (71, vec![h(21)])]);
+        p.reset_grouping();
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(1));
+        // Its detection not found again (a rebuild): the clearest, not chosen.
+        let gone = p.build_snapshot_found(&resolve, &|_, f| *f != h(1));
+        assert_eq!((gone.group(&id).unwrap().cover.face, gone.chosen_cover(&id)), (h(9), None));
+        // One undo takes it back.
+        assert_eq!(p.undo().as_deref(), Some("Set Kiba's group photo"));
+        assert!(p.file.get(&kiba).unwrap().cover.is_none());
+        // Set again, then its face goes to another group in the editor:
+        // the clearest again, and that edit's undo brings the photo back.
+        p.set_cover(&kiba, Some(h(1))).unwrap();
+        let edit = GroupEdit { kind: k, targets: vec![EditTarget::Subject(unnamed.clone())], moves: vec![(h(1), EditDest::Group(0))], ..GroupEdit::default() };
+        p.apply_edit(&p.plan_edit(&edit).unwrap()).unwrap();
+        assert!(p.file.get(&kiba).unwrap().cover.is_none());
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(9));
+        p.undo().unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&id), Some(h(1)));
+        // Back to automatic is a step of its own.
+        assert_eq!(p.set_cover(&kiba, None).unwrap(), "Kiba's group photo is automatic again");
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(9));
+        // People the same way, never a fursuit's head.
+        let someone = p.file.create(Kind::Person, Some("Someone".into()), vec![h(30), h(31)]);
+        p.set_cover(&someone, Some(h(30))).unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&GroupId::Subject(someone)), Some(h(30)));
+    }
+
+    /// A merge of two named groups keeps the kept name's photo, through
+    /// the people state, and one undo restores both.
+    #[test]
+    fn a_merge_keeps_the_kept_names_photo() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2)]);
+        let rook = p.file.create(k, Some("Rook".into()), vec![h(3), h(9)]);
+        p.set_cover(&kiba, Some(h(1))).unwrap();
+        p.set_cover(&rook, Some(h(3))).unwrap();
+        let before = p.file.clone();
+        let into = p.merge(&GroupId::Subject(kiba.clone()), &[GroupId::Subject(rook.clone())]).unwrap();
+        assert_eq!(into, kiba);
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!(snap.chosen_cover(&GroupId::Subject(kiba.clone())), Some(h(1)), "Kiba kept: Kiba's photo, not the clearer one");
+        p.undo().unwrap();
+        assert_eq!(p.file, before);
+        p.merge(&GroupId::Subject(rook.clone()), &[GroupId::Subject(kiba)]).unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&GroupId::Subject(rook)), Some(h(3)), "Rook kept: Rook's photo");
+    }
+
+    /// The editor's *Apply* chooses group photos in the same undo step as
+    /// its moves; a photo alone is a step too; a photo whose face the
+    /// same edit moves away is not set (and alone, changes nothing).
+    #[test]
+    fn an_edit_sets_group_photos_in_its_one_step() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2), h(3)]);
+        let rook = p.file.create(k, Some("Rook".into()), vec![h(4)]);
+        let edit = GroupEdit {
+            kind: k,
+            targets: vec![EditTarget::Subject(kiba.clone()), EditTarget::Subject(rook.clone())],
+            moves: vec![(h(3), EditDest::Group(1))],
+            covers: vec![(0, Some(h(2))), (1, Some(h(3)))],
+            ..GroupEdit::default()
+        };
+        let plan = p.plan_edit(&edit).unwrap();
+        assert_eq!(plan.covers.len(), 2);
+        let depth = p.undo.len();
+        let (words, _) = p.apply_edit(&plan).unwrap();
+        assert_eq!(p.undo.len(), depth + 1, "one step");
+        assert_eq!(words, "1 head to Rook, new group photo for Kiba, new group photo for Rook");
+        assert_eq!((p.file.get(&kiba).unwrap().cover, p.file.get(&rook).unwrap().cover), (Some(h(2)), Some(h(3))), "the moved head is Rook's photo");
+        p.undo().unwrap();
+        assert!(p.file.get(&kiba).unwrap().cover.is_none() && p.file.get(&rook).unwrap().cover.is_none());
+        // A photo alone.
+        let only = GroupEdit { kind: k, targets: vec![EditTarget::Subject(kiba.clone())], covers: vec![(0, Some(h(1)))], ..GroupEdit::default() };
+        assert_eq!(p.apply_edit(&p.plan_edit(&only).unwrap()).unwrap().0, "Set Kiba's group photo");
+        // A photo the same edit sends away: not set, and nothing else to do.
+        let away = GroupEdit { kind: k, targets: vec![EditTarget::Subject(rook.clone())], covers: vec![(0, Some(h(1)))], ..GroupEdit::default() };
+        let depth = p.undo.len();
+        assert_eq!(p.apply_edit(&p.plan_edit(&away).unwrap()), Err(Refused::Nothing));
+        assert_eq!(p.undo.len(), depth, "no undo step for nothing");
     }
 
     /// A review's X on a detection and on a box the user drew, then Z: the

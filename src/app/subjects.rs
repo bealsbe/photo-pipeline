@@ -585,6 +585,8 @@ pub enum Msg {
     Split(super::subjects_split::Msg),
     /// "Not fursuit heads" / "Not faces" on groups or picked heads.
     Remove(super::subjects_remove::Msg),
+    /// A named group's photo.
+    Cover(super::subjects_cover::Msg),
 }
 
 // ── getting there ───────────────────────────────────────────────────────────
@@ -891,6 +893,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Editor(msg) => super::subjects_editor::update(app, msg),
         Msg::Split(msg) => super::subjects_split::update(app, msg),
         Msg::Remove(msg) => super::subjects_remove::update(app, msg),
+        Msg::Cover(msg) => super::subjects_cover::update(app, msg),
     }
 }
 
@@ -1842,6 +1845,7 @@ mod tests {
             ],
             faces_found: 200,
             undoable: None, seen_together: Default::default(),
+            chosen_covers: Default::default(),
         }
     }
 
@@ -1891,6 +1895,7 @@ mod tests {
             faces_found: 0,
             undoable: None,
             seen_together: Default::default(),
+            chosen_covers: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;
@@ -1925,6 +1930,7 @@ mod tests {
             faces_found: 0,
             undoable: None,
             seen_together: Default::default(),
+            chosen_covers: Default::default(),
         };
         let ids = |v: &[&Group]| v.iter().map(|g| g.id.clone()).collect::<Vec<_>>();
         let c = GroupId::Cluster;

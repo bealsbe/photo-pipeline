@@ -212,7 +212,21 @@ pub enum Act {
     /// (each group heads left or went to, once), and where heads went,
     /// one [`Out`] per group they left and where they went, so each reads
     /// as a `move` / `split` / `remove_many` does.
-    Edit { groups: Vec<Side>, out: Vec<Out> },
+    Edit {
+        groups: Vec<Side>,
+        out: Vec<Out>,
+        /// Group photos chosen in the same *Apply* (absent: none).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        covers: Vec<EditCover>,
+    },
+    /// A named group's photo (what its tile shows) chosen: `head`, one of
+    /// its own; absent, back to the automatic pick.  `group` as it was
+    /// before.  It says nothing about who is who, so it makes no pairs.
+    Cover {
+        group: Side,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head: Option<Head>,
+    },
     /// The entry `undoes` was taken back (Ctrl+Z, Z in a review).  An undo
     /// can itself be undone, which puts the first back.  `of` is the act
     /// it took back, for reading.
@@ -233,6 +247,7 @@ impl Act {
             Act::Remove { .. } => "remove",
             Act::RemoveMany { .. } => "remove_many",
             Act::Edit { .. } => "edit",
+            Act::Cover { .. } => "cover",
             Act::Undo { .. } => "undo",
         }
     }
@@ -247,6 +262,15 @@ pub struct Out {
     pub to: To,
     pub heads: Vec<Head>,
     pub moved: usize,
+}
+
+/// A group photo chosen in an edit: for `groups[group]`, `head` (absent:
+/// the automatic pick again).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EditCover {
+    pub group: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head: Option<Head>,
 }
 
 /// Where heads went in an edit.
@@ -816,7 +840,7 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
         match &mut e.act {
             Act::Merge { groups } | Act::NotSame { groups } => groups.iter_mut().for_each(|g| c.side(k, g)),
             Act::Split { from, .. } => c.side(k, from),
-            Act::Edit { groups, out } => {
+            Act::Edit { groups, out, .. } => {
                 groups.iter_mut().for_each(|g| c.side(k, g));
                 for o in out {
                     if let To::New { name, .. } = &mut o.to {
@@ -828,7 +852,7 @@ pub fn code_entries(entries: &mut [Entry], c: &mut Codes) {
                 c.side(k, from);
                 c.side(k, to);
             }
-            Act::Answer { group, .. } => c.side(k, group),
+            Act::Answer { group, .. } | Act::Cover { group, .. } => c.side(k, group),
             Act::Name { name, group, from, .. } => {
                 // A head named into a subject: its name and the subject's
                 // are one, so they share the code.
@@ -1132,6 +1156,7 @@ at the export, by the same codes (below).
 | `draw` | `head`, `name` | none |
 | `remove` | `head` (not a face / not a fursuit head) | none |
 | `remove_many` | `groups` (as they were), `heads`, `removed` (whole groups or picked heads: not faces / not fursuit heads) | none |
+| `cover` | `group` (as it was), `head` (its photo now; absent: the automatic one again) | none |
 | `undo` | `undoes` (an id), `of` (its act) | takes that entry's pairs back |
 
 ## How
@@ -1277,7 +1302,10 @@ mod tests {
                     Out { from: Some(0), to: To::TakenOut, heads: heads([head(1, 30)]), moved: 1 },
                     Out { from: None, to: To::New { new: 1, name: None }, heads: heads([head(9, 0)]), moved: 1 },
                 ],
+                covers: vec![EditCover { group: 1, head: Some(Head(head(2, 0))) }, EditCover { group: 0, head: None }],
             },
+            Act::Cover { group: side(1, 3), head: Some(Head(head(1, 10))) },
+            Act::Cover { group: side(1, 3), head: None },
         ];
         for act in acts {
             let e = Entry::new(Kind::Fursuit, act, Some(How::hand(At::Drag)), Some(lib()));
@@ -1287,6 +1315,35 @@ mod tests {
             assert_eq!(back, e, "{line}");
             assert!(line.contains(&format!(r#""act":"{}""#, e.act.name())), "{line}");
         }
+    }
+
+    /// A group photo chosen is one short `cover` line: the group as it
+    /// was (its name kept here, a code in an export) and the head; back
+    /// to automatic, no head.  An edit's covers ride in its own entry
+    /// and are absent when it chose none, so older edit lines read the
+    /// same.  A cover makes no labelled pairs.
+    #[test]
+    fn a_group_photo_is_one_short_cover_line() {
+        let group = Side::new(3, Some("Someone".into()), Some("5ca1ab1e".into()), [head(1, 0), head(1, 10), head(1, 20)]);
+        let e = Entry::new(Kind::Person, Act::Cover { group: group.clone(), head: Some(Head(head(1, 10))) }, Some(How::hand(At::Faces)), None);
+        let line = e.line();
+        assert!(line.contains(r#""act":"cover""#) && line.contains(r#""kind":"person""#) && line.contains(r#""at":"faces""#), "{line}");
+        assert!(line.contains(r#""head":["01010101010101010101010101010101",10,100,50,80]"#), "{line}");
+        assert!(line.len() < 600, "{} bytes", line.len());
+        let back = Entry::new(Kind::Person, Act::Cover { group, head: None }, Some(How::hand(At::Faces)), None).line();
+        assert!(!back.contains(r#""head""#), "automatic again: no head: {back}");
+        assert!(pairs(&parse(&format!("{line}{back}")).0).is_empty(), "no pairs");
+        // An edit line of before reads, its covers empty; one without
+        // covers writes none.
+        let old = r#"{"v":1,"id":"0123456789abcdef","t":"2026-01-01T00:00:00.000Z","app":"0.1.0","kind":"fursuit","act":"edit","groups":[],"out":[]}"#;
+        let (read, bad) = parse(old);
+        assert!(bad == 0 && matches!(&read[0].act, Act::Edit { covers, .. } if covers.is_empty()));
+        assert!(!read[0].line().contains("covers"));
+        // In an export the group's name is a code.
+        let mut entries = vec![e];
+        code_entries(&mut entries, &mut Codes::default());
+        let coded = entries[0].line();
+        assert!(!coded.contains("Someone") && !coded.contains("5ca1ab1e") && coded.contains(r#""name":"person-1""#), "{coded}");
     }
 
     /// A partial last line (a crash mid-write) and a line from a newer

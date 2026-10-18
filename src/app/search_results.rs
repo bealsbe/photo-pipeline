@@ -869,6 +869,7 @@ mod tests {
             groups: vec![],
             faces_found: 0,
             undoable: None, seen_together: Default::default(),
+            chosen_covers: Default::default(),
         }, &[SKind::Person]);
         assert!(people_only.is_empty());
         // "@" alone offers everyone named; a word start counts ("@doe").
@@ -891,6 +892,7 @@ mod tests {
             groups: vec![g(1, SKind::Person, Some("B"), false, 3), g(2, SKind::Person, Some("A"), false, 30), g(3, SKind::Person, None, false, 90), g(4, SKind::Person, Some("H"), true, 9), g(5, SKind::Fursuit, Some("F"), false, 9)],
             faces_found: 0,
             undoable: None, seen_together: Default::default(),
+            chosen_covers: Default::default(),
         };
         let v = nameable(&all, &[SKind::Person]);
         assert_eq!(v.iter().map(|n| n.name.as_str()).collect::<Vec<_>>(), ["A", "B"], "most photos first; no unnamed, hidden or fursuit");

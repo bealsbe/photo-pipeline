@@ -286,6 +286,21 @@ impl Link {
         }
     }
 
+    /// A named group's photo: one of its faces (`None`: the automatic
+    /// pick again), chosen `at` there.  One undo step, recorded as
+    /// `cover`; the tile follows at once.
+    pub fn set_cover(&self, id: &GroupId, face: Option<FaceRef>, at: decisions::At) {
+        let GroupId::Subject(sid) = id else { return };
+        match self {
+            Link::Engine(e) => e.set_cover(sid.clone(), face, at),
+            Link::Fake(f) => {
+                let before = f.before(|s| Act::Cover { group: s.side(id, &[]), head: face.map(decisions::Head) }, id);
+                let done = f.edit(id, |p, _| p.set_cover(id, face), |z, _| z.set_cover(id, face));
+                f.record(done, before, Via::Hand(at), None);
+            }
+        }
+    }
+
     /// Forget a named subject: the name and what was confirmed.
     pub fn forget(&self, id: &GroupId) {
         match self {
@@ -1183,6 +1198,7 @@ impl FakeState {
         // The fursuits' groups ride along, each carrying its kind.
         snap.groups.extend(self.fursuits.groups());
         snap.seen_together = self.fursuits.seen_together();
+        snap.chosen_covers.extend(self.fursuits.chosen_covers());
         snap.groups.sort_by(|a, b| (b.name.is_some(), b.photos).cmp(&(a.name.is_some(), a.photos)).then(a.cover.capture.cmp(&b.cover.capture)));
         snap.generation += self.fursuits.generation();
         self.refresh_heads();
@@ -2245,8 +2261,9 @@ impl FakeState {
                 None => out.push((from, to, vec![*head])),
             }
         }
+        let covers = plan.covers.iter().map(|(g, face)| decisions::EditCover { group: index(g, &mut ids), head: face.map(decisions::Head) }).collect();
         let groups = ids.iter().map(|g| self.side(g, &[])).collect();
-        Act::Edit { groups, out: out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect() }
+        Act::Edit { groups, out: out.into_iter().map(|(from, to, heads)| decisions::Out { from, to, moved: heads.len(), heads: decisions::heads(heads.into_iter().take(decisions::MOVED_HEADS)) }).collect(), covers }
     }
 
     fn side(&self, id: &GroupId, first: &[FaceRef]) -> decisions::Side {
