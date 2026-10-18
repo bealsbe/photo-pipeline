@@ -180,7 +180,8 @@ pub enum BgEvent {
     /// Pairs of fursuit groups that may be one suit
     /// (`Engine::merge_suggestions`), nearest first: those offered now
     /// (by distance, or with verdicts already kept).  `focus`: the group
-    /// asked about (its page's *Similar groups*), else the whole tab.
+    /// asked about (its editor's *Likely the same fursuit*), else the
+    /// whole tab.
     /// `judging`: close pairs are being compared by the judge, and
     /// `MergeJudged` follows.  Fursuits only.
     MergeSuggestions { seq: u64, focus: Option<crate::model::subjects::GroupId>, list: Arc<Vec<crate::search::merging::GroupPair>>, judging: bool },

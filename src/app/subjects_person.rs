@@ -219,7 +219,6 @@ pub fn open(app: &mut App, id: &GroupId, rename: bool) -> Task<Message> {
     app.subjects.review = None;
     app.subjects.merges = None;
     app.quicklook = None;
-    super::subjects_merge::ask_similar(app);
     super::subjects_split::ask(app);
     let mut tasks = vec![search(app, false), subj::refresh_crops(app)];
     if naming {
@@ -745,13 +744,16 @@ pub fn on_key(app: &mut App, key: &Key, mods: keyboard::Modifiers) -> Task<Messa
 pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(p) = s.person.as_ref() else { return Space::new().into() };
-    let mut col = column![header(app, p), kit::hairline(), band(app, p), kit::hairline()].width(Length::Fill).height(Length::Fill);
-    // A fursuit's nearest groups, to merge with one click.
-    if let Some(similar) = super::subjects_merge::similar_row(app, &p.group) {
-        col = col.push(similar).push(kit::hairline());
-    }
-    if p.show == Show::Faces && !p.picked.is_empty() {
-        col = col.push(faces_strip(app, p));
+    // The group and its photos: no suggestion rows (a merge, a split),
+    // which the group editor offers.
+    let mut col = column![].width(Length::Fill).height(Length::Fill);
+    for part in parts(p) {
+        col = match part {
+            Part::Header => col.push(header(app, p)).push(kit::hairline()),
+            Part::Band => col.push(band(app, p)).push(kit::hairline()),
+            Part::PickStrip => col.push(faces_strip(app, p)),
+            Part::Body => col,
+        };
     }
     let body: Element<'_, Message> = match p.show {
         Show::Faces => faces_view(app, p),
@@ -777,6 +779,30 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
         layers.push(menu);
     }
     subj::layered(layers)
+}
+
+/// What a group's page is made of, top to bottom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Part {
+    Header,
+    /// Who it is: name, counts, *Photos | Faces*, the review, *Edit group*.
+    Band,
+    /// The picked faces' actions (on *Faces*).
+    PickStrip,
+    /// The photos, or the faces.
+    Body,
+}
+
+/// The page's parts.  Never a suggestion row (similar groups to merge, a
+/// split): the page shows the group, and those are offered in the group
+/// editor (*Edit group*).
+pub fn parts(p: &Person) -> Vec<Part> {
+    let mut v = vec![Part::Header, Part::Band];
+    if p.show == Show::Faces && !p.picked.is_empty() {
+        v.push(Part::PickStrip);
+    }
+    v.push(Part::Body);
+    v
 }
 
 /// Dialogs the person's page puts over everything (none of its own:
@@ -1221,6 +1247,21 @@ mod tests {
             faces_found: 400,
             undoable: None, seen_together: Default::default(),
             chosen_covers: Default::default(),
+        }
+    }
+
+    /// A group's page shows the group (its header, band and photos or
+    /// faces), never a suggestion row: no *Similar groups* to merge on a
+    /// fursuit's page, no split banner.  Those are the group editor's.
+    #[test]
+    fn a_group_page_shows_no_merge_or_split_suggestion() {
+        for kind in [Kind::Fursuit, Kind::Person] {
+            let mut p = Person::new(GroupId::Cluster(4), kind);
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::Body]);
+            p.show = Show::Faces;
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::Body]);
+            p.picked.push(FaceRef { key: Key([4; 16]), bbox: [0.0; 4] });
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::PickStrip, Part::Body], "the picked faces' actions only");
         }
     }
 

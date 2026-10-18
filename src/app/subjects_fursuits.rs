@@ -10,7 +10,9 @@
 //!   start (the first index's step, an export's photos, carrying on after a
 //!   stop) waits with its cost: a strip under the folder bar in any view,
 //!   and a card on the tab, with *Find fursuit heads* and *Skip this time*.
-//! - **Progress** on the tab and in the status bar, with × to stop.
+//! - **Progress** on the tab and in the status bar, with × to stop.  Over
+//!   the groups, what needs no answer (a scan running, heads to update,
+//!   skipped photos) is one quiet line, never a card: the tab shows groups.
 //! - **A failed card** says what failed and offers to try the card again
 //!   or open Preferences; never the processor.
 //! - **Heads to update** (fursuit matching v2): heads found before fursuits
@@ -219,7 +221,7 @@ pub fn body(app: &App) -> Element<'_, Message> {
                 _ => "Groups appear here as they are found, newest days first. You can keep culling meanwhile.",
             };
             let mut col = column![].width(Length::Fill);
-            if let Some(card) = status_card(app) {
+            if let Some(card) = status_card(app, false) {
                 col = col.push(card);
             }
             let (title, note) = match h.step {
@@ -376,6 +378,14 @@ fn card<'a>(glyph: Glyph, tone: iced::Color, title: String, detail: String, righ
     container(boxed).padding(Padding { top: 16.0, left: 16.0, right: 16.0, bottom: 4.0 }).into()
 }
 
+/// What needs no answer, over the groups, as quiet as it can be: one line
+/// on the photos' grey, ending in a link (an offer) or a bar (a step
+/// running).
+pub(super) fn quiet_line<'a>(glyph: Glyph, title: String, detail: String, tail: Element<'a, Message>) -> Element<'a, Message> {
+    let r = row![icons::view(glyph, 14.0, t::PHOTO_INK3), text(title).size(t::T_SMALL).font(paint::MEDIUM).color(t::PHOTO_INK2), text(detail).size(t::T_SMALL).color(t::PHOTO_INK3), tail].spacing(8).align_y(Alignment::Center);
+    container(r).padding(Padding { top: 10.0, left: 18.0, right: 16.0, bottom: 2.0 }).into()
+}
+
 fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
     progress_bar(0.0..=1.0, frac.clamp(0.0, 1.0))
         .length(w)
@@ -385,31 +395,36 @@ fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Message> {
 }
 
 /// Over the groups (or alone): a scan's progress, the processor's question,
-/// a failed card, or photos still to look at.
-pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
+/// a failed card, or photos still to look at.  Over the groups, what needs
+/// no answer (a scan running, an offer) is one quiet line; the question and
+/// a failure keep their card.
+pub fn status_card(app: &App, over_groups: bool) -> Option<Element<'_, Message>> {
     let h = &app.search.status.heads;
     let device = app.search.status.device.chosen;
+    let progress = |title: String, detail: String, frac: f32| {
+        if over_groups {
+            quiet_line(Glyph::Fursuit, title, detail, bar(frac, 96.0, t::PHOTO_RAISED))
+        } else {
+            card(Glyph::Fursuit, t::PHOTO_INK2, title, detail, bar(frac, 120.0, t::PHOTO_RAISED))
+        }
+    };
     match &h.step {
         Step::Scanning { why: Why::Vectors, done, total } => {
             let left = estimate::describe_seconds(fursuits::vector_seconds(total.saturating_sub(*done), device));
             let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
-            Some(card(
-                Glyph::Fursuit,
-                t::PHOTO_INK2,
+            Some(progress(
                 format!("Updating fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
                 format!("{} left {}. Their groups and suggestions come back as they're updated.", super::search_setup::capital(&left), on_device(device)),
-                bar(frac, 120.0, t::PHOTO_RAISED),
+                frac,
             ))
         }
         Step::Scanning { done, total, .. } => {
             let left = estimate::describe_seconds(fursuits::head_seconds(total.saturating_sub(*done), device));
             let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
-            Some(card(
-                Glyph::Fursuit,
-                t::PHOTO_INK2,
+            Some(progress(
                 format!("Finding fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
                 format!("{} left {}. Groups appear as they are found, newest days first.", super::search_setup::capital(&left), on_device(device)),
-                bar(frac, 120.0, t::PHOTO_RAISED),
+                frac,
             ))
         }
         Step::Asking(o) => {
@@ -438,29 +453,24 @@ pub fn status_card(app: &App) -> Option<Element<'_, Message>> {
                 buttons.into(),
             ))
         }
+        // Offers that wait on the user, over the groups: one quiet line,
+        // no box (nothing runs, nothing failed).
         Step::Idle if h.vectors_missing > 0 => {
             let n = h.vectors_missing;
-            let go = kit::btn("Update them", style::secondary(), Some(m(Msg::UpdateHeads)));
-            Some(card(
+            Some(quiet_line(
                 Glyph::Fursuit,
-                t::PHOTO_INK3,
-                format!("{} with fursuit heads to update", util::plural(n as u64, "photo")),
-                format!(
-                    "They were found before fursuits were told apart by the search model, so they aren't grouped or suggested yet. Updating them reads their previews again: {}.",
-                    fursuits::describe_vector_cost(n, device)
-                ),
-                go.into(),
+                format!("{} with fursuit heads to update.", util::plural(n as u64, "photo")),
+                format!("Found before fursuits were told apart by the search model, so not grouped yet. Updating reads their previews again: {}.", fursuits::describe_vector_cost(n, device)),
+                super::fursuit_judge::link_btn("Update them", m(Msg::UpdateHeads)),
             ))
         }
         Step::Idle if h.on && h.unscanned() > 0 && h.scanned > 0 => {
             let n = h.unscanned();
-            let go = kit::btn("Find their heads", style::secondary(), Some(m(Msg::FindHeads)));
-            Some(card(
+            Some(quiet_line(
                 Glyph::Fursuit,
-                t::PHOTO_INK3,
-                format!("{} with fursuits not looked at yet", util::plural(n as u64, "photo")),
-                format!("Their scan was skipped. Looking at them takes {}.", fursuits::describe_cost(n, device)),
-                go.into(),
+                format!("{} with fursuits not looked at yet.", util::plural(n as u64, "photo")),
+                format!("Their scan was skipped; looking at them takes {}.", fursuits::describe_cost(n, device)),
+                super::fursuit_judge::link_btn("Find their heads", m(Msg::FindHeads)),
             ))
         }
         Step::Idle => None,

@@ -2,8 +2,13 @@
 //! fursuit groups that may be one suit split apart, to merge or tell
 //! apart with one key each.
 //!
-//! - **On the Fursuits tab**, a row of pairs, nearest first, over the
-//!   groups; a click opens the review at that pair.
+//! - **No row on the tab, no section on a group's page.**  The tab shows
+//!   groups, not suggestions: one quiet control in its header (*Possible
+//!   merges*, with how many) and *Review possible fursuit merges* in the
+//!   View menu open the review; so does Y on the tab.
+//! - **In the group editor**, a fursuit group's own pairs (*Likely the
+//!   same fursuit*, `subjects_editor`), each with *Merge*, ×, and the
+//!   review at that pair; Esc there goes back to the editor.
 //! - **The review**, in the style of "Same fursuit?": the two groups side
 //!   by side (their covers large, a few more heads under them), **Y**
 //!   merges them (the named one keeps its name; two named ones ask which
@@ -15,8 +20,6 @@
 //!   close pairs, three head pairs each: the pairs it thinks are one suit
 //!   join the end of the list as they come; those it doesn't are counted
 //!   and can be shown.  With it off, the distance alone decides.
-//! - **On a fursuit's page**, *Similar groups*: its nearest pairs with
-//!   *Merge* and ×.
 //!
 //! Nothing merges without the user's click or key; fursuits only.
 
@@ -51,12 +54,6 @@ const BIG: f32 = 220.0;
 const SMALL: f32 = 52.0;
 const STRIP: f32 = 40.0;
 const STRIP_N: usize = 12;
-/// The tab's pair cards.
-const CARD: f32 = 64.0;
-const CARDS: usize = 6;
-/// A group page's *Similar groups*.
-const SIMILAR: f32 = 32.0;
-const SIMILAR_N: usize = 4;
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -79,19 +76,14 @@ pub enum Msg {
     ShowLeftOut,
     /// Compare the next pairs past the cap.
     CheckMore,
-    /// *Similar groups* on a fursuit's page: merge with pair `i`, or not
-    /// the same.
-    SimilarMerge(usize),
-    SimilarNotSame(usize),
 }
 
-/// The lists the engine last sent: the tab's, and a group page's.
+/// The tab's list as the engine last sent it: its count is the header's
+/// *Possible merges*, and the review starts from it.
 #[derive(Debug, Default)]
 pub struct Lists {
     pub tab: Option<Arc<Vec<GroupPair>>>,
     tab_seq: u64,
-    pub similar: Option<(GroupId, Arc<Vec<GroupPair>>)>,
-    similar_seq: u64,
 }
 
 /// An answer in the review.
@@ -150,6 +142,8 @@ pub struct MergeReview {
     steps: Vec<bool>,
     /// X's given (heads removed), for the counts.
     pub not_heads: usize,
+    /// Opened from the group editor on this group: Esc goes back there.
+    pub back_to: Option<GroupId>,
 }
 
 impl MergeReview {
@@ -173,7 +167,22 @@ impl MergeReview {
             x_pending: false,
             steps: Vec::new(),
             not_heads: 0,
+            back_to: None,
         }
+    }
+
+    /// The review from the group editor: `pair` first, then the tab's
+    /// list as it was (unless the judge offers the rest), Esc back to the
+    /// editor on `back_to`.
+    pub fn at_pair(seq: u64, judging: bool, pair: GroupPair, tab: Option<&[GroupPair]>, back_to: GroupId) -> MergeReview {
+        let mut r = MergeReview::new(seq, judging);
+        r.append(std::slice::from_ref(&pair));
+        if let Some(list) = tab.filter(|_| !judging) {
+            r.append(list);
+            r.loaded = true;
+        }
+        r.back_to = Some(back_to);
+        r
     }
 
     pub fn len(&self) -> usize {
@@ -240,26 +249,10 @@ pub fn ask_tab(app: &mut App) {
     app.search.link.merge_suggestions(seq, None, min, false);
 }
 
-/// Ask for a fursuit page's *Similar groups*.
-pub fn ask_similar(app: &mut App) {
-    let Some(p) = app.subjects.person.as_ref().filter(|p| p.kind == Kind::Fursuit) else { return };
-    if app.subjects.review.is_some() {
-        return;
-    }
-    let group = p.group.clone();
-    let seq = app.subjects.next_seq();
-    app.subjects.lists.similar_seq = seq;
-    let min = app.settings.people_min_photos();
-    app.search.link.merge_suggestions(seq, Some(&group), min, false);
-}
-
-/// The groups changed: the lists are asked again; the review asks again
-/// when a pair still to answer names a group that went (merged).
+/// The groups changed: the tab's list is asked again; the review asks
+/// again when a pair still to answer names a group that went (merged).
 pub fn on_subjects(app: &mut App) {
     ask_tab(app);
-    if app.subjects.page() == Page::Person {
-        ask_similar(app);
-    }
     let all = app.subjects.all.clone();
     let Some(r) = app.subjects.merges.as_mut() else { return };
     let stale = r.list.iter().zip(&r.answers).any(|(p, a)| a.is_none() && (all.group(&p.a).is_none() || all.group(&p.b).is_none()));
@@ -283,14 +276,13 @@ fn refresh(app: &mut App) {
 }
 
 pub fn on_merge_suggestions(app: &mut App, seq: u64, focus: Option<GroupId>, list: Arc<Vec<GroupPair>>, judging: bool) -> Task<Message> {
+    // A group editor's own pairs.
+    if super::subjects_editor::on_pairs(app, seq, &list) {
+        return subj::refresh_crops(app);
+    }
     let lists = &mut app.subjects.lists;
     if seq == lists.tab_seq && focus.is_none() {
         lists.tab = Some(list.clone());
-    }
-    if seq == lists.similar_seq {
-        if let Some(f) = focus.clone() {
-            lists.similar = Some((f, list.clone()));
-        }
     }
     if let Some(r) = app.subjects.merges.as_mut().filter(|r| r.seq == seq) {
         if r.refreshing {
@@ -363,18 +355,6 @@ pub fn comparing(app: &App) -> bool {
 }
 
 // ── crops ───────────────────────────────────────────────────────────────────
-
-pub fn wanted_tab(app: &App) -> Vec<(Face, u32, Framing)> {
-    let Some(list) = &app.subjects.lists.tab else { return Vec::new() };
-    let px = subj::px(app, CARD);
-    list.iter().take(CARDS).flat_map(|p| [p.a_heads.first(), p.b_heads.first()]).flatten().map(|f| (f.clone(), px, Framing::Face)).collect()
-}
-
-pub fn wanted_similar(app: &App) -> Vec<(Face, u32, Framing)> {
-    let Some((g, list)) = &app.subjects.lists.similar else { return Vec::new() };
-    let px = subj::px(app, SIMILAR);
-    list.iter().take(SIMILAR_N).filter_map(|p| if &p.a == g { p.b_heads.first() } else { p.a_heads.first() }).map(|f| (f.clone(), px, Framing::Face)).collect()
-}
 
 pub fn wanted(app: &App) -> Vec<(Face, u32, Framing)> {
     let Some(r) = app.subjects.merges.as_ref() else { return Vec::new() };
@@ -463,8 +443,6 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             refresh(app);
             app.show_status(format!("Comparing the next {} possible merges, nearest first.", merging::MAX_PAIRS), 4000)
         }
-        Msg::SimilarMerge(i) => similar_merge(app, i),
-        Msg::SimilarNotSame(i) => similar_not_same(app, i),
     }
 }
 
@@ -495,6 +473,44 @@ fn start(app: &mut App, at: Option<usize>) -> Task<Message> {
     subj::refresh_crops(app)
 }
 
+/// The review from the group editor, at one of its group's pairs: that
+/// pair first, then the rest as the tab's review has them (with the judge,
+/// the rest are the judge's to offer).  Esc goes back to the editor.
+pub fn start_at(app: &mut App, pair: GroupPair, back_to: GroupId) -> Task<Message> {
+    let judging = super::fursuit_judge::active(&app.search.status);
+    let seq = app.subjects.next_seq();
+    let tab = app.subjects.lists.tab.clone();
+    app.subjects.merges = Some(MergeReview::at_pair(seq, judging, pair, tab.as_deref().map(Vec::as_slice), back_to));
+    app.quicklook = None;
+    let min = app.settings.people_min_photos();
+    app.search.link.merge_suggestions(seq, None, min, judging);
+    subj::refresh_crops(app)
+}
+
+/// Y on the Fursuits tab, or the header's *Possible merges*: the review.
+pub fn tab_key(app: &mut App) -> Task<Message> {
+    if !subj::has_groups(app, Kind::Fursuit) {
+        return app.show_status("No fursuit groups yet: nothing to compare.", 4000);
+    }
+    start(app, None)
+}
+
+/// *Review possible fursuit merges* (View menu): the Fursuits tab, then
+/// the review over it, from wherever the command was given.
+pub fn open_review(app: &mut App) -> Task<Message> {
+    if !subj::has_groups(app, Kind::Fursuit) {
+        return app.show_status("No fursuit groups yet: nothing to compare.", 4000);
+    }
+    // The editor's arrangement isn't put away unasked.
+    if app.view == View::Subjects && app.subjects.editor.is_some() {
+        return app.show_status("Apply or cancel the group editor first.", 4000);
+    }
+    let switch = if app.view == View::Subjects { Task::none() } else { app.switch_view(View::Subjects) };
+    let tab = subj::update(app, subj::Msg::Tab(Kind::Fursuit));
+    let start = start(app, None);
+    Task::batch([switch, tab, start])
+}
+
 /// The two groups of a pair, as they are now (`None`: one went).
 fn groups_of<'a>(app: &'a App, p: &GroupPair) -> Option<(&'a super::people::Group, &'a super::people::Group)> {
     Some((app.subjects.group(&p.a)?, app.subjects.group(&p.b)?))
@@ -502,7 +518,7 @@ fn groups_of<'a>(app: &'a App, p: &GroupPair) -> Option<(&'a super::people::Grou
 
 /// Which group a merge keeps: the named one; of two unnamed, the one with
 /// more photos.  `None`: both named (the dialog asks).
-fn into_of(a: &super::people::Group, b: &super::people::Group) -> Option<GroupId> {
+pub(super) fn into_of(a: &super::people::Group, b: &super::people::Group) -> Option<GroupId> {
     match (a.name.is_some(), b.name.is_some()) {
         (true, true) => None,
         (true, false) => Some(a.id.clone()),
@@ -513,7 +529,7 @@ fn into_of(a: &super::people::Group, b: &super::people::Group) -> Option<GroupId
 
 /// A pair as the decision record has it: offered by its distance, or by
 /// the judge's majority.
-fn via(p: &GroupPair, at: At) -> Via {
+pub(super) fn via(p: &GroupPair, at: At) -> Via {
     Via::Pair { at, distance: p.distance, sure: p.sure, verdict: p.verdict }
 }
 
@@ -675,7 +691,12 @@ impl MergeReview {
 fn done(app: &mut App) -> Task<Message> {
     let Some(r) = app.subjects.merges.take() else { return Task::none() };
     let (merged, not) = r.counts();
-    let refresh = subj::refresh_crops(app);
+    // From the group editor: back there, on the group as it is now (gone
+    // when it was merged into another: the page below shows instead).
+    let refresh = match r.back_to.filter(|g| app.subjects.group(g).is_some()) {
+        Some(g) => super::subjects_editor::open(app, g, super::subjects_editor::Preset::Plain),
+        None => subj::refresh_crops(app),
+    };
     ask_tab(app);
     let text = match (merged, not) {
         (0, 0) => return refresh,
@@ -684,53 +705,6 @@ fn done(app: &mut App) -> Task<Message> {
         (m, n) => format!("Merged {}; {} won't be suggested again.", util::plural(m as u64, "pair"), util::thousands(n as u64)),
     };
     Task::batch([refresh, app.show_status(text, 6000)])
-}
-
-// ── *Similar groups* on a fursuit's page ────────────────────────────────────
-
-fn similar_pair(app: &App, i: usize) -> Option<(GroupId, GroupPair)> {
-    let p = app.subjects.person.as_ref()?;
-    let (g, list) = app.subjects.lists.similar.as_ref()?;
-    if *g != p.group {
-        return None;
-    }
-    Some((g.clone(), list.get(i)?.clone()))
-}
-
-fn similar_merge(app: &mut App, i: usize) -> Task<Message> {
-    let Some((me, pair)) = similar_pair(app, i) else { return Task::none() };
-    let other_id = if pair.a == me { pair.b.clone() } else { pair.a.clone() };
-    let (Some(mine), Some(other)) = (app.subjects.group(&me).cloned(), app.subjects.group(&other_id).cloned()) else {
-        return app.show_status("That group changed: look again.", 4000);
-    };
-    if mine.kind != Kind::Fursuit || other.kind != Kind::Fursuit {
-        return Task::none();
-    }
-    match (mine.name.is_some(), other.name.is_some()) {
-        (true, true) => {
-            let all = app.subjects.all.clone();
-            app.subjects.merge = MergeAsk::new(&all, vec![me.clone(), other_id], Some(&me)).map(|m| MergeAsk { via: via(&pair, At::Similar), ..m });
-            subj::refresh_crops(app)
-        }
-        (named_me, named_other) => {
-            // The page's group is kept, unless only the other is named.
-            let into = if named_other && !named_me { other_id.clone() } else { me.clone() };
-            let gone = if into == me { other_id } else { me.clone() };
-            if into != me {
-                super::subjects_person::follow(app, &into);
-            }
-            app.search.link.merge(&into, &[gone], via(&pair, At::Similar));
-            let name = mine.name.or(other.name).unwrap_or_else(|| "one group".into());
-            app.show_status_action(format!("Merged the two groups into {name}."), "Undo", subj::m(subj::Msg::Undo))
-        }
-    }
-}
-
-fn similar_not_same(app: &mut App, i: usize) -> Task<Message> {
-    let Some((_, pair)) = similar_pair(app, i) else { return Task::none() };
-    let heads = |h: &[Face]| h.iter().map(|f| f.face).collect::<Vec<FaceRef>>();
-    app.search.link.not_same(&pair.a, &pair.b, &heads(&pair.a_heads), &heads(&pair.b_heads), via(&pair, At::Similar));
-    app.show_status_action("Not the same fursuit: that group won't be suggested here again.", "Undo", subj::m(subj::Msg::Undo))
 }
 
 // ── keys ────────────────────────────────────────────────────────────────────
@@ -765,110 +739,6 @@ fn key_msg(pending: bool, key: &Key, c: Option<&str>) -> Option<Msg> {
         (Key::Named(Named::ArrowLeft), _) | (_, Some("a")) => Msg::Step(-1),
         _ => return None,
     })
-}
-
-// ── the tab's row ───────────────────────────────────────────────────────────
-
-fn name_or_unnamed(app: &App, id: &GroupId) -> (String, bool) {
-    match app.subjects.group(id).and_then(|g| g.name.clone()) {
-        Some(n) => (n, true),
-        None => ("Unnamed".to_string(), false),
-    }
-}
-
-/// On the Fursuits tab, over the groups: the nearest pairs that may be one
-/// suit, a click to review each; nothing when there are none.
-pub fn tab_section(app: &App) -> Option<Element<'_, Message>> {
-    let list = app.subjects.lists.tab.as_ref().filter(|l| !l.is_empty())?;
-    let s = &app.subjects;
-    let shape = subj::shape(Kind::Fursuit);
-    let mut cards = row![].spacing(8);
-    for (i, p) in list.iter().take(CARDS).enumerate() {
-        let (Some(fa), Some(fb)) = (p.a_heads.first(), p.b_heads.first()) else { continue };
-        let side = |f: &Face, id: &GroupId| -> Element<'_, Message> {
-            let (name, named) = name_or_unnamed(app, id);
-            let photos = s.group(id).map_or(0, |g| g.photos);
-            column![
-                tile::crop(s.crops.get(&f.face, subj::px(app, CARD), Framing::Face), CARD, shape),
-                text(name).size(t::T_SMALL).font(paint::MEDIUM).color(if named { t::PHOTO_INK } else { t::PHOTO_INK3 }).wrapping(text::Wrapping::None),
-                text(util::plural(photos as u64, "photo")).size(11).color(t::PHOTO_INK3),
-            ]
-            .spacing(3)
-            .width(CARD + 4.0)
-            .align_x(Alignment::Center)
-            .into()
-        };
-        let body = row![side(fa, &p.a), container(icons::view(Glyph::Merge, 13.0, t::PHOTO_INK3)).height(CARD).center_y(CARD), side(fb, &p.b)].spacing(4).align_y(Alignment::Start);
-        let b = button(body).padding(Padding { top: 10.0, bottom: 8.0, left: 8.0, right: 8.0 }).on_press(m(Msg::Review(Some(i)))).style(|_t, status| {
-            let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            button::Style { background: Some(Background::Color(if hot { t::PHOTO_RAISED } else { t::PHOTO_MOUNT })), text_color: t::PHOTO_INK, border: Border { radius: t::R_CELL.into(), ..Border::default() }, ..button::Style::default() }
-        });
-        cards = cards.push(tip(b, "Check these two: Y merges them, N says they're different", true));
-    }
-    let n = list.len();
-    let judge = &app.search.status.judge;
-    let active = super::fursuit_judge::active(&app.search.status);
-    let label = if n > CARDS { format!("Review all {n}") } else { "Review them".to_string() };
-    let go = button(container(row![text(label).size(t::T_BODY).font(paint::MEDIUM), keycap_quiet("Y")].spacing(8).align_y(Alignment::Center)).center_y(Length::Fill))
-        .height(t::CONTROL_H)
-        .padding(Padding::from([0.0, t::S4]))
-        .style(style::secondary().style())
-        .on_press(m(Msg::Review(None)));
-    let about = if active {
-        format!("{} compares the close ones as you review, on the graphics card.", judge.choice.label())
-    } else {
-        "Groups are kept tight, so one suit can sit in several. Nothing merges until you say.".to_string()
-    };
-    let side = column![tip(go, "One pair at a time: Y merges, N says they're different", true), text(about).size(t::T_SMALL).color(t::PHOTO_INK3).width(220)].spacing(8);
-    let r = row![cards, Space::new().width(t::S3), side].align_y(Alignment::Center);
-    let note = format!("{}, nearest first", util::plural(n as u64, "pair"));
-    Some(column![subj::heading("Possibly the same fursuit", note), container(scrollable(r).direction(scrollable::Direction::Horizontal(scrollable::Scrollbar::new().width(0).scroller_width(0)))).padding(Padding { left: 16.0, right: 16.0, top: 0.0, bottom: 10.0 })].into())
-}
-
-fn keycap_quiet<'a>(k: &'a str) -> Element<'a, Message> {
-    container(text(k).size(11).font(paint::MEDIUM).color(t::INK2)).padding(Padding::from([0.0, 4.0])).style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, 4.0), ..Default::default() }).into()
-}
-
-/// Y on the tab with pairs to review.
-pub fn tab_key(app: &mut App) -> Option<Task<Message>> {
-    app.subjects.lists.tab.as_ref().filter(|l| !l.is_empty())?;
-    Some(update(app, Msg::Review(None)))
-}
-
-// ── *Similar groups* ────────────────────────────────────────────────────────
-
-/// Under a fursuit's band: the groups nearest it, each with *Merge* and ×.
-pub fn similar_row<'a>(app: &'a App, group: &GroupId) -> Option<Element<'a, Message>> {
-    let s = &app.subjects;
-    let (g, list) = s.lists.similar.as_ref()?;
-    if g != group || list.is_empty() {
-        return None;
-    }
-    let shape = subj::shape(Kind::Fursuit);
-    let mut r = row![text("Similar groups").size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2)].spacing(t::S3).align_y(Alignment::Center);
-    for (i, p) in list.iter().enumerate().take(SIMILAR_N) {
-        let (other, heads) = if &p.a == group { (&p.b, &p.b_heads) } else { (&p.a, &p.a_heads) };
-        let Some(f) = heads.first() else { continue };
-        let (name, named) = name_or_unnamed(app, other);
-        let photos = s.group(other).map_or(0, |g| g.photos);
-        let crop = tile::crop(s.crops.get(&f.face, subj::px(app, SIMILAR), Framing::Face), SIMILAR, shape);
-        let words = column![
-            text(name).size(t::T_SMALL).font(paint::MEDIUM).color(if named { t::INK } else { t::INK2 }).wrapping(text::Wrapping::None),
-            text(util::plural(photos as u64, "photo")).size(11).color(t::INK3)
-        ]
-        .spacing(0);
-        let merge = tip(kit::btn("Merge", style::secondary(), Some(m(Msg::SimilarMerge(i)))).height(26).padding(Padding::from([0.0, 10.0])), "Merge it with this fursuit (Ctrl+Z undoes it)", true);
-        let side = tip(kit::icon_btn(Glyph::Compare, t::INK2, style::ghost(), Some(super::subjects_editor::m(super::subjects_editor::Msg::Open(group.clone(), super::subjects_editor::Preset::With(other.clone()))))).width(24).height(24).padding(0), "The two side by side, to move heads between them", true);
-        let not = tip(kit::icon_btn(Glyph::Close, t::INK3, style::ghost(), Some(m(Msg::SimilarNotSame(i)))).width(24).height(24).padding(0), "Not the same fursuit: don't suggest it here again", true);
-        let chip = container(row![crop, words, merge, side, not].spacing(8).align_y(Alignment::Center))
-            .padding(Padding { left: 4.0, right: 4.0, top: 3.0, bottom: 3.0 })
-            .style(|_| container::Style { background: Some(Background::Color(t::RAISED)), border: style::border(t::LINE_HI, 1.0, t::R_CONTROL), ..Default::default() });
-        r = r.push(chip);
-    }
-    if list.len() > SIMILAR_N {
-        r = r.push(text(format!("{} more on the Fursuits tab", list.len() - SIMILAR_N)).size(t::T_SMALL).color(t::INK3));
-    }
-    Some(container(r.padding(Padding::from([7.0, 12.0]))).width(Length::Fill).style(style::fill(t::MOUNT)).into())
 }
 
 // ── the review ──────────────────────────────────────────────────────────────
@@ -918,7 +788,8 @@ fn quiet<'a>(title: String) -> Element<'a, Message> {
 }
 
 fn header<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
-    let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, "Fursuits", t::INK2, style::secondary(), Some(m(Msg::Done))), "Stop the review  (Esc)", true);
+    let (label, hint) = if r.back_to.is_some() { ("Edit group", "Stop the review, back to the group editor  (Esc)") } else { ("Fursuits", "Stop the review  (Esc)") };
+    let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, label, t::INK2, style::secondary(), Some(m(Msg::Done))), hint, true);
     let n = r.len();
     let (merged, not) = r.counts();
     let caption = if n == 0 { String::new() } else { format!("{} of {}. {merged} merged, {not} not the same.", (r.at + 1).min(n), util::plural(n as u64, "pair")) };
@@ -1162,9 +1033,13 @@ fn waiting_page<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
     if let Some(line) = judge_line(app, r) {
         col = col.push(container(line).max_width(640));
     }
-    col = col.push(kit::btn("Back to the fursuits", style::secondary(), Some(m(Msg::Done))));
+    col = col.push(kit::btn(back_words(r), style::secondary(), Some(m(Msg::Done))));
     col = col.push(Space::new().height(Length::FillPortion(4)));
     container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
+}
+
+fn back_words(r: &MergeReview) -> &'static str {
+    if r.back_to.is_some() { "Back to the group" } else { "Back to the fursuits" }
 }
 
 fn end_page<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
@@ -1183,11 +1058,11 @@ fn end_page<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
         col = col.push(text("Close pairs are still being compared. Those the judge thinks are one fursuit appear here as they come.").size(t::T_BODY).color(t::PHOTO_INK2));
     }
     col = col.push(Space::new().height(t::S1));
-    col = col.push(kit::btn("Back to the fursuits", style::primary(), Some(m(Msg::Done))));
+    col = col.push(kit::btn(back_words(r), style::primary(), Some(m(Msg::Done))));
     if let Some(line) = judge_line(app, r) {
         col = col.push(container(line).max_width(640));
     }
-    col = col.push(text("New pairs show on the Fursuits tab as groups change: after a merge, a scan, or new exports.").size(t::T_SMALL).color(t::PHOTO_INK3));
+    col = col.push(text("New pairs come as groups change: after a merge, a scan, or new exports. A group's own are in its editor.").size(t::T_SMALL).color(t::PHOTO_INK3));
     col = col.push(Space::new().height(Length::FillPortion(4)));
     container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
 }
@@ -1197,10 +1072,9 @@ pub fn debug_state(app: &App) -> String {
     let s = &app.subjects;
     let short = super::people::short;
     let tab = s.lists.tab.as_ref().map(|l| l.iter().map(|p| format!("{}+{}{}", short(&p.a), short(&p.b), if p.sure { "" } else { "?" })).collect::<Vec<_>>());
-    let similar = s.lists.similar.as_ref().map(|(g, l)| (short(g), l.len()));
     let review = s.merges.as_ref().map(|r| {
         format!(
-            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={} x_pending={} not_heads={}]",
+            "[list={} at={} answers={} judging={} run={:?} judged={} left_out_shown={} refreshing={} x_pending={} not_heads={} back_to={:?}]",
             r.len(),
             r.at,
             r.answers.iter().map(|a| match a {
@@ -1214,10 +1088,11 @@ pub fn debug_state(app: &App) -> String {
             r.left_out_shown,
             r.refreshing,
             r.x_pending,
-            r.not_heads
+            r.not_heads,
+            r.back_to.as_ref().map(short)
         )
     });
-    format!("merges=[tab={tab:?} similar={similar:?} review={}]", review.unwrap_or_else(|| "none".into()))
+    format!("merges=[tab={tab:?} review={}]", review.unwrap_or_else(|| "none".into()))
 }
 
 #[cfg(test)]
@@ -1285,6 +1160,22 @@ mod tests {
         assert_eq!(r.pop_step(), Some(Some(0)), "then the answer");
         assert_eq!((r.answers[0], r.at), (None, 0));
         assert_eq!(r.pop_step(), None);
+    }
+
+    /// The review from the editor's pair: that pair first, then the rest
+    /// of the tab's list once each (with the judge on, the rest are the
+    /// judge's to offer), and Esc goes back to the editor.
+    #[test]
+    fn the_review_from_the_editor_starts_at_its_pair_and_goes_back_there() {
+        let tab = [pair(1, 2), pair(3, 4), pair(5, 1)];
+        let r = MergeReview::at_pair(1, false, pair(1, 5), Some(&tab), GroupId::Cluster(1));
+        let keys: Vec<(GroupId, GroupId)> = r.list.iter().map(GroupPair::key).collect();
+        assert_eq!(keys, [pair(1, 5).key(), pair(1, 2).key(), pair(3, 4).key()], "its pair first, each pair once");
+        assert_eq!((r.at, r.loaded, r.back_to.clone()), (0, true, Some(GroupId::Cluster(1))));
+        assert_eq!(back_words(&r), "Back to the group");
+        let r = MergeReview::at_pair(2, true, pair(1, 5), Some(&tab), GroupId::Cluster(1));
+        assert_eq!((r.len(), r.loaded, r.run.is_some()), (1, false, true), "with the judge: the pair, then what it offers");
+        assert_eq!(back_words(&MergeReview::new(3, false)), "Back to the fursuits");
     }
 
     /// The name rule of a merge from the review: the named one is kept; of

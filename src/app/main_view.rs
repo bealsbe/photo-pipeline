@@ -277,6 +277,10 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
     if cmd == Cmd::KeepThisPruneRest {
         return analysed && super::viewer_burst::can_open(app);
     }
+    // Fursuit groups to compare, and no group editor to put away first.
+    if cmd == Cmd::FursuitMerges {
+        return super::subjects::has_groups(app, super::people::Kind::Fursuit) && !(app.view == View::Subjects && app.subjects.editor.is_some());
+    }
     if cmd == Cmd::SelectMode && app.view == View::Subjects {
         return app.subjects.page() == super::subjects::Page::Overview && super::subjects::has_groups(app, app.subjects.tab);
     }

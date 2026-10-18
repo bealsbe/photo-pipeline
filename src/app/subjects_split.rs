@@ -8,9 +8,9 @@
 //! - **Picking a run**: Shift+click picks every head between the last one
 //!   clicked and this one, in the order shown.
 //! - **Two heads in one photo**: a group holding both holds at least two
-//!   fursuits.  Its tile carries a quiet split mark (a click opens the
-//!   group editor); the editor offers the split around them, never applies
-//!   it (`subjects_editor::Suggestion`).  No banner on the page.
+//!   fursuits.  The group editor offers the split around them, never
+//!   applies it (`subjects_editor::Suggestion`).  Nothing on the tab or
+//!   the page: no banner, no mark on its tile.
 //!
 //! Moving heads is the group editor's (`subjects_editor`): *Split into a
 //! new group* opens it with the picked heads in a new column.  Fursuits
