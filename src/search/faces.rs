@@ -2096,6 +2096,7 @@ mod tests {
             new_names: vec![Some("Rook".into()), None],
             moves: vec![(h(2), EditDest::New(0)), (h(3), EditDest::Group(0)), (h(4), EditDest::Removed), (h(1), EditDest::Group(1)), (h(5), EditDest::Group(0)), (h(10), EditDest::Group(0))],
             renames: vec![(2, "Ash".into())],
+            covers: Vec::new(),
         };
         let plan = p.plan_edit(&edit).unwrap();
         assert!(!plan.moves.iter().any(|m| m.0 == h(5)), "the viewer removed it");
@@ -2115,6 +2116,113 @@ mod tests {
         p.undo().unwrap();
         assert_eq!(p.file.subjects, before.subjects, "every part back");
         assert!(!p.file.removed_index(k).covers(&h(4)));
+    }
+
+    /// The group photo, through the people state: a named group's own
+    /// face, one undo step; the snapshot shows it at once and says it was
+    /// chosen; it holds through a regroup; it goes back to the clearest
+    /// when its face leaves (one edit, its own undo), or its detection
+    /// isn't found again; an unnamed group can't have one.
+    #[test]
+    fn a_group_photo_is_one_step_and_survives_a_regroup() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2), h(9)]);
+        let id = GroupId::Subject(kiba.clone());
+        let unnamed = p.file.create(k, None, vec![h(4), h(5)]);
+        p.set_other_clusters(k, vec![(7, vec![h(20), h(21)])]);
+        assert_eq!(p.set_cover(&unnamed, Some(h(4))), Err(Refused::Nothing), "unnamed: automatic only");
+        assert_eq!(p.set_cover(&kiba, Some(h(20))), Err(Refused::Nothing), "not its own");
+        assert!(p.undo.is_empty(), "a refusal leaves no undo step");
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!(snap.group(&id).unwrap().cover.face, h(9), "automatic: the clearest");
+        assert!(snap.chosen_cover(&id).is_none());
+        assert_eq!(p.set_cover(&kiba, Some(h(1))).unwrap(), "Set Kiba's group photo");
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!((snap.group(&id).unwrap().cover.face, snap.chosen_cover(&id)), (h(1), Some(h(1))), "shown at once");
+        assert_eq!(snap.undoable.as_deref(), Some("Set Kiba's group photo"));
+        // A regroup: other clusters, a new generation; the photo stays.
+        p.set_other_clusters(k, vec![(70, vec![h(20)]), (71, vec![h(21)])]);
+        p.reset_grouping();
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(1));
+        // Its detection not found again (a rebuild): the clearest, not chosen.
+        let gone = p.build_snapshot_found(&resolve, &|_, f| *f != h(1));
+        assert_eq!((gone.group(&id).unwrap().cover.face, gone.chosen_cover(&id)), (h(9), None));
+        // One undo takes it back.
+        assert_eq!(p.undo().as_deref(), Some("Set Kiba's group photo"));
+        assert!(p.file.get(&kiba).unwrap().cover.is_none());
+        // Set again, then its face goes to another group in the editor:
+        // the clearest again, and that edit's undo brings the photo back.
+        p.set_cover(&kiba, Some(h(1))).unwrap();
+        let edit = GroupEdit { kind: k, targets: vec![EditTarget::Subject(unnamed.clone())], moves: vec![(h(1), EditDest::Group(0))], ..GroupEdit::default() };
+        p.apply_edit(&p.plan_edit(&edit).unwrap()).unwrap();
+        assert!(p.file.get(&kiba).unwrap().cover.is_none());
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(9));
+        p.undo().unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&id), Some(h(1)));
+        // Back to automatic is a step of its own.
+        assert_eq!(p.set_cover(&kiba, None).unwrap(), "Kiba's group photo is automatic again");
+        assert_eq!(p.build_snapshot(&resolve).group(&id).unwrap().cover.face, h(9));
+        // People the same way, never a fursuit's head.
+        let someone = p.file.create(Kind::Person, Some("Someone".into()), vec![h(30), h(31)]);
+        p.set_cover(&someone, Some(h(30))).unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&GroupId::Subject(someone)), Some(h(30)));
+    }
+
+    /// A merge of two named groups keeps the kept name's photo, through
+    /// the people state, and one undo restores both.
+    #[test]
+    fn a_merge_keeps_the_kept_names_photo() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2)]);
+        let rook = p.file.create(k, Some("Rook".into()), vec![h(3), h(9)]);
+        p.set_cover(&kiba, Some(h(1))).unwrap();
+        p.set_cover(&rook, Some(h(3))).unwrap();
+        let before = p.file.clone();
+        let into = p.merge(&GroupId::Subject(kiba.clone()), &[GroupId::Subject(rook.clone())]).unwrap();
+        assert_eq!(into, kiba);
+        let snap = p.build_snapshot(&resolve);
+        assert_eq!(snap.chosen_cover(&GroupId::Subject(kiba.clone())), Some(h(1)), "Kiba kept: Kiba's photo, not the clearer one");
+        p.undo().unwrap();
+        assert_eq!(p.file, before);
+        p.merge(&GroupId::Subject(rook.clone()), &[GroupId::Subject(kiba)]).unwrap();
+        assert_eq!(p.build_snapshot(&resolve).chosen_cover(&GroupId::Subject(rook)), Some(h(3)), "Rook kept: Rook's photo");
+    }
+
+    /// The editor's *Apply* chooses group photos in the same undo step as
+    /// its moves; a photo alone is a step too; a photo whose face the
+    /// same edit moves away is not set (and alone, changes nothing).
+    #[test]
+    fn an_edit_sets_group_photos_in_its_one_step() {
+        let mut p = People::load(None);
+        let k = Kind::Fursuit;
+        let kiba = p.file.create(k, Some("Kiba".into()), vec![h(1), h(2), h(3)]);
+        let rook = p.file.create(k, Some("Rook".into()), vec![h(4)]);
+        let edit = GroupEdit {
+            kind: k,
+            targets: vec![EditTarget::Subject(kiba.clone()), EditTarget::Subject(rook.clone())],
+            moves: vec![(h(3), EditDest::Group(1))],
+            covers: vec![(0, Some(h(2))), (1, Some(h(3)))],
+            ..GroupEdit::default()
+        };
+        let plan = p.plan_edit(&edit).unwrap();
+        assert_eq!(plan.covers.len(), 2);
+        let depth = p.undo.len();
+        let (words, _) = p.apply_edit(&plan).unwrap();
+        assert_eq!(p.undo.len(), depth + 1, "one step");
+        assert_eq!(words, "1 head to Rook, new group photo for Kiba, new group photo for Rook");
+        assert_eq!((p.file.get(&kiba).unwrap().cover, p.file.get(&rook).unwrap().cover), (Some(h(2)), Some(h(3))), "the moved head is Rook's photo");
+        p.undo().unwrap();
+        assert!(p.file.get(&kiba).unwrap().cover.is_none() && p.file.get(&rook).unwrap().cover.is_none());
+        // A photo alone.
+        let only = GroupEdit { kind: k, targets: vec![EditTarget::Subject(kiba.clone())], covers: vec![(0, Some(h(1)))], ..GroupEdit::default() };
+        assert_eq!(p.apply_edit(&p.plan_edit(&only).unwrap()).unwrap().0, "Set Kiba's group photo");
+        // A photo the same edit sends away: not set, and nothing else to do.
+        let away = GroupEdit { kind: k, targets: vec![EditTarget::Subject(rook.clone())], covers: vec![(0, Some(h(1)))], ..GroupEdit::default() };
+        let depth = p.undo.len();
+        assert_eq!(p.apply_edit(&p.plan_edit(&away).unwrap()), Err(Refused::Nothing));
+        assert_eq!(p.undo.len(), depth, "no undo step for nothing");
     }
 
     /// A review's X on a detection and on a box the user drew, then Z: the

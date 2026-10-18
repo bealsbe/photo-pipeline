@@ -1219,6 +1219,7 @@ mod tests {
             groups: vec![g(1, Kind::Person, Some("Person A"), 312), g(2, Kind::Person, Some("Pat"), 20), g(3, Kind::Person, None, 58), g(4, Kind::Fursuit, Some("Patches"), 90)],
             faces_found: 400,
             undoable: None, seen_together: Default::default(),
+            chosen_covers: Default::default(),
         }
     }
 

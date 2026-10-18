@@ -1301,7 +1301,10 @@ mod tests {
                     Out { from: Some(0), to: To::TakenOut, heads: heads([head(1, 30)]), moved: 1 },
                     Out { from: None, to: To::New { new: 1, name: None }, heads: heads([head(9, 0)]), moved: 1 },
                 ],
+                covers: vec![EditCover { group: 1, head: Some(Head(head(2, 0))) }, EditCover { group: 0, head: None }],
             },
+            Act::Cover { group: side(1, 3), head: Some(Head(head(1, 10))) },
+            Act::Cover { group: side(1, 3), head: None },
         ];
         for act in acts {
             let e = Entry::new(Kind::Fursuit, act, Some(How::hand(At::Drag)), Some(lib()));
@@ -1311,6 +1314,35 @@ mod tests {
             assert_eq!(back, e, "{line}");
             assert!(line.contains(&format!(r#""act":"{}""#, e.act.name())), "{line}");
         }
+    }
+
+    /// A group photo chosen is one short `cover` line: the group as it
+    /// was (its name kept here, a code in an export) and the head; back
+    /// to automatic, no head.  An edit's covers ride in its own entry
+    /// and are absent when it chose none, so older edit lines read the
+    /// same.  A cover makes no labelled pairs.
+    #[test]
+    fn a_group_photo_is_one_short_cover_line() {
+        let group = Side::new(3, Some("Someone".into()), Some("5ca1ab1e".into()), [head(1, 0), head(1, 10), head(1, 20)]);
+        let e = Entry::new(Kind::Person, Act::Cover { group: group.clone(), head: Some(Head(head(1, 10))) }, Some(How::hand(At::Faces)), None);
+        let line = e.line();
+        assert!(line.contains(r#""act":"cover""#) && line.contains(r#""kind":"person""#) && line.contains(r#""at":"faces""#), "{line}");
+        assert!(line.contains(r#""head":["01010101010101010101010101010101",10,100,50,80]"#), "{line}");
+        assert!(line.len() < 600, "{} bytes", line.len());
+        let back = Entry::new(Kind::Person, Act::Cover { group, head: None }, Some(How::hand(At::Faces)), None).line();
+        assert!(!back.contains(r#""head""#), "automatic again: no head: {back}");
+        assert!(pairs(&parse(&format!("{line}{back}")).0).is_empty(), "no pairs");
+        // An edit line of before reads, its covers empty; one without
+        // covers writes none.
+        let old = r#"{"v":1,"id":"0123456789abcdef","t":"2026-01-01T00:00:00.000Z","app":"0.1.0","kind":"fursuit","act":"edit","groups":[],"out":[]}"#;
+        let (read, bad) = parse(old);
+        assert!(bad == 0 && matches!(&read[0].act, Act::Edit { covers, .. } if covers.is_empty()));
+        assert!(!read[0].line().contains("covers"));
+        // In an export the group's name is a code.
+        let mut entries = vec![e];
+        code_entries(&mut entries, &mut Codes::default());
+        let coded = entries[0].line();
+        assert!(!coded.contains("Someone") && !coded.contains("5ca1ab1e") && coded.contains(r#""name":"person-1""#), "{coded}");
     }
 
     /// A partial last line (a crash mid-write) and a line from a newer

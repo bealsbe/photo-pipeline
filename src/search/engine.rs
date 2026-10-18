@@ -4800,7 +4800,7 @@ mod tests {
         e.apply_edit(9, edit, Via::Editor { proposal: true, edited: 2 });
         let got = until(4);
         alone(&got[3]);
-        assert!(matches!(&got[3].act, Act::Edit { groups, out } if groups[0].n == 1 && out[0].from == Some(0) && matches!(out[0].to, crate::model::decisions::To::New { new: 0, .. }) && out[0].heads[0].0 == head(4)), "{:?}", got[3]);
+        assert!(matches!(&got[3].act, Act::Edit { groups, out, .. } if groups[0].n == 1 && out[0].from == Some(0) && matches!(out[0].to, crate::model::decisions::To::New { new: 0, .. }) && out[0].heads[0].0 == head(4)), "{:?}", got[3]);
         let how = got[3].how.as_ref().unwrap();
         assert_eq!((how.by.as_str(), how.at, how.edited), ("proposal", Some(At::Editor), Some(2)));
         // A review answer: C is A, by distance; the nearest member measured.
@@ -4872,17 +4872,30 @@ mod tests {
         e.flush_decisions(Duration::from_secs(2));
         assert_eq!(e.decisions().entries().len(), 10, "nothing new while off");
         e.decisions().set_on(true);
+        // A group photo chosen: one `cover` entry, and the tile shows it
+        // without a regroup.
+        let suit = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")).map(|g| g.id.clone()).expect("the named head's group");
+        let GroupId::Subject(sid) = suit.clone() else { panic!("a named group is a subject") };
+        e.set_cover(sid, Some(head(2)), At::Heads);
+        let got = until(11);
+        assert!(got[10].kind == Kind::Fursuit && got[10].lib.is_some());
+        assert!(matches!(&got[10].act, Act::Cover { group, head: Some(h) } if group.name.as_deref() == Some("Suit") && h.0 == head(2)), "{:?}", got[10]);
+        assert_eq!(got[10].how.as_ref().unwrap().at, Some(At::Heads));
+        let started = Instant::now();
+        while e.subjects().chosen_cover(&suit) != Some(head(2)) {
+            assert!(started.elapsed() < Duration::from_secs(5), "the snapshot shows the chosen head");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // "Not fursuit heads" on a group: one entry, the group as it was
         // and the heads removed.
-        let suit = e.subjects().groups.iter().find(|g| g.name.as_deref() == Some("Suit")).map(|g| g.id.clone()).expect("the named head's group");
         e.remove_boxes(Kind::Fursuit, vec![(suit, None)]);
-        let got = until(11);
+        let got = until(12);
         // After the rebuild the heads are raw again (too few to whiten):
         // the entry says so, with the raw cuts of the same choice.
-        let l = got[10].lib.as_ref().unwrap();
+        let l = got[11].lib.as_ref().unwrap();
         let g = heads::GroupingCuts::of(heads::Grouping::Tighter, false);
         assert_eq!((l.white, l.grouping, l.cuts.group, l.cuts.merge_suggest), (false, Some(g.grouping), g.group, Some(g.merge_suggest)), "{l:?}");
-        assert!(matches!(&got[10].act, Act::RemoveMany { groups, heads, removed: 1 } if groups[0].name.as_deref() == Some("Suit") && heads[0].0 == head(2)), "{:?}", got[10]);
+        assert!(matches!(&got[11].act, Act::RemoveMany { groups, heads, removed: 1 } if groups[0].name.as_deref() == Some("Suit") && heads[0].0 == head(2)), "{:?}", got[11]);
         // Forget all fursuits: their entries go (here, all of them).
         e.forget_kind(Kind::Fursuit);
         e.flush_decisions(Duration::from_secs(2));
@@ -5328,7 +5341,7 @@ mod tests {
                 targets: vec![crate::model::subjects::EditTarget::ClusterOf(vec![head(3), head(4)])],
                 new_names: vec![Some("Rook".into())],
                 moves: vec![(head(2), crate::model::subjects::EditDest::Group(0)), (head(1), crate::model::subjects::EditDest::New(0))],
-                renames: Vec::new(),
+                ..Default::default()
             };
             // A regroup lands meanwhile.
             if whiten {

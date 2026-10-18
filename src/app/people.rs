@@ -1140,6 +1140,37 @@ mod tests {
         assert!(p.snapshot().groups.iter().all(|g| g.name.is_none()));
     }
 
+    /// The stand-in keeps a group photo as the engine does: named groups
+    /// only, one undo step, through a regroup, back to the clearest when
+    /// its face leaves, and the kept name's on a merge.
+    #[test]
+    fn the_stand_in_keeps_a_group_photo() {
+        let mut p = people(true);
+        let s = p.snapshot();
+        let named: Vec<GroupId> = s.groups.iter().filter(|g| g.name.is_some()).map(|g| g.id.clone()).collect();
+        let unnamed = s.groups.iter().find(|g| g.name.is_none()).unwrap().id.clone();
+        let (a, b) = (named[0].clone(), named[1].clone());
+        let other = |id: &GroupId, p: &FakePeople| p.faces(id).iter().map(|f| f.face).find(|f| *f != p.snapshot().group(id).unwrap().cover.face).unwrap();
+        assert!(p.set_cover(&unnamed, Some(p.faces(&unnamed)[0].face)).is_err(), "unnamed");
+        let pick = other(&a, &p);
+        p.set_cover(&a, Some(pick)).unwrap();
+        assert_eq!(p.snapshot().chosen_cover(&a), Some(pick));
+        let words = format!("Set {}'s group photo", s.group(&a).unwrap().name.clone().unwrap());
+        assert_eq!(p.snapshot().undoable, Some(words.clone()));
+        p.look_at(p.shots());
+        assert_eq!(p.snapshot().chosen_cover(&a), Some(pick), "through a regroup");
+        assert_eq!(p.undo(), Some(words));
+        assert_eq!(p.snapshot().chosen_cover(&a), None);
+        p.set_cover(&a, Some(pick)).unwrap();
+        let bpick = other(&b, &p);
+        p.set_cover(&b, Some(bpick)).unwrap();
+        p.merge(&b, std::slice::from_ref(&a), |_| Some(Kind::Person)).unwrap();
+        assert_eq!(p.snapshot().chosen_cover(&b), Some(bpick), "the kept name's photo");
+        p.undo().unwrap();
+        p.answer(&a, &[pick], Some(false));
+        assert_eq!(p.snapshot().chosen_cover(&a), None, "its face left: the clearest");
+    }
+
     #[test]
     fn merging_never_crosses_kinds() {
         let mut p = people(false);
