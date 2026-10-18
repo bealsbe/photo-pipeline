@@ -524,7 +524,15 @@ pub struct State {
     /// view (done at the next event, once the bounds are known).
     reveal_seq: u64,
     reveal: Option<RecordId>,
+    /// Each on-screen tile's (pruned, marked) as last seen, so a mark
+    /// landing shows as a pulse; and the pulses under way (when, tone).
+    marks: HashMap<RecordId, (bool, bool)>,
+    pulses: HashMap<RecordId, (Instant, Color)>,
 }
+
+/// A mark's pulse: a ring in the mark's colour widening off the tile and
+/// fading, this long.
+const PULSE_MS: f32 = 200.0;
 
 /// Tiles sliding to new places after bursts were stacked or opened.  All
 /// rects are in the new layout's content coordinates (the old ones moved by
@@ -586,7 +594,41 @@ impl State {
             restack: None,
             reveal_seq: 0,
             reveal: None,
+            marks: HashMap::new(),
+            pulses: HashMap::new(),
         }
+    }
+
+    /// The marks of the tiles on screen, against what was seen: a change
+    /// starts a pulse (a tile seen for the first time starts none).  Ended
+    /// pulses go.  True while any pulse is under way.
+    fn note_marks(&mut self, on_screen: &[RecordId], coll: &Collection, now: Instant) -> bool {
+        for &id in on_screen {
+            let Some(rec) = coll.get(id) else { continue };
+            let cur = (rec.is_pruned, rec.is_marked);
+            match self.marks.insert(id, cur) {
+                Some(was) if was != cur => {
+                    let tone = if cur.0 {
+                        t::REJECT
+                    } else if cur.1 {
+                        t::KEEP
+                    } else {
+                        t::PHOTO_INK2
+                    };
+                    self.pulses.insert(id, (now, tone));
+                }
+                _ => {}
+            }
+        }
+        self.pulses.retain(|_, (at, _)| now.saturating_duration_since(*at).as_secs_f32() * 1000.0 < PULSE_MS);
+        !self.pulses.is_empty()
+    }
+
+    /// A pulse under way on `id`: its progress (0–1) and tone.
+    fn pulse(&self, id: RecordId, now: Instant) -> Option<(f32, Color)> {
+        let (at, tone) = self.pulses.get(&id)?;
+        let k = now.saturating_duration_since(*at).as_secs_f32() * 1000.0 / PULSE_MS;
+        (k < 1.0).then_some((k, *tone))
     }
 
     fn openness(&self, date: NaiveDate, collapsed: &HashSet<NaiveDate>, now: Instant) -> f32 {
@@ -841,9 +883,12 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     || st.collapse.values().any(|a| !a.done(now))
                     || st.restack.is_some()
                     || !st.bar.done(now);
-                // Thumbnails fading in, placeholders shimmering, a hover fade.
+                // Thumbnails fading in, placeholders shimmering, a hover
+                // fade, a mark's pulse.
                 let (on_screen, _) = collect(&metrics, data, st.scroll, bounds.height, false);
-                let lively = st.hover_fading(now)
+                let pulsing = st.note_marks(&on_screen, data.coll, now);
+                let lively = pulsing
+                    || st.hover_fading(now)
                     || on_screen.iter().filter_map(|id| data.coll.get(*id)).any(|r| match data.thumbs.get(&r.path) {
                         None => true,
                         Some(th) => arrival(th.arrived, now) < 1.0,
@@ -857,6 +902,8 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                 if st.sent_range != Some(key) {
                     st.sent_range = Some(key);
                     let (visible, _) = collect(&metrics, data, st.scroll, bounds.height, false);
+                    // Marks are remembered for the tiles on screen only.
+                    st.marks.retain(|id, _| visible.contains(id));
                     let missing: Vec<RecordId> = visible
                         .into_iter()
                         .filter(|id| data.coll.get(*id).is_some_and(|r| data.thumbs.get(&r.path).is_none()))
@@ -1063,11 +1110,13 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         let bounds = layout.bounds();
         let now = Instant::now();
         let hover_amt = |id: RecordId| st.hover_amount(id, now);
+        let pulse = |id: RecordId| st.pulse(id, now);
         let view = PaintState {
             scroll: st.scroll,
             size: st.size,
             hover: st.hover,
             hover_amt: &hover_amt,
+            pulse: &pulse,
             now,
             opacity: 1.0,
             bar: st.bar.value(now, paint::out_cubic),
@@ -1586,6 +1635,8 @@ pub struct PaintState<'s> {
     pub size: f32,
     hover: Hover,
     hover_amt: &'s dyn Fn(RecordId) -> f32,
+    /// A mark's pulse under way on a tile: progress and tone.
+    pulse: &'s dyn Fn(RecordId) -> Option<(f32, Color)>,
     now: Instant,
     pub opacity: f32,
     pub bar: f32,
@@ -1607,6 +1658,7 @@ impl<'s> PaintState<'s> {
             size,
             hover: Hover::None,
             hover_amt: &no_hover,
+            pulse: &no_pulse,
             now: Instant::now(),
             opacity,
             bar: 0.0,
@@ -1617,6 +1669,10 @@ impl<'s> PaintState<'s> {
             slide: None,
         }
     }
+}
+
+fn no_pulse(_: RecordId) -> Option<(f32, Color)> {
+    None
 }
 
 fn no_hover(_: RecordId) -> f32 {
@@ -1843,7 +1899,7 @@ fn paint_rows(r: &mut Renderer, data: &GridData<'_>, ps: &PaintState<'_>, m: &Me
     // on top of a thumbnail get a layer of their own.
     r.with_layer(clip, |r| {
         for d in &drawn {
-            paint_cell_marks(r, d.id, d.rec, data, m.ts, m.label_h, d.thumb, d.image, op * d.alpha, clip);
+            paint_cell_marks(r, d.id, d.rec, data, m.ts, m.label_h, d.thumb, d.image, op * d.alpha, (ps.pulse)(d.id), clip);
             // A hint until the photo is decided; a stack shows none (its
             // cover is its sharpest frame already).
             let decided = d.rec.is_pruned || d.rec.is_marked;
@@ -2073,6 +2129,7 @@ fn paint_cell_marks(
     thumb_rect: Rectangle,
     image_rect: Rectangle,
     op: f32,
+    pulse: Option<(f32, Color)>,
     _clip: Rectangle,
 ) {
     let selected = data.selection.contains(&id);
@@ -2080,10 +2137,19 @@ fn paint_cell_marks(
     let checkbox = data.select_mode.then_some(selected);
     paint_marks(r, image_rect, ts, crop, rec.is_pruned, rec.is_marked, checkbox, op);
 
+    let c = |col: Color| paint::with_alpha(col, op);
+    let mount = rect(thumb_rect.x - PAD, thumb_rect.y - PAD, ts + 2.0 * PAD, ts + 2.0 * PAD + label_h);
+    // A mark just landed: a ring in its colour widens off the mount and
+    // fades, so the eye catches which tile took it.
+    if let Some((k, tone)) = pulse {
+        let k = paint::out_cubic(k);
+        let grow = 2.0 + 6.0 * k;
+        let ring = rect(mount.x - grow, mount.y - grow, mount.width + 2.0 * grow, mount.height + 2.0 * grow);
+        paint::framed(r, ring, t::R_CELL + grow, Color::TRANSPARENT, c(t::alpha(tone, 0.9 * (1.0 - k))), 2.0);
+    }
+
     // Selection: an accent outline around the whole mount.
     if selected {
-        let c = |col: Color| paint::with_alpha(col, op);
-        let mount = rect(thumb_rect.x - PAD, thumb_rect.y - PAD, ts + 2.0 * PAD, ts + 2.0 * PAD + label_h);
         paint::framed(r, mount, t::R_CELL, Color::TRANSPARENT, c(t::SIGNAL), 2.0);
     }
 }
