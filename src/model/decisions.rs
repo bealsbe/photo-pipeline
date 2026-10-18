@@ -155,7 +155,8 @@ pub enum Act {
     /// them is labelled the same.
     Merge { groups: Vec<Side> },
     /// Two groups are not the same subject (a merge suggestion turned
-    /// down, or × on *Similar groups*).  Every pair across is different.
+    /// down, or × on a group's pairs in its editor).  Every pair across
+    /// is different.
     NotSame { groups: Vec<Side> },
     /// Heads split out of a group into a new one of their own: they and
     /// the rest of `from` are different.
@@ -291,7 +292,9 @@ pub enum At {
     Viewer,
     /// "Possibly the same fursuit": the pairs of groups.
     MergeReview,
-    /// A fursuit page's *Similar groups*.
+    /// One group's pairs: the group editor's *Likely the same fursuit*
+    /// (a fursuit page's *Similar groups* before; the same list, the same
+    /// record).
     Similar,
     /// The "Same person?" / "Same fursuit?" review.
     Review,

@@ -634,7 +634,7 @@ impl Link {
     /// *Possibly the same fursuit*: pairs of fursuit groups to merge or
     /// tell apart (`BgEvent::MergeSuggestions`, then with `judge` and a
     /// judge that can run, `BgEvent::MergeJudged`).  `focus`: one group's
-    /// pairs (its page's *Similar groups*).
+    /// pairs (the group editor's *Likely the same fursuit*).
     pub fn merge_suggestions(&self, seq: u64, focus: Option<&GroupId>, min_photos: usize, judge: bool) {
         match self {
             Link::Engine(e) => e.merge_suggestions(seq, focus.cloned(), min_photos, judge),

@@ -10,7 +10,9 @@
 //!   start (the first index's step, an export's photos, carrying on after a
 //!   stop) waits with its cost: a strip under the folder bar in any view,
 //!   and a card on the tab, with *Find fursuit heads* and *Skip this time*.
-//! - **Progress** on the tab and in the status bar, with × to stop.
+//! - **Progress** on the tab and in the status bar, with × to stop.  Over
+//!   the groups, what needs no answer (a scan running, heads to update,
+//!   skipped photos) is one quiet line, never a card: the tab shows groups.
 //! - **A failed card** says what failed and offers to try the card again
 //!   or open Preferences; never the processor.
 //! - **Heads to update** (fursuit matching v2): heads found before fursuits

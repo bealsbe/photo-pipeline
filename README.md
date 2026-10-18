@@ -636,9 +636,18 @@ never shown, merged, suggested or completed together with people or pets.
   its *Heads* (to split a group), naming and "Same fursuit?" (the review,
   Y and N in the keep and prune colours, one answer per burst, Ctrl+Z to
   take an answer back) are the same pages as a person's.
-- **Possibly the same fursuit.**  Over the groups, a row of pairs of
-  groups that may be one suit, nearest first (each card two covers, their
-  names and sizes); a click, or Y on the tab, opens the review: the two
+- **The tab and a group's page show the group, not suggestions.**  No
+  row of pairs over the groups, no mark on a tile, no *Similar groups*
+  on a page: a group's merge and split suggestions are in its editor
+  (*Edit group*, below).  Over the groups only what isn't a suggestion:
+  the processor's question before a head scan and a failing card (each a
+  card), and, as one quiet line, a scan running, heads to update or
+  skipped photos to look at.
+- **Possibly the same fursuit.**  The whole library's pairs of groups
+  that may be one suit, nearest first, are one quiet control in the
+  tab's header (*Possible merges*, with how many), Y on the tab, or View
+  ▸ *Review possible fursuit merges* from anywhere; each opens the
+  review (a group's own pairs are also in its editor): the two
   groups side by side, their covers large with a few more heads under
   them; **Y** merges them (a named group keeps its name; two named ask
   which name to keep), **N** says they are not the same, ← → step, **Z**
@@ -673,19 +682,20 @@ never shown, merged, suggested or completed together with people or pets.
   Shift+click picks a run; *Split into a new group* in the pick strip
   opens the group editor with them in a new column.  "Check this group"
   goes least alike first too.  A group with **two heads in one photo**
-  holds at least two fursuits: its tile carries a small split mark (a
-  click on it opens the group editor), and the editor offers *Suggested
-  split* in its header, with the two heads: a click lays the split out
+  holds at least two fursuits: its editor offers *Suggested split* in
+  its header (nothing on its tile or page), with the two heads: a click
+  lays the split out
   (each head beside the one it looks more like, the two in different
   columns) as a new column, moving nothing you arranged; Ctrl+Z takes it
   back.  It is only offered: nothing changes until you apply.
 - **The group editor** (people and fursuits alike, never the two mixed):
   one place to sort a group.  *Edit group* (E) on a group's page, or E
   with a group picked on the tab; every other way to move faces opens it
-  too, set up for the task: the split mark on a tile, side by side (C
-  with two groups picked, the button on a similar group, C on a pair in
-  "Same fursuit?"), and the picked faces' *Split into a new group* and
-  *Move to…* (with them picked).
+  too, set up for the task: side by side (C with two groups picked, C on
+  a pair in "Same fursuit?"), and the picked faces' *Split into a new
+  group* and *Move to…* (with them picked).  A group's suggestions are
+  here, and only here: *Suggested split* (above) and *Likely the same
+  fursuit* (below).
   - **Columns:** *Stays* (the group), any group opened beside it, and any
     number of new groups (*+ New group*, or drop on it).  Each least like
     the rest first, the farthest few marked, scrolling; only the tiles on
@@ -697,6 +707,20 @@ never shown, merged, suggested or completed together with people or pets.
     Below: *Take out of this group* (*Not this person*): out, free for any
     other group, never back in this one; and *Not fursuit heads* (*Not
     faces*): the boxes go.
+  - **Likely the same fursuit** (fursuits), at the top of the panel: the
+    groups this one may be one suit with, nearest first, the same pairs
+    the review would offer (by distance, under the cut-offs in force,
+    "not the same" left out; the nearest five, then *N more: review
+    them*).  Each row is a drop target like the panel's others, and a
+    click on its cover opens it as a column.  *Merge* merges the two at
+    once (a named group keeps its name, two named ask which to keep),
+    one undo step, and the editor then shows the merged group; the
+    middle button opens "Same fursuit?" at that pair, and Esc there comes
+    back to the editor; × says they are not the same.  *Merge* and the
+    review wait while something is arranged and not applied (a merge is a
+    change of its own, not part of *Apply*).  Ctrl+Z here takes back the
+    arrangement's steps first, then the merges and "not the same" made
+    here, one at a time.  Hidden while the box finds a group by name.
   - **Moving:** drag a face (the picked ones with it); Shift+click picks a
     run; ← / → to the column beside, N a new group, R take out, Delete
     not heads; Ctrl+Z takes back the last step.  Two heads of one photo
@@ -712,9 +736,6 @@ never shown, merged, suggested or completed together with people or pets.
 - **Take out of group** (fursuits; people: *Not Person A*), in the pick
   strip on *Heads* / *Faces*: the picked ones out of the group at once,
   never suggested for it again, one undo step.
-- **Similar groups** on a fursuit's page: its nearest groups, each with
-  *Merge* (one click, Ctrl+Z undoes it; two named ask which name to keep)
-  and × (not the same).
 - **Not fursuit heads…** (⋯ on a group's page, the tab's pick strip for
   picked groups, *Heads*' pick strip for picked heads) removes every
   head of them, after a confirmation that counts them and shows a few:
@@ -854,7 +875,9 @@ adapter) can learn from the way you correct groups, every grouping
 decision is added to a file, one line each:
 
 - **What is recorded.**  Merges (dragged, picked with S then M, *Merge
-  into…*, a suggested pair, *Similar groups*), "Not the same", splits and
+  into…*, a suggested pair in the review, or in the group editor's
+  *Likely the same fursuit*, `how.at` `similar` as a fursuit page's
+  *Similar groups* was), "Not the same", splits and
   moves (each *Apply* of the group editor, one entry: the groups as they
   were and where each set of heads went, new groups, taken out or not
   heads, with how many were moved by hand), review answers (Y,

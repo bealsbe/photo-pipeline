@@ -3764,3 +3764,38 @@ page."
   `edited` counts only the user's own moves
   (`a_suggested_split_is_offered_then_laid_out_without_undoing_the_users_moves`).
 
+## As built — group suggestions behind *Edit group* (2026-10-17)
+
+The user: "move all banners that add clutter to groups behind edit
+please. I don't need to see a merge or split suggestion in the main group
+screen."  What is computed is unchanged (`search::merging`, the judge,
+the cut-offs, the grouping); only where it shows moved.
+
+- **The tab:** no "Possibly the same fursuit" row and no split mark on a
+  tile (`subjects::tile_badge`: Hidden is the only mark).  One quiet
+  header control, left of the tabs so they never move: *Possible merges*
+  with the tab list's count (`subjects::merges_entry`), the review on a
+  click or Y.  View ▸ *Review possible fursuit merges*
+  (`Cmd::FursuitMerges`, no shortcut: Y answers in every review) opens it
+  from anywhere.  Over the groups, a scan running, heads to update and
+  skipped photos are one quiet line; the processor's question and a
+  failing card keep their card.
+- **A group's page:** no *Similar groups* (`subjects_person::parts`).
+- **The editor:** *Likely the same fursuit* at the top of the panel,
+  asked as *Similar groups* was (`merge_suggestions(seq, Some(home), min,
+  false)`, on the engine).  *Merge* is immediate (`Link::merge`, one
+  checkpoint, `Via::Pair { at: Similar, .. }` as before), then the editor
+  follows the group kept (`Follow`: by id once the merged one is gone,
+  else by the two covers, since two unnamed make a new subject).  It and
+  the review wait while `Editor::changed()`.  Ctrl+Z: the arrangement's
+  steps, then the editor's `LibStep`s (merge, not the same).  The review
+  opened from a pair has `back_to`: Esc returns to the editor.
+- **Tests:** `the_tab_shows_no_split_or_merge_suggestion_on_a_tile`,
+  `a_group_page_shows_no_merge_or_split_suggestion`,
+  `the_editor_shows_its_groups_merge_pairs_and_no_others`,
+  `merging_from_the_editor_is_one_step_recorded_as_the_pair`,
+  `after_a_merge_the_editor_follows_the_group_kept`,
+  `a_merge_waits_for_an_arrangement_to_be_applied`,
+  `the_review_from_the_editor_starts_at_its_pair_and_goes_back_there`,
+  `the_fursuit_merge_review_is_a_view_menu_command_without_a_shortcut`.
+
