@@ -41,24 +41,35 @@ pub trait KindStep: Send {
         let _ = r;
         false
     }
+    /// A detection too small and blurred to tell anyone apart (a
+    /// fursuit head's blob floor, `heads::HeadDetection::is_blob`): kept
+    /// in the cache, but out of the groups, suggestions and labels unless
+    /// the user confirmed it.  No floor for people.
+    fn below_floor(&self, r: &FaceRef) -> bool {
+        let _ = r;
+        false
+    }
 }
 
-/// The rows the user's labels keep out of a kind's grouping and
-/// suggestions: detections they removed ("Not a face"), and boxes drawn
-/// once whose drawing was taken back (their vectors stay in the cache).
+/// The rows kept out of a kind's grouping and suggestions: detections
+/// the user removed ("Not a face"), boxes drawn once whose drawing was
+/// taken back (their vectors stay in the cache), and detections under
+/// the kind's floor ([`KindStep::below_floor`]) that the user hasn't
+/// confirmed into a subject.
 pub struct Exclusion {
     removed: Removed,
     added: HashSet<FaceRef>,
+    confirmed: HashSet<FaceRef>,
 }
 
 impl Exclusion {
     pub fn new(file: &SubjectsFile, kind: Kind) -> Exclusion {
-        Exclusion { removed: file.removed_index(kind), added: file.added_of(kind).copied().collect() }
+        Exclusion { removed: file.removed_index(kind), added: file.added_of(kind).copied().collect(), confirmed: file.confirmed(kind).into_keys().collect() }
     }
 
     /// `r` (a row of `step`) is kept out.
     pub fn excludes(&self, step: &dyn KindStep, r: &FaceRef) -> bool {
-        self.removed.covers(r) || (step.is_added(r) && !self.added.contains(r))
+        self.removed.covers(r) || (step.is_added(r) && !self.added.contains(r)) || (step.below_floor(r) && !self.confirmed.contains(r))
     }
 
     /// Per row of `step`: kept out or not.
@@ -353,6 +364,48 @@ mod tests {
         let before: usize = g.clusters.iter().map(|c| c.members.len()).sum();
         g.assign_new(&more, &file);
         assert_eq!(g.clusters.iter().map(|c| c.members.len()).sum::<usize>(), before, "the removed newcomer joins nothing");
+    }
+
+    /// A kind's floor (round 2): rows under it take no part in a regroup
+    /// or in the suggestions, unless confirmed into a subject; a kind
+    /// without a floor (people) is as before.
+    #[test]
+    fn rows_under_the_floor_take_no_part_unless_confirmed() {
+        struct Floored(Toy);
+        impl KindStep for Floored {
+            fn kind(&self) -> Kind {
+                Kind::Fursuit
+            }
+            fn refs(&self) -> &[FaceRef] {
+                &self.0.refs
+            }
+            fn rows(&self) -> Rows<'_> {
+                self.0.rows()
+            }
+            fn clarity(&self, r: &FaceRef) -> f32 {
+                self.0.clarity(r)
+            }
+            fn cutoffs(&self) -> Cutoffs {
+                self.0.cutoffs()
+            }
+            fn below_floor(&self, r: &FaceRef) -> bool {
+                r.bbox[2] < 0.13 // rows 0 and 1 (widths 0.10, 0.12)
+            }
+        }
+        let step = Floored(Toy::new());
+        let file = SubjectsFile::default();
+        let j = job(&step, &file, 1);
+        assert_eq!(j.excluded.iter().filter(|x| **x).count(), 2, "{:?}", j.excluded);
+        let r = regroup(&j);
+        assert!(r.clusters.iter().all(|c| !c.members.contains(&0) && !c.members.contains(&1)), "{:?}", r.clusters);
+        assert_eq!(r.clusters.iter().map(|c| c.members.len()).sum::<usize>(), 7);
+        // Confirmed, row 0 is a member (and so not clustered either way);
+        // row 1 stays out; a person's step has no floor.
+        let mut file = SubjectsFile::default();
+        file.create(Kind::Fursuit, Some("A".into()), vec![step.refs()[0]]);
+        let out = Exclusion::new(&file, Kind::Fursuit);
+        assert!(!out.excludes(&step, &step.refs()[0]) && out.excludes(&step, &step.refs()[1]));
+        assert!(job(&Toy::new(), &file, 1).excluded.iter().all(|x| !x), "people: no floor");
     }
 
     /// Kinds never mix in the grouping: a job for one kind counts only

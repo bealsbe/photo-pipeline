@@ -139,6 +139,12 @@ pub struct HeadsStatus {
     pub vectors_missing: usize,
     /// Heads with search-model vectors (of photos still looked at).
     pub vectors: usize,
+    /// Photos looked at where no head was found: *Look again* (round 2)
+    /// reads them again with the detector's lower bar for large heads
+    /// (`ml::heads::BIG_SCORE_MIN`), adding heads only; asked for, never
+    /// automatic.
+    #[serde(default)]
+    pub no_head: usize,
     /// A whitening is fitted: fursuits can be grouped and suggested.
     /// None until [`whiten::MIN_HEADS`] heads have vectors.
     pub whitened: bool,
@@ -217,8 +223,12 @@ mod tests {
             for w in [false, true] {
                 let x = GroupingCuts::of(c, w);
                 assert!(x.merge_sure < x.group && x.group < x.merge_suggest && x.merge_suggest < x.merge_far, "{x:?}");
+                // The joining step's cut sits just under the group cut (round 2).
+                assert!(x.join < x.group && x.join > x.merge_sure, "{x:?}");
+                assert!((x.group - x.join - if w { JOIN_MARGIN } else { RAW_JOIN_MARGIN }).abs() < 1e-6);
             }
         }
+        assert!((GroupingCuts::of(Grouping::Balanced, true).join - 0.69).abs() < 1e-6);
         // The status says what is in force.
         let st = HeadsStatus { grouping: Grouping::Looser, whitened: false, ..HeadsStatus::default() };
         assert_eq!(st.cuts().group, 0.115);
@@ -360,17 +370,34 @@ pub struct GroupingCuts {
     pub grouping: Grouping,
     pub whitened: bool,
     pub group: f32,
+    /// The joining step's cut ([`JOIN_MARGIN`] under the group cut):
+    /// clusters the greedy pass left side by side are one group when
+    /// their members lie within it of each other on average.
+    pub join: f32,
     pub merge_suggest: f32,
     pub merge_sure: f32,
     pub merge_far: f32,
 }
+
+/// How far under the group cut the joining step's cut sits, whitened
+/// (round 2, 2026-10-17, on the user's 203 subjects over 54 000 heads,
+/// chosen on even days and held on odd ones): at the group cut itself
+/// (0.72) the joins gather more of a suit but take in more of the heads
+/// the user had rejected (odd days: 677 of 11 222 against 611 without
+/// the step); 0.03 under it keeps nearly all the gain (merges still
+/// needed on odd days 469 → 413; at the group cut 379) for 3 more
+/// rejected heads joined.  Raw: the same share of the cut (unmeasured:
+/// the library was whitened throughout).
+pub const JOIN_MARGIN: f32 = 0.03;
+pub const RAW_JOIN_MARGIN: f32 = 0.005;
 
 impl GroupingCuts {
     /// The cuts of `grouping` in the raw or the whitened space.  The
     /// merge suggestions' cut sits above the group cut by the margin it
     /// had before the choice (raw +0.003, whitened +0.02), and the judge's
     /// far end moves with the group cut; measured per choice on the labels
-    /// (the plan doc's table).
+    /// (the plan doc's table).  The joining step's cut sits under the
+    /// group cut by [`JOIN_MARGIN`].
     pub fn of(grouping: Grouping, whitened: bool) -> GroupingCuts {
         let (group, merge_suggest, merge_far) = match (grouping, whitened) {
             (Grouping::Tighter, false) => (0.094, 0.097, super::judging::RAW_SURE_NO),
@@ -381,9 +408,25 @@ impl GroupingCuts {
             (Grouping::Looser, true) => (0.75, 0.77, 0.846),
         };
         let merge_sure = if whitened { super::judging::SURE_YES } else { super::judging::RAW_SURE_YES };
-        GroupingCuts { grouping, whitened, group, merge_suggest, merge_far, merge_sure }
+        let join = group - if whitened { JOIN_MARGIN } else { RAW_JOIN_MARGIN };
+        GroupingCuts { grouping, whitened, group, join, merge_suggest, merge_far, merge_sure }
     }
 }
+
+/// The blob floor: a head smaller than this (its box's longer side in
+/// preview pixels) *and* blurrier than [`BLOB_SHARPNESS`] is a blob,
+/// kept in the cache but out of the groups, suggestions and labels
+/// unless the user confirmed it.  Round 2 (2026-10-17): of the 1 098
+/// heads the user removed, 950 were under 150 px and 859 under
+/// sharpness 0.03 (a background suit out of focus in hundreds of frames,
+/// crowd and background blobs); the kept, named heads sit at a median
+/// 540 px and 0.088.  This pair hides 94 % of the big removal day's
+/// heads and 18 % of the other days' (dark stage heads, which no size or
+/// blur rule separates), 1 of 1 200 named members, and 5.6 % of the
+/// library's heads.  Chosen on the removal day against kept heads of
+/// every day; the detector's score tells nothing (AUC 0.36).
+pub const BLOB_SIZE_PX: f32 = 180.0;
+pub const BLOB_SHARPNESS: f32 = 0.04;
 
 /// A head as the detector found it, kept per photo.
 #[derive(Debug, Clone, PartialEq)]
@@ -407,6 +450,12 @@ impl HeadDetection {
         let sharp = (self.sharpness * 4.0).clamp(0.0, 1.0);
         let score = ((self.score - 0.3) / 0.4).clamp(0.0, 1.0);
         0.5 * size + 0.3 * sharp + 0.2 * score
+    }
+
+    /// Too small and blurred to tell anyone apart ([`BLOB_SIZE_PX`],
+    /// [`BLOB_SHARPNESS`]).
+    pub fn is_blob(&self) -> bool {
+        self.size_px < BLOB_SIZE_PX && self.sharpness < BLOB_SHARPNESS
     }
 }
 
@@ -970,6 +1019,36 @@ impl HeadStore {
         self.scanned.values().map(Vec::len).sum()
     }
 
+    /// Photos looked at where nothing was found.
+    pub fn no_head(&self) -> usize {
+        self.scanned.values().filter(|v| v.is_empty()).count()
+    }
+
+    /// The photos looked at where nothing was found, by key.
+    pub fn keys_without_heads(&self) -> HashSet<Key> {
+        self.scanned.iter().filter(|(_, v)| v.is_empty()).map(|(k, _)| *k).collect()
+    }
+
+    /// *Look again*: a photo looked at before, read again with the lower
+    /// bar for large heads.  Heads found now that overlap none of the
+    /// detections kept (IoU under `ml::heads::NMS_OVERLAP`) are added,
+    /// with their vectors and tiles; the detections kept stay exactly as
+    /// they were, so every name and answer still points at its head.  A
+    /// photo not looked at before is added whole.
+    pub fn add_more(&mut self, key: Key, heads: &[Head]) -> io::Result<()> {
+        let Some(have) = self.scanned.get(&key) else { return self.add(key, heads) };
+        let new: Vec<Head> = heads.iter().filter(|h| have.iter().all(|d| crate::ml::heads::iou(d.bbox, h.bbox) < crate::ml::heads::NMS_OVERLAP)).cloned().collect();
+        if new.is_empty() {
+            return Ok(());
+        }
+        let mut dets = have.clone();
+        dets.extend(new.iter().map(|h| HeadDetection { bbox: h.bbox, score: h.score, size_px: h.size as f32, sharpness: h.sharpness }));
+        Self::append(&Self::heads_file(&self.dir), &Self::heads_header(), &Self::heads_block(&[(key, dets.clone())]))?;
+        self.scanned.insert(key, dets);
+        self.add_vector_rows(key, &new)?;
+        self.add_tiles(key, &new)
+    }
+
     /// Every head, found or drawn, as (ref, detection).
     pub fn all(&self) -> impl Iterator<Item = (FaceRef, &HeadDetection)> {
         self.scanned.iter().chain(self.drawn.iter()).flat_map(|(k, dets)| dets.iter().map(move |d| (d.head_ref(*k), d)))
@@ -1134,12 +1213,24 @@ impl KindStep for HeadStore {
     /// together with 7 of 432 different pairs, a judged group in eight
     /// mixed, and regroups the library's heads in under two seconds.
     /// *Find more* (0.14) and the review (0.17) join a suit across time.
+    /// Round 2 (2026-10-17) added the joining step: the greedy pass
+    /// leaves clusters of one suit side by side when they grow in the
+    /// wrong order (155 of the user's 160 merges were of groups already
+    /// under the cut), so clusters whose members lie within the join cut
+    /// of each other on average are joined afterwards, nearest first and
+    /// measured again as they grow ([`GroupingCuts::join`]).
     fn linkage(&self) -> subjects::Linkage {
-        subjects::Linkage::Average
+        subjects::Linkage::Average { join: Some(GroupingCuts::of(self.grouping, self.whitening.is_some()).join) }
     }
 
     fn is_added(&self, r: &FaceRef) -> bool {
         self.is_drawn(r)
+    }
+
+    /// The blob floor ([`HeadDetection::is_blob`]); a box the user drew
+    /// is never a blob.
+    fn below_floor(&self, r: &FaceRef) -> bool {
+        !self.is_drawn(r) && self.scanned.get(&r.key).is_some_and(|ds| ds.iter().any(|d| d.head_ref(r.key) == *r && d.is_blob()))
     }
 }
 
@@ -1377,11 +1468,15 @@ pub struct Fursuits {
     /// Heads with vectors needed before a whitening is fitted
     /// ([`whiten::MIN_HEADS`]; tests lower it).
     pub min_fit: usize,
+    /// The running scan is *Look again* over photos looked at before:
+    /// its results add heads ([`HeadStore::add_more`]) instead of
+    /// replacing a photo's.
+    look_again: bool,
 }
 
 impl Default for Fursuits {
     fn default() -> Fursuits {
-        Fursuits { store: None, status: HeadsStatus::default(), last_use: None, grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD), min_fit: whiten::MIN_HEADS }
+        Fursuits { store: None, status: HeadsStatus::default(), last_use: None, grouped: Grouped::default(), generation: 1, skipped: HashSet::new(), waiting: Vec::new(), gate: super::vocab::find(GATE_WORD), min_fit: whiten::MIN_HEADS, look_again: false }
     }
 }
 
@@ -1767,6 +1862,8 @@ impl Fursuits {
             for (job, p) in &batch.found {
                 let r = if batch.vectors_only {
                     store.add_vectors(p.key, &p.heads)
+                } else if self.look_again {
+                    store.add_more(p.key, &p.heads)
                 } else {
                     self.skipped.remove(&job.key);
                     store.add(p.key, &p.heads)
@@ -1785,9 +1882,49 @@ impl Fursuits {
                 Some(Stopped::Card(f)) => Step::Failed(f.clone()),
                 _ => Step::Idle,
             };
+            self.look_again = false;
         }
         self.refresh();
         batch.finished.is_some()
+    }
+
+    /// *Look again* (round 2): the photos looked at where nothing was
+    /// found, as jobs for the detector with its lower bar for large heads
+    /// ([`crate::ml::heads::BIG_SCORE_MIN`]), newest day first.  Asked
+    /// for, never automatic.
+    pub fn look_again_jobs(&self, lib: &LibraryIndex, index: &super::index::Index) -> Vec<HeadJob> {
+        let Some(store) = &self.store else { return Vec::new() };
+        let wanted = store.keys_without_heads();
+        if wanted.is_empty() {
+            return Vec::new();
+        }
+        let mut jobs = Vec::new();
+        for day in lib.days.values().rev() {
+            for shot in day.shots() {
+                let rep = shot.iter().find(|&&i| day.files[i].file_type == FileType::Jpg).or(shot.first());
+                let Some(&i) = rep else { continue };
+                let fe = &day.files[i];
+                let rel = super::pass::rel_path(&lib.root, &fe.path);
+                let Some(key) = index.paths.key_for(&rel, fe.size, &fe.mtime) else { continue };
+                if wanted.contains(&key) {
+                    jobs.push(HeadJob { path: fe.path.clone(), file_type: fe.file_type, key, boxes: Vec::new() });
+                }
+            }
+        }
+        jobs
+    }
+
+    /// *Look again* starts: its jobs run as a catch-up scan whose results
+    /// add heads to photos looked at before.  Nothing when there is
+    /// nothing to do or something runs or waits.
+    pub fn start_look_again(&mut self, jobs: &[HeadJob]) -> bool {
+        if jobs.is_empty() || !matches!(self.status.step, Step::Idle) || self.store.is_none() {
+            return false;
+        }
+        self.status.step = Step::Scanning { why: Why::CatchUp, done: 0, total: jobs.len() };
+        self.waiting.clear();
+        self.look_again = true;
+        true
     }
 
     /// The catch-up the user asked for (v2): its jobs start now, on either
@@ -1807,6 +1944,7 @@ impl Fursuits {
     pub fn stop(&mut self) {
         self.waiting.clear();
         self.status.step = Step::Idle;
+        self.look_again = false;
         self.refresh();
     }
 
@@ -1842,6 +1980,7 @@ impl Fursuits {
         self.status.found = found;
         self.status.vectors_missing = self.store.as_ref().map_or(0, |s| s.missing_vectors().len());
         self.status.vectors = self.store.as_ref().map_or(0, HeadStore::vector_count);
+        self.status.no_head = self.store.as_ref().map_or(0, HeadStore::no_head);
         self.status.whitened = self.store.as_ref().is_some_and(|s| s.whitening().is_some());
     }
 
@@ -1981,6 +2120,57 @@ mod store_tests {
         d
     }
 
+    /// Round 2's blob floor and *Look again*: a head small and blurred
+    /// is a blob, kept in the cache (the viewer's count, a later rule) but
+    /// out of the grouping unless the user confirmed it; a drawn box is
+    /// never one.  *Look again* adds heads to a photo looked at before
+    /// without touching the ones kept, and a photo with nothing found is
+    /// counted until it has a head.
+    #[test]
+    fn blobs_stay_out_of_the_groups_and_look_again_only_adds() {
+        use super::super::step::{Exclusion, KindStep};
+        let d = scratch("blobs");
+        let mut store = HeadStore::load(&d);
+        let (k1, k2) = (Key([1; 16]), Key([2; 16]));
+        let blob = Head { bbox: [0.1, 0.1, 0.05, 0.08], score: 0.35, size: 120, sharpness: 0.02, vector: vec![1.0, 0.0, 0.0], tile: vec![0xFF, 0xD8, 0xFF, 0xD9] };
+        let small_sharp = Head { bbox: [0.5, 0.1, 0.05, 0.08], score: 0.35, size: 120, sharpness: 0.09, vector: vec![0.0, 1.0, 0.0], tile: vec![0xFF, 0xD8, 0xFF, 0xD9] };
+        let big_soft = Head { bbox: [0.5, 0.5, 0.3, 0.4], score: 0.35, size: 600, sharpness: 0.02, vector: vec![0.0, 0.0, 1.0], tile: vec![0xFF, 0xD8, 0xFF, 0xD9] };
+        store.add(k1, &[blob.clone(), small_sharp.clone(), big_soft.clone()]).unwrap();
+        store.add(k2, &[]).unwrap();
+        assert_eq!((store.found(), store.looked_at(), store.no_head()), (3, 2, 1));
+        let dets = store.heads_of(&k1);
+        assert_eq!(dets.iter().map(HeadDetection::is_blob).collect::<Vec<_>>(), [true, false, false], "small and blurred only");
+        let _ = store.vectors();
+        let blob_ref = FaceRef::new(k1, blob.bbox);
+        let file = SubjectsFile::default();
+        let out = Exclusion::new(&file, Kind::Fursuit);
+        assert!(store.below_floor(&blob_ref) && out.excludes(&store, &blob_ref));
+        assert!(!out.excludes(&store, &FaceRef::new(k1, small_sharp.bbox)) && !out.excludes(&store, &FaceRef::new(k1, big_soft.bbox)));
+        // Confirmed into a subject, the blob takes part again.
+        let mut file = SubjectsFile::default();
+        file.create(Kind::Fursuit, Some("Someone".into()), vec![blob_ref]);
+        assert!(!Exclusion::new(&file, Kind::Fursuit).excludes(&store, &blob_ref));
+        // A drawn box of the same shape is never a blob.
+        let drawn = Head { bbox: [0.7, 0.7, 0.05, 0.08], ..blob.clone() };
+        store.add_drawn(k1, &[drawn.clone()]).unwrap();
+        assert!(!store.below_floor(&FaceRef::new(k1, drawn.bbox)));
+        // Look again at k2 (nothing found) adds its head; at k1, a head
+        // overlapping one kept is dropped and a new one is added; the
+        // kept detections are unchanged, byte for byte.
+        let before = store.heads_of(&k1).to_vec();
+        let found = Head { bbox: [0.2, 0.6, 0.3, 0.3], score: 0.22, size: 480, sharpness: 0.1, vector: vec![0.6, 0.8, 0.0], tile: vec![0xFF, 0xD8, 0xFF, 0xD9] };
+        store.add_more(k2, &[found.clone()]).unwrap();
+        let again = Head { bbox: [0.51, 0.5, 0.3, 0.4], score: 0.25, ..big_soft.clone() };
+        store.add_more(k1, &[again, found.clone()]).unwrap();
+        assert_eq!((store.no_head(), store.heads_of(&k2).len(), store.heads_of(&k1).len()), (0, 1, 4));
+        assert_eq!(&store.heads_of(&k1)[..3], &before[..]);
+        assert!(store.has_vector(&FaceRef::new(k1, found.bbox)) && store.has_vector(&FaceRef::new(k2, found.bbox)));
+        // Reloaded: the same.
+        let again = HeadStore::load(&d);
+        assert_eq!((again.found(), again.no_head(), again.heads_of(&k1).len()), (5, 0, 4));
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn the_head_cache_round_trips_and_is_private() {
         let d = scratch("store");
@@ -2085,15 +2275,15 @@ mod store_tests {
     fn linkages() -> Vec<(&'static str, f32, subjects::Linkage)> {
         use subjects::Linkage as L;
         vec![
-            ("ships now: average at the group cut", CUTOFFS.group, L::Average),
+            ("ships now: average at the group cut", CUTOFFS.group, L::Average { join: None }),
             ("shipped before: centroid+merge 0.14", 0.14, L::PEOPLE),
             ("centroid, no merge 0.14", 0.14, L::Centroid { merge: false, seed_cap: None }),
             ("centroid+merge 0.12", 0.12, L::PEOPLE),
             ("centroid+merge 0.10", 0.10, L::PEOPLE),
             ("centroid, seed cap 0.14/0.14", 0.14, L::Centroid { merge: false, seed_cap: Some(0.14) }),
             ("centroid, seed cap 0.14/0.17", 0.14, L::Centroid { merge: false, seed_cap: Some(0.17) }),
-            ("average 0.14", 0.14, L::Average),
-            ("average 0.17", 0.17, L::Average),
+            ("average 0.14", 0.14, L::Average { join: None }),
+            ("average 0.17", 0.17, L::Average { join: None }),
             ("complete 0.14", 0.14, L::Complete),
             ("complete 0.17", 0.17, L::Complete),
             ("complete 0.20", 0.20, L::Complete),
@@ -2857,7 +3047,7 @@ mod store_tests {
         assert!(d(0, 2) > 0.3, "the seeds are far apart: {}", d(0, 2));
         let people = subjects::cluster_with(&rows, &order, 0.17, Linkage::PEOPLE);
         assert_eq!(people.len(), 1, "people's merge pass joins the two bunches once their centroids drift within the cut: {people:?}");
-        let suits = subjects::cluster_with(&rows, &order, 0.17, Linkage::Average);
+        let suits = subjects::cluster_with(&rows, &order, 0.17, Linkage::Average { join: None });
         assert_eq!(suits.len(), 2, "average linkage keeps them apart: {suits:?}");
         for c in &suits {
             for &a in &c.members {
@@ -2868,12 +3058,12 @@ mod store_tests {
         }
         // The pass's incremental assign under the same linkage: the far
         // seed starts its own group rather than drifting into P.
-        let mut live = subjects::cluster_with(&rows, &order[..2], 0.17, Linkage::Average);
-        subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average);
+        let mut live = subjects::cluster_with(&rows, &order[..2], 0.17, Linkage::Average { join: None });
+        subjects::assign_with(&mut live, &rows, &[2], 0.17, Linkage::Average { join: None });
         assert_eq!(live.len(), 2, "{live:?}");
         let mut store = HeadStore::load(&scratch("linkage"));
         store.grouping = Grouping::Tighter;
-        assert_eq!(store.linkage(), Linkage::Average, "fursuits group by average linkage");
+        assert_eq!(store.linkage(), Linkage::Average { join: Some(GroupingCuts::of(Grouping::Tighter, false).join) }, "fursuits group by average linkage with the joining step");
         // Too few heads to whiten: the raw vectors' own cut-offs and band;
         // whitened, the research's.
         assert_eq!(store.cutoffs(), RAW_CUTOFFS);

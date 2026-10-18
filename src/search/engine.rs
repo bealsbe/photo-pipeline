@@ -122,6 +122,8 @@ enum Cmd {
     NotSame { a: GroupId, b: GroupId, a_heads: Vec<FaceRef>, b_heads: Vec<FaceRef>, via: Via },
     // Fursuit matching v2.
     CatchUpHeadVectors,
+    /// Round 2: look again at the photos where no head was found.
+    LookAgainForHeads,
     /// Tests: whiten with fewer heads than a library needs.
     #[cfg(test)]
     MinFit(usize),
@@ -636,6 +638,15 @@ impl Engine {
     /// this command, never on its own.
     pub fn catch_up_head_vectors(&self) {
         self.send(Cmd::CatchUpHeadVectors);
+    }
+
+    /// *Look again* (round 2): the photos looked at where no head was
+    /// found (`HeadsStatus::no_head`) are read again on the chosen
+    /// device with the detector's lower bar for large heads; heads found
+    /// are added, nothing kept is changed.  Asked for, never automatic;
+    /// card rules as for any scan.
+    pub fn look_again_for_heads(&self) {
+        self.send(Cmd::LookAgainForHeads);
     }
 
     /// *Possibly the same fursuit* (stage 2): pairs of fursuit groups
@@ -1491,6 +1502,7 @@ impl Worker {
                 }
                 Cmd::StopHeads => self.cancel_scan(),
                 Cmd::CatchUpHeadVectors => self.catch_up_head_vectors(),
+                Cmd::LookAgainForHeads => self.look_again_for_heads(),
                 #[cfg(test)]
                 Cmd::MinFit(n) => self.fursuits.min_fit = n,
                 #[cfg(test)]
@@ -1813,11 +1825,13 @@ impl Worker {
         };
         for kind in [Kind::Person, Kind::Fursuit] {
             let removed = file.removed_index(kind);
-            let found: Vec<FaceRef> = match kind {
-                Kind::Person => self.people.store.as_ref().map(|s| s.faces_of(&key).iter().map(|d| d.face_ref(key)).collect()).unwrap_or_default(),
-                _ => self.fursuits.store.as_ref().map(|s| s.heads_of(&key).iter().map(|d| d.head_ref(key)).collect()).unwrap_or_default(),
+            // A fursuit head under the blob floor is shown only when the
+            // user confirmed it (`KindStep::below_floor`).
+            let found: Vec<(FaceRef, bool)> = match kind {
+                Kind::Person => self.people.store.as_ref().map(|s| s.faces_of(&key).iter().map(|d| (d.face_ref(key), false)).collect()).unwrap_or_default(),
+                _ => self.fursuits.store.as_ref().map(|s| s.heads_of(&key).iter().map(|d| (d.head_ref(key), d.is_blob())).collect()).unwrap_or_default(),
             };
-            for face in found.into_iter().filter(|f| !removed.covers(f)) {
+            for face in found.into_iter().filter(|(f, blob)| !removed.covers(f) && (!blob || file.member_of(kind, f).is_some())).map(|(f, _)| f) {
                 if boxes.iter().any(|b| b.face == face && b.kind == kind) {
                     continue;
                 }
@@ -2596,6 +2610,22 @@ impl Worker {
             self.fursuits.vector_jobs(lib, ix)
         };
         if self.fursuits.start_catch_up(&jobs) {
+            self.run_head_scan(jobs);
+        }
+        self.publish_heads();
+    }
+
+    /// *Look again* over the photos where nothing was found: a scan with
+    /// the detector (the helper must have it), whose results add heads.
+    fn look_again_for_heads(&mut self) {
+        if self.pass.is_some() || self.scan.is_some() || !self.heads_ready() {
+            return;
+        }
+        let jobs = {
+            let (Some(lib), Some(ix)) = (&self.library, &self.index) else { return };
+            self.fursuits.look_again_jobs(lib, ix)
+        };
+        if self.fursuits.start_look_again(&jobs) {
             self.run_head_scan(jobs);
         }
         self.publish_heads();
@@ -4112,8 +4142,9 @@ mod tests {
                     let stem = crate::util::stem(p);
                     let a = Suits::angle(&stem).to_radians();
                     let key = Key::of(1, p.as_os_str().as_encoded_bytes());
-                    // `-dim-` in the name: a small, soft, doubtful head (clarity 0).
-                    let (size, sharpness, score) = if stem.contains("-dim-") { (100, 0.0, 0.3) } else { (300, 0.2, 0.5) };
+                    // `-dim-` in the name: a small, soft, doubtful head (clarity
+                    // 0.06, under the judge's bar) over the blob floor's sharpness.
+                    let (size, sharpness, score) = if stem.contains("-dim-") { (100, 0.05, 0.3) } else { (300, 0.2, 0.5) };
                     let heads = vec![crate::ml::heads::Head { bbox: [0.3, 0.2, 0.3, 0.4], score, size, sharpness, vector: vec![a.cos(), a.sin()], tile: Vec::new() }];
                     crate::ml::heads::HeadsResult { path: p.clone(), result: Ok(crate::ml::heads::PhotoHeads { key, heads }) }
                 })
