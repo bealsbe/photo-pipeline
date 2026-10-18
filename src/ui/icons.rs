@@ -115,6 +115,9 @@ pub enum Glyph {
     Label,
     /// Held in place (a split's two heads from one photo): a push pin.
     Pin,
+    /// Dissolve a group: its ring broken into four, three heads loose
+    /// inside, apart.
+    Dissolve,
 }
 
 /// An icon as a handle, `px` logical pixels square, in `color`.
@@ -632,6 +635,15 @@ fn draw(p: &mut Pen<'_>, glyph: Glyph) {
             p.line(&[(5.0, 12.0), (19.0, 12.0)]);
         }
         Pin => p.path("M9 3.5h6M10 3.5l-.6 5.5L6.5 12.5h11L14.6 9 14 3.5M12 12.5V21"),
+        Dissolve => {
+            // The group's ring, broken at the four diagonals.
+            for c in [0.0f32, 90.0, 180.0, 270.0] {
+                p.arc(12.0, 12.0, 8.5, c - 27.0, c + 27.0);
+            }
+            p.dot(12.0, 8.6, 1.5);
+            p.dot(8.9, 14.0, 1.5);
+            p.dot(15.1, 14.0, 1.5);
+        }
         CloseCall => {
             // Two heads (the fursuit tiles' rounded squares) side by side
             // on a beam with its post: a pair weighed.

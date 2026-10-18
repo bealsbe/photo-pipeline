@@ -397,7 +397,7 @@ impl FakeFursuits {
     /// Every fursuit group, as the Fursuits tab lists them.
     pub fn groups(&self) -> Vec<Group> {
         let mut out = Vec::new();
-        for g in &self.groups {
+        for g in self.groups.iter().filter(|g| !is_loose(&g.id)) {
             let faces: Vec<Face> = g.members.iter().filter_map(|&f| self.face_of(f, g.confirmed.contains(&f))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let photos: HashSet<Key> = faces.iter().map(|f| f.face.key).collect();
@@ -686,19 +686,49 @@ impl FakeFursuits {
             *count.entry(self.look_of(h)).or_default() += 1;
         }
         let most = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).and_then(|(l, _)| l);
-        let mut v: Vec<(GroupId, f32)> = self.groups.iter().filter(|g| !g.members.is_empty()).map(|g| (g.id.clone(), if Some(g.suit) == most { 0.08 } else { 0.4 + 0.3 * unit(&(&g.id, "near")) as f32 })).collect();
+        let mut v: Vec<(GroupId, f32)> = self.groups.iter().filter(|g| !g.members.is_empty() && !is_loose(&g.id)).map(|g| (g.id.clone(), if Some(g.suit) == most { 0.08 } else { 0.4 + 0.3 * unit(&(&g.id, "near")) as f32 })).collect();
         v.sort_by(|a, b| a.1.total_cmp(&b.1));
         v
     }
 
     /// The group holding a head, if any.
     pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
-        self.groups.iter().find(|g| g.members.contains(f)).map(|g| g.id.clone())
+        self.groups.iter().filter(|g| !is_loose(&g.id)).find(|g| g.members.contains(f)).map(|g| g.id.clone())
     }
 
     /// The groups holding two heads of one photo (stage 3's flag).
     pub fn seen_together(&self) -> HashSet<GroupId> {
-        self.groups.iter().filter(|g| !crate::search::splitting::photo_pairs(&g.members).is_empty()).map(|g| g.id.clone()).collect()
+        self.groups.iter().filter(|g| !is_loose(&g.id) && !crate::search::splitting::photo_pairs(&g.members).is_empty()).map(|g| g.id.clone()).collect()
+    }
+
+    /// Dissolve a group (no one fursuit): its heads leave it, kept apart
+    /// (a loose group the tab never shows, which a regroup leaves be); a
+    /// name goes; one undo step.
+    pub fn dissolve(&mut self, id: &GroupId) -> Result<String, String> {
+        let Some(g) = self.group(id).filter(|g| !is_loose(&g.id)) else { return Err("That group changed: look again.".into()) };
+        let n = g.members.len();
+        if n < 2 && g.name.is_none() {
+            return Err("nothing to dissolve".into());
+        }
+        let what = match &g.name {
+            Some(name) => format!("Dissolved {name}"),
+            None => format!("Dissolved a group of {n} fursuit heads"),
+        };
+        self.remember(what.clone());
+        let i = self.groups.iter().position(|g| &g.id == id).expect("checked");
+        let mut g = self.groups.remove(i);
+        self.next_id += 1;
+        g.id = GroupId::Cluster(loose_id(self.next_id));
+        g.name = None;
+        g.hidden = false;
+        g.confirmed.clear();
+        self.groups.push(g);
+        Ok(what)
+    }
+
+    /// Heads dissolves left on their own (not shown as groups).
+    pub fn loose(&self) -> usize {
+        self.groups.iter().filter(|g| is_loose(&g.id)).map(|g| g.members.len()).sum()
     }
 
     /// A group's split check, as the engine sends it: heads farthest from
@@ -1032,7 +1062,7 @@ impl FakeFursuits {
     /// left out; pairs the user said are different never come back.
     pub fn merge_pairs(&self, min_photos: usize, focus: Option<&GroupId>, judge: bool) -> (Vec<crate::search::merging::GroupPair>, Vec<crate::search::merging::GroupPair>) {
         use crate::search::merging::GroupPair;
-        let shown: Vec<&FakeGroup> = self.groups.iter().filter(|g| !g.hidden && (g.name.is_some() || g.members.iter().map(|f| f.key).collect::<HashSet<_>>().len() >= min_photos)).collect();
+        let shown: Vec<&FakeGroup> = self.groups.iter().filter(|g| !g.hidden && !is_loose(&g.id) && (g.name.is_some() || g.members.iter().map(|f| f.key).collect::<HashSet<_>>().len() >= min_photos)).collect();
         let mut near: Vec<(f32, usize, usize)> = Vec::new();
         for i in 0..shown.len() {
             for j in i + 1..shown.len() {
@@ -1155,6 +1185,16 @@ fn made_id(n: u64) -> u64 {
 
 fn is_made(id: &GroupId) -> bool {
     matches!(id, GroupId::Cluster(c) if *c >= made_id(0))
+}
+
+/// What a dissolve left: its heads kept as a group of their own id range
+/// (within the made ones, so a regroup leaves them be), never shown.
+fn loose_id(n: u64) -> u64 {
+    ID_BASE + 2_000_000_000 + n
+}
+
+fn is_loose(id: &GroupId) -> bool {
+    matches!(id, GroupId::Cluster(c) if *c >= loose_id(0))
 }
 
 #[cfg(test)]
@@ -1309,6 +1349,25 @@ mod tests {
     /// as pairs, nearest first; with the judge, the close ones are compared
     /// and a look-alike is mostly left out; "not the same" keeps a pair out
     /// through a regroup, and undo brings it back.
+    #[test]
+    fn the_stand_in_dissolves_a_group_for_good_and_undoes_it() {
+        let mut f = fursuits(false);
+        let before = f.groups();
+        let g = before.iter().filter(|g| g.name.is_none()).max_by_key(|g| g.photos).unwrap().clone();
+        let heads = f.faces(&g.id).len();
+        assert_eq!(f.dissolve(&g.id).unwrap(), format!("Dissolved a group of {heads} fursuit heads"));
+        assert!(f.groups().iter().all(|x| x.id != g.id) && f.loose() == heads, "gone from the tab, counted");
+        assert_eq!(f.groups().len(), before.len() - 1, "no tile per head");
+        assert!(f.merge_pairs(1, None, false).0.iter().all(|p| p.a != g.id && p.b != g.id));
+        let n = f.tagged.len();
+        f.scan(n);
+        assert!(f.groups().iter().all(|x| f.faces(&x.id).iter().all(|h| !f.faces(&g.id).contains(h))), "never grouped again");
+        assert_eq!(f.loose(), heads);
+        assert!(f.undo().is_some());
+        assert_eq!(f.groups(), before, "back as it was");
+        assert_eq!(f.loose(), 0);
+    }
+
     #[test]
     fn the_stand_in_suggests_split_suits_and_remembers_not_the_same() {
         let mut f = fursuits(false);

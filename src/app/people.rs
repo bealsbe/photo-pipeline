@@ -268,6 +268,13 @@ pub struct FakePeople {
     x_lost: HashMap<Vec<Key>, Vec<(GroupId, Key)>>,
 }
 
+/// What a dissolve left: a group of its own id range, never shown.
+const LOOSE_BASE: u64 = 1 << 50;
+
+fn is_loose(id: &GroupId) -> bool {
+    matches!(id, GroupId::Cluster(c) if *c >= LOOSE_BASE)
+}
+
 /// The names the stand-in gives (made up, never anyone's).
 const NAMES: [&str; 2] = ["Person A", "Person B"];
 
@@ -321,12 +328,15 @@ impl FakePeople {
             }
         }
         let old = std::mem::take(&mut self.groups);
+        // What a dissolve left stays apart, never grouped again.
+        let loose: HashSet<Key> = old.iter().filter(|g| is_loose(&g.id)).flat_map(|g| g.members.iter().copied()).collect();
         for (p, keys) in members.into_iter().enumerate() {
+            let keys: Vec<Key> = keys.into_iter().filter(|k| !loose.contains(k)).collect();
             if keys.is_empty() {
                 continue;
             }
             // A person the user already has keeps their group (and name).
-            if let Some(mut g) = old.iter().find(|g| g.person == p).cloned() {
+            if let Some(mut g) = old.iter().find(|g| g.person == p && !is_loose(&g.id)).cloned() {
                 let have: HashSet<Key> = g.members.iter().copied().collect();
                 for k in keys {
                     if !have.contains(&k) && !g.rejected.contains(&k) {
@@ -346,7 +356,33 @@ impl FakePeople {
             let confirmed = if named { keys.iter().copied().collect() } else { HashSet::new() };
             self.groups.push(FakeGroup { id, name: named.then(|| NAMES[p].to_string()), hidden: false, members: keys, confirmed, rejected: HashSet::new(), person: p });
         }
+        self.groups.extend(old.into_iter().filter(|g| is_loose(&g.id)));
         self.generation += 1;
+    }
+
+    /// Dissolve a group (no one person): its faces leave it, kept apart
+    /// (a loose group the tab never shows, which a regroup leaves be); a
+    /// name goes; one undo step.
+    pub fn dissolve(&mut self, id: &GroupId) -> Result<String, String> {
+        let Some(g) = self.group(id).filter(|g| !is_loose(&g.id)) else { return Err("That group changed: look again.".into()) };
+        let n = g.members.len();
+        if n < 2 && g.name.is_none() {
+            return Err("nothing to dissolve".into());
+        }
+        let what = match &g.name {
+            Some(name) => format!("Dissolved {name}"),
+            None => format!("Dissolved a group of {n} faces"),
+        };
+        self.remember(what.clone());
+        let i = self.groups.iter().position(|g| &g.id == id).expect("checked");
+        let mut g = self.groups.remove(i);
+        self.next_id += 1;
+        g.id = GroupId::Cluster(LOOSE_BASE + self.next_id);
+        g.name = None;
+        g.hidden = false;
+        g.confirmed.clear();
+        self.groups.push(g);
+        Ok(what)
     }
 
     fn face_of(&self, key: Key, confirmed: bool) -> Option<Face> {
@@ -370,7 +406,7 @@ impl FakePeople {
     /// Every group, as the tabs list them.
     pub fn snapshot(&self) -> Subjects {
         let mut groups = Vec::new();
-        for g in &self.groups {
+        for g in self.groups.iter().filter(|g| !is_loose(&g.id)) {
             let faces: Vec<Face> = g.members.iter().filter_map(|&k| self.face_of(k, g.confirmed.contains(&k))).collect();
             let Some(cover) = faces.iter().max_by(|a, b| a.clarity.total_cmp(&b.clarity)).cloned() else { continue };
             let days = crate::model::subjects::count_days(&faces);
@@ -380,7 +416,9 @@ impl FakePeople {
         groups.sort_by(|a, b| b.photos.cmp(&a.photos).then(a.cover.capture.cmp(&b.cover.capture)));
         let faces_found = self.groups.iter().map(|g| g.members.len()).sum::<usize>()
             + self.shots[..self.looked_at].iter().filter(|s| true_person(&s.key, s.burst).is_some_and(|p| placed(&s.key, p) == Placed::Held)).count();
-        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()), seen_together: HashSet::new(), loose: Default::default() }
+        let loose: usize = self.groups.iter().filter(|g| is_loose(&g.id)).map(|g| g.members.len()).sum();
+        let loose = if loose > 0 { [(Kind::Person, loose)].into_iter().collect() } else { Default::default() };
+        Subjects { generation: self.generation, groups, faces_found, undoable: self.undo.last().map(|u| u.1.clone()), seen_together: HashSet::new(), loose }
     }
 
     /// Photos with a face found in them so far.
@@ -513,14 +551,14 @@ impl FakePeople {
             *count.entry(person(f)).or_default() += 1;
         }
         let most = count.into_iter().max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0))).and_then(|(p, _)| p);
-        let mut v: Vec<(GroupId, f32)> = self.groups.iter().filter(|g| !g.members.is_empty()).map(|g| (g.id.clone(), if Some(g.person) == most { 0.1 } else { 0.5 + 0.01 * (hash64(&g.id) % 30) as f32 })).collect();
+        let mut v: Vec<(GroupId, f32)> = self.groups.iter().filter(|g| !g.members.is_empty() && !is_loose(&g.id)).map(|g| (g.id.clone(), if Some(g.person) == most { 0.1 } else { 0.5 + 0.01 * (hash64(&g.id) % 30) as f32 })).collect();
         v.sort_by(|a, b| a.1.total_cmp(&b.1));
         v
     }
 
     /// The group holding a face (by its photo), if any.
     pub fn group_of(&self, f: &FaceRef) -> Option<GroupId> {
-        self.groups.iter().find(|g| g.members.contains(&f.key)).map(|g| g.id.clone())
+        self.groups.iter().filter(|g| !is_loose(&g.id)).find(|g| g.members.contains(&f.key)).map(|g| g.id.clone())
     }
 
     /// A set of faces farthest from the rest first: those of another
