@@ -142,10 +142,13 @@ surround shifts how you judge colour and exposure.
 - **RAW and JPG** are small luggage tags under each photo (blue and peach).
 
 Motion is short and eased: hovered photos brighten, thumbnails fade in as they
-arrive, photos still loading shimmer, dialogs and menus settle into place, and
-a thin purple-to-blue sweep runs along the top of the content while the app is
+arrive, photos still loading shimmer, dialogs and menus settle into place, a
+ring in the mark's colour pulses off a tile as it takes a mark, and a thin
+purple-to-blue sweep runs along the top of the content while the app is
 scanning, reading the library or making thumbnails.  Each animation redraws
-only its own widget, so none of it slows the app down.
+only its own widget, so none of it slows the app down.  The selected tile's
+purple outline wears a soft halo, so it lifts off the grid rather than cuts
+into it.
 
 The type is Barlow, a DIN-like face in the spirit of the lettering on lenses
 and camera dials.  It's bundled, so the app looks the same on any machine.

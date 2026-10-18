@@ -1003,10 +1003,14 @@ impl App {
         self.history.reset_baseline(&self.coll);
         self.refresh_views();
         let pairs = self.coll.stats().paired / 2;
-        let t = self.show_status(
-            format!("Found {count} file{}, {pairs} RAW+JPG pair{}", util::s(count), util::s(pairs)),
-            0,
-        );
+        // Pairs are worth a word only when there are some (a JPG-only
+        // shoot has none to report).
+        let found = if pairs > 0 {
+            format!("Found {count} file{}, {pairs} RAW+JPG pair{}", util::s(count), util::s(pairs))
+        } else {
+            format!("Found {count} file{}", util::s(count))
+        };
+        let t = self.show_status(found, 0);
         self.update_status_count();
         // What an earlier analysis of this folder found, from the cache (no
         // photo is read; analysing again is only ever on request).
