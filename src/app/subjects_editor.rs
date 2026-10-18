@@ -1303,14 +1303,36 @@ fn close(app: &mut App) -> Task<Message> {
 /// wait).  Whether it was open.
 pub fn take_back(app: &mut App) -> Option<Task<Message>> {
     let e = app.subjects.editor.as_mut()?;
-    if e.take_back() {
-        e.note = None;
-        return Some(reorder(app));
+    Some(match e.next_undo() {
+        Undo::Arrangement => {
+            e.take_back();
+            e.note = None;
+            reorder(app)
+        }
+        Undo::Library(_) => undo_library(app),
+        Undo::Nothing => Task::none(),
+    })
+}
+
+/// What Ctrl+Z in the editor takes back next.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Undo {
+    /// The arrangement's last step (nothing in the library).
+    Arrangement,
+    /// A merge or "not the same" made here: one step on the engine.
+    Library(LibStep),
+    Nothing,
+}
+
+impl Editor {
+    /// The arrangement's steps first, then the merges and "not the same"
+    /// made here, newest first.
+    pub fn next_undo(&self) -> Undo {
+        if !self.history.is_empty() {
+            return Undo::Arrangement;
+        }
+        self.lib_steps.last().cloned().map_or(Undo::Nothing, Undo::Library)
     }
-    if !e.lib_steps.is_empty() {
-        return Some(undo_library(app));
-    }
-    Some(Task::none())
 }
 
 /// Esc: a drag, the picks, a note, then *Cancel*.
@@ -1806,6 +1828,110 @@ mod tests {
         assert_eq!(e.cols[2].heads, vec![h2(2)], "only what was still in Stays");
         assert_eq!((e.place_of(&h(3)), e.place_of(&h(4))), (Some(Place::Sent(kiba)), Some(Place::Col(1))), "the user's moves stand");
         assert_eq!(e.edited(), 2, "the user's two moves, not the suggestion's");
+    }
+
+    fn grp(id: u64, kind: Kind, name: Option<&str>, photos: usize) -> Group {
+        Group { id: GroupId::Cluster(id), kind, name: name.map(str::to_string), hidden: false, photos, bursts: photos, days: 1, cover: face(h(id as u8)), suggestions: 0 }
+    }
+
+    fn found(groups: Vec<Group>) -> Found {
+        Found { generation: 1, groups, faces_found: 0, undoable: None, seen_together: Default::default() }
+    }
+
+    fn pair(a: u64, b: u64, distance: f32) -> GroupPair {
+        GroupPair { a: GroupId::Cluster(a), b: GroupId::Cluster(b), distance, a_heads: Arc::new(vec![face(h(a as u8))]), b_heads: Arc::new(vec![face(h(b as u8))]), sure: true, verdict: None }
+    }
+
+    /// *Likely the same fursuit*: the editor shows the pairs the engine
+    /// gives for its own group, nearest first, and no other: not a pair
+    /// of two other groups, not one with a group of another kind or one
+    /// gone since.  The panel's lists under it leave those groups out;
+    /// searching by name hides the section.  A person's group has none.
+    #[test]
+    fn the_editor_shows_its_groups_merge_pairs_and_no_others() {
+        let c = GroupId::Cluster;
+        let all = found(vec![grp(1, Kind::Fursuit, None, 30), grp(2, Kind::Fursuit, Some("Kiba"), 20), grp(3, Kind::Fursuit, None, 12), grp(4, Kind::Fursuit, None, 9), grp(9, Kind::Person, None, 40)]);
+        let mut e = editor(c(1), &[h(1)], Preset::Plain);
+        assert!(e.shown_pairs(&all).is_empty(), "none asked yet");
+        e.pairs = Some(Arc::new(vec![pair(1, 2, 0.60), pair(3, 1, 0.65), pair(2, 3, 0.66), pair(1, 9, 0.67), pair(1, 77, 0.68)]));
+        let shown: Vec<(usize, GroupId)> = e.shown_pairs(&all).into_iter().map(|(i, g)| (i, g.clone())).collect();
+        assert_eq!(shown, [(0, c(2)), (1, c(3))]);
+        assert_eq!(e.paired_groups(&all), [c(2), c(3)].into_iter().collect::<HashSet<_>>());
+        e.search = "kib".into();
+        assert!(e.panel_pairs(&all).is_empty() && e.paired_groups(&all).is_empty(), "searching: the lists, not the pairs");
+        // Kinds never mix: a person's editor shows no pair, even one given.
+        let mut p = Editor::new(Kind::Person, c(9), None, Preset::Plain);
+        p.pairs = Some(Arc::new(vec![pair(9, 1, 0.5)]));
+        assert!(p.shown_pairs(&all).is_empty());
+    }
+
+    /// *Merge* on a pair is one merge (one undo step on the engine),
+    /// recorded as the suggested pair it was (`At::Similar`, its distance),
+    /// the group edited kept unless only the other is named; two named ask.
+    /// Ctrl+Z in the editor takes the arrangement's steps first, then the
+    /// merge, as one step.
+    #[test]
+    fn merging_from_the_editor_is_one_step_recorded_as_the_pair() {
+        let c = GroupId::Cluster;
+        let p = pair(1, 2, 0.61);
+        let via = Via::Pair { at: At::Similar, distance: 0.61, sure: true, verdict: None };
+        let plan = |a: Option<&str>, b: Option<&str>, b_photos: usize| merge_plan(&grp(1, Kind::Fursuit, a, 30), &grp(2, Kind::Fursuit, b, b_photos), &p);
+        assert_eq!(plan(Some("Kiba"), None, 50), MergePlan::Merge { into: c(1), gone: c(2), via });
+        assert_eq!(plan(None, Some("Rook"), 5), MergePlan::Merge { into: c(2), gone: c(1), via }, "the name stays");
+        assert_eq!(plan(None, None, 50), MergePlan::Merge { into: c(1), gone: c(2), via }, "the group edited stays");
+        assert_eq!(plan(Some("Kiba"), Some("Rook"), 5), MergePlan::Ask);
+        let mut e = editor(c(1), &[h(1), h(2)], Preset::Plain);
+        assert_eq!(e.next_undo(), Undo::Nothing);
+        let merged = LibStep::Merged { back_to: c(1), cover: h(1) };
+        e.lib_steps.push(merged.clone());
+        e.apply_move(&mv(0, &[h(2)], Target::New)).unwrap();
+        assert_eq!(e.next_undo(), Undo::Arrangement);
+        assert!(e.take_back());
+        assert_eq!(e.next_undo(), Undo::Library(merged), "then the merge, one step");
+        e.lib_steps.pop();
+        assert_eq!(e.next_undo(), Undo::Nothing);
+    }
+
+    /// After a merge the editor shows the group kept: by its id once the
+    /// merged one is gone, else (two unnamed make a new group) the one
+    /// whose cover is one of the two, never another kind's.  An undo
+    /// lands with the next change.
+    #[test]
+    fn after_a_merge_the_editor_follows_the_group_kept() {
+        let c = GroupId::Cluster;
+        let f = Follow { want: c(1), gone: Some(c(2)), covers: vec![h(1), h(2)], step: None };
+        let before = found(vec![grp(1, Kind::Fursuit, Some("Kiba"), 30), grp(2, Kind::Fursuit, None, 9)]);
+        assert_eq!(f.resolve(&before, Kind::Fursuit), Followed::Waiting, "not landed yet");
+        assert_eq!(f.resolve(&found(vec![grp(1, Kind::Fursuit, Some("Kiba"), 39)]), Kind::Fursuit), Followed::At(c(1)));
+        let made = Group { id: GroupId::Subject(SubjectId("new".into())), cover: face(h(2)), ..grp(5, Kind::Fursuit, None, 39) };
+        let after = found(vec![made.clone(), grp(3, Kind::Fursuit, None, 80)]);
+        assert_eq!(f.resolve(&after, Kind::Fursuit), Followed::At(made.id.clone()), "by its cover, not the largest");
+        assert_eq!(f.resolve(&after, Kind::Person), Followed::Lost, "never another kind's");
+        let back = Follow { want: c(1), gone: None, covers: vec![h(1)], step: None };
+        assert_eq!(back.resolve(&before, Kind::Fursuit), Followed::At(c(1)));
+    }
+
+    /// *Merge* and the review wait while something is arranged that
+    /// *Apply* would change; a group opened beside it to look at, an
+    /// empty new column, or a name put back are nothing to apply.
+    #[test]
+    fn a_merge_waits_for_an_arrangement_to_be_applied() {
+        let c = GroupId::Cluster;
+        let mut e = editor(c(1), &[h(1), h(2), h(3)], Preset::Plain);
+        assert!(!e.changed());
+        e.cols.push(Col { origin: Origin::Existing { id: c(2), was: None }, heads: vec![h(20)], name: String::new(), rank: HashMap::new(), loaded: true });
+        e.origin.insert(h(20), c(2));
+        e.cols.push(Col { origin: Origin::New, heads: vec![], name: "Rook".into(), rank: HashMap::new(), loaded: true });
+        assert!(!e.changed(), "looked at, nothing moved");
+        e.cols[0].name = "Kiba".into();
+        assert!(e.changed(), "a name to give");
+        e.cols[0].name.clear();
+        e.apply_move(&mv(0, &[h(1)], Target::Col(1))).unwrap();
+        assert!(e.changed(), "a head moved");
+        assert!(e.take_back() && !e.changed());
+        e.apply_move(&mv(0, &[h(3)], Target::Removed)).unwrap();
+        assert!(e.changed());
+        assert!(editor(c(1), &[h(1), h(2)], Preset::Split(vec![h(2)])).changed(), "a split laid out from the start");
     }
 
     /// Two heads of one photo never share a column, nor a panel group

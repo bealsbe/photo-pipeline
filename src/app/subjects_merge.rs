@@ -171,6 +171,20 @@ impl MergeReview {
         }
     }
 
+    /// The review from the group editor: `pair` first, then the tab's
+    /// list as it was (unless the judge offers the rest), Esc back to the
+    /// editor on `back_to`.
+    pub fn at_pair(seq: u64, judging: bool, pair: GroupPair, tab: Option<&[GroupPair]>, back_to: GroupId) -> MergeReview {
+        let mut r = MergeReview::new(seq, judging);
+        r.append(std::slice::from_ref(&pair));
+        if let Some(list) = tab.filter(|_| !judging) {
+            r.append(list);
+            r.loaded = true;
+        }
+        r.back_to = Some(back_to);
+        r
+    }
+
     pub fn len(&self) -> usize {
         self.list.len()
     }
@@ -465,16 +479,8 @@ fn start(app: &mut App, at: Option<usize>) -> Task<Message> {
 pub fn start_at(app: &mut App, pair: GroupPair, back_to: GroupId) -> Task<Message> {
     let judging = super::fursuit_judge::active(&app.search.status);
     let seq = app.subjects.next_seq();
-    let mut r = MergeReview::new(seq, judging);
-    r.append(std::slice::from_ref(&pair));
-    if !judging {
-        if let Some(list) = app.subjects.lists.tab.clone() {
-            r.append(&list);
-            r.loaded = true;
-        }
-    }
-    r.back_to = Some(back_to);
-    app.subjects.merges = Some(r);
+    let tab = app.subjects.lists.tab.clone();
+    app.subjects.merges = Some(MergeReview::at_pair(seq, judging, pair, tab.as_deref().map(Vec::as_slice), back_to));
     app.quicklook = None;
     let min = app.settings.people_min_photos();
     app.search.link.merge_suggestions(seq, None, min, judging);
@@ -1154,6 +1160,22 @@ mod tests {
         assert_eq!(r.pop_step(), Some(Some(0)), "then the answer");
         assert_eq!((r.answers[0], r.at), (None, 0));
         assert_eq!(r.pop_step(), None);
+    }
+
+    /// The review from the editor's pair: that pair first, then the rest
+    /// of the tab's list once each (with the judge on, the rest are the
+    /// judge's to offer), and Esc goes back to the editor.
+    #[test]
+    fn the_review_from_the_editor_starts_at_its_pair_and_goes_back_there() {
+        let tab = [pair(1, 2), pair(3, 4), pair(5, 1)];
+        let r = MergeReview::at_pair(1, false, pair(1, 5), Some(&tab), GroupId::Cluster(1));
+        let keys: Vec<(GroupId, GroupId)> = r.list.iter().map(GroupPair::key).collect();
+        assert_eq!(keys, [pair(1, 5).key(), pair(1, 2).key(), pair(3, 4).key()], "its pair first, each pair once");
+        assert_eq!((r.at, r.loaded, r.back_to.clone()), (0, true, Some(GroupId::Cluster(1))));
+        assert_eq!(back_words(&r), "Back to the group");
+        let r = MergeReview::at_pair(2, true, pair(1, 5), Some(&tab), GroupId::Cluster(1));
+        assert_eq!((r.len(), r.loaded, r.run.is_some()), (1, false, true), "with the judge: the pair, then what it offers");
+        assert_eq!(back_words(&MergeReview::new(3, false)), "Back to the fursuits");
     }
 
     /// The name rule of a merge from the review: the named one is kept; of

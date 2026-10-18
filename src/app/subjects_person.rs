@@ -1241,6 +1241,21 @@ mod tests {
         }
     }
 
+    /// A group's page shows the group (its header, band and photos or
+    /// faces), never a suggestion row: no *Similar groups* to merge on a
+    /// fursuit's page, no split banner.  Those are the group editor's.
+    #[test]
+    fn a_group_page_shows_no_merge_or_split_suggestion() {
+        for kind in [Kind::Fursuit, Kind::Person] {
+            let mut p = Person::new(GroupId::Cluster(4), kind);
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::Body]);
+            p.show = Show::Faces;
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::Body]);
+            p.picked.push(FaceRef { key: Key([4; 16]), bbox: [0.0; 4] });
+            assert_eq!(parts(&p), [Part::Header, Part::Band, Part::PickStrip, Part::Body], "the picked faces' actions only");
+        }
+    }
+
     /// An unnamed group whose cover was removed has a new id: the page
     /// follows it to the group whose cover it knew was there, the largest
     /// of several, never a named one or another kind's.

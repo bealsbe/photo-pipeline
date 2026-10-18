@@ -1881,6 +1881,25 @@ mod tests {
         }
     }
 
+    /// The tab shows groups, not suggestions: a fursuit group holding two
+    /// heads of one photo (the engine flags it: a split to suggest) carries
+    /// no split mark and says nothing of splitting; the only mark is
+    /// Hidden.  Merges and splits are offered in the group editor.
+    #[test]
+    fn the_tab_shows_no_split_or_merge_suggestion_on_a_tile() {
+        let mut f = found();
+        f.groups.push(group(8, Kind::Fursuit, None, 20, false));
+        f.seen_together.insert(GroupId::Cluster(8));
+        f.seen_together.insert(GroupId::Cluster(5));
+        for g in f.groups.iter().filter(|g| g.kind == Kind::Fursuit) {
+            assert!(f.seen_together.contains(&g.id));
+            assert_eq!(tile_badge(g), None, "no split mark on {:?}", g.id);
+            let hint = tile_hint(g).to_lowercase();
+            assert!(!hint.contains("split") && !hint.contains("same fursuit") && !hint.contains("suggest"), "{hint}");
+        }
+        assert_eq!(tile_badge(&group(9, Kind::Fursuit, None, 20, true)), Some(Glyph::Hide), "hidden is the one mark");
+    }
+
     #[test]
     fn a_tab_shows_one_kind_named_first_and_small_groups_folded_away() {
         let f = found();
