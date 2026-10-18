@@ -1113,7 +1113,8 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
         row![
             check("Only files marked for export", ex.marked_only, t::KEEP, (ex.has_marked && !locked).then_some(Msg::ExMarkedOnly as fn(bool) -> Msg)),
             Space::new().width(Length::Fill),
-            button(text("Clear all marks").size(t::T_SMALL).font(paint::MEDIUM))
+            // Clear all marks: only while there are marks to clear.
+            button(text(if ex.has_marked { "Clear all marks" } else { "" }).size(t::T_SMALL).font(paint::MEDIUM))
                 .padding(Padding::from([2.0, 4.0]))
                 .style(style::link().style())
                 .on_press_maybe((ex.has_marked && !locked).then_some(d(Msg::ExClearMarks))),
@@ -1135,8 +1136,10 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
     .spacing(t::S3);
 
     // What will happen
+    // (Once done, the summary below says what happened: the chips would
+    // only repeat its plan.)
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
-    if let Some(plan) = &ex.plan {
+    if let (Some(plan), None) = (&ex.plan, &ex.done) {
         let ids = export_ids(app, ex);
         let unp_raw = ids.iter().filter_map(|&i| app.coll.get(i)).filter(|r| r.file_type == FileType::Raw && !r.is_paired()).count();
         let unp_jpg = ids.iter().filter_map(|&i| app.coll.get(i)).filter(|r| r.file_type == FileType::Jpg && !r.is_paired()).count();
@@ -1246,10 +1249,12 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
         header(if ex.mode == Mode::Move { "Move to library" } else { "Export to library" }, Some("Photos are filed by the day they were taken.".into())),
         paths,
         options,
-        chips,
-        preview_box
     ]
     .spacing(t::S4);
+    if ex.done.is_none() {
+        col = col.push(chips);
+    }
+    col = col.push(preview_box);
 
     // Conflicts
     if let (Some(plan), false) = (&ex.plan, locked) {
