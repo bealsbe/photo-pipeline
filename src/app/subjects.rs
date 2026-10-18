@@ -1399,17 +1399,18 @@ fn looking(app: &App) -> Element<'_, Message> {
     } else {
         later(Glyph::Person, "Looking for faces", "Groups appear here as they are found, newest days first. You can keep culling meanwhile.")
     };
-    let col = column![progress_strip(app, Kind::Person).unwrap_or_else(|| Space::new().into()), body];
+    let col = column![progress_strip(app, Kind::Person, false).unwrap_or_else(|| Space::new().into()), body];
     container(col).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
 }
 
 /// While a kind's step runs (faces looked for, fursuit heads scanned):
 /// how far, on the photos' grey; for fursuits also what the step waits
-/// for.  Never another kind's.
-fn progress_strip(app: &App, kind: Kind) -> Option<Element<'_, Message>> {
+/// for.  Never another kind's.  Over the groups, a step running is one
+/// quiet line (the status bar has it too).
+fn progress_strip(app: &App, kind: Kind, over_groups: bool) -> Option<Element<'_, Message>> {
     match kind {
         Kind::Person => {}
-        Kind::Fursuit => return super::subjects_fursuits::status_card(app),
+        Kind::Fursuit => return super::subjects_fursuits::status_card(app, over_groups),
         Kind::Pet => return None,
     }
     let st = &app.search.status;
@@ -1429,11 +1430,14 @@ fn progress_strip(app: &App, kind: Kind) -> Option<Element<'_, Message>> {
     };
     let left = estimate::describe_seconds(estimate::seconds(total.saturating_sub(done), st.device.chosen));
     let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-    let bar = iced::widget::progress_bar(0.0..=1.0, frac).length(120).girth(4).style(|_| iced::widget::progress_bar::Style {
+    let bar = iced::widget::progress_bar(0.0..=1.0, frac).length(if over_groups { 96 } else { 120 }).girth(4).style(|_| iced::widget::progress_bar::Style {
         background: Background::Color(t::PHOTO_RAISED),
         bar: Background::Color(t::SIGNAL),
         border: iced::Border { radius: 2.0.into(), ..iced::Border::default() },
     });
+    if over_groups {
+        return Some(super::subjects_fursuits::quiet_line(Glyph::Person, line, format!("{} left. Groups appear as they are found.", super::search_setup::capital(&left)), bar.into()));
+    }
     let words = column![
         text(line).size(t::T_BODY).font(paint::MEDIUM).color(t::PHOTO_INK),
         text(format!("{} left. Groups appear as they are found, newest days first.", super::search_setup::capital(&left))).size(t::T_SMALL).color(t::PHOTO_INK2)
@@ -1562,7 +1566,7 @@ pub(super) fn groups(app: &App) -> Element<'_, Message> {
     // Over the groups only what isn't a suggestion: a running step, a
     // question it waits on, a failing card.  Merges and splits are
     // offered in the group editor.
-    if let Some(p) = progress_strip(app, s.tab) {
+    if let Some(p) = progress_strip(app, s.tab, true) {
         col = col.push(p);
     }
     if !a.named.is_empty() {
