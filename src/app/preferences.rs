@@ -99,6 +99,10 @@ pub enum Control {
     FindHeadsNow,
     /// *Forget all…* (fursuits).
     ForgetFursuits,
+    /// *Reset unnamed groups…* (fursuits), and its *Undo* while the reset
+    /// is the newest change.
+    ResetUnnamed,
+    UndoReset,
     /// *Keep a record of my corrections*.
     KeepCorrections,
     /// The record: *Export…* and *Delete the record…*.
@@ -162,6 +166,8 @@ impl Control {
             Control::RailSubjects => "pref-rail-subjects",
             Control::FindHeadsNow => "pref-find-heads-now",
             Control::ForgetFursuits => "pref-forget-fursuits",
+            Control::ResetUnnamed => "pref-reset-unnamed",
+            Control::UndoReset => "pref-undo-reset",
             Control::KeepCorrections => "pref-keep-corrections",
             Control::ExportCorrections => "pref-export-corrections",
             Control::DeleteCorrections => "pref-delete-corrections",
@@ -236,6 +242,8 @@ pub enum Ask {
     ForgetPeople,
     /// Forget every fursuit head found and every fursuit name given.
     ForgetFursuits,
+    /// Give the unnamed fursuit groups back to the automatic grouping.
+    ResetUnnamed,
     /// Delete a close-call judge's model.
     DeleteJudge(JudgeChoice),
     /// Delete the record of corrections.
@@ -547,6 +555,19 @@ fn search_confirmed(app: &mut App, ask: Ask) -> Task<Message> {
             link.forget_all_fursuits();
             "Forgot every fursuit head found and every fursuit name given, and the fursuit corrections in your record. Your photos are not changed."
         }
+        Ask::ResetUnnamed => {
+            let u = app.search.status.heads.unnamed;
+            if !unnamed_to_reset(app) {
+                return Task::none();
+            }
+            link.reset_unnamed_fursuits();
+            let text = format!(
+                "Reset {}: their {} are being grouped again. Named fursuits and your answers are kept.",
+                util::plural(u.groups as u64, "unnamed fursuit group"),
+                util::plural(u.heads as u64, "head")
+            );
+            return app.show_status_action(text, "Undo", m(Msg::Press(Control::UndoReset)));
+        }
         Ask::DeleteCorrections => {
             link.decisions().delete_all();
             app.prefs.exported = None;
@@ -724,6 +745,21 @@ fn press(app: &mut App, c: Control) -> Task<Message> {
             }
             Task::none()
         }
+        Control::ResetUnnamed => {
+            if unnamed_to_reset(app) {
+                app.prefs.confirm = Some(Ask::ResetUnnamed);
+            }
+            Task::none()
+        }
+        Control::UndoReset => {
+            // Only while the reset is the newest change: anything later is
+            // Ctrl+Z's on the page, one step at a time.
+            if !reset_is_newest(app) {
+                return app.show_status("The reset isn't the latest change any more. Ctrl+Z on People and fursuits takes changes back one at a time.", 6000);
+            }
+            app.search.link.undo_subjects();
+            Task::none()
+        }
         Control::KeepCorrections => {
             let on = !app.settings.keep_corrections;
             app.settings.keep_corrections = on;
@@ -849,6 +885,27 @@ fn people_to_forget(app: &App) -> bool {
 fn fursuits_to_forget(app: &App) -> bool {
     let h = &app.search.status.heads;
     h.found > 0 || h.named > 0 || app.subjects.all.groups.iter().any(|g| g.kind == super::people::Kind::Fursuit)
+}
+
+/// Unnamed fursuit groups hold heads, and nothing is scanning, waiting
+/// for an answer or regrouping: *Reset unnamed groups…* can run.
+fn unnamed_to_reset(app: &App) -> bool {
+    can_reset(&app.search.status.heads)
+}
+
+/// [`unnamed_to_reset`] on the head step's status alone.
+fn can_reset(h: &super::fursuits::HeadsStatus) -> bool {
+    h.unnamed.groups > 0 && !h.scanning() && h.asking().is_none() && !h.regrouping
+}
+
+/// The newest change to people or fursuits is a reset of unnamed fursuit
+/// groups (the engine's words for it, `People::reset_unnamed`).
+fn reset_is_newest(app: &App) -> bool {
+    is_reset_words(app.subjects.all.undoable.as_deref())
+}
+
+fn is_reset_words(undoable: Option<&str>) -> bool {
+    undoable.is_some_and(|w| w.starts_with("Reset ") && w.contains(" unnamed fursuit group"))
 }
 
 /// Why `n` fursuit photos weren't looked at for heads: indexed before
@@ -1076,6 +1133,12 @@ fn controls(app: &App) -> Vec<Control> {
     v.extend(JudgeChoice::ALL.iter().map(|&c| Control::Judge(c)));
     if judge_wants_download(app) {
         v.push(Control::JudgeDownload);
+    }
+    if reset_is_newest(app) {
+        v.push(Control::UndoReset);
+    }
+    if unnamed_to_reset(app) {
+        v.push(Control::ResetUnnamed);
     }
     if fursuits_to_forget(app) {
         v.push(Control::ForgetFursuits);
@@ -1865,6 +1928,7 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
             go,
         ));
     }
+    rows.push(unnamed_setting(app));
     let found = if h.found == 0 { "Nothing found yet.".to_string() } else { format!("{} found, {} named.", util::plural(h.found as u64, "head"), util::thousands(h.named as u64)) };
     let forget = focusable(p, Control::ForgetFursuits, kit::btn("Forget all…", style::secondary(), fursuits_to_forget(app).then(|| m(Msg::Press(Control::ForgetFursuits)))));
     rows.push(setting(
@@ -1874,6 +1938,43 @@ fn fursuits_section(app: &App) -> Element<'_, Message> {
     ));
     let sec = section("Fursuits", Some("Fursuit heads in your photos, grouped so you can name the fursuits you want to find. Never mixed with people."), rows);
     container(sec).id("pref-section-fursuits").width(Length::Fill).into()
+}
+
+/// Preferences ▸ Fursuits ▸ *Unnamed groups*: the groups a merge, a move
+/// or the editor made without a name hold their heads through every
+/// regroup; *Reset unnamed groups…* gives them back to the automatic
+/// grouping (after a confirmation with the counts), and *Undo* takes the
+/// reset back while it is the newest change.
+fn unnamed_setting(app: &App) -> Element<'_, Message> {
+    let p = &app.prefs;
+    let h = &app.search.status.heads;
+    let u = h.unnamed;
+    let newest = reset_is_newest(app);
+    let words = if newest && u.groups == 0 {
+        "Reset: their heads are grouped again by the automatic grouping. Undo puts every unnamed group back as it was.".to_string()
+    } else if u.groups == 0 {
+        "Groups you merge or sort without naming keep their heads together through every regrouping. None do now.".to_string()
+    } else {
+        let busy = if h.scanning() || h.asking().is_some() {
+            " It waits until the head step is done."
+        } else if h.regrouping {
+            " It waits until the fursuits are grouped again."
+        } else {
+            ""
+        };
+        format!(
+            "{} you merged or sorted without naming {} {} together through every regrouping, whatever the Grouping. Resetting gives them back to the automatic grouping; named fursuits and your answers stay.{busy}",
+            util::plural(u.groups as u64, "group"),
+            if u.groups == 1 { "holds its" } else { "hold their" },
+            util::plural(u.heads as u64, "head"),
+        )
+    };
+    let reset = focusable(p, Control::ResetUnnamed, kit::btn("Reset unnamed groups…", style::secondary(), unnamed_to_reset(app).then(|| m(Msg::Press(Control::ResetUnnamed)))));
+    let mut buttons = row![].spacing(t::S1).align_y(Alignment::Center);
+    if newest {
+        buttons = buttons.push(focusable(p, Control::UndoReset, kit::btn("Undo", style::ghost(), Some(m(Msg::Press(Control::UndoReset))))));
+    }
+    setting("Unnamed groups", about(words), buttons.push(reset).into())
 }
 
 /// Storage ▸ *Keep a record of my corrections*: the switch, for people
@@ -2380,6 +2481,11 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
                 true,
             )
         }
+        Ask::ResetUnnamed => {
+            let h = &app.search.status.heads;
+            let (title, body) = reset_words(h.unnamed, h.named, h.grouping);
+            (title, body, "Reset unnamed groups", true)
+        }
         Ask::DeleteJudge(c) => {
             let bytes = judge_bytes(&app.prefs, c).unwrap_or(0);
             let freed = if bytes > 0 { util::fmt_bytes(bytes) } else { "Its space".to_string() };
@@ -2429,6 +2535,37 @@ fn search_confirm_view(app: &App, ask: Ask) -> Element<'_, Message> {
     ]
     .spacing(t::S3);
     dialogs::backdrop(dialogs::frame_fit(content.into(), 460.0))
+}
+
+/// The reset's confirmation, with the counts: what goes back to the
+/// automatic grouping (hidden groups among them said so), and what stays.
+pub fn reset_words(u: crate::model::subjects::Unnamed, named: usize, grouping: crate::search::heads::Grouping) -> (&'static str, String) {
+    let one = u.groups == 1;
+    let groups = util::plural(u.groups as u64, "unnamed group");
+    let heads = util::plural(u.heads as u64, "head");
+    let go = if one { "goes" } else { "go" };
+    // Hidden groups are reset too: the count says so.
+    let hidden = match u.hidden {
+        0 => String::new(),
+        _ if one => " It is hidden on the tab; it is reset too.".to_string(),
+        n if n == u.groups => " All of them are hidden on the tab; they are reset too.".to_string(),
+        1 => " 1 of them is hidden on the tab; it is reset too.".to_string(),
+        n => format!(" {} of them are hidden on the tab; they are reset too.", util::thousands(n as u64)),
+    };
+    let answers = match u.rejected {
+        0 => String::new(),
+        n => format!(" The {} answered \u{201c}not this fursuit\u{201d} for {} go with {}.", util::plural(n as u64, "head"), if one { "it" } else { "them" }, if one { "it" } else { "them" }),
+    };
+    let kept = match named {
+        0 => "The heads marked not a fursuit head".to_string(),
+        1 => "Your 1 named fursuit, the heads marked not a fursuit head".to_string(),
+        n => format!("Your {} named fursuits, the heads marked not a fursuit head", util::thousands(n as u64)),
+    };
+    let body = format!(
+        "{groups} ({heads}) {go} back to automatic grouping, grouped again with the {} grouping.{hidden}{answers}\n\n{kept}, drawn heads, \u{201c}not the same\u{201d} answers and dissolved groups are kept. People are not touched, and your photos are not changed. Undo takes it back until you quit.",
+        grouping.label()
+    );
+    ("Reset unnamed fursuit groups?", body)
 }
 
 // ── pieces ──────────────────────────────────────────────────────────────────
@@ -2549,6 +2686,43 @@ fn tilde(p: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// *Reset unnamed groups…* is enabled only with unnamed fursuit groups
+    /// to reset and the head step quiet (not scanning, not waiting for an
+    /// answer, not regrouping); its *Undo* only while the reset is the
+    /// newest change.
+    #[test]
+    fn the_reset_button_waits_for_unnamed_groups_and_a_quiet_step() {
+        use crate::model::subjects::Unnamed;
+        use crate::search::heads::{HeadsStatus, Offer, Step, Why};
+        let none = HeadsStatus { on: true, found: 900, named: 20, ..HeadsStatus::default() };
+        assert!(!can_reset(&none), "no unnamed groups: disabled");
+        let some = HeadsStatus { unnamed: Unnamed { groups: 183, heads: 10_136, rejected: 1_614, hidden: 0 }, ..none.clone() };
+        assert!(can_reset(&some));
+        assert!(!can_reset(&HeadsStatus { step: Step::Scanning { why: Why::CatchUp, done: 1, total: 9 }, ..some.clone() }), "while scanning");
+        assert!(!can_reset(&HeadsStatus { step: Step::Asking(Offer { photos: 9, why: Why::CatchUp }), ..some.clone() }), "while asking");
+        assert!(!can_reset(&HeadsStatus { regrouping: true, ..some.clone() }), "while regrouping");
+        assert!(is_reset_words(Some("Reset 183 unnamed fursuit groups")) && is_reset_words(Some("Reset 1 unnamed fursuit group")));
+        assert!(!is_reset_words(Some("Dissolved a group of 3 fursuit heads")) && !is_reset_words(None));
+    }
+
+    /// The confirmation says the real counts, what is kept, and that
+    /// hidden groups are reset too.
+    #[test]
+    fn the_reset_confirmation_counts_what_goes_and_says_what_stays() {
+        use crate::model::subjects::Unnamed;
+        use crate::search::heads::Grouping;
+        let (title, body) = reset_words(Unnamed { groups: 183, heads: 10_136, rejected: 1_614, hidden: 0 }, 20, Grouping::Balanced);
+        assert_eq!(title, "Reset unnamed fursuit groups?");
+        assert!(body.starts_with("183 unnamed groups (10,136 heads) go back to automatic grouping, grouped again with the Balanced grouping."), "{body}");
+        assert!(body.contains("The 1,614 heads answered \u{201c}not this fursuit\u{201d} for them go with them."), "{body}");
+        assert!(body.contains("Your 20 named fursuits, the heads marked not a fursuit head, drawn heads, \u{201c}not the same\u{201d} answers and dissolved groups are kept. People are not touched"), "{body}");
+        assert!(!body.contains("hidden"), "{body}");
+        let (_, body) = reset_words(Unnamed { groups: 3, heads: 9, rejected: 0, hidden: 2 }, 1, Grouping::Tighter);
+        assert!(body.contains("2 of them are hidden on the tab; they are reset too.") && body.contains("Your 1 named fursuit,") && !body.contains("answered"), "{body}");
+        let (_, body) = reset_words(Unnamed { groups: 1, heads: 1, rejected: 0, hidden: 1 }, 0, Grouping::Looser);
+        assert!(body.starts_with("1 unnamed group (1 head) goes back") && body.contains("It is hidden on the tab; it is reset too.") && body.contains("\n\nThe heads marked"), "{body}");
+    }
 
     #[test]
     fn reveal_scrolls_only_as_far_as_needed() {

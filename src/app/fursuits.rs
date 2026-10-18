@@ -228,6 +228,9 @@ struct FakeGroup {
     judged: HashMap<FaceRef, bool>,
     /// The group photo chosen, if any.
     cover: Option<FaceRef>,
+    /// An unnamed group the user changed (merged into), so it holds its
+    /// heads through a regroup as an unnamed subject does in the engine.
+    pinned: bool,
 }
 
 /// The stand-in's fursuits: groups of heads made up from the library,
@@ -361,7 +364,7 @@ impl FakeFursuits {
             let named = self.name_first && suit < NAMES.len() && part == 0;
             let id = if named { self.fresh_subject() } else { GroupId::Cluster(ID_BASE + suit as u64 + 100 * part as u64 + 1000 * (self.generation + 1)) };
             let confirmed = if named { heads.iter().copied().collect() } else { HashSet::new() };
-            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, part, rounds: 0, judged: HashMap::new(), cover: None });
+            self.groups.push(FakeGroup { id, name: named.then(|| NAMES[suit].to_string()), hidden: false, members: heads, confirmed, rejected: HashSet::new(), suit, part, rounds: 0, judged: HashMap::new(), cover: None, pinned: false });
         }
         // Groups the user made by moving heads out stay.
         for g in old {
@@ -690,7 +693,7 @@ impl FakeFursuits {
         self.next_id += 1;
         let id = if name.is_some() { self.fresh_subject() } else { GroupId::Cluster(made_id(self.next_id)) };
         let suit = self.look_of(first).unwrap_or(0);
-        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), suit, part: 0, rounds: 0, judged: HashMap::new(), cover: None });
+        self.groups.push(FakeGroup { id: id.clone(), name, hidden: false, members: Vec::new(), confirmed: HashSet::new(), rejected: HashSet::new(), suit, part: 0, rounds: 0, judged: HashMap::new(), cover: None, pinned: false });
         id
     }
 
@@ -742,6 +745,61 @@ impl FakeFursuits {
         Ok(what)
     }
 
+    /// An unnamed group that holds its heads through a regroup: one the
+    /// user made or merged into without naming it (the engine's unnamed
+    /// subject).
+    fn held_unnamed(g: &FakeGroup) -> bool {
+        g.name.is_none() && !is_loose(&g.id) && (g.pinned || is_made(&g.id))
+    }
+
+    /// The unnamed groups *Reset unnamed groups* would give back to the
+    /// automatic grouping: how many, their heads, how many hidden.
+    pub fn unnamed(&self) -> crate::model::subjects::Unnamed {
+        let mut u = crate::model::subjects::Unnamed::default();
+        for g in self.groups.iter().filter(|g| Self::held_unnamed(g)) {
+            u.groups += 1;
+            u.heads += g.members.len();
+            u.rejected += g.rejected.len();
+            u.hidden += usize::from(g.hidden);
+        }
+        u
+    }
+
+    /// The groups a reset would take, largest first.
+    pub fn unnamed_ids(&self) -> Vec<GroupId> {
+        let mut v: Vec<&FakeGroup> = self.groups.iter().filter(|g| Self::held_unnamed(g)).collect();
+        v.sort_by(|a, b| b.members.len().cmp(&a.members.len()));
+        v.into_iter().map(|g| g.id.clone()).collect()
+    }
+
+    /// *Reset unnamed groups*: the unnamed groups the user made go, and
+    /// their heads are grouped afresh; named groups, "not the same" and
+    /// what dissolves left stay.  One undo step.
+    pub fn reset_unnamed(&mut self) -> Result<String, String> {
+        let n = self.unnamed().groups;
+        if n == 0 {
+            return Err("no unnamed groups to reset".into());
+        }
+        let what = format!("Reset {n} unnamed fursuit {}", if n == 1 { "group" } else { "groups" });
+        self.remember(what.clone());
+        self.groups.retain(|g| !Self::held_unnamed(g));
+        self.regroup();
+        Ok(what)
+    }
+
+    /// The script's `fursuits-unnamed`: the first `n` unnamed groups held
+    /// as if merged into (the last of them hidden), so Preferences offers
+    /// the reset.
+    pub fn hold_unnamed(&mut self, n: usize) {
+        let ids: Vec<GroupId> = self.groups.iter().filter(|g| g.name.is_none() && !is_loose(&g.id)).take(n).map(|g| g.id.clone()).collect();
+        let last = ids.last().cloned();
+        for g in self.groups.iter_mut().filter(|g| ids.contains(&g.id)) {
+            g.pinned = true;
+            g.hidden = Some(&g.id) == last.as_ref() && ids.len() > 2;
+        }
+        self.generation += 1;
+    }
+
     /// Heads dissolves left on their own (not shown as groups).
     pub fn loose(&self) -> usize {
         self.groups.iter().filter(|g| is_loose(&g.id)).map(|g| g.members.len()).sum()
@@ -787,6 +845,11 @@ impl FakeFursuits {
             self.undo.remove(0);
         }
         self.generation += 1;
+    }
+
+    /// What the next undo takes back.
+    pub fn undoable(&self) -> Option<String> {
+        self.undo.last().map(|u| u.2.clone())
     }
 
     /// Edits that can be taken back.
@@ -867,6 +930,8 @@ impl FakeFursuits {
             if g.name.is_none() {
                 g.name = m.name;
             }
+            // Merged without a name: held, as the engine's unnamed subject.
+            g.pinned = g.name.is_none();
             // The kept name's group photo wins; else the other's comes along.
             if g.cover.is_none() {
                 g.cover = m.cover;
@@ -911,6 +976,7 @@ impl FakeFursuits {
             g.confirmed.clear();
             g.rejected.clear();
             g.hidden = false;
+            g.pinned = false;
             g.rounds = 0;
             g.judged.clear();
             g.id = GroupId::Cluster(ID_BASE + g.suit as u64 + 100 * g.part as u64 + 1000 * (generation + 1));
@@ -1028,7 +1094,7 @@ impl FakeFursuits {
                 self.next_id += 1;
                 let id = GroupId::Cluster(made_id(self.next_id));
                 let s = faces.first().and_then(|f| self.look_of(f)).unwrap_or(suit);
-                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, part: 0, rounds: 0, judged: HashMap::new(), cover: None });
+                self.groups.push(FakeGroup { id, name: None, hidden: false, members: faces.to_vec(), confirmed: HashSet::new(), rejected: HashSet::new(), suit: s, part: 0, rounds: 0, judged: HashMap::new(), cover: None, pinned: false });
             }
         }
         Ok(())
@@ -1402,6 +1468,42 @@ mod tests {
         assert!(f.undo().is_some());
         assert_eq!(f.groups(), before, "back as it was");
         assert_eq!(f.loose(), 0);
+    }
+
+    /// The stand-in's *Reset unnamed groups*: the unnamed groups the user
+    /// made or merged into go (a hidden one too), their heads are grouped
+    /// afresh, named groups and "not the same" stay; one undo puts the
+    /// groups back.  With none held there is nothing to reset.
+    #[test]
+    fn the_stand_in_resets_unnamed_groups_and_undoes_it() {
+        let mut f = fursuits(true);
+        assert!(f.reset_unnamed().is_err() && f.unnamed().groups == 0, "nothing held yet");
+        let unnamed: Vec<GroupId> = f.groups().iter().filter(|g| g.name.is_none()).map(|g| g.id.clone()).collect();
+        let named_before: Vec<Group> = f.groups().into_iter().filter(|g| g.name.is_some()).collect();
+        // Two unnamed groups merged: one held group of both.
+        let into = unnamed[0].clone();
+        f.merge(&into, std::slice::from_ref(&unnamed[1]), |_| Some(Kind::Fursuit)).unwrap();
+        f.not_same(&unnamed[2], &unnamed[3]).unwrap();
+        f.set_hidden(&into, true);
+        let u = f.unnamed();
+        assert_eq!((u.groups, u.hidden), (1, 1));
+        assert_eq!(u.heads, f.faces(&into).len());
+        let held = f.groups();
+        let told = f.told_apart.clone();
+        assert_eq!(f.reset_unnamed().unwrap(), "Reset 1 unnamed fursuit group");
+        assert_eq!(f.unnamed().groups, 0);
+        assert!(f.groups().iter().all(|g| g.id != into), "the held group is gone");
+        assert_eq!(f.groups().into_iter().filter(|g| g.name.is_some()).collect::<Vec<_>>(), named_before, "named groups as they were");
+        assert_eq!(f.told_apart, told, "not the same stays");
+        assert!(f.groups().iter().filter(|g| g.name.is_none()).count() >= 2, "the heads are grouped afresh");
+        assert_eq!(f.undoable().as_deref(), Some("Reset 1 unnamed fursuit group"));
+        assert!(f.undo().is_some());
+        assert_eq!(f.groups(), held, "back as it was");
+        // The script's scenario holds every unnamed group, the last hidden.
+        let mut g = fursuits(true);
+        g.hold_unnamed(usize::MAX);
+        let u = g.unnamed();
+        assert!(u.groups >= 3 && u.hidden == 1 && u.heads > u.groups, "{u:?}");
     }
 
     #[test]

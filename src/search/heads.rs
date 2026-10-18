@@ -150,8 +150,14 @@ pub struct HeadsStatus {
     pub whitened: bool,
     /// Preferences ▸ Fursuits ▸ *Grouping*.
     pub grouping: Grouping,
-    /// The groups are being made again (the choice changed), on a worker.
+    /// The groups are being made again (the choice changed, or unnamed
+    /// groups were reset), on a worker.
     pub regrouping: bool,
+    /// Unnamed fursuit subjects (made by a merge, a move or the editor
+    /// without a name), which hold their heads through regroups:
+    /// Preferences ▸ Fursuits ▸ *Reset unnamed groups…* counts them.
+    #[serde(default)]
+    pub unnamed: crate::model::subjects::Unnamed,
 }
 
 impl HeadsStatus {

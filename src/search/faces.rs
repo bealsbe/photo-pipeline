@@ -986,6 +986,24 @@ impl People {
         Ok((what, heads))
     }
 
+    /// *Reset unnamed groups* (Preferences ▸ Fursuits): every unnamed
+    /// subject of `kind` goes ([`SubjectsFile::reset_unnamed`]), so the
+    /// heads it pinned together are grouped afresh by the next regroup.
+    /// Named subjects, the other kinds and every answer stay.  One undo
+    /// step, which puts the file back exactly.  The words for the status
+    /// line, and the subjects taken.
+    pub fn reset_unnamed(&mut self, kind: Kind) -> Result<(String, Vec<Subject>), Refused> {
+        let u = self.file.unnamed(kind);
+        if u.groups == 0 {
+            return Err(Refused::Nothing);
+        }
+        let what = format!("Reset {} unnamed {} {}", u.groups, kind.noun(), plural(u.groups, "group"));
+        self.checkpoint(what.clone());
+        let gone = self.file.reset_unnamed(kind);
+        self.save();
+        Ok((what, gone))
+    }
+
     /// The automatic groups of one dissolved head on its own, with their
     /// kind and size (1): what a dissolve mostly leaves.  The tab doesn't
     /// show them as groups; it counts them.  A dissolved head that joins
@@ -2145,6 +2163,40 @@ mod tests {
         assert!(p.file.dissolved_heads(Kind::Fursuit).is_empty(), "kinds never mix");
         assert!(p.undo().is_some());
         assert_eq!(p.file, before, "back exactly");
+    }
+
+    /// *Reset unnamed groups* is one undo step of its kind only: the
+    /// fursuits' unnamed subjects go, people's stay; the saved file is
+    /// written once, and one undo puts it back exactly (on disk too).
+    /// With none to reset it is refused and leaves nothing to undo.
+    #[test]
+    fn resetting_unnamed_groups_is_one_undo_step_of_its_kind() {
+        let d = std::env::temp_dir().join(format!("pp-faces-reset-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let path = d.join("subjects.json");
+        let mut p = People::load(Some(path.clone()));
+        let named = p.file.create(Kind::Fursuit, Some("Sparky Dragon".into()), vec![face(1)]);
+        p.file.create(Kind::Fursuit, None, vec![face(2), face(3)]);
+        p.file.create(Kind::Fursuit, None, vec![face(4)]);
+        let person = p.file.create(Kind::Person, None, vec![face(5), face(6)]);
+        p.file.add_dissolved(Kind::Fursuit, vec![face(7), face(8)]).unwrap();
+        p.save();
+        let on_disk = std::fs::read(&path).unwrap();
+        let before = p.file.clone();
+        let (what, gone) = p.reset_unnamed(Kind::Fursuit).unwrap();
+        assert_eq!((what.as_str(), gone.len()), ("Reset 2 unnamed fursuit groups", 2));
+        assert!(p.file.get(&named).is_some() && p.file.get(&person).is_some(), "named fursuits and people stay");
+        assert_eq!(p.file.unnamed(Kind::Fursuit).groups, 0);
+        assert_eq!(SubjectsFile::load(&path), SubjectsFile { version: p.file.written_version(), ..p.file.clone() }, "saved");
+        assert_eq!(p.undo.last().map(|u| u.1.as_str()), Some("Reset 2 unnamed fursuit groups"));
+        assert_eq!(p.undo().as_deref(), Some("Reset 2 unnamed fursuit groups"));
+        assert_eq!(p.file, before, "back exactly");
+        assert_eq!(std::fs::read(&path).unwrap(), on_disk, "byte for byte on disk");
+        assert_eq!(p.reset_unnamed(Kind::Pet), Err(Refused::Nothing));
+        p.file.reset_unnamed(Kind::Fursuit);
+        assert_eq!(p.reset_unnamed(Kind::Fursuit), Err(Refused::Nothing));
+        assert!(p.undo().is_none(), "a refusal leaves nothing to undo");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// "Not the same" is the user's answer: kept by the groups' heads,

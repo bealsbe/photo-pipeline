@@ -170,6 +170,9 @@
 //!                             # faces-running [n]
 //! search fake fursuits        # the stand-in's fursuits: fursuits (two
 //!                             # named), fursuits-first (none named),
+//!                             # fursuits-unnamed [n] (as fursuits, n
+//!                             # unnamed groups held as if merged into,
+//!                             # all by default, the last hidden),
 //!                             # fursuits-many [n] (n more made-up groups,
 //!                             # 800 by default: a tab of many tiles),
 //!                             # heads-catchup (indexed before heads),
@@ -193,6 +196,10 @@
 //! search dlg fursuits         # the dialog's Find fursuit heads box
 //! prefs find-heads|find-heads-now|forget-fursuits
 //!                             # Preferences ▸ Fursuits
+//! prefs reset-unnamed|undo-reset   # Preferences ▸ Fursuits ▸ Reset unnamed
+//!                             # groups… (then prefs confirm|cancel), and
+//!                             # the row's Undo while the reset is newest
+//! prefs show-unnamed          # open Preferences at that row
 //! search dlg faces|face 1     # the dialog's Find people's faces box, the
 //!                             # 2nd face model (registry order)
 //! subjects open               # People and fursuits (Ctrl+4)
@@ -1387,6 +1394,8 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "find-heads" => Some(Control::FindHeads),
         "find-heads-now" => Some(Control::FindHeadsNow),
         "forget-fursuits" => Some(Control::ForgetFursuits),
+        "reset-unnamed" => Some(Control::ResetUnnamed),
+        "undo-reset" => Some(Control::UndoReset),
         "grouping-tighter" => Some(Control::Grouping(crate::search::heads::Grouping::Tighter)),
         "grouping-balanced" => Some(Control::Grouping(crate::search::heads::Grouping::Balanced)),
         "grouping-looser" => Some(Control::Grouping(crate::search::heads::Grouping::Looser)),
@@ -1457,6 +1466,7 @@ fn prefs_step(app: &mut App, arg: &str) -> Task<Message> {
         "show-search" => super::preferences::open_at(app, Control::SearchDevice(app.settings.search_device)),
         "show-people" => super::preferences::open_at(app, Control::RailSubjects),
         "show-fursuits" => super::preferences::open_at(app, Control::ForgetFursuits),
+        "show-unnamed" => super::preferences::open_at(app, Control::ResetUnnamed),
         "show-judge" => super::preferences::open_at(app, Control::Judge(crate::ml::judge::JudgeChoice::Gemma4)),
         "show-judge-storage" => super::preferences::open_at(app, Control::JudgeDelete(judge_arg(rest))),
         "show-storage" => super::preferences::open_at(app, Control::ModelsDelete),
