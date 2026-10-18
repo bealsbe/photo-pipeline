@@ -145,11 +145,18 @@ impl Speed {
     /// Bytes a second over the last `w` (or all there is), once that is
     /// at least [`SETTLE`] long.
     fn rate_over(&self, w: Duration) -> Option<f64> {
-        let &(t1, b1) = self.samples.back()?;
-        let &(t0, b0) = self.samples.iter().rev().find(|(t, _)| *t + w <= t1).or(self.samples.front())?;
-        let span = t1.duration_since(t0);
-        (span >= SETTLE).then(|| (b1 - b0) as f64 / span.as_secs_f64())
+        rate_over(&self.samples, w)
     }
+}
+
+/// Bytes a second over the last `w` of `samples` ((when, bytes so far),
+/// oldest first; or all there is), once that is at least [`SETTLE`] long.
+/// Shared with the copies' speed (`transfer_speed`).
+pub(super) fn rate_over(samples: &VecDeque<(Instant, u64)>, w: Duration) -> Option<f64> {
+    let &(t1, b1) = samples.back()?;
+    let &(t0, b0) = samples.iter().rev().find(|(t, _)| *t + w <= t1).or(samples.front())?;
+    let span = t1.duration_since(t0);
+    (span >= SETTLE).then(|| (b1 - b0) as f64 / span.as_secs_f64())
 }
 
 /// A speed in the units the progress uses (decimal): "38 MB/s",

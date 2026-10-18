@@ -56,9 +56,12 @@ pub enum BgEvent {
     /// false for a first delivery sent while capture times are still read.
     DayRecords { date: NaiveDate, generation: u64, data: Arc<crate::app::calendar::DayData>, complete: bool },
 
-    ExportProgress { done: usize, total: usize },
+    /// An export to the library, after each file (`ops::Progress`: files,
+    /// bytes, and the bytes that really went over).
+    ExportProgress(crate::ops::Progress),
     ExportDone(Arc<ExportReport>),
-    CopyProgress { files: usize, files_total: usize, bytes: u64, bytes_total: u64 },
+    /// An edit copy, after each file.
+    CopyProgress(crate::ops::Progress),
     CopyDone(Arc<CopyReport>),
 
     Trashed(Arc<crate::ops::trash::TrashResult>),

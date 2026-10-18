@@ -68,6 +68,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         col = col.push(b);
     }
     let content: Element<'_, Message> = match app.view {
+        View::Grid if folder_empty(app) => folder_empty_page(app),
         View::Grid if hints_ui::filtered_empty(app) => hints_ui::filtered_empty_page(app),
         View::Grid if pile_done(app) => pile_done_page(app),
         View::Grid if none_shown(app) => none_shown_page(app),
@@ -707,16 +708,18 @@ fn date_popup<'a>(app: &'a App, p: &'a super::DatePopup) -> Element<'a, Message>
     let weeks = crate::ui::calendar_stage::month_weeks(p.year, p.month, first);
     let current = if p.from { app.filter.date_from } else { app.filter.date_to };
     let today = Local::now().date_naive();
-    let nav = |g: Glyph, delta: i32| kit::icon_btn(g, t::INK2, style::ghost(), Some(Message::Filter(FilterMsg::DatePopupMonth(delta))));
+    let nav = |g: Glyph, delta: i32, label: &'static str| {
+        tip(kit::icon_btn(g, t::INK2, style::ghost(), Some(Message::Filter(FilterMsg::DatePopupMonth(delta)))), label, false)
+    };
     let header = row![
-        nav(Glyph::ChevronLeft, -1),
+        nav(Glyph::ChevronLeft, -1, "Previous month"),
         text(format!("{} {}", MONTH_NAME[(p.month - 1) as usize], p.year))
             .size(t::T_BODY)
             .font(paint::SEMIBOLD)
             .color(t::INK)
             .width(Length::Fill)
             .center(),
-        nav(Glyph::ChevronRight, 1),
+        nav(Glyph::ChevronRight, 1, "Next month"),
     ]
     .align_y(Alignment::Center);
     let mut grid = column![header, Space::new().height(4)].spacing(2);
@@ -821,7 +824,11 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     if let Some(slot) = search_setup::status_slot(app) {
         r = r.push(slot);
     }
-    r = r.push(counts);
+    // The working folder's counts, once there is one (a row of zeros says
+    // nothing).
+    if s.total > 0 {
+        r = r.push(counts);
+    }
     if let Some(p) = review_progress(app) {
         r = r.push(Space::new().width(t::S3)).push(kit::vrule(12.0)).push(Space::new().width(t::S2)).push(p);
     }
@@ -892,6 +899,35 @@ fn none_shown_page(app: &App) -> Element<'_, Message> {
     empty_page(app, glyph, title, body, action, hint)
 }
 
+/// No working folder yet, or the folder has no photos: say so, with the
+/// way in, rather than show a bare grid.  Not while a scan is running.
+fn folder_empty(app: &App) -> bool {
+    app.coll.is_empty() && !app.scanning
+}
+
+fn folder_empty_page(app: &App) -> Element<'_, Message> {
+    let open = (Cmd::Open.label().to_string(), Message::Cmd(Cmd::Open));
+    let hint = Some(Cmd::Open.shortcut());
+    match &app.folder {
+        None => empty_page_to(
+            app,
+            Glyph::FolderOpen,
+            "No working folder",
+            "Open a folder of photos to start culling, or pick a day in the library calendar.".to_string(),
+            open,
+            hint,
+        ),
+        Some(folder) => empty_page_to(
+            app,
+            Glyph::Folder,
+            "No photos here",
+            format!("{} has no RAW or JPG files in it, or in its folders.", util::file_name(folder)),
+            open,
+            hint,
+        ),
+    }
+}
+
 /// A filter that shows nothing: what's going on, and a way out.
 fn empty_page<'a>(
     app: &App,
@@ -901,6 +937,18 @@ fn empty_page<'a>(
     action: (&'a str, FilterMsg),
     hint: Option<&'a str>,
 ) -> Element<'a, Message> {
+    empty_page_to(app, glyph, title, body, (action.0.to_string(), Message::Filter(action.1)), hint)
+}
+
+/// [`empty_page`] with any message as its way out.
+fn empty_page_to<'a>(
+    app: &App,
+    glyph: Glyph,
+    title: impl text::IntoFragment<'a>,
+    body: String,
+    action: (String, Message),
+    hint: Option<&'a str>,
+) -> Element<'a, Message> {
     let mut col = column![].spacing(t::S2).align_x(Alignment::Center).max_width(460);
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(glyph, 48.0, t::INK4));
@@ -908,7 +956,7 @@ fn empty_page<'a>(
     col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
     col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     col = col.push(Space::new().height(t::S2));
-    let button = kit::btn(action.0, style::secondary(), Some(Message::Filter(action.1)));
+    let button = kit::btn(action.0, style::secondary(), Some(action.1));
     col = col.push(match hint {
         Some(h) => tip(button, h, true),
         None => button.into(),

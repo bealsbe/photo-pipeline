@@ -92,7 +92,7 @@ fn move_one(op: &MoveOp) -> Result<(), String> {
     }
     fsutil::ensure_parent(&op.dest).map_err(|e| format!("could not create {}: {e}", folder_of(&op.dest)))?;
     match fsutil::safe_move(&op.src, &op.dest, &meta, false) {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(taken()),
         Err(e) => Err(e.to_string()),
     }
@@ -353,7 +353,7 @@ pub mod freedesktop {
         }
         fsutil::ensure_parent(dest).map_err(|e| format!("could not recreate {}: {e}", folder_of(dest)))?;
         match fsutil::safe_move(&src, dest, &meta, false) {
-            Ok(()) => {}
+            Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(taken()),
             Err(e) => return Err(e.to_string()),
         }

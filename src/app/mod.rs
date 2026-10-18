@@ -8,6 +8,7 @@ pub mod commands;
 pub mod compare;
 pub mod dialogs;
 pub mod download_speed;
+pub mod transfer_speed;
 pub mod fursuit_art;
 pub mod fursuit_judge;
 pub mod fursuits;
@@ -662,7 +663,7 @@ impl App {
             return c.title();
         }
         if Some(id) == self.shortcuts {
-            return "Keyboard Shortcuts".into();
+            return "Keyboard shortcuts".into();
         }
         if Some(id) == self.prefs.window {
             return "Preferences".into();
@@ -694,6 +695,10 @@ impl App {
         // A download's speed, and a stall (when no progress comes at all).
         if self.search.downloads.iter().any(|d| d.state == crate::ml::download::DownloadState::Downloading) {
             subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Search(search::Msg::Clock)));
+        }
+        // A copy's speed line: its time left and a stall move with the clock.
+        if dialogs::copy_running(self) {
+            subs.push(iced::time::every(Duration::from_secs(1)).map(|_| Message::Tick));
         }
         Subscription::batch(subs)
     }
@@ -998,10 +1003,14 @@ impl App {
         self.history.reset_baseline(&self.coll);
         self.refresh_views();
         let pairs = self.coll.stats().paired / 2;
-        let t = self.show_status(
-            format!("Found {count} file{}, {pairs} RAW+JPG pair{}", util::s(count), util::s(pairs)),
-            0,
-        );
+        // Pairs are worth a word only when there are some (a JPG-only
+        // shoot has none to report).
+        let found = if pairs > 0 {
+            format!("Found {count} file{}, {pairs} RAW+JPG pair{}", util::s(count), util::s(pairs))
+        } else {
+            format!("Found {count} file{}", util::s(count))
+        };
+        let t = self.show_status(found, 0);
         self.update_status_count();
         // What an earlier analysis of this folder found, from the cache (no
         // photo is read; analysing again is only ever on request).
@@ -1907,14 +1916,14 @@ impl App {
 
     pub fn pick_folder(&mut self, target: FolderTarget) -> Task<Message> {
         let (title, start) = match target {
-            FolderTarget::Working => ("Open Working Folder", self.folder.clone()),
-            FolderTarget::Library | FolderTarget::ExportLibrary => ("Set Library Folder", self.library.clone()),
-            FolderTarget::EditCopy => ("Folder to Copy Photos Into", dialogs::edit_copy_base(self)),
+            FolderTarget::Working => ("Open working folder", self.folder.clone()),
+            FolderTarget::Library | FolderTarget::ExportLibrary => ("Set library folder", self.library.clone()),
+            FolderTarget::EditCopy => ("Folder to copy photos into", dialogs::edit_copy_base(self)),
             FolderTarget::EditCopySetting => {
                 let s = &self.settings.edit_copy_folder;
-                ("Folder to Copy Photos Into", (!s.is_empty()).then(|| PathBuf::from(s)))
+                ("Folder to copy photos into", (!s.is_empty()).then(|| PathBuf::from(s)))
             }
-            FolderTarget::ExportCorrections => ("Folder to Export the Record Into", None),
+            FolderTarget::ExportCorrections => ("Folder to export the record into", None),
         };
         let start = start.or_else(dirs::home_dir).unwrap_or_default();
         let dialog = rfd::AsyncFileDialog::new().set_title(title).set_directory(start);
@@ -2230,11 +2239,9 @@ impl App {
                 BgEvent::DayRecords { date, generation, data, complete } => {
                     self.calendar.on_day_records(date, generation, data, complete)
                 }
-                BgEvent::ExportProgress { done, total } => dialogs::on_export_progress(self, done, total),
+                BgEvent::ExportProgress(p) => dialogs::on_export_progress(self, p),
                 BgEvent::ExportDone(report) => tasks.push(dialogs::on_export_done(self, report)),
-                BgEvent::CopyProgress { files, files_total, bytes, bytes_total } => {
-                    dialogs::on_copy_progress(self, files, files_total, bytes, bytes_total)
-                }
+                BgEvent::CopyProgress(p) => dialogs::on_copy_progress(self, p),
                 BgEvent::CopyDone(report) => tasks.push(dialogs::on_copy_done(self, report)),
                 BgEvent::Trashed(result) => tasks.push(dialogs::on_trashed(self, result)),
                 BgEvent::Sorted(result) => tasks.push(self.on_sorted_event(result)),
