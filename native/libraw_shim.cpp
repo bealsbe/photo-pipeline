@@ -49,6 +49,23 @@ int pp_flip(void *h) {
     return ((libraw_data_t *)h)->sizes.flip;
 }
 
+// The frame geometry, unrotated: out[0..2] the visible area (width,
+// height) and its margins in the raw (left, top); out[4..8] the camera's
+// default crop (left, top, width, height in raw coordinates; zero when the
+// file names none).  Read from the header only: nothing is unpacked.
+void pp_frame(void *h, int out[8]) {
+    libraw_data_t *lr = (libraw_data_t *)h;
+    out[0] = lr->sizes.width;
+    out[1] = lr->sizes.height;
+    out[2] = lr->sizes.left_margin;
+    out[3] = lr->sizes.top_margin;
+    const libraw_raw_inset_crop_t &c = lr->sizes.raw_inset_crops[0];
+    out[4] = c.cleft;
+    out[5] = c.ctop;
+    out[6] = c.cwidth;
+    out[7] = c.cheight;
+}
+
 static void fill(pp_image *out, libraw_processed_image_t *img) {
     out->type = (int)img->type;
     out->width = img->width;

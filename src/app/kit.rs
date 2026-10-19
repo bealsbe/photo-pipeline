@@ -122,16 +122,28 @@ pub fn segmented<'a>(items: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 
 /// One segment: text, optionally with a trailing icon.
 pub fn segment<'a>(label: impl Into<String>, active: bool, trailing: Option<Glyph>, on: Message) -> Element<'a, Message> {
-    segment_padded(label, active, trailing, on, t::S3)
+    segment_padded(label, active, trailing, Some(on), t::S3)
+}
+
+/// A segment that may be off (`on` is `None`): drawn dim, not pressable.
+pub fn segment_maybe<'a>(label: impl Into<String>, active: bool, on: Option<Message>) -> Element<'a, Message> {
+    segment_padded(label, active, None, on, t::S3)
 }
 
 /// A segment with tighter sides, for long rows of short options.
 pub fn segment_compact<'a>(label: impl Into<String>, active: bool, on: Message) -> Element<'a, Message> {
-    segment_padded(label, active, None, on, t::S2)
+    segment_padded(label, active, None, Some(on), t::S2)
 }
 
-fn segment_padded<'a>(label: impl Into<String>, active: bool, trailing: Option<Glyph>, on: Message, pad: f32) -> Element<'a, Message> {
-    let fg = if active { t::INK } else { t::INK2 };
+fn segment_padded<'a>(label: impl Into<String>, active: bool, trailing: Option<Glyph>, on: Option<Message>, pad: f32) -> Element<'a, Message> {
+    // Off, the button's style dims the text; the icon follows it.
+    let fg = if on.is_none() {
+        t::INK4
+    } else if active {
+        t::INK
+    } else {
+        t::INK2
+    };
     let mut content = row![text(label.into()).size(t::T_SMALL).font(paint::MEDIUM)].spacing(t::S1).align_y(Alignment::Center);
     if let Some(g) = trailing {
         content = content.push(icons::view(g, 12.0, fg));
@@ -140,6 +152,6 @@ fn segment_padded<'a>(label: impl Into<String>, active: bool, trailing: Option<G
         .height(t::CONTROL_SM - 4.0)
         .padding(Padding::from([0.0, pad]))
         .style(style::segment(active).radius(3.0).style())
-        .on_press(on)
+        .on_press_maybe(on)
         .into()
 }

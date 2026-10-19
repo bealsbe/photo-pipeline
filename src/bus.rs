@@ -63,6 +63,10 @@ pub enum BgEvent {
     /// An edit copy, after each file.
     CopyProgress(crate::ops::Progress),
     CopyDone(Arc<CopyReport>),
+    /// The edit-copy dialog's check `serial`: whether its custom profile can
+    /// be used (`None`: no custom profile to check), and how many RAWs
+    /// already in the folder have no profile beside them.
+    EditCopyCheck { serial: u64, profile: Option<Result<(), String>>, missing_profiles: usize },
 
     Trashed(Arc<crate::ops::trash::TrashResult>),
     Sorted(Arc<SortResult>),
@@ -240,6 +244,7 @@ impl BgEvent {
             BgEvent::ExportDone(_) => "ExportDone",
             BgEvent::CopyProgress { .. } => "CopyProgress",
             BgEvent::CopyDone(_) => "CopyDone",
+            BgEvent::EditCopyCheck { .. } => "EditCopyCheck",
             BgEvent::Trashed(_) => "Trashed",
             BgEvent::Sorted(_) => "Sorted",
             BgEvent::Undo(_) => "Undo",

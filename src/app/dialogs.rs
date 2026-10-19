@@ -8,7 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use chrono::NaiveDateTime;
@@ -21,12 +21,13 @@ use super::style;
 use super::transfer_speed;
 use super::{App, FolderTarget, Message};
 use crate::ui::motion::SmoothBar;
-use crate::bus::{BgEvent, SortResult};
+use crate::bus::{BgEvent, Bus, SortResult};
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
 use crate::ops::edit_copy::{self, CopyReport, EditCopyPlan, MarkedFiles};
 use crate::ops::Progress;
 use crate::ops::library::{self, ExportReport, LibraryPlan, Mode, Resolution};
+use crate::ops::rt_profile::{self, ProfileChoice, ProfileKind};
 use crate::ops::separate::{SeparationPlan, Strategy};
 use crate::ops::trash;
 use crate::ui::icons::{self, Glyph};
@@ -116,6 +117,13 @@ pub enum Msg {
     EcRaws(bool),
     EcJpgs(bool),
     EcChange,
+    /// The RawTherapee profile option (Custom with no file chosen yet asks
+    /// for one first).
+    EcProfile(ProfileKind),
+    /// Choose the custom `.pp3` (again).
+    EcProfileBrowse,
+    /// The file picker's answer (`None`: cancelled).
+    EcProfilePicked(Option<PathBuf>),
     EcGo,
     EcStop,
     // sort
@@ -302,23 +310,116 @@ pub struct EditCopy {
     stopping: bool,
     cancel: Arc<AtomicBool>,
     done: Option<Arc<CopyReport>>,
+    /// The RawTherapee profile each RAW gets, and the custom `.pp3` (kept
+    /// while another option is picked).
+    profile: ProfileKind,
+    profile_path: Option<PathBuf>,
+    /// The custom profile, as the last check found it.
+    profile_check: ProfileCheck,
+    /// RAWs already in the folder with no profile beside them (`None`
+    /// until checked).
+    missing_profiles: Option<usize>,
+    /// The check whose answer counts (see [`EditCopy::check`]).
+    check_serial: u64,
 }
+
+/// What reading the custom profile found (on a worker; the dialog only
+/// shows it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProfileCheck {
+    Checking,
+    Ok,
+    /// Why it can't be used ("Portrait.pp3 can't be used: …").
+    Bad(String),
+}
+
+/// Serials for [`EditCopy::check`], unique across dialogs.
+static CHECK_SERIAL: AtomicU64 = AtomicU64::new(0);
 
 impl EditCopy {
     /// What the primary button does.
     fn go(&self) -> EcGoAction {
         let plan = self.plan.as_ref();
+        let add = self.profiles_to_add() > 0;
         if self.running.is_some() {
             EcGoAction::None
-        } else if self.done.is_some() || plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0) {
+        } else if self.done.is_some() || plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0 && !add) {
             EcGoAction::OpenFolder
         } else if self.base.is_none() && !self.sel.files.is_empty() {
             EcGoAction::ChooseFolder
-        } else if plan.is_some_and(|p| p.to_copy_count() > 0) {
+        } else if !self.profile_ready() {
+            // A custom profile being checked, not chosen, or unusable.
+            EcGoAction::None
+        } else if plan.is_some_and(|p| p.to_copy_count() > 0) || add {
             EcGoAction::Copy
         } else {
             EcGoAction::None
         }
+    }
+
+    /// RAWs are copied and a profile goes with them.
+    fn profile_active(&self) -> bool {
+        self.raws && self.profile != ProfileKind::None
+    }
+
+    /// The profile for the run, as the worker gets it (a path, read there).
+    fn profile_choice(&self) -> ProfileChoice {
+        match (self.profile_active(), self.profile, &self.profile_path) {
+            (true, ProfileKind::Base, _) => ProfileChoice::Base,
+            (true, ProfileKind::Custom, Some(p)) => ProfileChoice::Custom(p.clone()),
+            _ => ProfileChoice::None,
+        }
+    }
+
+    /// Nothing about the profile holds the copy back.
+    fn profile_ready(&self) -> bool {
+        !self.profile_active()
+            || self.profile != ProfileKind::Custom
+            || (self.profile_path.is_some() && self.profile_check == ProfileCheck::Ok)
+    }
+
+    /// RAWs already in the folder that will get a profile they lack.
+    fn profiles_to_add(&self) -> usize {
+        if self.profile_active() { self.missing_profiles.unwrap_or(0) } else { 0 }
+    }
+
+    /// Plan again (the files, the folder or the option changed) and check.
+    fn replan(&mut self, coll: &crate::model::collection::Collection, bus: &Bus) {
+        self.plan = self.dest_dir().map(|d| EditCopyPlan::new(&self.sel.files, coll, &d));
+        self.check(bus);
+    }
+
+    /// Check, on a worker, what the dialog can't know without the disk: can
+    /// the custom profile be used, and which RAWs already in the folder lack
+    /// a profile.  The answer comes back as `BgEvent::EditCopyCheck`; one
+    /// for an earlier check is dropped.
+    fn check(&mut self, bus: &Bus) {
+        self.check_serial = CHECK_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+        let serial = self.check_serial;
+        let custom = match self.profile_choice() {
+            ProfileChoice::Custom(p) => Some(p),
+            _ => None,
+        };
+        let existing: Vec<PathBuf> = match (&self.plan, self.profile_active()) {
+            (Some(plan), true) => plan.existing_raws().map(|o| o.dest.clone()).collect(),
+            _ => Vec::new(),
+        };
+        if custom.is_some() {
+            self.profile_check = ProfileCheck::Checking;
+        }
+        if custom.is_none() && existing.is_empty() {
+            self.missing_profiles = Some(0);
+            return;
+        }
+        self.missing_profiles = None;
+        let bus = bus.clone();
+        std::thread::spawn(move || {
+            let profile = custom.map(|p| {
+                rt_profile::read_custom(&p).map(|_| ()).map_err(|why| format!("{} can't be used: {why}", util::file_name(&p)))
+            });
+            let missing_profiles = existing.iter().filter(|d| !crate::ops::fsutil::lexists(&rt_profile::sidecar_path(d))).count();
+            let _ = bus.unbounded_send(BgEvent::EditCopyCheck { serial, profile, missing_profiles });
+        });
     }
 
     /// The primary button (Copy / Choose folder / Open folder) is clickable.
@@ -345,9 +446,9 @@ impl EditCopy {
     }
 
     /// The choice of RAWs and JPGs changed: pick the files again and plan.
-    fn reselect(&mut self, coll: &crate::model::collection::Collection) {
+    fn reselect(&mut self, coll: &crate::model::collection::Collection, bus: &Bus) {
         self.sel = edit_copy::select_marked(coll, self.raws, self.jpgs);
-        self.plan = self.dest_dir().map(|d| EditCopyPlan::new(&self.sel.files, coll, &d));
+        self.replan(coll, bus);
     }
 
     fn dest_dir(&self) -> Option<PathBuf> {
@@ -387,10 +488,40 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
         stopping: false,
         cancel: Arc::new(AtomicBool::new(false)),
         done: None,
+        profile: app.settings.edit_copy_profile,
+        profile_path: (!app.settings.edit_copy_profile_path.is_empty()).then(|| PathBuf::from(&app.settings.edit_copy_profile_path)),
+        profile_check: ProfileCheck::Checking,
+        missing_profiles: None,
+        check_serial: 0,
     };
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
+    ec.replan(&app.coll, &app.bus());
     app.modal = Some(Modal { kind: Kind::EditCopy(Box::new(ec)), confirm: None });
     Task::none()
+}
+
+/// A check's answer (see [`EditCopy::check`]).
+pub fn on_copy_check(app: &mut App, serial: u64, profile: Option<Result<(), String>>, missing: usize) {
+    let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
+    if serial != ec.check_serial {
+        return;
+    }
+    ec.missing_profiles = Some(missing);
+    if let Some(result) = profile {
+        ec.profile_check = match result {
+            Ok(()) => ProfileCheck::Ok,
+            Err(why) => ProfileCheck::Bad(why),
+        };
+    }
+}
+
+/// Ask for a `.pp3`, starting beside the one chosen before.
+fn pick_profile(current: Option<&PathBuf>) -> Task<Message> {
+    let start = current.and_then(|p| p.parent()).map(PathBuf::from).or_else(dirs::home_dir).unwrap_or_default();
+    let dialog = rfd::AsyncFileDialog::new()
+        .set_title("RawTherapee profile for each RAW")
+        .add_filter("RawTherapee profile", &["pp3"])
+        .set_directory(start);
+    Task::perform(async move { dialog.pick_file().await.map(|h| h.path().to_path_buf()) }, |p| d(Msg::EcProfilePicked(p)))
 }
 
 pub fn edit_copy_base(app: &App) -> Option<PathBuf> {
@@ -401,9 +532,10 @@ pub fn edit_copy_base(app: &App) -> Option<PathBuf> {
 }
 
 pub fn edit_copy_folder_changed(app: &mut App, path: PathBuf) {
+    let bus = app.bus();
     let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
     ec.base = Some(path.clone());
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
+    ec.replan(&app.coll, &bus);
     app.settings.edit_copy_folder = path.to_string_lossy().into_owned();
     app.settings.edit_copy_subfolder = ec.subfolder;
     let _ = app.settings.save();
@@ -415,6 +547,7 @@ pub fn edit_copy_settings_changed(app: &mut App) {
     let s = &app.settings;
     let base = (!s.edit_copy_folder.is_empty()).then(|| PathBuf::from(&s.edit_copy_folder));
     let subfolder = s.edit_copy_subfolder;
+    let bus = app.bus();
     let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
     if ec.running.is_some() || ec.done.is_some() {
         return;
@@ -423,7 +556,7 @@ pub fn edit_copy_settings_changed(app: &mut App) {
         ec.base = base;
     }
     ec.subfolder = subfolder && ec.working.is_some();
-    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
+    ec.replan(&app.coll, &bus);
 }
 
 pub fn on_copy_progress(app: &mut App, p: Progress) {
@@ -439,15 +572,71 @@ pub fn on_copy_done(app: &mut App, report: Arc<CopyReport>) -> Task<Message> {
     if let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal {
         ec.running = None;
         ec.stopping = false;
-        ec.done = Some(report.clone());
         noun = ec.noun();
+        // The profile couldn't be read after all: nothing was copied, and
+        // the dialog says why and waits for another choice.
+        if let Some(why) = &report.profiles.refused {
+            ec.profile_check = ProfileCheck::Bad(why.clone());
+            return app.show_status(format!("Nothing copied: {why}"), 0);
+        }
+        ec.done = Some(report.clone());
     }
     let n = report.copied.len();
     let mut msg = format!("{n} {noun}{} copied for editing", s(n));
+    if let Some(p) = profiles_summary(&report.profiles) {
+        msg.push_str(&format!(", {p}"));
+    }
     if !report.failed.is_empty() {
         msg.push_str(&format!("  ({} failed)", report.failed.len()));
     }
     app.show_status(msg, 0)
+}
+
+/// The Copy for editing dialog's state, for the test harness.
+pub fn edit_copy_dump(app: &App) -> String {
+    let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &app.modal else { return "[copy] no Copy for editing dialog".into() };
+    let mut out = format!(
+        "[copy] raws={} jpgs={} profile={:?} path={:?} check={:?} missing={:?} choice={:?} go={:?} to_copy={} existing={}",
+        ec.raws,
+        ec.jpgs,
+        ec.profile,
+        ec.profile_path,
+        ec.profile_check,
+        ec.missing_profiles,
+        ec.profile_choice(),
+        ec.go(),
+        ec.plan.as_ref().map_or(0, |p| p.to_copy_count()),
+        ec.plan.as_ref().map_or(0, |p| p.existing_count()),
+    );
+    if let Some(r) = &ec.done {
+        let p = &r.profiles;
+        out.push_str(&format!(
+            "\n[copy] done copied={} failed={} profiles written={} with_crop={} kept={} failed={:?}",
+            r.copied.len(),
+            r.failed.len(),
+            p.written.len(),
+            p.with_crop,
+            p.kept,
+            p.failed
+        ));
+    }
+    out
+}
+
+/// "3 profiles written, kept 2 existing profiles"; `None` when no profile
+/// was written, kept or failed.
+fn profiles_summary(p: &edit_copy::ProfileReport) -> Option<String> {
+    let mut parts = Vec::new();
+    if !p.written.is_empty() {
+        parts.push(format!("{} written", plural(p.written.len() as u64, "profile")));
+    }
+    if p.kept > 0 {
+        parts.push(format!("kept {} existing profile{}", p.kept, s(p.kept)));
+    }
+    if !p.failed.is_empty() {
+        parts.push(format!("{} not written", plural(p.failed.len() as u64, "profile")));
+    }
+    (!parts.is_empty()).then(|| parts.join(", "))
 }
 
 // ── sort / pair / prune ─────────────────────────────────────────────────────
@@ -710,7 +899,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
             match msg {
                 Msg::EcSubfolder(v) => {
                     ec.subfolder = v;
-                    ec.plan = ec.dest_dir().map(|d| EditCopyPlan::new(&ec.sel.files, &app.coll, &d));
+                    ec.replan(&app.coll, &bus);
                     if let Some(b) = &ec.base {
                         app.settings.edit_copy_folder = b.to_string_lossy().into_owned();
                         app.settings.edit_copy_subfolder = v;
@@ -719,19 +908,40 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 }
                 Msg::EcRaws(v) => {
                     ec.raws = v;
-                    ec.reselect(&app.coll);
+                    ec.reselect(&app.coll, &bus);
                     app.settings.edit_copy_raws = v;
                     let _ = app.settings.save();
                 }
                 Msg::EcJpgs(v) => {
                     ec.jpgs = v;
-                    ec.reselect(&app.coll);
+                    ec.reselect(&app.coll, &bus);
                     app.settings.edit_copy_jpgs = v;
                     let _ = app.settings.save();
                 }
                 Msg::EcChange => {
                     app.modal = Some(Modal { kind: Kind::EditCopy(ec), confirm });
                     return app.pick_folder(FolderTarget::EditCopy);
+                }
+                Msg::EcProfile(kind) if ec.running.is_none() && ec.done.is_none() => {
+                    if kind == ProfileKind::Custom && ec.profile_path.is_none() {
+                        // Nothing to use yet: ask, and switch once one is chosen.
+                        task = pick_profile(None);
+                    } else {
+                        ec.profile = kind;
+                        app.settings.edit_copy_profile = kind;
+                        app.settings.save_in_background();
+                        ec.check(&bus);
+                    }
+                }
+                Msg::EcProfileBrowse if ec.running.is_none() && ec.done.is_none() => task = pick_profile(ec.profile_path.as_ref()),
+                Msg::EcProfilePicked(Some(path)) if ec.running.is_none() && ec.done.is_none() => {
+                    let path = util::normalize(&path);
+                    ec.profile = ProfileKind::Custom;
+                    app.settings.edit_copy_profile = ProfileKind::Custom;
+                    app.settings.edit_copy_profile_path = path.to_string_lossy().into_owned();
+                    app.settings.save_in_background();
+                    ec.profile_path = Some(path);
+                    ec.check(&bus);
                 }
                 Msg::EcGo => match ec.go() {
                     EcGoAction::None => {}
@@ -748,7 +958,10 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                         if let Some(dest) = ec.dest_dir() {
                             // Re-plan: the folder may have changed while the dialog sat open.
                             let plan = EditCopyPlan::new(&ec.sel.files, &app.coll, &dest);
-                            if plan.to_copy_count() > 0 {
+                            let profile = ec.profile_choice();
+                            // A RAW already there may still want its profile.
+                            let add = !profile.is_none() && plan.existing_raws().next().is_some();
+                            if plan.to_copy_count() > 0 || add {
                                 ec.running = Some(Run::start(plan.to_copy_count(), plan.total_bytes()));
                                 ec.cancel = Arc::new(AtomicBool::new(false));
                                 let cancel = ec.cancel.clone();
@@ -756,7 +969,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                                 let bus = bus.clone();
                                 std::thread::spawn(move || {
                                     let pbus = bus.clone();
-                                    let report = run_plan.execute(&cancel, &move |p| {
+                                    let report = run_plan.execute(&profile, &cancel, &move |p| {
                                         let _ = pbus.unbounded_send(BgEvent::CopyProgress(p));
                                     });
                                     let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
@@ -1302,6 +1515,84 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
 
 // ── edit copy view ──────────────────────────────────────────────────────────
 
+/// The RawTherapee profile: the three options, then one line saying what
+/// each RAW gets (or why it can't, or why nothing does), lined up under the
+/// folder rows' values.
+fn profile_rows<'a>(ec: &'a EditCopy, locked: bool) -> Element<'a, Message> {
+    let open = ec.raws && !locked;
+    let on = |k: ProfileKind| open.then(|| d(Msg::EcProfile(k)));
+    let kind = ec.profile;
+    let options = kit::segmented(vec![
+        kit::segment_maybe(format!("Default ({})", rt_profile::BASE_NAME), ec.raws && kind == ProfileKind::Base, on(ProfileKind::Base)),
+        kit::segment_maybe("Custom…", ec.raws && kind == ProfileKind::Custom, on(ProfileKind::Custom)),
+        kit::segment_maybe("No profile", ec.raws && kind == ProfileKind::None, on(ProfileKind::None)),
+    ]);
+    let choose = |label: &'a str| -> Element<'a, Message> {
+        button(text(label).size(t::T_SMALL).font(paint::MEDIUM))
+            .padding(Padding::from([2.0, 4.0]))
+            .style(style::link().style())
+            .on_press_maybe(open.then(|| d(Msg::EcProfileBrowse)))
+            .into()
+    };
+    // An example of the name, from the first RAW of the plan.
+    let example = ec
+        .plan
+        .as_ref()
+        .and_then(|p| p.ops.iter().find(|o| o.raw))
+        .map(|o| format!("{}.pp3", util::file_name(&o.dest)))
+        .unwrap_or_else(|| "name.ARW.pp3".into());
+    let custom = ec.profile_path.as_ref().map(|p| util::file_name(p));
+    let line: Element<'a, Message> = if !ec.raws {
+        kit::caption("Only RAW files get a RawTherapee profile, and this copy has no RAWs.").into()
+    } else {
+        match (kind, &ec.profile_check, custom) {
+            (ProfileKind::None, ..) => kit::caption("RAWs are copied without a RawTherapee profile.").into(),
+            (ProfileKind::Base, ..) => kit::tip(
+                kit::secondary(format!("Each RAW gets a RawTherapee profile beside it: {example}")),
+                "A profile already beside a RAW is kept, never replaced. A cropped photo's profile carries its crop.",
+                false,
+            ),
+            (ProfileKind::Custom, _, None) => row![kit::secondary("Choose a .pp3 file for each RAW to start from.").width(Length::Fill), choose("Choose…")]
+                .spacing(t::S2)
+                .align_y(Alignment::Center)
+                .into(),
+            (ProfileKind::Custom, ProfileCheck::Bad(why), Some(_)) => row![
+                icons::view(Glyph::Warning, 14.0, t::WARN),
+                text(format!("{why}. Choose another file or option.")).size(t::T_SMALL).color(t::WARN).width(Length::Fill),
+                choose("Choose another…"),
+            ]
+            .spacing(t::S2)
+            .align_y(Alignment::Center)
+            .into(),
+            (ProfileKind::Custom, ProfileCheck::Checking, Some(name)) => {
+                row![kit::caption(format!("Reading {name}\u{2026}")).width(Length::Fill), choose("Change")].spacing(t::S2).align_y(Alignment::Center).into()
+            }
+            (ProfileKind::Custom, ProfileCheck::Ok, Some(name)) => row![
+                kit::tip(
+                    kit::secondary(format!("Each RAW gets a copy of {name} beside it: {example}")),
+                    "A profile already beside a RAW is kept, never replaced. A cropped photo's profile carries its crop.",
+                    false,
+                ),
+                Space::new().width(Length::Fill),
+                choose("Change"),
+            ]
+            .spacing(t::S2)
+            .align_y(Alignment::Center)
+            .into(),
+        }
+    };
+    // Under the values: the icon, the label column and their gaps.
+    let indent = 16.0 + t::S2 + 104.0 + t::S2;
+    column![
+        row![icons::view(Glyph::Settings, 16.0, t::INK2), kit::caption("Profile").width(104), options]
+            .spacing(t::S2)
+            .align_y(Alignment::Center)
+            .height(t::CONTROL_H),
+        container(line).padding(Padding { top: 0.0, bottom: t::S1, left: indent, right: 0.0 }),
+    ]
+    .into()
+}
+
 fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element<'a, Message> {
     let running = ec.running.is_some();
     let locked = running || ec.done.is_some();
@@ -1329,6 +1620,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             ]
             .spacing(t::S4)
             .padding(Padding { top: t::S1, bottom: t::S1, left: 0.0, right: 0.0 }),
+            profile_rows(ec, locked),
             container(
                 checkbox(ec.subfolder)
                     .label(format!("Put them in a subfolder named “{shoot}”"))
@@ -1367,6 +1659,38 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     });
     if let Some(k) = ec.plan.as_ref().map(|p| p.existing_count()).filter(|&k| k > 0) {
         chips = chips.push(chip(format!("{k} already in the folder"), t::INK2));
+    }
+    match &ec.done {
+        Some(report) => {
+            let p = &report.profiles;
+            if !p.written.is_empty() || p.kept > 0 {
+                let label = match (p.written.len(), p.kept) {
+                    (w, 0) => format!("{} written", plural(w as u64, "profile")),
+                    (0, k) => format!("kept {} existing profile{}", k, s(k)),
+                    (w, k) => format!("{} written, {k} kept", plural(w as u64, "profile")),
+                };
+                let crop_note = if p.with_crop > 0 { format!(" {} carry the photo's crop.", plural(p.with_crop as u64, "profile")) } else { String::new() };
+                let kept_note = if p.kept > 0 { " A profile already beside a RAW was kept as it was: it may hold edits made in RawTherapee." } else { "" };
+                chips = chips.push(kit::tip(
+                    chip(label, t::SIGNAL),
+                    format!("RawTherapee profiles beside the RAWs, for RawTherapee to open them with.{crop_note}{kept_note}"),
+                    false,
+                ));
+            }
+            if !p.failed.is_empty() {
+                chips = chips.push(chip(format!("⚠ {} not written", plural(p.failed.len() as u64, "profile")), t::WARN));
+            }
+        }
+        None => {
+            let add = ec.profiles_to_add();
+            if add > 0 {
+                chips = chips.push(kit::tip(
+                    chip(format!("{} to add", plural(add as u64, "profile")), t::SIGNAL),
+                    "RAWs already in the folder with no profile beside them get one. A profile already there is kept.",
+                    false,
+                ));
+            }
+        }
     }
     if renamed > 0 {
         chips = chips.push(kit::tip(
@@ -1413,7 +1737,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         }
         r = r.push(Space::new().width(Length::Fill));
         r = r.push(
-            text(util::fmt_size(size))
+            text(if size > 0 { util::fmt_size(size) } else { String::new() })
                 .size(t::T_SMALL)
                 .color(if dim { t::INK3 } else { t::INK2 })
                 .width(70)
@@ -1435,6 +1759,9 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         if !report.failed.is_empty() {
             extra.push(format!("{} failed", report.failed.len()));
         }
+        if let Some(p) = profiles_summary(&report.profiles) {
+            extra.push(p);
+        }
         list = list.push(
             container(
                 row![
@@ -1454,6 +1781,12 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             }
             if report.failed.len() > 50 {
                 list = list.push(container(kit::caption(format!("and {} more", report.failed.len() - 50))).padding(Padding::from([4.0, t::S3])));
+            }
+        }
+        if !report.profiles.failed.is_empty() {
+            list = list.push(group("Profiles not written", report.profiles.failed.len()));
+            for (name, err) in report.profiles.failed.iter().take(50) {
+                list = list.push(file_row(name.clone(), false, Some((err.clone(), t::REJECT)), 0, false));
             }
         }
         if !report.copied.is_empty() {
@@ -1514,7 +1847,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             Some(format!("{} of each marked shot {} copied into one folder to edit from. The originals stay put.", ec.which(), if ec.raws && ec.jpgs { "are" } else { "is" })),
         ),
         card,
-        chips,
+        chips.wrap().vertical_spacing(t::S2),
         list_box(list.into()),
     ]
     .spacing(t::S4);
@@ -1527,6 +1860,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
         _ if running => "Copying…".to_string(),
         EcGoAction::OpenFolder => "Open folder".into(),
         EcGoAction::ChooseFolder => "Choose folder…".into(),
+        EcGoAction::Copy if n == 0 => format!("Add {}", plural(ec.profiles_to_add() as u64, "profile")),
         EcGoAction::Copy => format!("Copy {}", plural(n as u64, noun)),
         EcGoAction::None => "Copy".into(),
     };

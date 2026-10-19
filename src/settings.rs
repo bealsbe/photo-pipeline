@@ -43,6 +43,11 @@ pub struct Settings {
     pub edit_copy_subfolder: bool,
     pub edit_copy_raws: bool,
     pub edit_copy_jpgs: bool,
+    /// The RawTherapee profile each RAW copied for editing gets: the
+    /// built-in Base, a custom `.pp3`, or none.
+    pub edit_copy_profile: crate::ops::rt_profile::ProfileKind,
+    /// The custom `.pp3` last chosen (kept while another option is picked).
+    pub edit_copy_profile_path: String,
     pub window_width: f32,
     pub window_height: f32,
     pub window_x: Option<f32>,
@@ -156,6 +161,8 @@ impl Default for Settings {
             edit_copy_subfolder: true,
             edit_copy_raws: true,
             edit_copy_jpgs: false,
+            edit_copy_profile: crate::ops::rt_profile::ProfileKind::Base,
+            edit_copy_profile_path: String::new(),
             window_width: 1200.0,
             window_height: 780.0,
             window_x: None,
@@ -398,10 +405,23 @@ mod tests {
         assert!(s.show_file_names && s.viewer_filmstrip && s.edit_copy_subfolder && s.global_menu);
         assert_eq!(s.thumb_size, 180);
         assert!(s.library_folder.is_empty() && s.edit_copy_folder.is_empty());
+        assert_eq!(s.edit_copy_profile, crate::ops::rt_profile::ProfileKind::Base);
+        assert!(s.edit_copy_profile_path.is_empty());
         // An older settings.json, written before the global-menu setting.
         let old: Settings = serde_json::from_str(r#"{"show_file_names": false, "viewer_advance": true}"#).expect("parses");
         assert!(old.global_menu);
         assert!(!old.show_file_names && old.viewer_advance);
+        assert_eq!(old.edit_copy_profile, crate::ops::rt_profile::ProfileKind::Base);
+    }
+
+    #[test]
+    fn the_edit_copy_profile_choice_is_saved_by_name() {
+        use crate::ops::rt_profile::ProfileKind;
+        let s = Settings { edit_copy_profile: ProfileKind::None, ..Settings::default() };
+        let text = serde_json::to_string(&s).unwrap();
+        assert!(text.contains(r#""edit_copy_profile":"none""#), "{text}");
+        let back: Settings = serde_json::from_str(r#"{"edit_copy_profile": "custom", "edit_copy_profile_path": "/home/me/Portrait.pp3"}"#).unwrap();
+        assert_eq!((back.edit_copy_profile, back.edit_copy_profile_path.as_str()), (ProfileKind::Custom, "/home/me/Portrait.pp3"));
     }
 
     #[test]
@@ -418,6 +438,8 @@ mod tests {
             edit_copy_subfolder: false,
             edit_copy_raws: false,
             edit_copy_jpgs: true,
+            edit_copy_profile: crate::ops::rt_profile::ProfileKind::Custom,
+            edit_copy_profile_path: "/home/me/RawTherapee/Portrait.pp3".into(),
             global_menu: false,
             stack_bursts: true,
             ..Settings::default()
