@@ -2241,6 +2241,7 @@ impl App {
                 BgEvent::ExportDone(report) => tasks.push(dialogs::on_export_done(self, report)),
                 BgEvent::CopyProgress(p) => dialogs::on_copy_progress(self, p),
                 BgEvent::CopyDone(report) => tasks.push(dialogs::on_copy_done(self, report)),
+                BgEvent::EditCopyCheck { serial, profile, missing_profiles } => dialogs::on_copy_check(self, serial, profile, missing_profiles),
                 BgEvent::Trashed(result) => tasks.push(dialogs::on_trashed(self, result)),
                 BgEvent::Sorted(result) => tasks.push(self.on_sorted_event(result)),
                 BgEvent::Undo(done) => tasks.push(undo::on_done(self, done)),

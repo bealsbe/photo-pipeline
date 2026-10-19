@@ -73,6 +73,11 @@
 //! progress                    # print review progress and the filter
 //! shown                       # print the grid's tiles and marks
 //! dlg export-go               # press a dialog button (see `dialog_msg`)
+//! dlg copy-profile-base|copy-profile-custom|copy-profile-none
+//!                             # Copy for editing's profile options
+//! dlg copy-profile-file /x.pp3   # as if its file picker returned /x.pp3
+//! dlg copy-raws-on|copy-raws-off|copy-jpgs-on|copy-jpgs-off
+//! copydump                    # print the Copy for editing dialog's state
 //! gridscroll 20000 3000       # scroll the grid to y=20000 px over 3 s
 //! zoom 240                    # set the grid's thumbnail size
 //! calday 2026-07-24           # show a day's photos in the calendar (as
@@ -1236,6 +1241,10 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 Task::none()
             }
         },
+        "copydump" => {
+            eprintln!("[script] {}", super::dialogs::edit_copy_dump(app));
+            Task::none()
+        }
         "marks" => {
             let root = app.folder.clone().unwrap_or_default();
             let mut rows: Vec<String> = app
@@ -1877,6 +1886,14 @@ fn dialog_msg(name: &str) -> Option<super::dialogs::Msg> {
         "export-overwrite" => Msg::ExBulk(Resolution::Overwrite),
         "export-go" => Msg::ExGo,
         "copy-go" => Msg::EcGo,
+        "copy-profile-base" => Msg::EcProfile(crate::ops::rt_profile::ProfileKind::Base),
+        "copy-profile-custom" => Msg::EcProfile(crate::ops::rt_profile::ProfileKind::Custom),
+        "copy-profile-none" => Msg::EcProfile(crate::ops::rt_profile::ProfileKind::None),
+        "copy-raws-on" => Msg::EcRaws(true),
+        "copy-raws-off" => Msg::EcRaws(false),
+        "copy-jpgs-on" => Msg::EcJpgs(true),
+        "copy-jpgs-off" => Msg::EcJpgs(false),
+        n if n.starts_with("copy-profile-file ") => Msg::EcProfilePicked(Some(n["copy-profile-file ".len()..].trim().into())),
         "sort-rename" => Msg::SortStrategy(Strategy::Rename),
         "sort-skip" => Msg::SortStrategy(Strategy::Skip),
         "sort-go" => Msg::SortGo,

@@ -41,6 +41,7 @@ impl PpImage {
 unsafe extern "C" {
     fn pp_open(path: *const c_char, err: *mut c_int) -> *mut c_void;
     fn pp_flip(h: *mut c_void) -> c_int;
+    fn pp_frame(h: *mut c_void, out: *mut c_int);
     fn pp_thumb(h: *mut c_void, out: *mut PpImage) -> c_int;
     fn pp_thumb_min(h: *mut c_void, min_edge: c_int, out: *mut PpImage) -> c_int;
     fn pp_thumb_size(h: *mut c_void, w: *mut c_int, hgt: *mut c_int) -> c_int;
@@ -84,6 +85,19 @@ pub enum Thumbnail {
     },
 }
 
+/// Where the picture lies on the sensor, before any rotation: the visible
+/// area (`width` × `height`, starting `left_margin`, `top_margin` into the
+/// raw) and the camera's own default crop, `(left, top, width, height)` in
+/// raw coordinates, when the file names one (the frame of its JPG).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    pub width: u32,
+    pub height: u32,
+    pub left_margin: u32,
+    pub top_margin: u32,
+    pub crop: Option<(u32, u32, u32, u32)>,
+}
+
 /// 8-bit interleaved RGB from a full demosaic.
 pub struct Rgb8 {
     pub width: u32,
@@ -111,6 +125,21 @@ impl Raw {
             5 => 8,
             6 => 6,
             _ => 1,
+        }
+    }
+
+    /// The frame's geometry from the header, unrotated (see [`Frame`]).
+    pub fn frame(&mut self) -> Frame {
+        let mut v: [c_int; 8] = [0; 8];
+        // SAFETY: handle is valid; `v` has the 8 ints pp_frame writes.
+        unsafe { pp_frame(self.handle, v.as_mut_ptr()) };
+        let u = |i: usize| v[i].max(0) as u32;
+        Frame {
+            width: u(0),
+            height: u(1),
+            left_margin: u(2),
+            top_margin: u(3),
+            crop: (u(6) > 0 && u(7) > 0).then(|| (u(4), u(5), u(6), u(7))),
         }
     }
 

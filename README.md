@@ -108,8 +108,9 @@ src/ui/                custom widgets: grid, image stage, burst sheet,
   drag.rs              dragging a group's tile onto another (to merge)
 src/model/             records, collection & pairing, filters, crops,
                        sidecars, library index and its saved tree
-src/ops/               file operations: export, sort, trash, edit copy,
-                       crop export, and fsutil (the safe-write primitives)
+src/ops/               file operations: export, sort, trash, edit copy (and
+                       its RawTherapee profiles), crop export, and fsutil
+                       (the safe-write primitives)
 src/imaging/           JPEG/RAW decoding, thumbnails, viewer loader, burst
                        sheet tile pictures
 src/ml/                the search model: registry, download, the helper
@@ -121,6 +122,7 @@ native/                C shims over LibRaw and libjpeg-turbo
 vendor/LibRaw          LibRaw 0.22.2, the version rawpy uses
 assets/fonts           Barlow, with tabular figures built in (see its README)
 assets/icons           the app icon (SVG, and PNGs from 16 to 256 px)
+assets/rawtherapee     Base.pp3, the default profile Copy for editing gives RAWs
 assets/*.desktop.in    the desktop entry install.sh fills in and installs
 testdata/              camera header excerpts for the unit tests (see its README)
 scripts/               check-private.sh (see "Testing")
@@ -1304,6 +1306,36 @@ remembered).  A marked file brings its partner of the wanted kind, a shot with
 none of it is listed and not copied, and pruned shots are left out.  Nothing
 is overwritten; a taken name gets `_1`, `_2`.  A crop is written as an `.xmp`
 sidecar for a RAW only, and a JPG is copied as it is.
+
+**A RawTherapee profile for each RAW.**  The dialog's Profile row chooses
+what each RAW it copies gets beside it, as a starting point in RawTherapee:
+*Default (Base)*, the built-in profile (`assets/rawtherapee/Base.pp3`, from
+RawTherapee 5.13, carried in the binary); *Custom…*, a `.pp3` you choose (the
+picker shows `.pp3` files, and *Change* picks another); or *No profile*.  The
+choice and the custom file are remembered.  The profile takes the RAW's final
+name: `20261012_2044_2048.ARW` gets `20261012_2044_2048.ARW.pp3`, and a RAW
+saved as `…_1.ARW` for a clash gets `…_1.ARW.pp3`.  A profile already beside a
+RAW is never replaced, since it may hold your RawTherapee edits: it is kept and
+counted ("kept 2 existing profiles").  A RAW that was already in the folder
+gets one if it has none (with nothing else to copy, the button reads *Add 2
+profiles*).  Only RAWs get one: with RAW files unticked the row is off and says
+why.  A custom file is read on a worker when chosen, and once more at the start
+of the copy; one that is missing, unreadable, not text, over 2 MB or without a
+`[Version]` section is named in the dialog with the reason, and nothing is
+copied until you choose another file or option.  Profiles are written like
+every other file (temp file, fsync, a rename that never replaces); one that
+can't be written is listed, and its RAW stays copied.  The summary and the
+status line say how many were written and kept.
+
+A cropped photo's profile carries its crop, since RawTherapee reads the
+`.pp3` and not the `.xmp`.  Only `[Crop]`'s `Enabled`, `X`, `Y`, `W`, `H` and
+`FixedRatio` change; every other line stays byte for byte.  The rectangle is in
+RawTherapee's pixels: its upright frame, a few pixels larger than the camera's
+JPG (the A7 V's 7024×4680 round its 7008×4672).  That frame is worked out from
+the RAW's header with LibRaw, and was checked against `rawtherapee-cli` renders
+of landscape and portrait shots.  A RAW that LibRaw can't read, or a custom
+profile whose coarse transformation turns or flips the frame, gets the profile
+without the crop (the `.xmp` still has it).
 
 While an export or an edit copy runs, its dialog shows the files and bytes
 done with the transfer speed and the time left ("72 of 132 files, 1.8 GB of

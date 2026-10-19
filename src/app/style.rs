@@ -147,6 +147,9 @@ pub fn segment(active: bool) -> Look {
             border: Color::TRANSPARENT,
             hover_bg: t::RAISED_HI,
             hover_fg: t::INK,
+            // Off (a dialog that has run), the choice still shows.
+            disabled_bg: t::RAISED,
+            disabled_fg: t::INK3,
             ..ghost()
         }
     } else {

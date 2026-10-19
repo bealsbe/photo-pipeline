@@ -3,6 +3,7 @@ pub mod edit_copy;
 pub mod fsutil;
 pub mod library;
 pub mod netfs;
+pub mod rt_profile;
 pub mod separate;
 pub mod trash;
 pub mod undo;
