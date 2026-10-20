@@ -105,6 +105,7 @@
 //!                             # (PP_GLOW_ALL=1 lights every button's hover
 //!                             # glow, there being no pointer headless)
 //! cdump                       # print the compare view's state
+//! foldercollapse              # the folder bar's collapse button (on or off)
 //! netdump                     # print network-share state and unsaved saves
 //! nettry                      # press the banner's Try again
 //! netdismiss                  # close the banner
@@ -1306,6 +1307,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         }
         // Steps go on: quitting may stop to ask about unsaved marks.
         "quit" => app.update(Message::Cmd(Cmd::Quit)),
+        "foldercollapse" => app.update(Message::FolderBarCollapse),
         _ => Task::none(),
     };
     Task::batch([t, next(i + 1, 50)])
