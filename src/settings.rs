@@ -272,39 +272,54 @@ impl Settings {
         self.global_menu && !forced_off
     }
 
+    /// Save now, waiting for the disk: for quitting, when the save must be
+    /// complete.  Anywhere else use [`Settings::save_in_background`].
     pub fn save(&self) -> std::io::Result<()> {
-        // Supersedes any background save still waiting, and waits for one
-        // being written, so the two never interleave.
-        SAVE_GEN.fetch_add(1, Ordering::SeqCst);
-        let _writing = SAVE_LOCK.lock();
-        self.write()
+        match path() {
+            Some(p) => self.save_at(&p),
+            None => Ok(()),
+        }
     }
 
     /// Save on a background thread, so the UI thread never waits on the
     /// disk.  Saves land in order; one overtaken by a newer save is skipped.
     pub fn save_in_background(&self) {
+        if let Some(p) = path() {
+            self.save_in_background_at(p);
+        }
+    }
+
+    fn save_at(&self, p: &std::path::Path) -> std::io::Result<()> {
+        // Supersedes any background save still waiting, and waits for one
+        // being written, so the two never interleave.
+        SAVE_GEN.fetch_add(1, Ordering::SeqCst);
+        let _writing = SAVE_LOCK.lock();
+        self.write(p)
+    }
+
+    fn save_in_background_at(&self, p: PathBuf) {
         let generation = SAVE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
         let s = self.clone();
+        let target = p.clone();
         let spawned = std::thread::Builder::new().name("settings-save".into()).spawn(move || {
             let _writing = SAVE_LOCK.lock();
             if SAVE_GEN.load(Ordering::SeqCst) == generation {
-                if let Err(e) = s.write() {
+                if let Err(e) = s.write(&target) {
                     eprintln!("settings: could not save: {e}");
                 }
             }
         });
         if spawned.is_err() {
-            let _ = self.save();
+            let _ = self.save_at(&p);
         }
     }
 
-    fn write(&self) -> std::io::Result<()> {
-        let Some(p) = path() else { return Ok(()) };
+    fn write(&self, p: &std::path::Path) -> std::io::Result<()> {
         if let Some(dir) = p.parent() {
             fs::create_dir_all(dir)?;
         }
         let text = serde_json::to_string_pretty(self).unwrap_or_default();
-        crate::model::sidecar::atomic_write_text(&p, &text)
+        crate::model::sidecar::atomic_write_text(p, &text)
     }
 
     /// Read the Python app's QSettings INI, if there is one.
@@ -383,6 +398,39 @@ fn unquote(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The thumbnail size the file at `p` holds (0: none yet).
+    fn saved_thumb(p: &std::path::Path) -> u32 {
+        fs::read_to_string(p).ok().and_then(|t| serde_json::from_str::<Settings>(&t).ok()).map_or(0, |s| s.thumb_size)
+    }
+
+    /// Background saves land in order, newest wins, and a save made at
+    /// quit (waiting) is complete and is the last word: no older background
+    /// save lands after it.
+    #[test]
+    fn background_saves_keep_the_newest_and_the_quit_save_is_last() {
+        let d = std::env::temp_dir().join(format!("pp-settings-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        let p = d.join("photo-pipeline").join("settings.json");
+        // A quick run of toggles, then nothing: the newest lands.
+        for size in 101..=140 {
+            Settings { thumb_size: size, ..Settings::default() }.save_in_background_at(p.clone());
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while saved_thumb(&p) != 140 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(saved_thumb(&p), 140);
+        // Toggles, then quit at once: the quit save waits and wins.
+        for size in 201..=240 {
+            Settings { thumb_size: size, ..Settings::default() }.save_in_background_at(p.clone());
+        }
+        Settings { thumb_size: 300, ..Settings::default() }.save_at(&p).unwrap();
+        assert_eq!(saved_thumb(&p), 300, "complete when save returns");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(saved_thumb(&p), 300, "no older save lands after it");
+        let _ = fs::remove_dir_all(&d);
+    }
 
     /// Fursuit grouping: Balanced by default, and a settings file from
     /// before the choice loads as Balanced; a saved choice comes back.

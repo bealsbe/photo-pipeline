@@ -1709,7 +1709,7 @@ impl App {
             Message::FolderBarCollapse => {
                 self.folder_bar_collapsed = !self.folder_bar_collapsed;
                 self.settings.folder_bar_collapsed = self.folder_bar_collapsed;
-                let _ = self.settings.save();
+                self.settings.save_in_background();
                 Task::none()
             }
             Message::PickFolder(target) => self.pick_folder(target),
