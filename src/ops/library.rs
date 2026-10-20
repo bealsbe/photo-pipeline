@@ -147,6 +147,9 @@ pub struct PlannedOp {
     pub final_dest: PathBuf,
     /// The source's size as the record knows it (for progress; not a stat).
     pub file_size: u64,
+    /// For a conflict: the first free `_1`, `_2`… name, found when planning
+    /// so choosing Rename needs no disk.
+    pub rename_dest: Option<PathBuf>,
 }
 
 impl PlannedOp {
@@ -156,7 +159,10 @@ impl PlannedOp {
 
     pub fn set_resolution(&mut self, r: Resolution) {
         self.resolution = r;
-        self.final_dest = if r == Resolution::Rename { next_free(&self.dest) } else { self.dest.clone() };
+        self.final_dest = match (r, &self.rename_dest) {
+            (Resolution::Rename, Some(free)) => free.clone(),
+            _ => self.dest.clone(),
+        };
     }
 
     /// Replace an existing file only when the user chose to for a known
@@ -201,9 +207,18 @@ pub struct LibraryPlan {
     pub ops: Vec<PlannedOp>,
 }
 
-impl LibraryPlan {
-    /// Plan `ids` (already filtered by the caller) into `root`.
-    pub fn new(ids: &[RecordId], coll: &Collection, root: &Path, rename: bool) -> Self {
+/// What a library plan needs of the files, read from the collection in
+/// memory: the shots (RAW+JPG together), dated and, when renaming, in
+/// capture order.  [`LibraryInput::plan`] places them in a library.
+#[derive(Debug, Clone)]
+pub struct LibraryInput {
+    shots: Vec<(NaiveDateTime, Vec<PlannedOp>)>,
+    rename: bool,
+}
+
+impl LibraryInput {
+    /// `ids` (already filtered by the caller).  No disk.
+    pub fn new(ids: &[RecordId], coll: &Collection, rename: bool) -> Self {
         let included: HashSet<RecordId> = ids.iter().copied().collect();
         let mut seen: HashSet<RecordId> = HashSet::new();
         let mut shots: Vec<(NaiveDateTime, Vec<RecordId>)> = Vec::new();
@@ -223,8 +238,6 @@ impl LibraryPlan {
             seen.extend(members.iter().copied());
             shots.push((best_datetime(record, pair), members));
         }
-
-        let mut names: HashMap<RecordId, String> = HashMap::new();
         if rename {
             shots.sort_by(|a, b| {
                 let min_name = |s: &Vec<RecordId>| {
@@ -232,43 +245,67 @@ impl LibraryPlan {
                 };
                 a.0.cmp(&b.0).then_with(|| min_name(&a.1).cmp(&min_name(&b.1)))
             });
+        }
+        let shots = shots
+            .into_iter()
+            .map(|(dt, members)| {
+                let ops = members
+                    .into_iter()
+                    .filter_map(|m| coll.get(m).map(|r| (m, r)))
+                    .map(|(m, r)| PlannedOp {
+                        id: m,
+                        src: r.path.clone(),
+                        filename: r.filename(),
+                        file_type: r.file_type,
+                        is_pruned: r.is_pruned,
+                        crop: r.crop.clone(),
+                        dest: PathBuf::new(),
+                        final_dest: PathBuf::new(),
+                        date: dt.date(),
+                        conflict: false,
+                        resolution: Resolution::Skip,
+                        file_size: r.file_size,
+                        rename_dest: None,
+                    })
+                    .collect();
+                (dt, ops)
+            })
+            .collect();
+        Self { shots, rename }
+    }
+
+    /// Place the files in `root`: library names (after the day's highest
+    /// sequence already there), and which destinations are taken.  Reads
+    /// the library's folders, so it runs on a worker.
+    pub fn plan(&self, root: &Path) -> LibraryPlan {
+        let mut names: Vec<Vec<Option<String>>> = self.shots.iter().map(|(_, ops)| vec![None; ops.len()]).collect();
+        if self.rename {
             let mut counters: HashMap<String, u32> = HashMap::new();
             let mut existing: HashMap<PathBuf, HashMap<String, u32>> = HashMap::new();
-            for (dt, members) in &shots {
+            for (i, (dt, ops)) in self.shots.iter().enumerate() {
                 let day = dt.format("%Y%m%d").to_string();
-                let counter = counters
-                    .entry(day)
-                    .or_insert_with(|| highest_sequence(root, dt.date(), &mut existing));
+                let counter = counters.entry(day).or_insert_with(|| highest_sequence(root, dt.date(), &mut existing));
                 *counter += 1;
-                for &m in members {
-                    if let Some(r) = coll.get(m) {
-                        names.insert(m, library_name(*dt, *counter, &util::suffix(&r.path)));
-                    }
+                for (j, op) in ops.iter().enumerate() {
+                    names[i][j] = Some(library_name(*dt, *counter, &util::suffix(&op.src)));
                 }
             }
         }
 
         let mut ops = Vec::new();
-        for (dt, members) in &shots {
+        for (i, (dt, members)) in self.shots.iter().enumerate() {
             let d = dt.date();
-            for &m in members {
-                let Some(r) = coll.get(m) else { continue };
-                let name = names.get(&m).cloned().unwrap_or_else(|| r.filename());
-                let dest = day_dir(root, d).join(r.file_type.label()).join(name);
+            for (j, m) in members.iter().enumerate() {
+                let name = names[i][j].clone().unwrap_or_else(|| m.filename.clone());
+                let dest = day_dir(root, d).join(m.file_type.label()).join(name);
                 let conflict = dest.exists();
                 let mut op = PlannedOp {
-                    id: m,
-                    src: r.path.clone(),
-                    filename: r.filename(),
-                    file_type: r.file_type,
-                    is_pruned: r.is_pruned,
-                    crop: r.crop.clone(),
                     final_dest: dest.clone(),
+                    rename_dest: conflict.then(|| next_free(&dest)),
                     dest,
-                    date: d,
                     conflict,
                     resolution: Resolution::Skip,
-                    file_size: r.file_size,
+                    ..m.clone()
                 };
                 // Clean ops are ready to go; conflicts wait for the user.
                 if !conflict {
@@ -277,7 +314,15 @@ impl LibraryPlan {
                 ops.push(op);
             }
         }
-        Self { ops }
+        LibraryPlan { ops }
+    }
+}
+
+impl LibraryPlan {
+    /// Plan `ids` (already filtered by the caller) into `root`.  Reads the
+    /// disk: the dialog runs [`LibraryInput::plan`] on a worker instead.
+    pub fn new(ids: &[RecordId], coll: &Collection, root: &Path, rename: bool) -> Self {
+        LibraryInput::new(ids, coll, rename).plan(root)
     }
 
     pub fn total(&self) -> usize {
@@ -542,6 +587,30 @@ mod tests {
         assert!(day_dir(&lib, d).join("RAW/20250302_1000_0006.ARW").exists());
         assert!(!src.join("A.ARW").exists());
         assert!(src.exists(), "source root itself is kept");
+    }
+
+    #[test]
+    fn a_rename_for_a_conflict_is_found_when_planning_not_when_chosen() {
+        let src = tmp("src5");
+        let lib = tmp("lib5");
+        let mut c = Collection::new();
+        let a = c.add(rec(&src.join("A.JPG"), "2025-03-02 10:00:00"));
+        let d = NaiveDate::from_ymd_opt(2025, 3, 2).unwrap();
+        fs::create_dir_all(day_dir(&lib, d).join("JPG")).unwrap();
+        fs::write(day_dir(&lib, d).join("JPG/A.JPG"), b"x").unwrap();
+        fs::write(day_dir(&lib, d).join("JPG/A_1.JPG"), b"x").unwrap();
+        // The memory half reads nothing; the plan is the same as new()'s.
+        let input = LibraryInput::new(&[a], &c, false);
+        let mut plan = input.plan(&lib);
+        assert_eq!(plan.conflict_count(), 1);
+        assert_eq!(format!("{:?}", plan.ops), format!("{:?}", LibraryPlan::new(&[a], &c, &lib, false).ops));
+        // Choosing Rename (on the UI thread) touches no disk: the library
+        // can be gone and the free name is still the one found.
+        fs::remove_dir_all(&lib).unwrap();
+        plan.apply_bulk_resolution(Resolution::Rename);
+        assert_eq!(util::file_name(&plan.ops[0].final_dest), "A_2.JPG");
+        plan.apply_bulk_resolution(Resolution::Skip);
+        assert_eq!(plan.ops[0].final_dest, plan.ops[0].dest);
     }
 
     #[test]

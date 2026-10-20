@@ -1345,6 +1345,15 @@ seconds, "starting…" until there is enough to go on, and "stalled" when no
 file has finished for longer than the one under way should take.  A move
 within one drive is a rename, so it shows no speed.
 
+**Plans are made on a worker.**  What Export, Copy for editing and Sort
+will do depends on the disk (is a name taken, is that file already there),
+and on a network share each look costs milliseconds.  So each plan is
+worked out on a worker thread whenever an option changes; meanwhile the
+dialog says "Checking the folder…" (or the library) and its main button
+waits.  Only the plan for the latest choices is shown, however quickly
+they change.  Review's note about files on another drive appears once
+that check is done.
+
 ## Differences from the Python app
 
 These are deliberate:
@@ -1480,7 +1489,9 @@ These are deliberate:
   judge-free|judge-cardcrash|judge-broken`) judges a named fursuit's close
   calls a few a second, offering its own suit's heads and leaving
   look-alikes out (with a few mistakes); `judge stop|showleftout|trycard|
-  prefs|dump` drive its line.
+  prefs|dump` drive its line.  `PP_PLAN_DELAY_MS=800` makes the dialogs'
+  plan workers wait that long, as on a slow share, so their "Checking the
+  folder…" state can be seen; `dlgdump` prints the open dialog's plan.
 - **Profiling:** `PP_PROFILE=1` prints any update, view rebuild or widget draw
   that takes more than a frame, plus gaps in animation, and a summary table on
   exit (`src/profile.rs`; off, it costs nothing).  A build with

@@ -129,22 +129,54 @@ fn same_file(size: u64, mtime: f64, target: &Path) -> bool {
     meta.len() == size && (t - mtime).abs() <= MTIME_SLACK
 }
 
+/// What planning needs of each file, read from the collection in memory
+/// (no disk), in capture order so `_1` suffixes go to the later shot.  The
+/// ops' `dest` is only the file name until [`EditCopyPlan::build`] places
+/// them.
+pub fn plan_inputs(files: &[RecordId], coll: &Collection) -> Vec<CopyOp> {
+    let mut records: Vec<_> = files.iter().filter_map(|&id| coll.get(id).map(|r| (id, r))).collect();
+    records.sort_by(|a, b| a.1.shot_time().cmp(&b.1.shot_time()).then_with(|| a.1.name_lower.cmp(&b.1.name_lower)));
+    records
+        .into_iter()
+        .map(|(id, r)| {
+            let filename = r.filename();
+            CopyOp {
+                id,
+                src: r.path.clone(),
+                dest: PathBuf::from(&filename),
+                filename,
+                file_size: r.file_size,
+                mtime: r.modified.timestamp,
+                shot_time: r.shot_time(),
+                // Only a RAW gets a crop sidecar; a JPG is copied as it is.
+                crop: r.crop.clone().filter(|_| r.file_type == FileType::Raw),
+                exists: false,
+                raw: r.file_type == FileType::Raw,
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub struct EditCopyPlan {
     pub ops: Vec<CopyOp>,
 }
 
 impl EditCopyPlan {
-    /// Building touches the disk read-only.
+    /// Building touches the disk read-only: on a worker, not the UI thread
+    /// (see [`plan_inputs`] and [`EditCopyPlan::build`]).
     pub fn new(files: &[RecordId], coll: &Collection, dest_dir: &Path) -> Self {
-        let mut records: Vec<_> = files.iter().filter_map(|&id| coll.get(id).map(|r| (id, r))).collect();
-        // Capture order, so `_1` suffixes go to the later shot.
-        records.sort_by(|a, b| a.1.shot_time().cmp(&b.1.shot_time()).then_with(|| a.1.name_lower.cmp(&b.1.name_lower)));
+        Self::build(plan_inputs(files, coll), dest_dir)
+    }
+
+    /// Place `inputs` (from [`plan_inputs`]) in `dest_dir`: an identical
+    /// file already there is skipped, a taken name gets `_1`, `_2`….  Reads
+    /// the disk (a stat or two a file), so it runs on a worker.
+    pub fn build(inputs: Vec<CopyOp>, dest_dir: &Path) -> Self {
         let mut claimed: HashSet<String> = HashSet::new(); // lower-cased: exFAT/NTFS
-        let mut ops = Vec::with_capacity(records.len());
-        for (id, r) in records {
-            let filename = r.filename();
-            let target = dest_dir.join(&filename);
+        let mut ops = Vec::with_capacity(inputs.len());
+        for mut op in inputs {
+            let target = dest_dir.join(&op.filename);
             let (stem, suffix) = (util::stem(&target), util::suffix(&target));
             let mut dest = target.clone();
             let mut n = 0;
@@ -155,7 +187,7 @@ impl EditCopyPlan {
                     if !fsutil::lexists(&dest) {
                         break;
                     }
-                    if same_file(r.file_size, r.modified.timestamp, &dest) {
+                    if same_file(op.file_size, op.mtime, &dest) {
                         exists = true;
                         break;
                     }
@@ -164,19 +196,9 @@ impl EditCopyPlan {
                 dest = dest_dir.join(format!("{stem}_{n}{suffix}"));
             }
             claimed.insert(util::file_name(&dest).to_lowercase());
-            ops.push(CopyOp {
-                id,
-                src: r.path.clone(),
-                filename,
-                file_size: r.file_size,
-                mtime: r.modified.timestamp,
-                shot_time: r.shot_time(),
-                // Only a RAW gets a crop sidecar; a JPG is copied as it is.
-                crop: r.crop.clone().filter(|_| r.file_type == FileType::Raw),
-                dest,
-                exists,
-                raw: r.file_type == FileType::Raw,
-            });
+            op.dest = dest;
+            op.exists = exists;
+            ops.push(op);
         }
         Self { ops }
     }

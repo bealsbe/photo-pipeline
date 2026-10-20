@@ -24,9 +24,9 @@ use crate::ui::motion::SmoothBar;
 use crate::bus::{BgEvent, Bus, SortResult};
 use crate::model::collection::RecordId;
 use crate::model::record::FileType;
-use crate::ops::edit_copy::{self, CopyReport, EditCopyPlan, MarkedFiles};
+use crate::ops::edit_copy::{self, CopyOp, CopyReport, EditCopyPlan, MarkedFiles};
 use crate::ops::Progress;
-use crate::ops::library::{self, ExportReport, LibraryPlan, Mode, Resolution};
+use crate::ops::library::{self, ExportReport, LibraryInput, LibraryPlan, Mode, Resolution};
 use crate::ops::rt_profile::{self, ProfileChoice, ProfileKind};
 use crate::ops::separate::{SeparationPlan, Strategy};
 use crate::ops::trash;
@@ -137,6 +137,31 @@ pub enum Msg {
     PruneUnmarkConfirmed,
 }
 
+// ── plans on workers ────────────────────────────────────────────────────────
+//
+// Every dialog's plan reads the disk (does the destination exist, is a name
+// taken), and on a network share one stat is 1.5–20 ms.  So plans are built
+// on a worker from a snapshot taken in memory, and come back as a
+// `BgEvent` carrying the serial of the request; only the newest request's
+// answer lands, so quick changes can't let an old plan replace a newer one.
+
+static PLAN_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// A serial for a plan request, unique across dialogs.
+fn next_serial() -> u64 {
+    PLAN_SERIAL.fetch_add(1, Ordering::Relaxed) + 1
+}
+
+/// `PP_PLAN_DELAY_MS`: each plan worker waits that long first, as if the
+/// folder were on a slow share (for headless checks of the waiting state).
+fn slow_share_for_tests() {
+    static DELAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let ms = *DELAY.get_or_init(|| std::env::var("PP_PLAN_DELAY_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+    if ms > 0 {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
 // ── export ──────────────────────────────────────────────────────────────────
 
 pub struct Export {
@@ -156,6 +181,10 @@ pub struct Export {
     date_to: NaiveDateTime,
     dates: HashMap<RecordId, NaiveDateTime>,
     plan: Option<LibraryPlan>,
+    /// A plan for the current options is being built (`plan` is the last
+    /// one, kept on screen until the new one lands).
+    planning: bool,
+    plan_serial: u64,
     bulk: Option<Resolution>,
     running: Option<Run>,
     done: Option<Arc<ExportReport>>,
@@ -199,6 +228,8 @@ pub fn open_export(app: &mut App) -> Task<Message> {
         date_to: max,
         dates,
         plan: None,
+        planning: false,
+        plan_serial: 0,
         bulk: None,
         running: None,
         done: None,
@@ -230,9 +261,33 @@ fn export_ids(app: &App, ex: &Export) -> Vec<RecordId> {
         .collect()
 }
 
+/// Plan again for the current options, on a worker (`BgEvent::ExportPlanned`).
 fn rebuild_export(app: &App, ex: &mut Export) {
     ex.bulk = None;
-    ex.plan = ex.library.as_ref().map(|lib| LibraryPlan::new(&export_ids(app, ex), &app.coll, lib, ex.rename));
+    ex.plan_serial = next_serial();
+    let Some(lib) = ex.library.clone() else {
+        ex.plan = None;
+        ex.planning = false;
+        return;
+    };
+    ex.planning = true;
+    let input = LibraryInput::new(&export_ids(app, ex), &app.coll, ex.rename);
+    let (serial, bus) = (ex.plan_serial, app.bus());
+    std::thread::spawn(move || {
+        slow_share_for_tests();
+        let plan = input.plan(&lib);
+        let _ = bus.unbounded_send(BgEvent::ExportPlanned { serial, plan: Box::new(plan) });
+    });
+}
+
+/// A plan built on a worker; one for an earlier request is dropped.
+pub fn on_export_planned(app: &mut App, serial: u64, plan: Box<LibraryPlan>) {
+    let Some(Modal { kind: Kind::Export(ex), .. }) = &mut app.modal else { return };
+    if serial != ex.plan_serial || ex.running.is_some() || ex.done.is_some() {
+        return;
+    }
+    ex.plan = Some(*plan);
+    ex.planning = false;
 }
 
 pub fn export_library_changed(app: &mut App, path: PathBuf) {
@@ -306,6 +361,11 @@ pub struct EditCopy {
     base: Option<PathBuf>,
     subfolder: bool,
     plan: Option<EditCopyPlan>,
+    /// A plan for the current choices is being built on a worker: the
+    /// dialog says "Checking the folder…" and Copy waits for it.
+    planning: bool,
+    /// `base` is the remembered folder, not yet seen to still be there.
+    base_unchecked: bool,
     running: Option<Run>,
     stopping: bool,
     cancel: Arc<AtomicBool>,
@@ -319,8 +379,54 @@ pub struct EditCopy {
     /// RAWs already in the folder with no profile beside them (`None`
     /// until checked).
     missing_profiles: Option<usize>,
-    /// The check whose answer counts (see [`EditCopy::check`]).
-    check_serial: u64,
+    /// The request whose answer counts (see [`EditCopy::replan`]).
+    plan_serial: u64,
+}
+
+/// A worker's answer to [`EditCopy::replan`] or [`EditCopy::check`].
+#[derive(Debug, Clone)]
+pub struct EditCopyPlanned {
+    pub serial: u64,
+    /// The plan (`None`: no folder to place the files in).
+    pub plan: Option<EditCopyPlan>,
+    /// The remembered folder is no longer there: ask for one.
+    pub base_gone: bool,
+    /// Can the custom profile be used (`None`: none to check).
+    pub profile: Option<Result<(), String>>,
+    /// RAWs already in the folder with no profile beside them (`None`:
+    /// not counted, keep the last count).
+    pub missing_profiles: Option<usize>,
+}
+
+/// What a plan request hands the worker: memory only.
+struct PlanJob {
+    serial: u64,
+    /// The files and the folder to place them in (`None`: keep `reuse`).
+    place: Option<(Vec<CopyOp>, PathBuf)>,
+    reuse: Option<EditCopyPlan>,
+    /// The remembered folder, to see that it is still there.
+    base: Option<PathBuf>,
+    custom: Option<PathBuf>,
+    profiles: bool,
+}
+
+impl PlanJob {
+    /// Run on a worker: the only part that reads the disk.
+    fn run(self) -> EditCopyPlanned {
+        if self.base.as_ref().is_some_and(|b| !b.is_dir()) {
+            return EditCopyPlanned { serial: self.serial, plan: None, base_gone: true, profile: None, missing_profiles: Some(0) };
+        }
+        let plan = match self.place {
+            Some((inputs, dest)) => Some(EditCopyPlan::build(inputs, &dest)),
+            None => self.reuse,
+        };
+        let profile = self.custom.map(|p| rt_profile::read_custom(&p).map(|_| ()).map_err(|why| format!("{} can't be used: {why}", util::file_name(&p))));
+        let missing = match (&plan, self.profiles) {
+            (Some(plan), true) => plan.existing_raws().filter(|o| !crate::ops::fsutil::lexists(&rt_profile::sidecar_path(&o.dest))).count(),
+            _ => 0,
+        };
+        EditCopyPlanned { serial: self.serial, plan, base_gone: false, profile, missing_profiles: Some(missing) }
+    }
 }
 
 /// What reading the custom profile found (on a worker; the dialog only
@@ -333,9 +439,6 @@ enum ProfileCheck {
     Bad(String),
 }
 
-/// Serials for [`EditCopy::check`], unique across dialogs.
-static CHECK_SERIAL: AtomicU64 = AtomicU64::new(0);
-
 impl EditCopy {
     /// What the primary button does.
     fn go(&self) -> EcGoAction {
@@ -343,7 +446,12 @@ impl EditCopy {
         let add = self.profiles_to_add() > 0;
         if self.running.is_some() {
             EcGoAction::None
-        } else if self.done.is_some() || plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0 && !add) {
+        } else if self.done.is_some() {
+            EcGoAction::OpenFolder
+        } else if self.planning {
+            // The plan for these choices isn't in yet.
+            EcGoAction::None
+        } else if plan.is_some_and(|p| p.to_copy_count() == 0 && p.existing_count() > 0 && !add) {
             EcGoAction::OpenFolder
         } else if self.base.is_none() && !self.sel.files.is_empty() {
             EcGoAction::ChooseFolder
@@ -383,43 +491,82 @@ impl EditCopy {
         if self.profile_active() { self.missing_profiles.unwrap_or(0) } else { 0 }
     }
 
-    /// Plan again (the files, the folder or the option changed) and check.
+    /// Plan again (the files, the folder or the option changed): the files
+    /// are read from the collection here, in memory, and placed in the
+    /// folder on a worker, which also checks the profile.  The answer comes
+    /// back as `BgEvent::EditCopyPlanned`; one for an earlier request is
+    /// dropped ([`EditCopy::land`]).
     fn replan(&mut self, coll: &crate::model::collection::Collection, bus: &Bus) {
-        self.plan = self.dest_dir().map(|d| EditCopyPlan::new(&self.sel.files, coll, &d));
-        self.check(bus);
+        let place = self.dest_dir().map(|d| (edit_copy::plan_inputs(&self.sel.files, coll), d));
+        self.planning = place.is_some();
+        if place.is_none() {
+            self.plan = None;
+        }
+        self.request(place, None, bus);
     }
 
-    /// Check, on a worker, what the dialog can't know without the disk: can
-    /// the custom profile be used, and which RAWs already in the folder lack
-    /// a profile.  The answer comes back as `BgEvent::EditCopyCheck`; one
-    /// for an earlier check is dropped.
-    fn check(&mut self, bus: &Bus) {
-        self.check_serial = CHECK_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
-        let serial = self.check_serial;
+    /// The profile option changed: check it against the plan in hand (or
+    /// plan again, if that plan is for earlier choices).
+    fn check(&mut self, coll: &crate::model::collection::Collection, bus: &Bus) {
+        if self.planning {
+            return self.replan(coll, bus);
+        }
+        let reuse = self.plan.clone();
+        self.request(None, reuse, bus);
+    }
+
+    fn request(&mut self, place: Option<(Vec<CopyOp>, PathBuf)>, reuse: Option<EditCopyPlan>, bus: &Bus) {
+        self.plan_serial = next_serial();
         let custom = match self.profile_choice() {
             ProfileChoice::Custom(p) => Some(p),
             _ => None,
         };
-        let existing: Vec<PathBuf> = match (&self.plan, self.profile_active()) {
-            (Some(plan), true) => plan.existing_raws().map(|o| o.dest.clone()).collect(),
-            _ => Vec::new(),
-        };
         if custom.is_some() {
             self.profile_check = ProfileCheck::Checking;
         }
-        if custom.is_none() && existing.is_empty() {
+        let job = PlanJob {
+            serial: self.plan_serial,
+            base: self.base.clone().filter(|_| self.base_unchecked),
+            place,
+            reuse,
+            custom,
+            profiles: self.profile_active(),
+        };
+        let nothing_on_disk = job.place.is_none() && job.base.is_none() && job.custom.is_none() && !(job.profiles && job.reuse.is_some());
+        if nothing_on_disk {
             self.missing_profiles = Some(0);
             return;
         }
         self.missing_profiles = None;
         let bus = bus.clone();
         std::thread::spawn(move || {
-            let profile = custom.map(|p| {
-                rt_profile::read_custom(&p).map(|_| ()).map_err(|why| format!("{} can't be used: {why}", util::file_name(&p)))
-            });
-            let missing_profiles = existing.iter().filter(|d| !crate::ops::fsutil::lexists(&rt_profile::sidecar_path(d))).count();
-            let _ = bus.unbounded_send(BgEvent::EditCopyCheck { serial, profile, missing_profiles });
+            slow_share_for_tests();
+            let _ = bus.unbounded_send(BgEvent::EditCopyPlanned(Box::new(job.run())));
         });
+    }
+
+    /// Take a worker's answer, if it is for the newest request.  Returns
+    /// whether it landed.
+    fn land(&mut self, r: EditCopyPlanned) -> bool {
+        if r.serial != self.plan_serial {
+            return false;
+        }
+        if r.base_gone {
+            self.base = None;
+        }
+        self.base_unchecked = false;
+        self.plan = r.plan;
+        self.planning = false;
+        if let Some(m) = r.missing_profiles {
+            self.missing_profiles = Some(m);
+        }
+        if let Some(result) = r.profile {
+            self.profile_check = match result {
+                Ok(()) => ProfileCheck::Ok,
+                Err(why) => ProfileCheck::Bad(why),
+            };
+        }
+        true
     }
 
     /// The primary button (Copy / Choose folder / Open folder) is clickable.
@@ -474,8 +621,8 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
             "No shots are marked.\n\nSelect photos and press M (or Keep in the viewer) to mark the ones you want to edit.",
         );
     }
-    let last = PathBuf::from(&app.settings.edit_copy_folder);
-    let base = (!app.settings.edit_copy_folder.is_empty() && last.is_dir()).then_some(last);
+    // The remembered folder: the plan's worker checks it is still there.
+    let base = (!app.settings.edit_copy_folder.is_empty()).then(|| PathBuf::from(&app.settings.edit_copy_folder));
     let mut ec = EditCopy {
         sel,
         raws,
@@ -484,6 +631,8 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
         base,
         subfolder: app.settings.edit_copy_subfolder && app.folder.is_some(),
         plan: None,
+        planning: false,
+        base_unchecked: !app.settings.edit_copy_folder.is_empty(),
         running: None,
         stopping: false,
         cancel: Arc::new(AtomicBool::new(false)),
@@ -492,25 +641,17 @@ pub fn open_edit_copy(app: &mut App) -> Task<Message> {
         profile_path: (!app.settings.edit_copy_profile_path.is_empty()).then(|| PathBuf::from(&app.settings.edit_copy_profile_path)),
         profile_check: ProfileCheck::Checking,
         missing_profiles: None,
-        check_serial: 0,
+        plan_serial: 0,
     };
     ec.replan(&app.coll, &app.bus());
     app.modal = Some(Modal { kind: Kind::EditCopy(Box::new(ec)), confirm: None });
     Task::none()
 }
 
-/// A check's answer (see [`EditCopy::check`]).
-pub fn on_copy_check(app: &mut App, serial: u64, profile: Option<Result<(), String>>, missing: usize) {
-    let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
-    if serial != ec.check_serial {
-        return;
-    }
-    ec.missing_profiles = Some(missing);
-    if let Some(result) = profile {
-        ec.profile_check = match result {
-            Ok(()) => ProfileCheck::Ok,
-            Err(why) => ProfileCheck::Bad(why),
-        };
+/// A plan built on a worker (see [`EditCopy::replan`]).
+pub fn on_copy_planned(app: &mut App, r: Box<EditCopyPlanned>) {
+    if let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal {
+        ec.land(*r);
     }
 }
 
@@ -535,10 +676,11 @@ pub fn edit_copy_folder_changed(app: &mut App, path: PathBuf) {
     let bus = app.bus();
     let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &mut app.modal else { return };
     ec.base = Some(path.clone());
+    ec.base_unchecked = false;
     ec.replan(&app.coll, &bus);
     app.settings.edit_copy_folder = path.to_string_lossy().into_owned();
     app.settings.edit_copy_subfolder = ec.subfolder;
-    let _ = app.settings.save();
+    app.settings.save_in_background();
 }
 
 /// Preferences changed the destination or the subfolder option: an open
@@ -554,6 +696,7 @@ pub fn edit_copy_settings_changed(app: &mut App) {
     }
     if base.is_some() {
         ec.base = base;
+        ec.base_unchecked = false;
     }
     ec.subfolder = subfolder && ec.working.is_some();
     ec.replan(&app.coll, &bus);
@@ -592,11 +735,35 @@ pub fn on_copy_done(app: &mut App, report: Arc<CopyReport>) -> Task<Message> {
     app.show_status(msg, 0)
 }
 
+/// The open dialog's plan state, for the test harness.
+pub fn dialog_dump(app: &App) -> String {
+    match &app.modal {
+        Some(Modal { kind: Kind::EditCopy(_), .. }) => edit_copy_dump(app),
+        Some(Modal { kind: Kind::Export(ex), .. }) => format!(
+            "[export] planning={} files={} conflicts={} bulk={:?}",
+            ex.planning,
+            ex.plan.as_ref().map_or(0, |p| p.total()),
+            ex.plan.as_ref().map_or(0, |p| p.conflict_count()),
+            ex.bulk
+        ),
+        Some(Modal { kind: Kind::Sort(so), .. }) => format!(
+            "[sort] checked={} moves={} conflicts={} strategy={:?}",
+            so.checked,
+            so.plan.move_count(),
+            so.plan.conflict_count(),
+            so.plan.strategy
+        ),
+        Some(Modal { kind: Kind::Prune(pr), .. }) => format!("[prune] files={} remote={}", pr.ids.len(), pr.remote),
+        _ => "[dialog] none open".into(),
+    }
+}
+
 /// The Copy for editing dialog's state, for the test harness.
 pub fn edit_copy_dump(app: &App) -> String {
     let Some(Modal { kind: Kind::EditCopy(ec), .. }) = &app.modal else { return "[copy] no Copy for editing dialog".into() };
     let mut out = format!(
-        "[copy] raws={} jpgs={} profile={:?} path={:?} check={:?} missing={:?} choice={:?} go={:?} to_copy={} existing={}",
+        "[copy] planning={} raws={} jpgs={} profile={:?} path={:?} check={:?} missing={:?} choice={:?} go={:?} to_copy={} existing={}",
+        ec.planning,
         ec.raws,
         ec.jpgs,
         ec.profile,
@@ -642,13 +809,19 @@ fn profiles_summary(p: &edit_copy::ProfileReport) -> Option<String> {
 // ── sort / pair / prune ─────────────────────────────────────────────────────
 
 pub struct Sort {
+    /// Where each file goes; conflicts are known once `checked`.
     plan: SeparationPlan,
+    checked: bool,
+    plan_serial: u64,
     running: bool,
 }
 
 pub struct Prune {
     ids: Vec<RecordId>,
+    /// Some files are on another drive (found on a worker, so the warning
+    /// may appear a moment after the dialog).
     remote: bool,
+    remote_serial: u64,
     running: bool,
 }
 
@@ -656,9 +829,28 @@ pub fn open_sort(app: &mut App) -> Task<Message> {
     if app.coll.is_empty() {
         return info(app, "No working folder", "Open a folder of photos first (Ctrl+O).");
     }
-    let plan = SeparationPlan::new(&app.coll);
-    app.modal = Some(Modal { kind: Kind::Sort(Box::new(Sort { plan, running: false })), confirm: None });
+    // Where each file goes is known in memory; which names are taken is
+    // found on a worker (`BgEvent::SortPlanned`).
+    let plan = SeparationPlan::prepare(&app.coll);
+    let serial = next_serial();
+    let (job, bus) = (plan.clone(), app.bus());
+    std::thread::spawn(move || {
+        slow_share_for_tests();
+        let _ = bus.unbounded_send(BgEvent::SortPlanned { serial, plan: Box::new(job.check_disk()) });
+    });
+    app.modal = Some(Modal { kind: Kind::Sort(Box::new(Sort { plan, checked: false, plan_serial: serial, running: false })), confirm: None });
     Task::none()
+}
+
+/// The sort plan with its conflicts checked; one for an earlier dialog is
+/// dropped.
+pub fn on_sort_planned(app: &mut App, serial: u64, plan: Box<SeparationPlan>) {
+    let Some(Modal { kind: Kind::Sort(so), .. }) = &mut app.modal else { return };
+    if serial != so.plan_serial || so.running {
+        return;
+    }
+    so.plan = *plan;
+    so.checked = true;
 }
 
 pub fn open_review(app: &mut App) -> Task<Message> {
@@ -667,9 +859,23 @@ pub fn open_review(app: &mut App) -> Task<Message> {
         return info(app, "Nothing to review", "No files are marked to prune. Mark photos with P in the grid or the viewer.");
     }
     let paths: Vec<PathBuf> = ids.iter().filter_map(|&i| app.coll.get(i)).map(|r| r.path.clone()).collect();
-    let remote = trash::has_remote_files(&paths);
-    app.modal = Some(Modal { kind: Kind::Prune(Box::new(Prune { ids, remote, running: false })), confirm: None });
+    let (serial, bus) = (next_serial(), app.bus());
+    std::thread::spawn(move || {
+        slow_share_for_tests();
+        let remote = trash::has_remote_files(&paths);
+        let _ = bus.unbounded_send(BgEvent::PruneRemote { serial, remote });
+    });
+    app.modal = Some(Modal { kind: Kind::Prune(Box::new(Prune { ids, remote: false, remote_serial: serial, running: false })), confirm: None });
     Task::none()
+}
+
+/// Whether the pruned files are on another drive (see [`open_review`]).
+pub fn on_prune_remote(app: &mut App, serial: u64, remote: bool) {
+    if let Some(Modal { kind: Kind::Prune(pr), .. }) = &mut app.modal {
+        if serial == pr.remote_serial {
+            pr.remote = remote;
+        }
+    }
 }
 
 pub fn on_trashed(app: &mut App, result: Arc<trash::TrashResult>) -> Task<Message> {
@@ -830,7 +1036,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                         }
                     }
                 }
-                Msg::ExBulk(r) => {
+                Msg::ExBulk(r) if !ex.planning => {
                     if let Some(p) = &mut ex.plan {
                         p.apply_bulk_resolution(r);
                         ex.bulk = Some(r);
@@ -868,7 +1074,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     app.modal = Some(Modal { kind: Kind::Export(ex), confirm });
                     return app.pick_folder(FolderTarget::ExportLibrary);
                 }
-                Msg::ExGo => {
+                Msg::ExGo if !ex.planning => {
                     if let (Some(plan), None) = (ex.plan.clone(), &ex.done) {
                         if plan.total() > 0 && ex.running.is_none() {
                             ex.running = Some(Run::start(plan.active_count(), plan.active_bytes()));
@@ -903,20 +1109,20 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     if let Some(b) = &ec.base {
                         app.settings.edit_copy_folder = b.to_string_lossy().into_owned();
                         app.settings.edit_copy_subfolder = v;
-                        let _ = app.settings.save();
+                        app.settings.save_in_background();
                     }
                 }
                 Msg::EcRaws(v) => {
                     ec.raws = v;
                     ec.reselect(&app.coll, &bus);
                     app.settings.edit_copy_raws = v;
-                    let _ = app.settings.save();
+                    app.settings.save_in_background();
                 }
                 Msg::EcJpgs(v) => {
                     ec.jpgs = v;
                     ec.reselect(&app.coll, &bus);
                     app.settings.edit_copy_jpgs = v;
-                    let _ = app.settings.save();
+                    app.settings.save_in_background();
                 }
                 Msg::EcChange => {
                     app.modal = Some(Modal { kind: Kind::EditCopy(ec), confirm });
@@ -930,7 +1136,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                         ec.profile = kind;
                         app.settings.edit_copy_profile = kind;
                         app.settings.save_in_background();
-                        ec.check(&bus);
+                        ec.check(&app.coll, &bus);
                     }
                 }
                 Msg::EcProfileBrowse if ec.running.is_none() && ec.done.is_none() => task = pick_profile(ec.profile_path.as_ref()),
@@ -941,7 +1147,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     app.settings.edit_copy_profile_path = path.to_string_lossy().into_owned();
                     app.settings.save_in_background();
                     ec.profile_path = Some(path);
-                    ec.check(&bus);
+                    ec.check(&app.coll, &bus);
                 }
                 Msg::EcGo => match ec.go() {
                     EcGoAction::None => {}
@@ -956,26 +1162,27 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                     }
                     EcGoAction::Copy => {
                         if let Some(dest) = ec.dest_dir() {
-                            // Re-plan: the folder may have changed while the dialog sat open.
-                            let plan = EditCopyPlan::new(&ec.sel.files, &app.coll, &dest);
+                            // The run plans again on its worker (the folder may
+                            // have changed while the dialog sat open) and sends
+                            // that plan, so the dialog shows what ran.
+                            let inputs = edit_copy::plan_inputs(&ec.sel.files, &app.coll);
                             let profile = ec.profile_choice();
-                            // A RAW already there may still want its profile.
-                            let add = !profile.is_none() && plan.existing_raws().next().is_some();
-                            if plan.to_copy_count() > 0 || add {
-                                ec.running = Some(Run::start(plan.to_copy_count(), plan.total_bytes()));
-                                ec.cancel = Arc::new(AtomicBool::new(false));
-                                let cancel = ec.cancel.clone();
-                                let run_plan = plan.clone();
-                                let bus = bus.clone();
-                                std::thread::spawn(move || {
-                                    let pbus = bus.clone();
-                                    let report = run_plan.execute(&profile, &cancel, &move |p| {
-                                        let _ = pbus.unbounded_send(BgEvent::CopyProgress(p));
-                                    });
-                                    let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
+                            let (files, bytes) = ec.plan.as_ref().map_or((0, 0), |p| (p.to_copy_count(), p.total_bytes()));
+                            ec.running = Some(Run::start(files, bytes));
+                            ec.cancel = Arc::new(AtomicBool::new(false));
+                            let cancel = ec.cancel.clone();
+                            let serial = ec.plan_serial;
+                            let bus = bus.clone();
+                            std::thread::spawn(move || {
+                                let plan = EditCopyPlan::build(inputs, &dest);
+                                let planned = EditCopyPlanned { serial, plan: Some(plan.clone()), base_gone: false, profile: None, missing_profiles: None };
+                                let _ = bus.unbounded_send(BgEvent::EditCopyPlanned(Box::new(planned)));
+                                let pbus = bus.clone();
+                                let report = plan.execute(&profile, &cancel, &move |p| {
+                                    let _ = pbus.unbounded_send(BgEvent::CopyProgress(p));
                                 });
-                            }
-                            ec.plan = Some(plan);
+                                let _ = bus.unbounded_send(BgEvent::CopyDone(Arc::new(report)));
+                            });
                         }
                     }
                 },
@@ -989,8 +1196,8 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         }
         Kind::Sort(mut so) => {
             match msg {
-                Msg::SortStrategy(st) => so.plan.set_strategy(st),
-                Msg::SortGo => {
+                Msg::SortStrategy(st) if so.checked => so.plan.set_strategy(st),
+                Msg::SortGo if so.checked => {
                     let n = so.plan.move_count();
                     app.modal = Some(Modal {
                         kind: Kind::Sort(so),
@@ -1353,7 +1560,12 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
     // (Once done, the summary below says what happened: the chips would
     // only repeat its plan.)
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
-    if let (Some(plan), None) = (&ex.plan, &ex.done) {
+    if ex.planning && ex.done.is_none() {
+        // (With no plan yet, the preview below says so instead.)
+        if ex.plan.is_some() {
+            chips = chips.push(container(kit::caption("Checking the library\u{2026}")).padding(Padding::from([4.0, 0.0])));
+        }
+    } else if let (Some(plan), None) = (&ex.plan, &ex.done) {
         let ids = export_ids(app, ex);
         let unp_raw = ids.iter().filter_map(|&i| app.coll.get(i)).filter(|r| r.file_type == FileType::Raw && !r.is_paired()).count();
         let unp_jpg = ids.iter().filter_map(|&i| app.coll.get(i)).filter(|r| r.file_type == FileType::Jpg && !r.is_paired()).count();
@@ -1454,6 +1666,8 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
             }
             col.into()
         }
+    } else if ex.planning {
+        container(kit::caption("Checking the library\u{2026}")).padding(t::S3).into()
     } else {
         container(kit::secondary("Choose a library folder to see where the photos will go.")).padding(t::S3).into()
     };
@@ -1471,7 +1685,7 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
     col = col.push(preview_box);
 
     // Conflicts
-    if let (Some(plan), false) = (&ex.plan, locked) {
+    if let (Some(plan), false) = (&ex.plan, locked || ex.planning) {
         let n = plan.conflict_count();
         if n > 0 {
             let seg = |label: &'static str, r: Resolution| kit::segment(label, ex.bulk == Some(r), None, d(Msg::ExBulk(r)));
@@ -1502,7 +1716,7 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
         let (label, msg) = match &ex.plan {
             Some(p) if p.total() > 0 => {
                 let verb = if ex.mode == Mode::Move { "Move" } else { "Export" };
-                (format!("{verb} {}", plural(p.total() as u64, "file")), (!running).then_some(Msg::ExGo))
+                (format!("{verb} {}", plural(p.total() as u64, "file")), (!running && !ex.planning).then_some(Msg::ExGo))
             }
             _ => ("Export".into(), None),
         };
@@ -1639,17 +1853,23 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     let sel = &ec.sel;
     let noun = ec.noun();
     let marked = || sel.files.iter().filter_map(|&i| app.coll.get(i));
-    let (n, bytes) = match &ec.plan {
+    // While a plan for these choices is built, the last one isn't shown:
+    // it may be for other files or another folder.
+    let shown_plan = ec.plan.as_ref().filter(|_| !ec.planning || ec.running.is_some());
+    let (n, bytes) = match shown_plan {
         Some(plan) => (plan.to_copy_count(), plan.total_bytes()),
         None => (sel.files.len(), marked().map(|r| r.file_size).sum()),
     };
-    let (renamed, cropped) = match (&ec.done, &ec.plan) {
+    let (renamed, cropped) = match (&ec.done, shown_plan) {
         (Some(report), _) => (report.copied.iter().filter(|o| o.renamed()).count(), report.copied.iter().filter(|o| o.is_cropped()).count()),
         (None, Some(plan)) => (plan.renamed_count(), plan.cropped_count()),
         (None, None) => (0, marked().filter(|r| r.is_cropped() && r.file_type == FileType::Raw).count()),
     };
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
-    chips = chips.push(if let Some(report) = &ec.done {
+    let checking = ec.planning && ec.running.is_none() && ec.done.is_none();
+    chips = chips.push(if checking {
+        container(kit::caption("Checking the folder\u{2026}")).padding(Padding::from([4.0, 0.0])).into()
+    } else if let Some(report) = &ec.done {
         let copied: u64 = report.copied.iter().map(|o| o.file_size).sum();
         chip(format!("{} copied, {}", plural(report.copied.len() as u64, noun), util::fmt_bytes(copied)), t::RAW)
     } else if n > 0 {
@@ -1657,7 +1877,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     } else {
         chip("Nothing to copy".into(), t::INK2)
     });
-    if let Some(k) = ec.plan.as_ref().map(|p| p.existing_count()).filter(|&k| k > 0) {
+    if let Some(k) = shown_plan.map(|p| p.existing_count()).filter(|&k| k > 0) {
         chips = chips.push(chip(format!("{k} already in the folder"), t::INK2));
     }
     match &ec.done {
@@ -1682,7 +1902,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             }
         }
         None => {
-            let add = ec.profiles_to_add();
+            let add = if checking { 0 } else { ec.profiles_to_add() };
             if add > 0 {
                 chips = chips.push(kit::tip(
                     chip(format!("{} to add", plural(add as u64, "profile")), t::SIGNAL),
@@ -1692,7 +1912,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             }
         }
     }
-    if renamed > 0 {
+    if renamed > 0 && !checking {
         chips = chips.push(kit::tip(
             chip(format!("{renamed} renamed"), t::WARN),
             "Other files in the folder have these names, so the copies get a number added. Nothing is overwritten.",
@@ -1809,7 +2029,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
     } else {
         if sel.files.is_empty() {
             list = list.push(container(kit::secondary(format!("No {noun}s to copy. Mark shots with M in the grid or the viewer first."))).padding(t::S3));
-        } else if let Some(plan) = &ec.plan {
+        } else if let Some(plan) = shown_plan {
             let (have, new): (Vec<_>, Vec<_>) = plan.ops.iter().partition(|op| op.exists);
             if !new.is_empty() {
                 list = list.push(group("To copy", new.len()));
@@ -1947,6 +2167,9 @@ fn sort_view<'a>(_app: &'a App, so: &'a Sort, w: f32, h: f32) -> Element<'a, Mes
     }
 
     let mut chips = row![].spacing(t::S2).align_y(Alignment::Center);
+    if !so.checked {
+        chips = chips.push(container(kit::caption("Checking the folder\u{2026}")).padding(Padding::from([4.0, 0.0])));
+    }
     if n_skip > 0 {
         chips = chips.push(chip(format!("{n_skip} already sorted"), t::INK2));
     }
@@ -2000,7 +2223,7 @@ fn sort_view<'a>(_app: &'a App, so: &'a Sort, w: f32, h: f32) -> Element<'a, Mes
         .spacing(t::S1)
         .height(Length::Fill),
     );
-    let can_go = plan.move_count() > 0 && !so.running;
+    let can_go = plan.move_count() > 0 && !so.running && so.checked;
     col = col.push(footer(
         vec![],
         vec![
@@ -2293,4 +2516,137 @@ pub fn shortcuts_view<'a>() -> Element<'a, Message> {
         .height(Length::Fill)
         .style(style::fill(t::MOUNT))
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::collection::Collection;
+    use crate::model::record::{MTime, PhotoRecord};
+    use iced::futures::channel::mpsc;
+    use std::time::Duration;
+
+    /// Two marked RAW+JPG shots (made-up paths: planning never reads them).
+    fn shoot() -> Collection {
+        let mut c = Collection::new();
+        for name in ["RAW/IMG_1.ARW", "JPG/IMG_1.JPG", "RAW/IMG_2.ARW", "JPG/IMG_2.JPG"] {
+            let p = PathBuf::from("/home/me/shoot").join(name);
+            let mut r = PhotoRecord::new(p.clone(), FileType::from_path(&p).unwrap(), 10, MTime::from_unix(1_700_000_000, 0), None);
+            r.is_marked = true;
+            c.add(r);
+        }
+        c.build_pairs();
+        c
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("pp-dialogs-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The dialog as opened on `coll`, copying RAWs into `base`, no profile.
+    fn dialog(coll: &Collection, base: PathBuf, base_unchecked: bool) -> EditCopy {
+        EditCopy {
+            sel: edit_copy::select_marked(coll, true, false),
+            raws: true,
+            jpgs: false,
+            working: None,
+            base: Some(base),
+            subfolder: false,
+            plan: None,
+            planning: false,
+            base_unchecked,
+            running: None,
+            stopping: false,
+            cancel: Arc::new(AtomicBool::new(false)),
+            done: None,
+            profile: ProfileKind::None,
+            profile_path: None,
+            profile_check: ProfileCheck::Checking,
+            missing_profiles: None,
+            plan_serial: 0,
+        }
+    }
+
+    /// The next plan a worker sent.
+    fn answer(rx: &mut mpsc::UnboundedReceiver<BgEvent>) -> EditCopyPlanned {
+        for _ in 0..500 {
+            match rx.try_recv() {
+                Ok(BgEvent::EditCopyPlanned(p)) => return *p,
+                Ok(_) => {}
+                _ => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        panic!("no plan came back");
+    }
+
+    #[test]
+    fn copy_waits_for_the_plan_of_the_current_choices() {
+        let (bus, mut rx) = mpsc::unbounded();
+        let c = shoot();
+        let mut ec = dialog(&c, scratch("waits"), false);
+        ec.replan(&c, &bus);
+        // Nothing has been placed yet: no Copy, however long it takes.
+        assert!(ec.planning);
+        assert_eq!(ec.go(), EcGoAction::None);
+        assert!(!ec.go_enabled());
+        assert!(ec.land(answer(&mut rx)));
+        assert!(!ec.planning);
+        assert_eq!(ec.go(), EcGoAction::Copy);
+        assert_eq!(ec.plan.as_ref().unwrap().to_copy_count(), 2);
+        // A change asks again: the plan in hand is for other choices, so
+        // Copy waits again until the new one lands.
+        ec.jpgs = true;
+        ec.reselect(&c, &bus);
+        assert_eq!(ec.go(), EcGoAction::None);
+        assert!(ec.land(answer(&mut rx)));
+        assert_eq!(ec.go(), EcGoAction::Copy);
+        assert_eq!(ec.plan.as_ref().unwrap().to_copy_count(), 4);
+    }
+
+    #[test]
+    fn an_older_plan_never_replaces_a_newer_one() {
+        let (bus, mut rx) = mpsc::unbounded();
+        let c = shoot();
+        let mut ec = dialog(&c, scratch("stale"), false);
+        ec.replan(&c, &bus); // RAWs
+        let first = ec.plan_serial;
+        ec.jpgs = true;
+        ec.reselect(&c, &bus); // RAWs and JPGs
+        let (a, b) = (answer(&mut rx), answer(&mut rx));
+        let (old, new) = if a.serial == first { (a, b) } else { (b, a) };
+        assert_eq!(old.serial, first);
+        // The older answer is dropped, whenever it arrives …
+        assert!(!ec.land(old.clone()));
+        assert!(ec.planning && ec.plan.is_none());
+        assert_eq!(ec.go(), EcGoAction::None);
+        assert!(ec.land(new));
+        assert_eq!(ec.plan.as_ref().unwrap().ops.len(), 4);
+        // … before or after the newer one.
+        assert!(!ec.land(old));
+        assert_eq!(ec.plan.as_ref().unwrap().ops.len(), 4);
+        assert_eq!(ec.go(), EcGoAction::Copy);
+    }
+
+    #[test]
+    fn a_remembered_folder_that_is_gone_asks_for_one() {
+        let (bus, mut rx) = mpsc::unbounded();
+        let c = shoot();
+        let gone = scratch("gone").join("not here");
+        let mut ec = dialog(&c, gone, true);
+        ec.replan(&c, &bus);
+        assert_eq!(ec.go(), EcGoAction::None);
+        assert!(ec.land(answer(&mut rx)));
+        assert!(ec.base.is_none() && ec.plan.is_none());
+        assert_eq!(ec.go(), EcGoAction::ChooseFolder);
+    }
+
+    #[test]
+    fn plan_serials_are_unique_across_dialogs() {
+        let a = next_serial();
+        let b = next_serial();
+        assert!(b > a);
+    }
 }
