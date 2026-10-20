@@ -1,7 +1,9 @@
 //! A tiny scripted driver for verifying the UI headlessly-ish: steps run on
 //! a timer, screenshots come from iced (only this app's windows).
 //!
-//! Enabled with `PP_SCRIPT=<file>`.  One command per line:
+//! Enabled with `PP_SCRIPT=<file>`.  `PP_PLAN_DELAY_MS=<ms>` makes each
+//! dialog's plan worker wait that long, as on a slow share, so the
+//! "Checking the folder…" state can be seen.  One command per line:
 //!
 //! ```text
 //! wait 1500
@@ -78,6 +80,8 @@
 //! dlg copy-profile-file /x.pp3   # as if its file picker returned /x.pp3
 //! dlg copy-raws-on|copy-raws-off|copy-jpgs-on|copy-jpgs-off
 //! copydump                    # print the Copy for editing dialog's state
+//! dlgdump                     # print the open dialog's plan state (copy,
+//!                             # export, sort, review)
 //! gridscroll 20000 3000       # scroll the grid to y=20000 px over 3 s
 //! zoom 240                    # set the grid's thumbnail size
 //! calday 2026-07-24           # show a day's photos in the calendar (as
@@ -1241,6 +1245,10 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 Task::none()
             }
         },
+        "dlgdump" => {
+            eprintln!("[script] {}", super::dialogs::dialog_dump(app));
+            Task::none()
+        }
         "copydump" => {
             eprintln!("[script] {}", super::dialogs::edit_copy_dump(app));
             Task::none()
@@ -1884,6 +1892,7 @@ fn dialog_msg(name: &str) -> Option<super::dialogs::Msg> {
         "export-all" => Msg::ExMarkedOnly(false),
         "export-skip" => Msg::ExBulk(Resolution::Skip),
         "export-overwrite" => Msg::ExBulk(Resolution::Overwrite),
+        "export-bulk-rename" => Msg::ExBulk(Resolution::Rename),
         "export-go" => Msg::ExGo,
         "copy-go" => Msg::EcGo,
         "copy-profile-base" => Msg::EcProfile(crate::ops::rt_profile::ProfileKind::Base),

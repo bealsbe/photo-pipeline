@@ -63,10 +63,15 @@ pub enum BgEvent {
     /// An edit copy, after each file.
     CopyProgress(crate::ops::Progress),
     CopyDone(Arc<CopyReport>),
-    /// The edit-copy dialog's check `serial`: whether its custom profile can
-    /// be used (`None`: no custom profile to check), and how many RAWs
-    /// already in the folder have no profile beside them.
-    EditCopyCheck { serial: u64, profile: Option<Result<(), String>>, missing_profiles: usize },
+    /// The edit-copy dialog's plan, built on a worker, with its profile
+    /// check (see `dialogs::EditCopyPlanned`).
+    EditCopyPlanned(Box<crate::app::dialogs::EditCopyPlanned>),
+    /// The export dialog's plan for request `serial`, built on a worker.
+    ExportPlanned { serial: u64, plan: Box<crate::ops::library::LibraryPlan> },
+    /// The sort dialog's plan with its conflicts found on disk.
+    SortPlanned { serial: u64, plan: Box<crate::ops::separate::SeparationPlan> },
+    /// Whether the pruned files the review dialog lists are on another drive.
+    PruneRemote { serial: u64, remote: bool },
 
     Trashed(Arc<crate::ops::trash::TrashResult>),
     Sorted(Arc<SortResult>),
@@ -244,7 +249,10 @@ impl BgEvent {
             BgEvent::ExportDone(_) => "ExportDone",
             BgEvent::CopyProgress { .. } => "CopyProgress",
             BgEvent::CopyDone(_) => "CopyDone",
-            BgEvent::EditCopyCheck { .. } => "EditCopyCheck",
+            BgEvent::EditCopyPlanned(_) => "EditCopyPlanned",
+            BgEvent::ExportPlanned { .. } => "ExportPlanned",
+            BgEvent::SortPlanned { .. } => "SortPlanned",
+            BgEvent::PruneRemote { .. } => "PruneRemote",
             BgEvent::Trashed(_) => "Trashed",
             BgEvent::Sorted(_) => "Sorted",
             BgEvent::Undo(_) => "Undo",
