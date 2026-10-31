@@ -1,6 +1,6 @@
-//! People's faces (phase 3, plan §5.2 step 5, §6.5, §7a.5): what the
-//! engine keeps about faces beside the search index, and the *Subjects*
-//! page's state built from it and from the user's file.
+//! People's faces: what the engine keeps about faces beside the search
+//! index, and the *Subjects* page's state built from it and from the
+//! user's file.
 //!
 //! - The **cache** ([`FaceStore`], recomputable, under the library's index
 //!   folder, files readable by the user alone): the detections YuNet found
@@ -13,7 +13,7 @@
 //! - [`People`]: both together on the engine's thread, with the clusters
 //!   derived from them, the undo stack and the snapshot the page shows.
 //!
-//! Nothing here is written into photos, sidecars or exports (§10).
+//! Nothing here is written into photos, sidecars or exports.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -667,7 +667,7 @@ pub struct People {
     /// The people's clusters and sureness, from the last regroup and the
     /// faces assigned since.
     pub grouped: Grouped,
-    /// Other kinds' automatic clusters (fursuits, phase 4), by cluster
+    /// Other kinds' automatic clusters (fursuits), by cluster
     /// id, as their steps last published them: so an operation on such a
     /// group finds its members and its kind here, and the kinds check
     /// refuses a mix.  Never people's rows.
@@ -1498,7 +1498,7 @@ impl People {
         if gone.is_empty() && redraw.is_empty() {
             return Err(Refused::Nothing);
         }
-        let what = format!("Took back {} not a {}", util_plural(faces.len(), "photo"), box_noun(kind));
+        let what = format!("Took back {} not a {}", crate::util::a_or_n(faces.len(), "photo"), box_noun(kind));
         self.checkpoint(what.clone());
         self.file.removed.retain(|l| !gone.contains(l));
         self.file.added.extend(redraw);
@@ -1580,7 +1580,7 @@ impl People {
         Arc::new(Subjects { generation: self.generation, groups, faces_found, undoable, seen_together: HashSet::new(), chosen_covers, loose: HashMap::new() })
     }
 
-    /// Suggestions for review (UI 6): for a subject, the faces within
+    /// Suggestions for review: for a subject, the faces within
     /// the cut-off (the strict one with `strict`) of its confirmed
     /// members that are confirmed nowhere and not rejected for it, nearest
     /// first, one entry per burst; for a cluster, its own members to
@@ -1745,13 +1745,9 @@ pub struct Taken {
     pub drawn: Vec<FaceRef>,
 }
 
-/// "a photo", "3 photos".
-fn util_plural(n: usize, word: &str) -> String {
-    if n == 1 { format!("a {word}") } else { format!("{n} {word}s") }
-}
-
+/// `word` with its plural `s` unless `n` is 1 ("face", "faces").
 fn plural(n: usize, word: &str) -> String {
-    if n == 1 { word.to_string() } else { format!("{word}s") }
+    format!("{word}{}", crate::util::s(n))
 }
 
 /// A face's pixels for `Engine::crop`: the cached tile when there is one
@@ -1971,12 +1967,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Decision 12 through the people state: merging or moving across
-    /// kinds is refused and leaves no undo step.
+    /// Merging or moving across kinds is refused and leaves no undo step.
     /// Another kind's cluster, published through `other_clusters`, keeps
     /// its kind through every operation: naming it makes a subject of
     /// that kind, merging it into a person is refused, and its members
-    /// are found (phase 4 found the opposite on a real run).
+    /// are found (a real run once found the opposite).
     #[test]
     fn another_kinds_cluster_keeps_its_kind() {
         let mut p = People::load(None);

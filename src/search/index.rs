@@ -1,4 +1,4 @@
-//! The search index on disk and in memory (plan §6).
+//! The search index on disk and in memory.
 //!
 //! **Keys.**  A file's [`Key`] is a 128-bit digest of its size and first
 //! 64 KB: the EXIF with the capture time, sub-seconds and the maker note's

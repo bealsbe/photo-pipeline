@@ -32,41 +32,21 @@ use crate::util;
 /// but no tab shows them.
 pub const KINDS: [Kind; 2] = [Kind::Person, Kind::Fursuit];
 
-/// How the pages speak of a kind.
-pub trait KindWords {
-    /// The tab's name: "People", "Fursuits".
-    fn title(self) -> &'static str;
-    /// One of them: "person", "fursuit", "pet".
-    fn one(self) -> &'static str;
-    /// What a crop of one shows: "Faces", "Heads".
-    fn crops(self) -> &'static str;
-    /// Saved in the settings as a number.
-    fn index(self) -> u8;
+/// What a crop of one shows: "Faces", "Heads".
+pub fn crops(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Person => "Faces",
+        Kind::Fursuit => "Heads",
+        Kind::Pet => "Pets",
+    }
 }
 
-impl KindWords for Kind {
-    fn title(self) -> &'static str {
-        self.plural()
-    }
-
-    fn one(self) -> &'static str {
-        self.noun()
-    }
-
-    fn crops(self) -> &'static str {
-        match self {
-            Kind::Person => "Faces",
-            Kind::Fursuit => "Heads",
-            Kind::Pet => "Pets",
-        }
-    }
-
-    fn index(self) -> u8 {
-        match self {
-            Kind::Person => 0,
-            Kind::Fursuit => 1,
-            Kind::Pet => 2,
-        }
+/// The kind saved in the settings as a number.
+pub fn kind_index(kind: Kind) -> u8 {
+    match kind {
+        Kind::Person => 0,
+        Kind::Fursuit => 1,
+        Kind::Pet => 2,
     }
 }
 
@@ -1278,10 +1258,10 @@ mod tests {
 
     #[test]
     fn kinds_are_spoken_of_in_their_own_words() {
-        assert_eq!(KINDS.map(|k| k.title()), ["People", "Fursuits"]);
-        assert_eq!(KINDS.map(|k| k.one()), ["person", "fursuit"]);
-        assert_eq!(kind_from_index(Kind::Pet.index()), Kind::Person, "a saved Pets tab opens People");
-        assert!(KINDS.iter().all(|k| kind_from_index(k.index()) == *k));
-        assert!(!KINDS.iter().any(|k| k.title().contains("Character") || k.one().contains("character")), "Fursuits, never Characters");
+        assert_eq!(KINDS.map(|k| k.plural()), ["People", "Fursuits"]);
+        assert_eq!(KINDS.map(|k| k.noun()), ["person", "fursuit"]);
+        assert_eq!(kind_from_index(kind_index(Kind::Pet)), Kind::Person, "a saved Pets tab opens People");
+        assert!(KINDS.iter().all(|k| kind_from_index(kind_index(*k)) == *k));
+        assert!(!KINDS.iter().any(|k| k.plural().contains("Character") || k.noun().contains("character")), "Fursuits, never Characters");
     }
 }

@@ -91,8 +91,7 @@ struct State {
 
 impl State {
     fn progress(&self, now: Instant) -> f32 {
-        let k = (now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 / self.ms.max(1.0)).clamp(0.0, 1.0);
-        paint::lerp(self.from, self.to, paint::out_cubic(k))
+        paint::Tween { from: self.from, to: self.to, start: self.start, ms: self.ms }.value(now)
     }
 
     fn animating(&self, now: Instant) -> bool {

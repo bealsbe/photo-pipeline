@@ -1,8 +1,8 @@
-//! Phase 0: the evaluation harness for library search (ignored by
-//! default; plan §8).  It runs the real helper on a folder of previews,
-//! ranks a fixed set of queries, writes the candidates a labelling page
-//! shows, and, once labels exist, scores precision, recall, the prompt
-//! templates and the closeness cut-off.
+//! The evaluation harness for library search (ignored by default).  It
+//! runs the real helper on a folder of previews, ranks a fixed set of
+//! queries, writes the candidates a labelling page shows, and, once
+//! labels exist, scores precision, recall, the prompt templates and the
+//! closeness cut-off.
 //!
 //! ```text
 //! PP_MODEL_DIR=<models> PP_EVAL_PREVIEWS=<folder of JPG previews> \
@@ -10,7 +10,7 @@
 //!     cargo test --release -- --ignored --nocapture search::eval::
 //! ```
 //!
-//! - `PP_EVAL_PREVIEWS`: any tree of JPEGs (the study's `prev/<set>/*.jpg`).
+//! - `PP_EVAL_PREVIEWS`: any tree of JPEGs (such as `prev/<set>/*.jpg`).
 //! - `PP_EVAL_OUT/vectors.bin`: the embeddings, cached between runs.
 //! - `PP_EVAL_OUT/candidates.json`: per query, the top [`CANDIDATES`]
 //!   with scores, for the labelling page.
@@ -177,7 +177,7 @@ impl Setup {
 /// Write the candidates the labelling page shows, and the score spread
 /// of each query.
 #[test]
-#[ignore = "phase 0: needs PP_MODEL_DIR, PP_EVAL_PREVIEWS and PP_EVAL_OUT"]
+#[ignore = "needs PP_MODEL_DIR, PP_EVAL_PREVIEWS and PP_EVAL_OUT"]
 fn candidates() {
     let s = setup();
     let prompts: Vec<String> = QUERIES.iter().map(|q| query::prompt(q)).collect();
@@ -225,7 +225,7 @@ fn candidates() {
 /// Score the labels: precision at 10 and 50, recall within the pool,
 /// the prompt templates, the closeness sweep and the fursuit contrast.
 #[test]
-#[ignore = "phase 0: needs the candidates run and PP_EVAL_LABELS"]
+#[ignore = "needs the candidates run and PP_EVAL_LABELS"]
 fn score_labels() {
     let s = setup();
     let labels: HashMap<String, Vec<String>> = serde_json::from_str(&std::fs::read_to_string(need("PP_EVAL_LABELS")).expect("labels file")).expect("labels JSON");
@@ -347,7 +347,7 @@ fn mean(v: &[f64]) -> f64 {
     if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
 }
 
-// ── phase 2: the hidden tags and the query syntax ───────────────────────────
+// ── the hidden tags and the query syntax ────────────────────────────────────
 
 /// The tag thresholds against the labels: for each vocabulary word, how
 /// many previews carry it at each probability floor, and for the words
@@ -355,7 +355,7 @@ fn mean(v: &[f64]) -> f64 {
 /// many of the right ones are found (recall within the labelled pool).
 /// Needs the `candidates` run (the cached vectors) and `PP_EVAL_LABELS`.
 #[test]
-#[ignore = "phase 2: needs the candidates run and PP_EVAL_LABELS"]
+#[ignore = "needs the candidates run and PP_EVAL_LABELS"]
 fn tag_thresholds() {
     use crate::search::tags::{DEFAULT_THRESHOLD, VocabVectors};
     use crate::search::vocab::{self, VOCABULARY};
@@ -463,15 +463,15 @@ fn tag_thresholds() {
 
 /// The engine on a scratch library (symlinks into the archive are fine:
 /// it only reads): the first index on the card, then the example
-/// queries of the phase 2 round with their hit counts, the fursuits
-/// left out and the Things list.  The index goes in `PP_EVAL_OUT/index`.
+/// queries with their hit counts, the fursuits left out and the Things
+/// list.  The index goes in `PP_EVAL_OUT/index`.
 ///
 /// ```text
 /// PP_MODEL_DIR=<models> PP_EVAL_LIBRARY=<library root> PP_EVAL_OUT=<scratch> \
 ///     cargo test --release -- --ignored --nocapture --exact search::eval::library_queries
 /// ```
 #[test]
-/// Phase 3's check on a scratch library of symlinks (read only): the first
+/// The people check on a scratch library of symlinks (read only): the first
 /// index with faces on the chosen device, the clusters that follow, naming
 /// the largest, `@name` queries clearest first, suggestions, a tile, undo
 /// and *Forget all*.  Prints counts only, never names or paths of people.
@@ -481,7 +481,7 @@ fn tag_thresholds() {
 ///   PP_EVAL_OUT=<scratch> [PP_EVAL_DEVICE=gpu|cpu] [PP_EVAL_FACE_MODEL=aura-face|s-face|insight-face] \
 ///   cargo test --release people_library -- --ignored --nocapture
 /// ```
-#[ignore = "phase 3: needs PP_MODEL_DIR, PP_MODEL_ROOT, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
+#[ignore = "needs PP_MODEL_DIR, PP_MODEL_ROOT, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
 fn people_library() {
     use crate::bus::BgEvent;
     use crate::ml::models::{self, ModelId};
@@ -636,7 +636,7 @@ fn people_library() {
     std::thread::sleep(Duration::from_millis(200));
 }
 
-/// Phase 4's check on a scratch library of symlinks (read only): the
+/// The fursuit check on a scratch library of symlinks (read only): the
 /// first index with the head step on the chosen device (the card scans
 /// at once; the processor asks, and the test answers yes), the fursuit
 /// clusters that follow, a tile, *Find more* on the largest, naming it
@@ -660,10 +660,7 @@ fn fursuits_library() {
     use crate::search::heads::Step;
     use std::sync::Arc;
     use std::time::Duration;
-    fn rss_mb() -> f64 {
-        let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-        s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
-    }
+    use crate::search::rss_mb;
     let root = PathBuf::from(need("PP_EVAL_LIBRARY"));
     let out = PathBuf::from(need("PP_EVAL_OUT"));
     need("PP_MODEL_DIR");
@@ -697,7 +694,7 @@ fn fursuits_library() {
     assert!(status.stopped.is_none(), "{:?}", status.stopped);
     let index_s = t.elapsed().as_secs_f64();
     eprintln!("indexed {} shots in {index_s:.1} s on {:?}; heads: on={} installed={} tagged={} step={:?}; resident {:.0} MB", status.indexed_shots, status.device.name, status.heads.on, status.heads.models_installed, status.heads.tagged, status.heads.step, rss_mb());
-    // The step: the card scans at once; the processor asks (decision 11).
+    // The step: the card scans at once; the processor asks.
     // An index that was already complete ends no pass, so nothing offers
     // the step: then the tab's catch-up (find_heads) is what resumes a
     // scan, over the photos the cache hasn't seen.
@@ -842,7 +839,7 @@ fn fursuits_library() {
 }
 
 #[test]
-#[ignore = "phase 2: needs PP_MODEL_DIR, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
+#[ignore = "needs PP_MODEL_DIR, PP_EVAL_LIBRARY and PP_EVAL_OUT"]
 fn library_queries() {
     use crate::bus::BgEvent;
     use crate::model::library_cache::{self, Store};
@@ -967,7 +964,7 @@ fn library_queries() {
 /// `preview<TAB>camera model<TAB>source` (every frame whose model
 /// contains `PP_EVAL_IR_MODEL`, default `ILCE-6000`, is infrared).
 #[test]
-#[ignore = "phase 2: needs the candidates run, PP_EVAL_LABELS and PP_EVAL_MODELS"]
+#[ignore = "needs the candidates run, PP_EVAL_LABELS and PP_EVAL_MODELS"]
 fn infrared() {
     use crate::search::tags::DEFAULT_THRESHOLD;
     use crate::search::vocab::{self, VOCABULARY};

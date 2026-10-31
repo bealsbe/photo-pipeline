@@ -36,6 +36,10 @@ pub struct Collection {
     order: Vec<RecordId>,
     by_path: HashMap<PathBuf, RecordId>,
     pair_index: HashMap<PairKey, Vec<RecordId>>,
+    /// Per slot: the RAW/JPG partner, as `build_pairs` last found them.
+    pair_of: Vec<Option<RecordId>>,
+    /// Records came, went or moved since `build_pairs`: `pair_of` is stale.
+    pairs_dirty: bool,
     stats: Stats,
     /// Bumped whenever records come, go, move or pair up (not for marks),
     /// so what is derived from those (bursts) knows when to look again.
@@ -79,6 +83,7 @@ impl Collection {
         self.pair_index.entry(pair_key(&record.path)).or_default().push(id);
         self.by_path.insert(record.path.clone(), id);
         self.slots.push(Some(record));
+        self.pairs_dirty = true;
         self.order.push(id);
         self.generation += 1;
         id
@@ -98,6 +103,7 @@ impl Collection {
     pub fn remove(&mut self, id: RecordId) -> Option<PhotoRecord> {
         let record = self.slots.get_mut(id as usize)?.take()?;
         self.generation += 1;
+        self.pairs_dirty = true;
         let s = &mut self.stats;
         s.total -= 1;
         match record.file_type {
@@ -135,6 +141,7 @@ impl Collection {
         let old_path = record.path.clone();
         let old_key = pair_key(&old_path);
         self.generation += 1;
+        self.pairs_dirty = true;
         if let Some(bucket) = self.pair_index.get_mut(&old_key) {
             bucket.retain(|&r| r != id);
             if bucket.is_empty() {
@@ -230,6 +237,15 @@ impl Collection {
                 r.pair_stem = v;
             }
         }
+        self.pair_of = vec![None; self.slots.len()];
+        for ids in self.pair_index.values() {
+            for &id in ids {
+                if self.get(id).is_some_and(|r| r.is_paired()) {
+                    self.pair_of[id as usize] = ids.iter().copied().find(|&o| o != id);
+                }
+            }
+        }
+        self.pairs_dirty = false;
         self.generation += 1;
         self.stats.paired = paired_count;
         self.stats.unpaired = self.stats.total - paired_count;
@@ -247,6 +263,9 @@ impl Collection {
 
     /// The RAW/JPG partner of a paired record.
     pub fn find_pair(&self, id: RecordId) -> Option<RecordId> {
+        if !self.pairs_dirty {
+            return self.pair_of.get(id as usize).copied().flatten();
+        }
         let r = self.get(id)?;
         if !r.is_paired() {
             return None;

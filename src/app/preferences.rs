@@ -496,7 +496,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
         Msg::Recount => recount(app),
         Msg::Exported(r) => {
             let text = match r {
-                Ok((dir, n)) => format!("Exported {} with a README of the format to {}.", util::plural(n as u64, "correction"), tilde(&dir)),
+                Ok((dir, n)) => format!("Exported {} with a README of the format to {}.", util::plural(n as u64, "correction"), util::tilde(&dir)),
                 Err(e) => format!("Couldn't export the record: {e}."),
             };
             app.prefs.exported = Some(text.clone());
@@ -959,9 +959,9 @@ fn grouping_setting(app: &App) -> Element<'_, Message> {
         let on = g == chosen;
         let mut top = row![text(g.label()).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].spacing(8).align_y(Alignment::Center);
         if g == crate::search::heads::Grouping::default() {
-            top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
+            top = top.push(kit::caption("The default"));
         }
-        let body = column![top, text(grouping_words(g)).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill);
+        let body = column![top, kit::note(grouping_words(g))].spacing(2).width(Length::Fill);
         let dot = container(if on {
             Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() }))
         } else {
@@ -990,7 +990,7 @@ fn grouping_setting(app: &App) -> Element<'_, Message> {
     .spacing(3);
     if app.search.status.heads.regrouping {
         col = col.push(Space::new().height(t::S1));
-        col = col.push(row![icons::view(Glyph::Info, 13.0, t::INK3), text("Grouping the fursuits again. Names, answers and labels stay.").size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center));
+        col = col.push(row![icons::view(Glyph::Info, 13.0, t::INK3), kit::caption("Grouping the fursuits again. Names, answers and labels stay.")].spacing(6).align_y(Alignment::Center));
     }
     container(col).padding(Padding::from([t::S3, t::S4])).width(Length::Fill).into()
 }
@@ -1353,7 +1353,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         storage_section(app),
         kit::caption(format!(
             "Settings are kept in {}.",
-            settings::path().map(|f| tilde(&f)).unwrap_or_else(|| "settings.json".into())
+            settings::path().map(|f| util::tilde(&f)).unwrap_or_else(|| "settings.json".into())
         )),
     ]
     .spacing(t::S5 + t::S2)
@@ -1524,7 +1524,7 @@ fn desktop(app: &App) -> Element<'_, Message> {
         .spacing(6)
         .align_y(Alignment::Center);
     let about = column![
-        text("When the Plasma panel has a Global Menu, the menus show there instead of in the window.").size(t::T_SMALL).color(t::INK3),
+        kit::caption("When the Plasma panel has a Global Menu, the menus show there instead of in the window."),
         status,
     ]
     .spacing(t::S1);
@@ -1565,7 +1565,7 @@ fn storage_section(app: &App) -> Element<'_, Message> {
 fn size_column<'a>(value: String, sub: Option<String>) -> Element<'a, Message> {
     let mut size = column![text(value).size(t::T_BODY).font(paint::MEDIUM).color(t::INK)].align_x(Alignment::End).width(96);
     if let Some(s) = sub {
-        size = size.push(text(s).size(t::T_SMALL).color(t::INK3));
+        size = size.push(kit::caption(s));
     }
     size.into()
 }
@@ -1580,9 +1580,9 @@ fn search_index_row(app: &App) -> Element<'_, Message> {
     };
     let rebuild = focusable(p, Control::SearchRebuild, kit::btn("Rebuild…", style::ghost(), search_action_ready(app, Control::SearchRebuild).then(|| m(Msg::Press(Control::SearchRebuild)))));
     let clear = focusable(p, Control::SearchClear, kit::btn("Clear…", style::secondary(), search_action_ready(app, Control::SearchClear).then(|| m(Msg::Press(Control::SearchClear)))));
-    let path = crate::search::index::cache_dir().map(|d| tilde(&d)).unwrap_or_default();
+    let path = crate::search::index::cache_dir().map(|d| util::tilde(&d)).unwrap_or_default();
     let about = column![
-        text("What each photo looks like to search, so a search reads no photos.").size(t::T_SMALL).color(t::INK3),
+        kit::caption("What each photo looks like to search, so a search reads no photos."),
         text(path).size(t::T_SMALL).color(t::INK4)
     ]
     .spacing(2);
@@ -1601,8 +1601,8 @@ fn heads_row(app: &App) -> Element<'_, Message> {
         Some(s) => (util::fmt_bytes(s.heads_bytes + s.judged_bytes), Some(util::plural(h.found as u64, "head"))),
     };
     let about = column![
-        text("The fursuit heads found in your photos, and the close calls the judge checked, so the Fursuits tab and its reviews read no photos. Forget them in Preferences ▸ Fursuits.").size(t::T_SMALL).color(t::INK3),
-        text(crate::search::index::cache_dir().map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
+        kit::caption("The fursuit heads found in your photos, and the close calls the judge checked, so the Fursuits tab and its reviews read no photos. Forget them in Preferences ▸ Fursuits."),
+        text(crate::search::index::cache_dir().map(|d| util::tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)
     ]
     .spacing(2);
     // Lines up with the rows' buttons (it has none: it isn't a cache).
@@ -1619,9 +1619,9 @@ fn models_row(app: &App) -> Element<'_, Message> {
     };
     let open = focusable(p, Control::ModelsOpen, kit::btn("Open", style::ghost(), models_exist(p).then(|| m(Msg::Press(Control::ModelsOpen)))));
     let delete = focusable(p, Control::ModelsDelete, kit::btn("Delete…", style::secondary(), search_action_ready(app, Control::ModelsDelete).then(|| m(Msg::Press(Control::ModelsDelete)))));
-    let path = crate::ml::models::models_dir().map(|d| tilde(&d)).unwrap_or_default();
+    let path = crate::ml::models::models_dir().map(|d| util::tilde(&d)).unwrap_or_default();
     let about = column![
-        text("The models search, faces and fursuit heads use. Deleted, each downloads again, after asking, when it's next needed.").size(t::T_SMALL).color(t::INK3),
+        kit::caption("The models search, faces and fursuit heads use. Deleted, each downloads again, after asking, when it's next needed."),
         text(path).size(t::T_SMALL).color(t::INK4)
     ]
     .spacing(2);
@@ -1708,10 +1708,7 @@ fn search_section(app: &App) -> Element<'_, Message> {
             Control::CheckCard,
             // No side padding: wrapped onto its own line, the link sits
             // flush with the words above it.
-            iced::widget::button(text("Check again").size(t::T_SMALL).font(paint::MEDIUM))
-                .padding(Padding::from([1.0, 0.0]))
-                .style(style::link().style())
-                .on_press(m(Msg::Press(Control::CheckCard))),
+            kit::link_btn("Check again", [1.0, 0.0], Some(m(Msg::Press(Control::CheckCard)))),
         );
         about_device = about_device.push(row![text(line).size(t::T_SMALL).color(tone), check].spacing(t::S2).align_y(Alignment::Center).wrap());
     } else {
@@ -1738,7 +1735,7 @@ fn search_section(app: &App) -> Element<'_, Message> {
         .on_release(m(Msg::ClosenessDone))
         .width(160)
         .style(style::zoom_slider(true));
-    let ends = row![text("Closer").size(t::T_SMALL).color(t::INK3), Space::new().width(Length::Fill), text("Looser").size(t::T_SMALL).color(t::INK3)].width(160);
+    let ends = row![kit::caption("Closer"), Space::new().width(Length::Fill), kit::caption("Looser")].width(160);
     let reset_on = !at_default(v);
     let reset = kit::tip(
         focusable(
@@ -1811,7 +1808,7 @@ fn people_section(app: &App) -> Element<'_, Message> {
             k => format!(", and the {k} names you gave"),
         };
         let offer = row![
-            text(format!("No new faces will be looked for. Forget the {n} already found{names}?")).size(t::T_SMALL).color(t::INK2).width(Length::Fill),
+            kit::note(format!("No new faces will be looked for. Forget the {n} already found{names}?")).width(Length::Fill),
             focusable(p, Control::KeepFaces, kit::btn("Keep them", style::ghost(), Some(m(Msg::Press(Control::KeepFaces))))),
             focusable(p, Control::ForgetFaces, kit::btn("Forget them", style::danger(), Some(m(Msg::Press(Control::ForgetFaces))))),
         ]
@@ -2009,10 +2006,10 @@ fn corrections_row(app: &App) -> Element<'_, Message> {
         None => "Nothing recorded yet.".to_string(),
     }));
     if bytes > crate::model::decisions::LARGE_BYTES {
-        words = words.push(text("That's a lot: export it, then delete it to start a new one.").size(t::T_SMALL).color(t::INK2));
+        words = words.push(kit::note("That's a lot: export it, then delete it to start a new one."));
     }
     if let Some(path) = app.search.link.decisions().path() {
-        words = words.push(text(util::elide_path(Path::new(&tilde(path)), 40)).size(t::T_SMALL).color(t::INK4));
+        words = words.push(text(util::elide_path(Path::new(&util::tilde(path)), 40)).size(t::T_SMALL).color(t::INK4));
     }
     let export = focusable(p, Control::ExportCorrections, kit::btn("Export…", style::ghost(), kept.then(|| m(Msg::Press(Control::ExportCorrections)))));
     let delete = focusable(p, Control::DeleteCorrections, kit::btn("Delete the record…", style::secondary(), kept.then(|| m(Msg::Press(Control::DeleteCorrections)))));
@@ -2053,7 +2050,7 @@ fn judge_setting(app: &App) -> Element<'_, Message> {
             col = col.push(
                 row![
                     icons::view(Glyph::Info, 13.0, t::INK3),
-                    text(format!("{} stays downloaded ({}) and isn't loaded; Storage deletes it.", c.label(), util::fmt_bytes(b))).size(t::T_SMALL).color(t::INK3)
+                    kit::caption(format!("{} stays downloaded ({}) and isn't loaded; Storage deletes it.", c.label(), util::fmt_bytes(b)))
                 ]
                 .spacing(6)
                 .align_y(Alignment::Center),
@@ -2071,8 +2068,8 @@ fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
     let mut lines = column![].spacing(2);
     match c.model().map(crate::ml::models::info) {
         None => {
-            top = top.push(text("The default").size(t::T_SMALL).color(t::INK3));
-            lines = lines.push(text("Find more and the review offer photos by how alike the heads look, as before.").size(t::T_SMALL).color(t::INK2));
+            top = top.push(kit::caption("The default"));
+            lines = lines.push(kit::note("Find more and the review offer photos by how alike the heads look, as before."));
         }
         Some(mi) => {
             let coming = app.search.downloads.iter().find(|d| d.model == mi.id && !d.state.is_final());
@@ -2085,9 +2082,9 @@ fn judge_option(app: &App, c: JudgeChoice, on: bool) -> Element<'_, Message> {
                 None => format!("{} to download", super::search_setup::size(mi.bytes())),
             };
             top = top.push(Space::new().width(Length::Fill));
-            top = top.push(text(right).size(t::T_SMALL).color(t::INK2));
-            lines = lines.push(text(super::fursuit_judge::choice_words(c).unwrap_or_default()).size(t::T_SMALL).color(t::INK2));
-            lines = lines.push(text(format!("{}. Licence: {}, {}. From {}.", mi.name, mi.licence, mi.licence_plain, mi.publisher)).size(t::T_SMALL).color(t::INK3));
+            top = top.push(kit::note(right));
+            lines = lines.push(kit::note(super::fursuit_judge::choice_words(c).unwrap_or_default()));
+            lines = lines.push(kit::caption(format!("{}. Licence: {}, {}. From {}.", mi.name, mi.licence, mi.licence_plain, mi.publisher)));
         }
     }
     let dot = container(if on {
@@ -2193,7 +2190,7 @@ fn judge_row(app: &App, c: JudgeChoice) -> Element<'_, Message> {
     } else {
         "A close-call judge, not chosen now. Its files stay until deleted; choosing it again uses them as they are."
     };
-    let about = column![text(what).size(t::T_SMALL).color(t::INK3), text(judge_dir(c).map(|d| tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)].spacing(2);
+    let about = column![kit::caption(what), text(judge_dir(c).map(|d| util::tilde(&d)).unwrap_or_default()).size(t::T_SMALL).color(t::INK4)].spacing(2);
     setting(format!("Close-call judge: {}", c.label()), about.into(), row![size_column(value, sub), open, delete].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
@@ -2226,13 +2223,13 @@ fn face_model_view(app: &App, picked: crate::ml::models::ModelId) -> Element<'_,
             top = top.push(text("Recommended").size(t::T_SMALL).color(t::SIGNAL));
         }
         if now == Some(mi.id) {
-            top = top.push(text("In use now").size(t::T_SMALL).color(t::INK3));
+            top = top.push(kit::caption("In use now"));
         }
         top = top.push(Space::new().width(Length::Fill));
-        top = top.push(text(super::search_setup::size(mi.bytes())).size(t::T_SMALL).color(t::INK2));
+        top = top.push(kit::note(super::search_setup::size(mi.bytes())));
         let licence = format!("Licence: {}: {}. From {}, its publisher.", super::search_setup::capital(mi.licence), mi.licence_plain, mi.publisher);
         let what = mi.what.split_whitespace().collect::<Vec<_>>().join(" ");
-        let col = column![top, text(what).size(t::T_SMALL).color(t::INK2), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
+        let col = column![top, kit::note(what), text(licence).size(t::T_SMALL).color(if mi.restricted { t::WARN } else { t::INK3 })].spacing(2).width(Length::Fill);
         let dot = container(if on { Element::from(container(Space::new()).width(8).height(8).style(|_| container::Style { background: Some(Background::Color(t::SIGNAL)), border: Border { radius: 4.0.into(), ..Border::default() }, ..Default::default() })) } else { Space::new().into() })
             .width(16)
             .height(16)
@@ -2305,8 +2302,8 @@ fn cache_row<'a>(p: &'a Prefs, c: Cache, label: &'a str, what: &'a str) -> Eleme
     let exists = usage.is_some_and(|u| u.exists);
     let open = focusable(p, Control::Open(c), kit::btn("Open", style::ghost(), exists.then(|| m(Msg::Press(Control::Open(c))))));
     let clear = focusable(p, Control::Clear(c), kit::btn("Clear…", style::secondary(), clearable(p, c).then(|| m(Msg::Press(Control::Clear(c))))));
-    let path = c.dir().map(|d| tilde(&d)).unwrap_or_default();
-    let about = column![text(what).size(t::T_SMALL).color(t::INK3), text(path).size(t::T_SMALL).color(t::INK4)].spacing(2);
+    let path = c.dir().map(|d| util::tilde(&d)).unwrap_or_default();
+    let about = column![kit::caption(what), text(path).size(t::T_SMALL).color(t::INK4)].spacing(2);
     setting(label, about.into(), row![size, open, clear].spacing(t::S1).align_y(Alignment::Center).into())
 }
 
@@ -2352,9 +2349,9 @@ fn unsaved_row(app: &App) -> Element<'_, Message> {
             .color(t::INK2),
         );
     }
-    about = about.push(text("These are your marks, not a cache, so they can't be cleared here.").size(t::T_SMALL).color(t::INK3));
+    about = about.push(kit::caption("These are your marks, not a cache, so they can't be cleared here."));
     let dir = crate::model::saver::default_journal_dir();
-    about = about.push(text(dir.as_deref().map(tilde).unwrap_or_default()).size(t::T_SMALL).color(t::INK4));
+    about = about.push(text(dir.as_deref().map(util::tilde).unwrap_or_default()).size(t::T_SMALL).color(t::INK4));
     let exists = journal.as_ref().is_some_and(|j| j.exists);
     let size = column![text(value).size(t::T_BODY).font(paint::MEDIUM).color(tone)].align_x(Alignment::End).width(96);
     let open = focusable(p, Control::OpenUnsaved, kit::btn("Open", style::ghost(), exists.then(|| m(Msg::Press(Control::OpenUnsaved)))));
@@ -2606,13 +2603,13 @@ fn setting<'a>(label: impl text::IntoFragment<'a>, about: Element<'a, Message>, 
 }
 
 fn about<'a>(s: impl text::IntoFragment<'a>) -> Element<'a, Message> {
-    text(s).size(t::T_SMALL).color(t::INK3).into()
+    kit::caption(s).into()
 }
 
 /// A folder setting's line: where it points, or what it is for when unset.
 fn path_about<'a>(path: Option<&Path>, unset: &'a str) -> Element<'a, Message> {
     match path {
-        Some(p) => row![icons::view(Glyph::Folder, 13.0, t::INK3), text(util::elide_path(Path::new(&tilde(p)), 64)).size(t::T_SMALL).color(t::INK2)]
+        Some(p) => row![icons::view(Glyph::Folder, 13.0, t::INK3), kit::note(util::elide_path(Path::new(&util::tilde(p)), 64))]
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
@@ -2675,14 +2672,6 @@ fn keycap<'a>(k: &'a str) -> Element<'a, Message> {
 }
 
 /// `~/…` for a path in the home folder.
-fn tilde(p: &Path) -> String {
-    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {
-        Some(rel) if rel.as_os_str().is_empty() => "~".into(),
-        Some(rel) => format!("~/{}", rel.display()),
-        None => p.display().to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2776,9 +2765,9 @@ mod tests {
     #[test]
     fn home_paths_are_shortened() {
         let home = dirs::home_dir().unwrap();
-        assert_eq!(tilde(&home.join(".cache/photo_pipeline/thumbs")), "~/.cache/photo_pipeline/thumbs");
-        assert_eq!(tilde(&home), "~");
-        assert_eq!(tilde(Path::new("/mnt/nas/library")), "/mnt/nas/library");
+        assert_eq!(util::tilde(&home.join(".cache/photo_pipeline/thumbs")), "~/.cache/photo_pipeline/thumbs");
+        assert_eq!(util::tilde(&home), "~");
+        assert_eq!(util::tilde(Path::new("/mnt/nas/library")), "/mnt/nas/library");
     }
 
     #[test]

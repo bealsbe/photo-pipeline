@@ -355,7 +355,7 @@ fn bench_bursts() {
     }
 }
 
-/// Library search (plan §9): the first index of a library through the
+/// Library search: the first index of a library through the
 /// real engine and helper, then queries.
 ///
 /// ```text

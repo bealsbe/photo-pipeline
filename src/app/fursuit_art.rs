@@ -44,7 +44,7 @@ pub struct Look {
 
 /// The stand-in's suits.  Look-alikes on purpose (0, 6 and 7 are all
 /// masked foxes in close greys), so groups mix and the review has wrong
-/// suggestions to turn down, as the study found with real suits.
+/// suggestions to turn down, as with real suits.
 pub const LOOKS: [Look; 12] = [
     Look { ears: Ears::Fox, mark: Mark::Mask, fur: 178, muzzle: 228, dark: 62 },
     Look { ears: Ears::Bear, mark: Mark::Spots, fur: 108, muzzle: 168, dark: 58 },

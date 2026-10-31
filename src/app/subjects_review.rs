@@ -7,7 +7,7 @@
 //! (shown here as *Auto-advance*), the next suggestion comes after the
 //! same short beat as in the viewer.
 //!
-//! - **One answer covers a whole burst** (UI 6): a suggestion is a press,
+//! - **One answer covers a whole burst**: a suggestion is a press,
 //!   its frames answered together.
 //! - **No is "not this person"**: the photo leaves them (when it was in)
 //!   and is never suggested again.
@@ -25,7 +25,7 @@ use iced::widget::{Space, button, column, container, row, scrollable, stack, tex
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{self, Face, FaceRef, Framing, GroupId, Kind, KindWords};
+use super::people::{self, Face, FaceRef, Framing, GroupId, Kind};
 use super::style;
 use super::subjects::{self as subj, m as sm};
 use super::viewer_advance::BEAT_MS;
@@ -553,7 +553,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(r) = s.review.as_ref() else { return Space::new().into() };
     let body: Element<'_, Message> = match &r.list {
-        None => quiet("Finding the photos to check…".into(), String::new()),
+        None => kit::quiet("Finding the photos to check…".into(), Some(String::new())),
         Some(l) if l.is_empty() => waiting_page(app, r),
         Some(_) if r.at_end() => end_page(app, r),
         Some(list) => {
@@ -583,22 +583,10 @@ pub fn view(app: &App) -> Element<'_, Message> {
     column![header(app, r), kit::hairline(), container(body).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND))].width(Length::Fill).height(Length::Fill).into()
 }
 
-fn quiet<'a>(title: String, body: String) -> Element<'a, Message> {
-    let col = column![
-        Space::new().height(Length::FillPortion(2)),
-        text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK),
-        text(body).size(t::T_BODY).color(t::PHOTO_INK2),
-        Space::new().height(Length::FillPortion(5)),
-    ]
-    .spacing(t::S2)
-    .align_x(Alignment::Center);
-    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
-}
-
 fn header<'a>(app: &'a App, r: &'a Review) -> Element<'a, Message> {
     let s = &app.subjects;
     let name = s.group(&r.group).and_then(|g| g.name.clone());
-    let one = r.kind.one();
+    let one = r.kind.noun();
     let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, name.clone().unwrap_or_else(|| "Unnamed group".into()), t::INK2, style::secondary(), Some(rm(Msg::Done))), "Stop the review  (Esc)", true);
     let title = if r.checking { format!("Same {one} as this group?") } else { format!("Same {one}?") };
     let n = r.len();
@@ -699,7 +687,7 @@ fn suggestion<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element
     };
     let not_tip = format!("{}: a mask, a plush, a sign… Removed for good, in every frame of the burst; never grouped, suggested or found again  (X)", not_head_words(r.kind));
     let crop: Element<'a, Message> = if x_done { stack![crop, x_mark(BIG, shape)].into() } else { crop };
-    let one = r.kind.one();
+    let one = r.kind.noun();
     let hint_yes = if r.checking { format!("Yes: the same {one} as this group  (Y)") } else { format!("Yes: add it to them  (Y)") };
     let hint_no = format!("No: not this {one}; never suggested again  (N)");
     let mut burst = if entry.len() > 1 { format!("A burst of {} frames: one answer covers them all.", entry.len()) } else { String::new() };
@@ -751,7 +739,7 @@ fn photo<'a>(app: &'a App, r: &'a Review, list: &'a [Vec<Face>]) -> Element<'a, 
     let caption = if entry.len() > 1 { format!("In the photo: the first of {} frames", entry.len()) } else { "In the photo".to_string() };
     let name = f.jpg.as_deref().or(f.raw.as_deref()).map(util::stem).unwrap_or_default();
     let when = format!("{}, {}", super::search::long_date(f.day), f.capture.format("%H:%M:%S"));
-    let open = button(text("Open the photo  Enter").size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([2.0, 0.0])).style(style::link().style()).on_press(rm(Msg::Open));
+    let open = kit::link_btn("Open the photo  Enter", [2.0, 0.0], Some(rm(Msg::Open)));
     column![text(caption).size(t::T_SMALL).color(t::PHOTO_INK3), mount, text(name).size(t::T_SMALL).color(t::PHOTO_INK2), text(when).size(t::T_SMALL).color(t::PHOTO_INK3), open]
         .spacing(6)
         .width(PHOTO_W + 10.0)

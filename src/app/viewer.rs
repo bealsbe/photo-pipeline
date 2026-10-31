@@ -86,6 +86,8 @@ pub struct Viewer {
 
 /// The status while a photo decodes.
 const LOADING: &str = "Loading…";
+/// EXIF sections kept for photos shown; emptied when full.
+const EXIF_CACHE: usize = 256;
 
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -519,6 +521,9 @@ fn maybe_exiftool(v: &mut Viewer, path: &std::path::Path, ft: FileType, sections
 pub fn on_exif(app: &mut App, key: (PathBuf, Option<PathBuf>), sections: Sections) {
     let bus = app.bus();
     let Some(v) = app.viewer.as_mut() else { return };
+    if v.exif_cache.len() >= EXIF_CACHE {
+        v.exif_cache.clear();
+    }
     v.exif_cache.insert(key.clone(), sections.clone());
     if v.exif_pending.as_ref() != Some(&key) {
         return;
@@ -1035,13 +1040,13 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         // The burst, and the frame the outline is on.
         let title = viewer_burst::title(app, v).unwrap_or_default();
         let frame = record.and_then(|r| viewer_burst::frame_caption(app, v).map(|f| format!("{f}, {}", r.filename())));
-        top = top.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+        top = top.push(kit::title(title));
         top = top.push(kit::caption(v.sheet.note.clone().or(frame).unwrap_or_default()));
         if let Some(h) = hint {
             top = top.push(h);
         }
     } else {
-        top = top.push(text(name).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+        top = top.push(kit::title(name));
         match viewer_burst::frame_caption(app, v) {
             Some(frame) => {
                 top = top.push(kit::caption(frame));
@@ -1052,7 +1057,7 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
                     true,
                 ));
             }
-            None => top = top.push(kit::caption(format!("{} of {}", util::thousands(v.index as u64 + 1), util::thousands(n as u64)))),
+            None => top = top.push(kit::caption(util::of(v.index as u64 + 1, n as u64))),
         }
         if let Some(h) = hint {
             top = top.push(h);
@@ -1283,7 +1288,7 @@ pub fn view<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
                 }
                 None => "Cropped".into(),
             };
-            facts = facts.push(row![icons::view(Glyph::Scissors, 14.0, t::SIGNAL), text(label).size(t::T_SMALL).color(t::INK2)].spacing(6).align_y(Alignment::Center));
+            facts = facts.push(row![icons::view(Glyph::Scissors, 14.0, t::SIGNAL), kit::note(label)].spacing(6).align_y(Alignment::Center));
         }
         bottom = bottom.push(container(facts).padding(Padding::from([0.0, t::S2])));
     }
@@ -1406,7 +1411,7 @@ fn exif_panel<'a>(app: &'a App, v: &'a Viewer) -> Element<'a, Message> {
         for (l, val) in rows {
             f = f.push(
                 row![
-                    text(l).size(t::T_SMALL).color(t::INK3).width(92),
+                    kit::caption(l).width(92),
                     text(val).size(t::T_SMALL).color(t::INK).width(Length::Fill),
                 ]
                 .spacing(t::S2),

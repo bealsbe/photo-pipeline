@@ -107,7 +107,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         View::Subjects => super::subjects::view(app, keyboard_ok),
     };
     // Background work shows as a sweep along the content's top edge.
-    let busy = app.scanning
+    let busy = app.scanning()
         || match app.view {
             View::Calendar => app.calendar.is_indexing() || app.calendar.thumbs.pending() > 0,
             // The first index runs along the top of the search page (an
@@ -269,14 +269,14 @@ pub fn cmd_enabled(app: &App, cmd: Cmd) -> bool {
         };
     }
     if cmd == Cmd::Analyse {
-        return !app.scanning && !app.coll.is_empty() && !app.quality.analysing();
+        return !app.scanning() && !app.coll.is_empty() && !app.quality.analysing();
     }
-    let analysed = !app.quality.analysing() && app.quality.hints.coverage().0 > 0;
+    let analysed = || !app.quality.analysing() && app.quality.hints.coverage().0 > 0;
     if matches!(cmd, Cmd::PruneSoft | Cmd::PruneAccidental | Cmd::PruneCopies | Cmd::ProblemsOnly) {
-        return analysed && !app.view.is_library();
+        return analysed() && !app.view.is_library();
     }
     if cmd == Cmd::KeepThisPruneRest {
-        return analysed && super::viewer_burst::can_open(app);
+        return analysed() && super::viewer_burst::can_open(app);
     }
     // Fursuit groups to compare, and no group editor to put away first.
     if cmd == Cmd::FursuitMerges {
@@ -726,7 +726,7 @@ fn date_popup<'a>(app: &'a App, p: &'a super::DatePopup) -> Element<'a, Message>
     let names = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
     let mut head = row![].spacing(2);
     for i in 0..7 {
-        head = head.push(text(names[(first as usize + i) % 7]).size(t::T_SMALL).color(t::INK3).width(32).center());
+        head = head.push(kit::caption(names[(first as usize + i) % 7]).width(32).center());
     }
     grid = grid.push(head);
     for week in weeks {
@@ -785,7 +785,7 @@ fn count<'a>(n: usize, label: &'a str, tone: Color, dot: bool) -> Element<'a, Me
         }));
     }
     r = r.push(text(util::thousands(n as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(if dot { t::INK } else { tone }));
-    r = r.push(text(label).size(t::T_SMALL).color(t::INK3));
+    r = r.push(kit::caption(label));
     r.into()
 }
 
@@ -805,10 +805,7 @@ fn status_bar(app: &App) -> Element<'_, Message> {
     let mut message = row![crate::ui::symbols::line(&app.status.text, t::T_SMALL, paint::REGULAR, t::INK2)].spacing(t::S2).align_y(Alignment::Center);
     if let Some((label, msg)) = &app.status.action {
         message = message.push(
-            button(text(label.clone()).size(t::T_SMALL).font(paint::MEDIUM))
-                .padding(Padding::from([2.0, 6.0]))
-                .style(style::link().style())
-                .on_press(msg.clone()),
+            kit::link_btn(label.clone(), [2.0, 6.0], Some(msg.clone())),
         );
     }
     let mut r = row![message, Space::new().width(Length::Fill)].align_y(Alignment::Center).padding(Padding::from([0.0, BAR_PAD]));
@@ -837,7 +834,7 @@ fn status_bar(app: &App) -> Element<'_, Message> {
 
 /// "To review" is showing and nothing is left in it.
 fn pile_done(app: &App) -> bool {
-    app.filter.to_review && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
+    app.filter.to_review && app.derived.visible.is_empty() && !app.scanning() && !app.coll.is_empty()
 }
 
 /// The end of the pile: say so, rather than show an empty grid.
@@ -864,7 +861,7 @@ fn pile_done_page(app: &App) -> Element<'_, Message> {
 
 /// Marked or Pruned is showing and nothing is in it.
 fn none_shown(app: &App) -> bool {
-    matches!(app.filter.show(), Show::Marked | Show::Pruned) && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
+    matches!(app.filter.show(), Show::Marked | Show::Pruned) && app.derived.visible.is_empty() && !app.scanning() && !app.coll.is_empty()
 }
 
 /// Nothing is marked, or pruned: say how photos get here.
@@ -902,7 +899,7 @@ fn none_shown_page(app: &App) -> Element<'_, Message> {
 /// No working folder yet, or the folder has no photos: say so, with the
 /// way in, rather than show a bare grid.  Not while a scan is running.
 fn folder_empty(app: &App) -> bool {
-    app.coll.is_empty() && !app.scanning
+    app.coll.is_empty() && !app.scanning()
 }
 
 fn folder_empty_page(app: &App) -> Element<'_, Message> {
@@ -953,7 +950,7 @@ fn empty_page_to<'a>(
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(glyph, 48.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+    col = col.push(kit::title(title));
     col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     col = col.push(Space::new().height(t::S2));
     let button = kit::btn(action.0, style::secondary(), Some(action.1));
@@ -974,23 +971,23 @@ const PROGRESS_W: f32 = 64.0;
 /// differ from the file counts beside them.  Clicking switches To review.
 fn review_progress(app: &App) -> Option<Element<'_, Message>> {
     let p = app.derived.progress;
-    if app.view.is_library() || app.scanning || p.shots == 0 {
+    if app.view.is_library() || app.scanning() || p.shots == 0 {
         return None;
     }
     let shots = format!("shot{}", util::s(p.shots));
     let done = p.reviewed == p.shots;
     let words: Element<'_, Message> = if done {
         row![
-            text("All").size(t::T_SMALL).color(t::INK3),
+            kit::caption("All"),
             text(util::thousands(p.shots as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
-            text(format!("{shots} reviewed")).size(t::T_SMALL).color(t::INK3),
+            kit::caption(format!("{shots} reviewed")),
         ]
         .spacing(4)
         .into()
     } else {
         row![
             text(util::thousands(p.reviewed as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
-            text(format!("of {} {shots} reviewed", util::thousands(p.shots as u64))).size(t::T_SMALL).color(t::INK3),
+            kit::caption(format!("of {} {shots} reviewed", util::thousands(p.shots as u64))),
         ]
         .spacing(4)
         .into()

@@ -1,4 +1,4 @@
-//! Hidden tags (plan §3.2, decision 8): which vocabulary words each
+//! Hidden tags: which vocabulary words each
 //! indexed shot carries, derived from its stored vector against the
 //! vocabulary's text vectors.  Helpers only: they power completions, the
 //! *Things* list and the ranking boost (and later the fursuit-head step);
@@ -10,7 +10,7 @@
 //! unless the vocabulary gives one), and, for a word that must beat
 //! another ([`super::vocab::Word::must_beat`]: the animals and "fursuit",
 //! snow and "infrared"), when it does.  Each word is otherwise judged on
-//! its own, so a camera in a fursuit photo counts as a camera; the study's
+//! its own, so a camera in a fursuit photo counts as a camera; an earlier
 //! softmax share over the whole vocabulary let the fursuit label swallow
 //! the rest.
 //!
@@ -39,7 +39,7 @@ use crate::ops::fsutil;
 /// The match probability a photo needs to carry a word, unless the word
 /// says otherwise: 1 % (cosine ≥ 0.108), above the search default of
 /// 0.3 %, so a tag is a plain match.  Set from the user's own labels on the
-/// phase 0 sample (1 779 previews, 28 words, `eval::tag_thresholds`): at
+/// labelled sample (1 779 previews, 28 words, `eval::tag_thresholds`): at
 /// 1 % the tags are right 87.6 % of the time and find 30.5 % of the
 /// labelled photos; at 2 % (the earlier choice, from the agent's own
 /// judgement) 88.5 % and 21.5 %, so 1 % finds two fifths more for a point

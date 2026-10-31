@@ -1,4 +1,4 @@
-//! The query syntax (plan §7.2), parsed into what the engine applies and
+//! The query syntax, parsed into what the engine applies and
 //! the page shows.  Pure, cheap, callable on the UI thread.
 //!
 //! | Write | Means |
@@ -6,7 +6,7 @@
 //! | `red car at night` | photos that look like the words |
 //! | `"a red car at night"` | the words exactly as the prompt, no template |
 //! | `fireworks -crowd` | like "fireworks", and more like it than like "crowd" |
-//! | `@Name` | a person, fursuit or pet's chip: phase 3; recognised, not searched |
+//! | `@Name` | a person, fursuit or pet's chip; recognised, not searched |
 //! | `2024`, `jun 2024`, `apr–jun 2024`, `2023–2024` | only those dates (`-` and `..` work as the dash) |
 //!
 //! Everything is combined with AND; two date terms narrow each other.
@@ -181,7 +181,7 @@ pub struct Parsed {
     pub exclude: Vec<String>,
     /// Only shots on these days (two date terms narrow each other).
     pub dates: Option<DateRange>,
-    /// `@Name`s, as typed without the `@`.  Phase 3's chips; phase 2
+    /// `@Name`s, as typed without the `@`: the subject chips.  The parser
     /// recognises them and searches nothing for them.
     pub names: Vec<String>,
 }

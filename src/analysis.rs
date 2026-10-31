@@ -1,6 +1,6 @@
 //! The analysis pass: measure each shot's embedded preview
 //! (`imaging::quality`) and find identical files, off the UI thread.
-//! Started only when asked (decision 2); `app::quality` starts it and
+//! Started only when asked; `app::quality` starts it and
 //! keeps the results.
 //!
 //! - **One job per shot** (the caller passes which files to measure: a

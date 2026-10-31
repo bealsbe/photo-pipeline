@@ -1,6 +1,5 @@
-//! The fursuit-head step as the pages see it (decision 11, plan §5.2 and
-//! §7a.4–7a.5): on or off, how far it has got, what it waits for, and
-//! what it costs on each device.
+//! The fursuit-head step as the pages see it: on or off, how far it has
+//! got, what it waits for, and what it costs on each device.
 //!
 //! - **Semi-automatic, scanned during indexing.**  Heads are looked for on
 //!   the photos the index tags as fursuits, as a step after search (and
@@ -52,9 +51,9 @@ use crate::ops::fsutil;
 use super::step::{self, Grouped, KindStep, RegroupJob, Regrouped};
 
 /// Seconds per fursuit photo for the head step (OWLv2 to find heads, then
-/// DINOv2 on each head): the study's 0.12 s on the card (about 1.4 hours
+/// DINOv2 on each head): the measured 0.12 s on the card (about 1.4 hours
 /// for the library's ~42 k fursuit photos) and 1.3 s on the processor
-/// (about 15 hours), plan §3.7.
+/// (about 15 hours).
 /// Fursuit photos in a busy event day (sample E2's day held ~3 500).
 pub const EVENT_DAY_PHOTOS: usize = 3_500;
 
@@ -191,15 +190,15 @@ impl HeadsStatus {
 }
 
 /// The fursuit photos a head scan would look at: those indexed and not
-/// looked at yet; before anything is indexed, the study's share of the
+/// looked at yet; before anything is indexed, the measured share of the
 /// library (about three shots in four showed fursuits).
 pub fn photos_to_look_at(h: &HeadsStatus, shots: usize) -> usize {
     if h.tagged > 0 { h.unscanned() } else { shots * 3 / 4 }
 }
 
 /// Whether a head scan may start without asking: only on the graphics
-/// card.  On the processor every scan asks first, with its cost (decision
-/// 11, "each time").
+/// card.  On the processor every scan asks first, with its cost ("each
+/// time").
 pub fn starts_unasked(device: Device) -> bool {
     device == Device::Gpu
 }
@@ -245,7 +244,7 @@ mod tests {
     #[test]
     fn the_costs_match_the_measurements() {
         // The library's fursuit photos, with the helper's own graphs
-        // measured (plan, "As built — phase 4"): about 3.5 hours on the
+        // measured: about 3.5 hours on the
         // card, about two days on the processor; an event day a quarter
         // of an hour on the card, over four hours on the processor.
         let n = 42_180;
@@ -303,18 +302,18 @@ pub const CROP_VERSION: u32 = 1;
 /// the score floor, the overlap and size gates); a change means the
 /// photos are looked at again.
 pub const DETECTOR_VERSION: u32 = 1;
-/// The vector model: one, not a choice (decision 11).  v2: the search
+/// The vector model: one, not a choice.  v2: the search
 /// model's image tower on the head crop, whitened over the library's
-/// heads (`super::whiten`); phase 4's DINOv2 is not run any more.
+/// heads (`super::whiten`); the earlier DINOv2 is not run any more.
 pub const VECTOR_MODEL: ModelId = ModelId::Siglip2;
-/// Head-vector files of models no longer run (phase 4's DINOv2): never
+/// Head-vector files of models no longer run (the earlier DINOv2): never
 /// read, counted in the cache's size, and removed with the rest by
 /// *Clear*, *Rebuild* and *Forget all*.
 pub const LEGACY_VECTOR_FILES: &[&str] = &["headvecs-dinov2-base.bin"];
 /// Dropped entries beyond this share get the files rewritten on load.
 const COMPACT_SHARE: f64 = 0.1;
 /// The word in the vocabulary that gates the step: a photo is looked at
-/// for heads only when the index tags it with it (decision 8, 11).
+/// for heads only when the index tags it with it.
 pub const GATE_WORD: &str = "fursuit";
 
 /// The fursuit cut-offs, in whitened cosine distance (v2), from the
@@ -334,9 +333,8 @@ pub const RAW_CUTOFFS: Cutoffs = Cutoffs { group: 0.094, suggest: 0.097, strict:
 
 /// How tight the automatic fursuit groups are: Preferences ▸ Fursuits ▸
 /// *Grouping* (the user's choice, 2026-10-10: Balanced by default).  The
-/// cuts were swept on the user's labels (`docs/library-search-plan.md`,
-/// "As built — a choice of fursuit grouping"): looser groups split a suit
-/// less often and mix a little more, and the merge suggestions and split
+/// cuts were swept on the user's labels: looser groups split a suit less
+/// often and mix a little more, and the merge suggestions and split
 /// tools make either kind of mistake cheap to fix.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -401,9 +399,8 @@ impl GroupingCuts {
     /// The cuts of `grouping` in the raw or the whitened space.  The
     /// merge suggestions' cut sits above the group cut by the margin it
     /// had before the choice (raw +0.003, whitened +0.02), and the judge's
-    /// far end moves with the group cut; measured per choice on the labels
-    /// (the plan doc's table).  The joining step's cut sits under the
-    /// group cut by [`JOIN_MARGIN`].
+    /// far end moves with the group cut; measured per choice on the labels.
+    /// The joining step's cut sits under the group cut by [`JOIN_MARGIN`].
     pub fn of(grouping: Grouping, whitened: bool) -> GroupingCuts {
         let (group, merge_suggest, merge_far) = match (grouping, whitened) {
             (Grouping::Tighter, false) => (0.094, 0.097, super::judging::RAW_SURE_NO),
@@ -1432,7 +1429,7 @@ fn nearest_members(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f
             if i >= rows.len() {
                 return None;
             }
-            let v = rows.row_vec(i);
+            let v = rows.row(i);
             let (m, d) = members.iter().filter(|&&m| m < rows.len()).map(|&m| (m, 1.0 - rows.dot(m, &v))).min_by(|a, b| a.1.total_cmp(&b.1))?;
             (d <= cutoff).then_some((i, d, m))
         })
@@ -1446,7 +1443,7 @@ fn nearest_members(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f
 pub enum Decision {
     /// Start now (the card; or the user said so).
     Start,
-    /// Wait for the user: the processor is chosen (decision 11).
+    /// Wait for the user: the processor is chosen.
     Ask(Offer),
     /// Nothing to do: off, nothing to look at, or something runs already.
     Nothing,
@@ -1609,7 +1606,7 @@ impl Fursuits {
         self.grouped.suggestion_counts.get(id).copied().unwrap_or(0)
     }
 
-    /// Suggestions for review (UI 6): for a fursuit subject, the heads
+    /// Suggestions for review: for a fursuit subject, the heads
     /// within the cut-off (the strict one with `strict`: *Find more*) of
     /// its confirmed members that are confirmed nowhere and not rejected
     /// for it, nearest first, one entry per burst; for a cluster, its own
@@ -2233,10 +2230,7 @@ mod store_tests {
     #[test]
     #[ignore = "measures resident memory at library scale (PP_HEADS_ROWS)"]
     fn resident_size_of_the_head_vectors_at_library_scale() {
-        fn rss_mb() -> f64 {
-            let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
-            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
-        }
+        use crate::search::rss_mb;
         let rows: usize = std::env::var("PP_HEADS_ROWS").ok().and_then(|s| s.parse().ok()).unwrap_or(68_000);
         let dim = crate::ml::heads::DIM;
         let d = scratch("rss");
@@ -2764,10 +2758,7 @@ mod store_tests {
     #[test]
     #[ignore = "needs a head cache from an eval run (PP_EVAL_OUT)"]
     fn fursuit_regroup_cost() {
-        fn rss_mb() -> f64 {
-            let s = fs::read_to_string("/proc/self/status").unwrap_or_default();
-            s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
-        }
+        use crate::search::rss_mb;
         let dir = PathBuf::from(std::env::var("PP_EVAL_OUT").expect("PP_EVAL_OUT")).join("index");
         let mut store = HeadStore::load(&dir);
         store.vectors();
@@ -2857,7 +2848,7 @@ mod store_tests {
         client.shutdown();
     }
 
-    /// A cache from before v2 (phase 4's DINOv2 vectors in
+    /// A cache from before v2 (DINOv2 vectors in
     /// `headvecs-dinov2-base.bin`, no SigLIP2 vectors, no whitening):
     /// loading it neither fails nor reads the old vectors; its heads are
     /// listed for the catch-up; the old file is counted in the cache's
@@ -2867,7 +2858,7 @@ mod store_tests {
         let d = scratch("legacy");
         {
             let mut s = HeadStore::load(&d);
-            // Detections and tiles as phase 4 wrote them; its vectors
+            // Detections and tiles as the old version wrote them; its vectors
             // went to the DINOv2 file, written below as it was.
             let mut h = head(0.1, 300, &[]);
             h.vector.clear();

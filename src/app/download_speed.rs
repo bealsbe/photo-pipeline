@@ -109,15 +109,7 @@ impl Speed {
             self.samples.push_back((now, self.bytes));
             return;
         }
-        self.samples.push_back((now, self.bytes));
-        while self.samples.len() > 2 && self.samples[1].0 + STEADY <= now {
-            self.samples.pop_front();
-        }
-        if self.shown.is_none_or(|(at, _, _)| now.duration_since(at) >= REFRESH) {
-            if let (Some(fast), Some(steady)) = (self.rate_over(WINDOW), self.rate_over(STEADY)) {
-                self.shown = Some((now, fast, steady));
-            }
-        }
+        record(&mut self.samples, &mut self.shown, now, self.bytes);
     }
 
     /// Every download of the set has ended: the next event starts afresh.
@@ -141,17 +133,25 @@ impl Speed {
         self.shown = None;
         self.active_at = Some(now);
     }
-
-    /// Bytes a second over the last `w` (or all there is), once that is
-    /// at least [`SETTLE`] long.
-    fn rate_over(&self, w: Duration) -> Option<f64> {
-        rate_over(&self.samples, w)
-    }
 }
 
 /// Bytes a second over the last `w` of `samples` ((when, bytes so far),
 /// oldest first; or all there is), once that is at least [`SETTLE`] long.
 /// Shared with the copies' speed (`transfer_speed`).
+/// Take a sample, keep the window to [`STEADY`] and refresh the figure
+/// shown every [`REFRESH`].
+pub(super) fn record(samples: &mut VecDeque<(Instant, u64)>, shown: &mut Option<(Instant, f64, f64)>, now: Instant, bytes: u64) {
+    samples.push_back((now, bytes));
+    while samples.len() > 2 && samples[1].0 + STEADY <= now {
+        samples.pop_front();
+    }
+    if shown.is_none_or(|(at, _, _)| now.duration_since(at) >= REFRESH) {
+        if let (Some(fast), Some(steady)) = (rate_over(samples, WINDOW), rate_over(samples, STEADY)) {
+            *shown = Some((now, fast, steady));
+        }
+    }
+}
+
 pub(super) fn rate_over(samples: &VecDeque<(Instant, u64)>, w: Duration) -> Option<f64> {
     let &(t1, b1) = samples.back()?;
     let &(t0, b0) = samples.iter().rev().find(|(t, _)| *t + w <= t1).or(samples.front())?;

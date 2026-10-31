@@ -64,7 +64,7 @@ pub const MOVED_HEADS: usize = 200;
 pub const RESET_GROUPS: usize = MOVED_HEADS;
 pub const RESET_SIDE_HEADS: usize = 4;
 /// Past this size Preferences says the record is large.  Nothing is
-/// rotated or dropped: see the plan's "As built" section.
+/// rotated or dropped.
 pub const LARGE_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The record's path for the app: beside the user's subjects file.

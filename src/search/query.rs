@@ -1,4 +1,4 @@
-//! Queries (plan §7.2): the text's vector against every shot's, the
+//! Queries: the text's vector against every shot's, the
 //! closeness cut-off, accidental frames left out, best first.  Pure apart
 //! from the text encoder, so it is unit-tested on synthetic vectors.
 //!
@@ -10,7 +10,7 @@
 //! to [`CLOSENESS_DEFAULT`].  A cut relative to the query's own spread
 //! was tried first and fails for things most of the library shows
 //! ("fursuit" here: nothing stands out); it stays in the evaluation
-//! harness for comparison.  *Provisional* until phase 0's labelled set
+//! harness for comparison.  *Provisional* until the labelled set
 //! fine-tunes the default.
 
 use std::path::PathBuf;
@@ -48,7 +48,7 @@ pub struct Hit {
     /// Cosine similarity of the shot to the query.
     pub score: f32,
     /// Carries every vocabulary word the query names as a hidden tag, so
-    /// it is ranked ahead of the rest (plan §7.2).  For ordering and
+    /// it is ranked ahead of the rest.  For ordering and
     /// tests only: tags are never shown on a photo.
     pub tagged: bool,
     pub day: NaiveDate,
@@ -65,7 +65,7 @@ pub struct Hit {
 }
 
 /// The prompt a plain query is wrapped in before encoding (the template
-/// the study measured; phase 0 confirms it).
+/// that measured best; the evaluation harness confirms it).
 pub fn prompt(text: &str) -> String {
     format!("a photo of a {}.", text.trim())
 }
@@ -144,52 +144,38 @@ pub fn score_rows(query: &[f32], rows: &[u16], dim: usize) -> Vec<f32> {
     rows.chunks_exact(dim).map(|row| row.iter().zip(query).map(|(&h, &q)| f16_to_f32(h) * q).sum()).collect()
 }
 
-/// IEEE half → single.
+/// IEEE half → single (the `half` crate's conversion: hardware F16C
+/// where the processor has it, so a row's loop vectorises).
+#[inline]
 pub fn f16_to_f32(h: u16) -> f32 {
-    let sign = ((h >> 15) & 1) as u32;
-    let exp = ((h >> 10) & 0x1f) as u32;
-    let frac = (h & 0x3ff) as u32;
-    let bits = match exp {
-        0 if frac == 0 => sign << 31,
-        0 => {
-            // Subnormal: normalise.
-            let mut e = 127 - 15 + 1;
-            let mut f = frac;
-            while f & 0x400 == 0 {
-                f <<= 1;
-                e -= 1;
-            }
-            (sign << 31) | ((e as u32) << 23) | ((f & 0x3ff) << 13)
-        }
-        31 => (sign << 31) | 0x7f80_0000 | (frac << 13),
-        _ => (sign << 31) | ((exp + 127 - 15) << 23) | (frac << 13),
-    };
-    f32::from_bits(bits)
+    half::f16::from_bits(h).to_f32()
 }
 
 /// Single → IEEE half, round to nearest even.
+#[inline]
 pub fn f32_to_f16(v: f32) -> u16 {
-    let bits = v.to_bits();
-    let sign = ((bits >> 16) & 0x8000) as u16;
-    let exp = ((bits >> 23) & 0xff) as i32;
-    let frac = bits & 0x7f_ffff;
-    if exp == 0xff {
-        return sign | 0x7c00 | if frac != 0 { 0x200 } else { 0 };
+    half::f16::from_f32(v).to_bits()
+}
+
+/// `a · b`.
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+/// Scale `v` to unit length in place; left as it is when its length is
+/// zero or not finite.
+pub fn normalise_in_place(v: &mut [f32]) {
+    let n = dot(v, v).sqrt();
+    if n > 0.0 && n.is_finite() {
+        v.iter_mut().for_each(|x| *x /= n);
     }
-    let e = exp - 127 + 15;
-    if e >= 0x1f {
-        return sign | 0x7c00;
-    }
-    if e <= 0 {
-        if e < -10 {
-            return sign;
-        }
-        let m = (frac | 0x80_0000) >> (1 - e);
-        let rounded = (m + 0x1000 + ((m >> 13) & 1)) >> 13;
-        return sign | rounded as u16;
-    }
-    let m = ((e as u32) << 23 | frac) + 0x1000 + ((frac >> 13) & 1);
-    sign | (m >> 13) as u16
+}
+
+/// A unit-length copy of `v` (see [`normalise_in_place`]).
+pub fn normalised(v: &[f32]) -> Vec<f32> {
+    let mut out = v.to_vec();
+    normalise_in_place(&mut out);
+    out
 }
 
 #[cfg(test)]

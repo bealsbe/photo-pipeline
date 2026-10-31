@@ -1,5 +1,5 @@
 //! The helper process: `photo-pipeline --ml-worker --device gpu|cpu
-//! [--text-only] [--face-model <id>]` (plan §4.3).  The same binary,
+//! [--text-only] [--face-model <id>]`.  The same binary,
 //! started by [`super::client::Client`], so there is nothing extra to
 //! install.  It loads the ONNX Runtime sessions on the chosen device, runs
 //! the self-check on the card, reads previews itself (the app sends paths
@@ -17,7 +17,7 @@
 //! searching what is indexed works whatever the card does; with
 //! `--text-only` nothing touches the card at all.
 //!
-//! **Faces** (phase 3): with `--face-model`, the helper also loads YuNet
+//! **Faces**: with `--face-model`, the helper also loads YuNet
 //! and the chosen recognition model on the same device.  A batch that
 //! asks for faces gets, per photo, the faces found on the detector's
 //! canvas, cut from the full preview, aligned, recognised and tiled, in
@@ -43,6 +43,7 @@ use super::prep::{self, FacePrep, INPUT_SIZE, Prepared};
 use super::{CardFailure, Device, SelfCheck};
 use crate::imaging::decode::{self, Pixels};
 use crate::model::record::FileType;
+use crate::search::query::normalised;
 
 /// The flag that makes the binary a helper.
 pub const FLAG: &str = "--ml-worker";
@@ -76,7 +77,7 @@ pub enum Request {
     EmbedImages { id: u64, files: Vec<(PathBuf, FileType)>, want: Want },
     /// Encode query texts on the processor.
     EncodeText { id: u64, texts: Vec<String> },
-    /// Find fursuit heads in these photos (phase 4): one result per path,
+    /// Find fursuit heads in these photos: one result per path,
     /// in order.  Needs a helper started with `--heads`.
     FindHeads { id: u64, files: Vec<(PathBuf, FileType)> },
     /// The search model's vectors of heads already found (fursuit
@@ -100,7 +101,7 @@ pub enum Reply {
     Failed { message: String },
     Images { id: u64, results: Vec<ImageResult> },
     Texts { id: u64, vectors: Vec<Vec<f32>> },
-    /// The heads found (phase 4), one entry per path asked.
+    /// The heads found, one entry per path asked.
     Heads { id: u64, results: Vec<heads::HeadsResult> },
     /// A request that couldn't be served (asked a text-only helper for
     /// images, or a model error), with the request's id.
@@ -211,7 +212,7 @@ pub struct Models {
     /// YuNet, with its declared shape made symbolic, when faces are on.
     detector: Option<Session>,
     face: Option<FaceModel>,
-    /// OWLv2 for fursuit heads (phase 4), when asked for: its own
+    /// OWLv2 for fursuit heads, when asked for: its own
     /// session, nothing shared with faces.  The heads' vectors come from
     /// the image tower above (v2), kept in a store of their own.
     heads: Option<heads::HeadModels>,
@@ -651,11 +652,6 @@ fn output_dim(session: &Session) -> Option<usize> {
         ValueType::Tensor { shape, .. } if shape.len() == 2 => Some(shape[1].max(0) as usize),
         _ => None,
     })
-}
-
-fn normalised(v: &[f32]) -> Vec<f32> {
-    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if n > 0.0 && n.is_finite() { v.iter().map(|x| x / n).collect() } else { v.to_vec() }
 }
 
 /// A face's tile for the page: a square around the box (60 % wider than

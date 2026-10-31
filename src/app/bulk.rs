@@ -1,4 +1,4 @@
-//! The analysis' bulk actions (decision 5): *Keep this, prune the rest*,
+//! The analysis' bulk actions: *Keep this, prune the rest*,
 //! *Prune all soft frames…*, *Prune accidental frames…* and *Prune
 //! duplicate copies…*.
 //!
@@ -88,7 +88,7 @@ pub fn changes(coll: &Collection, plan: &Plan, chosen: Option<RecordId>) -> Chan
 
 /// The hints are there to act on, or why not.
 fn ready(app: &App) -> Result<(), &'static str> {
-    if app.coll.is_empty() || app.scanning {
+    if app.coll.is_empty() || app.scanning() {
         return Err("Open a folder of photos first (Ctrl+O).");
     }
     if app.quality.analysing() {
@@ -393,7 +393,7 @@ pub fn overlay(app: &App, id: window::Id) -> Option<Element<'_, Message>> {
         dialogs::header(title, None),
         kit::secondary(body),
         well,
-        text(foot).size(t::T_SMALL).color(t::INK3),
+        kit::caption(foot),
         dialogs::footer(
             vec![],
             vec![

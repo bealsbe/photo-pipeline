@@ -36,8 +36,9 @@ const OWNER: u32 = 0;
 const MIN_LEVEL_EDGE: u32 = 900;
 /// A stand-in preview must be at least this big to be worth showing.
 const PREVIEW_MIN_EDGE: u32 = 1000;
-/// Previews kept (about 7 MB each for a 1616 × 1080 preview).
-const PREVIEW_CACHE: usize = 12;
+/// Previews kept, by bytes (a 1616 × 1080 preview is about 7 MB; a
+/// camera's 4000 px preview about 40 MB).
+const PREVIEW_CACHE_BYTES: usize = 96 * 1024 * 1024;
 
 #[derive(Debug)]
 pub struct FullImage {
@@ -182,6 +183,7 @@ pub struct Loader {
     loading: HashSet<PathBuf>,
     /// Stand-ins for images still decoding (dropped when the full arrives).
     previews: VecDeque<Entry>,
+    preview_bytes: usize,
     previewing: HashSet<PathBuf>,
     /// Images on screen in the compare view: never evicted.
     pinned: HashSet<PathBuf>,
@@ -206,6 +208,7 @@ impl Loader {
             bytes: 0,
             loading: HashSet::new(),
             previews: VecDeque::new(),
+            preview_bytes: 0,
             previewing: HashSet::new(),
             pinned: HashSet::new(),
         }
@@ -323,9 +326,12 @@ impl Loader {
         if self.contains(path) || self.previews.iter().any(|e| e.path == path) {
             return false;
         }
+        self.preview_bytes += image.bytes;
         self.previews.push_back(Entry { path: path.to_path_buf(), image: image.clone(), allocations: Vec::new() });
-        while self.previews.len() > PREVIEW_CACHE {
-            self.previews.pop_front();
+        while self.preview_bytes > PREVIEW_CACHE_BYTES && self.previews.len() > 1 {
+            if let Some(old) = self.previews.pop_front() {
+                self.preview_bytes -= old.image.bytes;
+            }
         }
         true
     }
@@ -333,7 +339,10 @@ impl Loader {
     /// A worker finished.
     pub fn deliver(&mut self, path: &Path, image: &Arc<FullImage>) {
         self.loading.remove(path);
-        self.previews.retain(|e| e.path != path);
+        if let Some(pos) = self.previews.iter().position(|e| e.path == path) {
+            let e = self.previews.remove(pos).expect("in range");
+            self.preview_bytes -= e.image.bytes;
+        }
         if let Some(pos) = self.entries.iter().position(|e| e.path == path) {
             let e = self.entries.remove(pos).expect("in range");
             self.bytes -= e.image.bytes;

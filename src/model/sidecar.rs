@@ -8,16 +8,17 @@
 //! | `.photo-pipeline-pairs.json`  | `{"paired_stems": [{parent, stem}]}`      |
 //! | `.photo-pipeline-crops.json`  | `{"crops": {rel: {left, top, …}}}`        |
 //!
-//! Every write goes through [`atomic_write_text`]: temp file, fsync, rename.
-//! A crash leaves either the old sidecar or the new one, never a torn file.
+//! Every write goes through [`atomic_write_text`] (`ops::fsutil`'s atomic
+//! write: temp file, fsync, rename, directory fsync).  A crash leaves
+//! either the old sidecar or the new one, never a torn file.
 //!
 //! The app saves through a [`Saver`] (`model::saver`), which writes on its
 //! own thread: on a network share one save takes 10–300 ms, which held up
 //! every P or M.  It keeps a save that failed and writes it again later.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde_json::{Map, Value, json};
@@ -29,34 +30,23 @@ pub const PRUNE_FILE: &str = ".photo_pipeline.json";
 pub const EXPORT_FILE: &str = ".photo-pipeline-export.json";
 pub const CROPS_FILE: &str = ".photo-pipeline-crops.json";
 
-/// Write `content` to `path` atomically.
+/// Write `content` to `path` atomically, replacing what was there (a
+/// sidecar is always the newest marks).
 ///
-/// The temp file is fsynced before the rename and the directory after it, so
-/// the new contents survive a power cut once this returns.
+/// [`fsutil::atomic_write`](crate::ops::fsutil::atomic_write): the temp
+/// sibling is fsynced before the rename and the directory after it, so the
+/// new contents survive a power cut once this returns.
 pub fn atomic_write_text(path: &Path, content: &str) -> std::io::Result<()> {
-    let mut tmp_name = path.as_os_str().to_owned();
-    tmp_name.push(".~tmp");
-    let tmp = PathBuf::from(tmp_name);
-    let result = (|| {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(content.as_bytes())?;
-        f.sync_all()?;
-        drop(f);
-        fs::rename(&tmp, path)?;
-        crate::ops::fsutil::sync_parent(path);
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&tmp);
-    }
-    result
+    crate::ops::fsutil::atomic_write(path, content.as_bytes(), true)
 }
 
+#[cfg(test)]
 fn read_json(path: &Path) -> Option<Value> {
     let text = fs::read(path).ok()?;
     serde_json::from_slice(&text).ok()
 }
 
+#[cfg(test)]
 fn read_path_list(folder: &Path, file: &str, key: &str) -> Option<HashSet<PathBuf>> {
     let data = read_json(&folder.join(file))?;
     path_list_from(folder, &data, key)
@@ -78,6 +68,7 @@ fn path_list_from(folder: &Path, data: &Value, key: &str) -> Option<HashSet<Path
     Some(out)
 }
 
+#[cfg(test)]
 fn write_path_list<'a>(
     folder: &Path,
     file: &str,
@@ -94,7 +85,7 @@ fn path_list_text<'a>(folder: &Path, key: &str, paths: impl Iterator<Item = &'a 
     py_json(&Value::Object(m))
 }
 
-/// The prune sidecar's text for `paths` (what [`write_prune_marks`] writes).
+/// The prune sidecar's text for `paths`.
 pub fn prune_text<'a>(folder: &Path, paths: impl Iterator<Item = &'a Path>) -> String {
     path_list_text(folder, "pruned", paths)
 }
@@ -112,28 +103,28 @@ pub fn parse_export_marks(folder: &Path, text: &str) -> Option<HashSet<PathBuf>>
     parse_path_list(folder, text, "marked")
 }
 
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
+/// The prune marks on disk (the app reads through `model::saver`, which
+/// knows what is still waiting to be written; the quality evaluation and
+/// the tests read the file itself).
+#[cfg(test)]
 pub fn read_prune_marks(folder: &Path) -> Option<HashSet<PathBuf>> {
     read_path_list(folder, PRUNE_FILE, "pruned")
 }
 
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
+/// Write the prune sidecar directly (the app saves through `model::saver`).
+#[cfg(test)]
 pub fn write_prune_marks<'a>(folder: &Path, paths: impl Iterator<Item = &'a Path>) -> std::io::Result<()> {
     write_path_list(folder, PRUNE_FILE, "pruned", paths)
 }
 
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
+/// The export marks on disk (see [`read_prune_marks`]).
+#[cfg(test)]
 pub fn read_export_marks(folder: &Path) -> Option<HashSet<PathBuf>> {
     read_path_list(folder, EXPORT_FILE, "marked")
 }
 
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
-pub fn write_export_marks<'a>(folder: &Path, paths: impl Iterator<Item = &'a Path>) -> std::io::Result<()> {
-    write_path_list(folder, EXPORT_FILE, "marked", paths)
-}
-
 /// Persisted crops as {absolute path: Crop}.  Malformed entries are skipped.
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
+#[cfg(test)]
 pub fn read_crops(folder: &Path) -> HashMap<PathBuf, Crop> {
     match read_json(&folder.join(CROPS_FILE)) {
         Some(data) => crops_from(folder, &data),
@@ -162,9 +153,10 @@ fn crops_from(folder: &Path, data: &Value) -> HashMap<PathBuf, Crop> {
     out
 }
 
-/// Persist crops.  Full-frame crops are dropped, and an empty set removes
+/// Persist crops directly (the app saves through `model::saver` with
+/// [`crops_text`]).  Full-frame crops are dropped, and an empty set removes
 /// the sidecar rather than leaving an empty one behind.
-#[allow(dead_code)] // direct access; the app goes through `model::saver`
+#[cfg(test)]
 pub fn write_crops<'a>(folder: &Path, crops: impl Iterator<Item = (&'a Path, &'a Crop)>) -> std::io::Result<()> {
     let target = folder.join(CROPS_FILE);
     let Some(text) = crops_text(folder, crops) else {

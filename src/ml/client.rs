@@ -1,8 +1,8 @@
-//! The app's side of the helper process (plan §4.3): start it, send it
+//! The app's side of the helper process: start it, send it
 //! work over its pipes, turn its replies into results, and apply the
 //! restart rule.  Everything that runs a model goes through the
 //! [`Embedder`] trait, so the search pass is tested with a fake and the
-//! device rule (decision 3) is checked without a card.
+//! device rule is checked without a card.
 //!
 //! **Restart rule.**  If the helper stops while running on the card, it
 //! is started once more on the card; a second stop counts as the card
@@ -13,7 +13,7 @@
 //! a new client is made (*Try the card again*); queries still work,
 //! through a text-only helper that never touches the card.  The client
 //! never starts a processor helper for image work unless the processor
-//! is the chosen device.  Face work (phase 3) is image work: it follows
+//! is the chosen device.  Face work is image work: it follows
 //! the same path and the same rule.
 
 use std::collections::HashMap;
@@ -44,7 +44,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 /// Successful requests after which an earlier crash is forgotten.
 const FORGIVE_AFTER: u32 = 50;
 
-/// A face as the helper found it in a photo (phase 3): its place on the
+/// A face as the helper found it in a photo: its place on the
 /// oriented preview, what the detector thought of it, how clear it is,
 /// the recognition model's vector and a small tile for the page.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -190,7 +190,7 @@ pub struct ImageResult {
 /// Why the helper couldn't answer.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HelperError {
-    /// The graphics card failed (decision 3): the caller stops its work.
+    /// The graphics card failed: the caller stops its work.
     Card(CardFailure),
     /// The helper stopped on the processor and was started again; the
     /// request should be sent again.
@@ -210,7 +210,7 @@ pub trait Embedder: Send + Sync {
     fn embed_images(&self, files: &[(PathBuf, FileType)], want: &Want) -> Result<Vec<ImageResult>, HelperError>;
     /// Encode query texts (always on the processor, whatever the device).
     fn encode_text(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, HelperError>;
-    /// Find fursuit heads in a batch of photos (phase 4): image work on
+    /// Find fursuit heads in a batch of photos: image work on
     /// the chosen device, under the same card rule as [`embed_images`].
     /// A helper started without the head models answers with an error.
     ///
@@ -250,7 +250,7 @@ pub struct Spec {
     pub text_only: bool,
     /// Load the face detector and this recognition model too.
     pub face_model: Option<ModelId>,
-    /// Load the fursuit head detector too (OWLv2; phase 4).  The heads'
+    /// Load the fursuit head detector too (OWLv2).  The heads'
     /// vectors come from the search model's image tower (v2).
     pub heads: bool,
 }

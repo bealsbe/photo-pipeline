@@ -20,7 +20,7 @@ use iced::widget::{Space, column, container, row, text};
 use iced::{Alignment, Element, Length, Padding, Task};
 
 use super::kit;
-use super::people::{Face, FaceRef, Framing, GroupId, Kind, KindWords};
+use super::people::{Face, FaceRef, Framing, GroupId, Kind};
 use super::style;
 use super::subjects::{self as subj, m, px, shape};
 use super::{App, Message};
@@ -84,12 +84,11 @@ pub fn action(kind: Kind) -> String {
     format!("Not {}", nouns(kind))
 }
 
-/// The heads of `n` in words: "a fursuit head", "23 fursuit heads".
-fn count(kind: Kind, n: usize) -> String {
-    match (kind, n) {
-        (Kind::Fursuit, 1) => "a fursuit head".to_string(),
-        (_, 1) => "a face".to_string(),
-        _ => format!("{n} {}", nouns(kind)),
+/// The heads of `n` in words: "a fursuit head", "1,200 fursuit heads".
+pub fn count(kind: Kind, n: usize) -> String {
+    match n {
+        1 => format!("a {}", nouns(kind).trim_end_matches('s')),
+        _ => format!("{} {}", util::thousands(n as u64), nouns(kind)),
     }
 }
 
@@ -262,7 +261,7 @@ pub fn debug_state(app: &App) -> String {
         None => "none".into(),
         Some(a) => format!(
             "kind={} targets={} waiting={} heads={} from={:?} names={:?}",
-            a.kind.one(),
+            a.kind.noun(),
             a.targets.len(),
             a.waiting.len(),
             a.faces.len(),

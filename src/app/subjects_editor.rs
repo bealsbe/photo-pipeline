@@ -68,7 +68,7 @@ use iced::{Alignment, Background, Element, Length, Padding, Task};
 
 use super::columns::{self as cols, ColMsg, Columns, Look, Target};
 use super::kit::{self, tip};
-use super::people::{Face, FaceRef, Framing, Group, GroupId, Kind, KindWords, Subjects as Found};
+use super::people::{Face, FaceRef, Framing, Group, GroupId, Kind, Subjects as Found};
 use super::style;
 use super::subjects::{self as subj, MergeAsk, m as sm};
 use super::{App, Message};
@@ -1519,7 +1519,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         page = page.push(strip);
     }
     if let Some(note) = &e.note {
-        let mut r = row![icons::view(Glyph::Info, 15.0, t::INK2), text(note.clone()).size(t::T_SMALL).color(t::INK2).width(Length::Fill)].spacing(8).align_y(Alignment::Center);
+        let mut r = row![icons::view(Glyph::Info, 15.0, t::INK2), kit::note(note.clone()).width(Length::Fill)].spacing(8).align_y(Alignment::Center);
         if e.gone.is_some() {
             r = r.push(kit::btn("Send to a new group", style::secondary(), Some(m(Msg::GoneToNew))));
         }
@@ -1647,14 +1647,14 @@ fn panel<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Element<'a, Messag
     let s = &app.subjects;
     let shape = subj::shape(e.kind);
     let cover_px = subj::px(app, COVER);
-    let search = text_input(&format!("Find a {}", e.kind.one()), &e.search).on_input(|v| m(Msg::Search(v))).size(t::T_SMALL).padding(Padding::from([5.0, 8.0])).style(style::input());
+    let search = text_input(&format!("Find a {}", e.kind.noun()), &e.search).on_input(|v| m(Msg::Search(v))).size(t::T_SMALL).padding(Padding::from([5.0, 8.0])).style(style::input());
     let row_of = |id: GroupId| -> Element<'a, Message> {
         let g = s.group(&id);
         let crop = tile::crop(g.and_then(|g| s.crops.get(&g.cover.face, cover_px, Framing::Face)), COVER, shape);
         let name = g.and_then(|g| g.name.clone()).unwrap_or_else(|| "Unnamed".into());
         let photos = g.map_or(0, |g| g.photos);
         let sent = e.sent.iter().filter(|(x, _)| *x == id).map(|(_, v)| v.len()).sum::<usize>();
-        let mut line = row![text(util::thousands(photos as u64)).size(t::T_SMALL).color(t::INK3)].spacing(6);
+        let mut line = row![kit::caption(util::thousands(photos as u64))].spacing(6);
         if sent > 0 {
             line = line.push(text(format!("+{sent}")).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::SIGNAL));
         }
@@ -1669,14 +1669,14 @@ fn panel<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Element<'a, Messag
     }
     let named = panel_groups(s, e);
     if !named.is_empty() {
-        list = list.push(container(text(format!("Named {}", e.kind.title().to_lowercase())).size(t::T_SMALL).color(t::INK3)).padding(Padding { left: 8.0, top: 4.0, bottom: 2.0, ..Padding::ZERO }));
+        list = list.push(container(kit::caption(format!("Named {}", e.kind.plural().to_lowercase()))).padding(Padding { left: 8.0, top: 4.0, bottom: 2.0, ..Padding::ZERO }));
     }
     for id in named {
         list = list.push(row_of(id));
     }
     let unnamed = unnamed_groups(s, e);
     if !unnamed.is_empty() {
-        list = list.push(container(text("The largest unnamed").size(t::T_SMALL).color(t::INK3)).padding(Padding { left: 8.0, top: 10.0, bottom: 2.0, ..Padding::ZERO }));
+        list = list.push(container(kit::caption("The largest unnamed")).padding(Padding { left: 8.0, top: 10.0, bottom: 2.0, ..Padding::ZERO }));
     }
     for id in unnamed {
         list = list.push(row_of(id));
@@ -1684,7 +1684,7 @@ fn panel<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Element<'a, Messag
     let (_, _, removed, taken) = e.counts();
     let crops = cols::crop_word(e.kind);
     let special = |target: Target, glyph: Glyph, title: &'a str, about: String, n: usize, tone: iced::Color| -> Element<'a, Message> {
-        let mut words = column![text(title).size(t::T_SMALL).font(paint::MEDIUM).color(tone), text(about).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill);
+        let mut words = column![text(title).size(t::T_SMALL).font(paint::MEDIUM).color(tone), kit::caption(about)].spacing(1).width(Length::Fill);
         if n > 0 {
             words = words.push(text(format!("{n} so far")).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::SIGNAL));
         }
@@ -1723,7 +1723,7 @@ fn pairs_section<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Option<Ele
         let named = name.is_some();
         let photos = g.map_or(0, |g| g.photos);
         let sent = e.sent.iter().filter(|(x, _)| x == other).map(|(_, v)| v.len()).sum::<usize>();
-        let mut line = row![text(util::plural(photos as u64, "photo")).size(t::T_SMALL).color(t::INK3)].spacing(6);
+        let mut line = row![kit::caption(util::plural(photos as u64, "photo"))].spacing(6);
         if sent > 0 {
             line = line.push(text(format!("+{sent}")).size(t::T_SMALL).font(paint::SEMIBOLD).color(t::SIGNAL));
         }
@@ -1752,7 +1752,7 @@ fn pairs_section<'a>(app: &'a App, e: &'a Editor, look: &Look<'a>) -> Option<Ele
         let b = button(label).padding(Padding::from([4.0, 8.0])).style(style::ghost().style()).on_press_maybe(can.then(|| m(Msg::PairReview(next))));
         rows = rows.push(b);
     }
-    let head = row![icons::view(Glyph::Merge, 13.0, t::INK3), text("Likely the same fursuit").size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center);
+    let head = row![icons::view(Glyph::Merge, 13.0, t::INK3), kit::caption("Likely the same fursuit")].spacing(6).align_y(Alignment::Center);
     let boxed = container(rows).width(Length::Fill).style(|_| container::Style { border: style::border(t::LINE_HI, 1.0, t::R_CONTROL), ..Default::default() });
     Some(column![container(head).padding(Padding { left: 8.0, top: 4.0, bottom: 2.0, right: 0.0 }), boxed, Space::new().height(6)].spacing(4).into())
 }

@@ -29,7 +29,7 @@ fn main() -> iced::Result {
         return Ok(());
     }
     // The ML helper process: the same binary, started by the app with a
-    // flag (plan §4.3).  No window, no fonts.
+    // flag.  No window, no fonts.
     if args.get(1).is_some_and(|a| a == ml::worker::FLAG) {
         std::process::exit(ml::worker::main(&args[2..]));
     }

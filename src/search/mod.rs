@@ -1,4 +1,4 @@
-//! Library search by what photos show (plan §5–§7): an index of one
+//! Library search by what photos show: an index of one
 //! vector per shot, built from the previews by the ML helper, and queries
 //! answered from memory, best first.
 //!
@@ -18,12 +18,12 @@
 //! - [`tags`]: hidden tags derived from the stored vectors against the
 //!   vocabulary; *Things* and the ranking boost come from them.
 //! - [`estimate`]: the numbers the invitation and the dialog quote.
-//! - [`faces`]: people's faces (phase 3): the detections and face
+//! - [`faces`]: people's faces: the detections and face
 //!   vectors cache beside the index, the catch-up, and the grouping into
 //!   the *Subjects* page's groups (`crate::model::subjects` holds the
 //!   pure rules and the user's file).
 //!
-//! Search is library only (decision 14).  The index and the models live in
+//! Search is library only.  The index and the models live in
 //! the user's cache, never in the library; nothing is written to photos
 //! or sidecars.
 
@@ -55,6 +55,14 @@ pub use vocab::Kind;
 
 use crate::ml::{CardFailure, DeviceStatus};
 
+/// The process's resident size in MB (Linux), for the memory gates the
+/// ignored library-scale tests print.
+#[cfg(test)]
+pub(crate) fn rss_mb() -> f64 {
+    let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+    s.lines().find(|l| l.starts_with("VmRSS:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|k| k.parse::<f64>().ok()).unwrap_or(0.0) / 1024.0
+}
+
 /// What kind of pass is running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -67,13 +75,12 @@ pub enum PassKind {
     /// answering until the new one is complete.
     Rebuild,
     /// Faces over photos already indexed: the catch-up the People tab
-    /// asks for, or the face vectors again after a face-model change
-    /// (phase 3).  Reads previews, writes the faces cache, never the
-    /// search index.
+    /// asks for, or the face vectors again after a face-model change.
+    /// Reads previews, writes the faces cache, never the search index.
     Faces,
 }
 
-/// Where finding people's faces stands (phase 3, decision 9).  Part of
+/// Where finding people's faces stands.  Part of
 /// [`Status`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FacesStatus {
@@ -108,7 +115,7 @@ pub struct PassProgress {
     pub oldest_day: Option<NaiveDate>,
 }
 
-/// Why indexing is stopped (the banner, §7a.4).
+/// Why indexing is stopped (the banner).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Stopped {
     /// The card was chosen and failed: nothing moves to the processor.
@@ -148,10 +155,9 @@ pub struct Status {
     pub helper_restarts: u32,
     /// Preferences ▸ *Index new exports*.
     pub index_exports: bool,
-    /// People's faces (phase 3).
+    /// People's faces.
     pub faces: FacesStatus,
-    /// The fursuit-head step (phase 4): on or off, how far, what it waits
-    /// for.
+    /// The fursuit-head step: on or off, how far, what it waits for.
     pub heads: heads::HeadsStatus,
     /// The fursuit close-call judge (fursuit matching v2).
     pub judge: crate::ml::judge::JudgeStatus,
@@ -188,7 +194,7 @@ pub fn complete_things(things: &[Thing], typed: &str) -> Vec<Thing> {
 }
 
 impl Status {
-    /// The search page's state in §7a's words.
+    /// The search page's state in its own words.
     pub fn is_indexing(&self) -> bool {
         self.pass.is_some()
     }

@@ -35,7 +35,7 @@ zbus = "5"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
 wayland-protocols-plasma = { version = "0.3", features = ["client"] }
-# Library search (docs/library-search-plan.md §4): ONNX Runtime through
+# Library search: ONNX Runtime through
 # `ort`, pinned (a release candidate).  The first build downloads a static
 # ONNX Runtime with its WebGPU provider (~120 MB) into ~/.cache/ort.pyke.io,
 # and `copy-dylibs` puts libwebgpu_dawn.so beside the binary.  The helper

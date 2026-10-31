@@ -14,13 +14,13 @@
 //! writes no file but its own record of corrections
 //! (`decisions-stand-in.jsonl`, never the real record's file: run it with
 //! a throwaway `HOME`).  `PP_SEARCH_FAKE=indexed` starts it with the library
-//! indexed.  It answers phase 2's questions too: made-up Things (the
+//! indexed.  It answers the page's other questions too: made-up Things (the
 //! vocabulary's objects and scenes, with counts that grow with the index),
 //! the query's dates and `-word`s applied to its hits (dates alone answer
 //! with every shot from them, oldest first), and, for an animal word, a
 //! share of the hits handed back as fursuits left out.
 //!
-//! Phase 3 adds people (`crate::model::subjects`): the groups of faces
+//! People (`crate::model::subjects`) are answered too: the groups of faces
 //! found, a group's faces and suggestions, naming, merging, moving faces,
 //! answers, the faces switch and model, and a search within a person's
 //! photos.  The stand-in answers them too (`super::people::FakePeople`),
@@ -770,7 +770,7 @@ impl Link {
         }
     }
 
-    // ── fursuit heads (decision 11) ──
+    // ── fursuit heads ──
 
     /// Preferences ▸ *Find fursuit heads* (and the download dialog's tick).
     pub fn set_find_heads(&self, on: bool) {
@@ -1304,7 +1304,7 @@ impl FakeState {
     }
 
     /// A head scan would start: on the card it does; on the processor it
-    /// waits for the user's answer, with its cost (decision 11).
+    /// waits for the user's answer, with its cost.
     fn start_heads(&mut self, why: fursuits::Why) {
         self.refresh_heads();
         let h = &mut self.status.heads;
@@ -1655,7 +1655,7 @@ impl Fake {
             }
             s.status.indexed_shots = s.status.indexed_shots.min(shots);
             s.refresh_people();
-            // An export added photos: index them quietly (decision 5).
+            // An export added photos: index them quietly.
             let grew = shots.saturating_sub(had);
             if had > 0 && grew > 0 && s.status.first_index_asked && s.status.index_exports && s.status.pass.is_none() {
                 if s.status.stopped.is_some() {

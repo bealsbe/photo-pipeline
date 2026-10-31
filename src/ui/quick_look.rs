@@ -112,10 +112,6 @@ pub fn photo_rect(bounds: Rectangle, w: f32, h: f32) -> Rectangle {
     rect((area.x + (area.width - pw) / 2.0).round(), (area.y + (area.height - ph) / 2.0).round(), pw, ph)
 }
 
-fn progress(start: Instant, now: Instant, ms: f32) -> f32 {
-    (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / ms).clamp(0.0, 1.0)
-}
-
 pub struct QuickLook<'a, Message> {
     shown: Shown,
     scale_factor: f32,
@@ -223,9 +219,9 @@ impl<Message> Widget<Message, iced::Theme, Renderer> for QuickLook<'_, Message> 
                     st.reported = b.size();
                     shell.publish((self.on)(QuickLookEvent::Viewport(b.size())));
                 }
-                let popping = |at: Option<Instant>| at.is_some_and(|a| progress(a, *now, t::MOTION_MS) < 1.0);
+                let popping = |at: Option<Instant>| at.is_some_and(|a| paint::progress(a, *now, t::MOTION_MS) < 1.0);
                 let loading = self.shown.full.is_none() && self.shown.preview.is_none() && self.shown.thumb.is_none() && self.shown.status.is_none();
-                if progress(start, *now, t::MOTION_MS) < 1.0
+                if paint::progress(start, *now, t::MOTION_MS) < 1.0
                     || popping(st.pruned_at)
                     || popping(st.marked_at)
                     || *now < st.settle_until
@@ -302,7 +298,7 @@ impl<Message> Widget<Message, iced::Theme, Renderer> for QuickLook<'_, Message> 
         let now = Instant::now();
         let s = &self.shown;
         // Entrance: 0 → 1.
-        let k = st.opened.map(|o| paint::out_cubic(progress(o, now, t::MOTION_MS))).unwrap_or(0.0);
+        let k = st.opened.map(|o| paint::out_cubic(paint::progress(o, now, t::MOTION_MS))).unwrap_or(0.0);
         let photo = self.photo(b);
         let grow = paint::lerp(GROW_FROM, 1.0, k);
         let c = photo.center();
@@ -359,7 +355,7 @@ impl<'a, Message: 'a> From<QuickLook<'a, Message>> for Element<'a, Message, iced
 /// The crop framing, the prune cross-out and the keep check, as the grid
 /// draws them on a thumbnail.
 fn draw_marks(r: &mut Renderer, s: &Shown, ir: Rectangle, k: f32, now: Instant, st: &State) {
-    let pop = |at: Option<Instant>| at.map(|a| paint::out_cubic(progress(a, now, t::MOTION_MS))).unwrap_or(1.0);
+    let pop = |at: Option<Instant>| at.map(|a| paint::out_cubic(paint::progress(a, now, t::MOTION_MS))).unwrap_or(1.0);
     if let Some(crop) = s.crop.as_ref().filter(|c| !c.is_full() && !s.pruned) {
         let (w, h) = (ir.width, ir.height);
         let cx = ir.x + (crop.left as f32 * w).floor();

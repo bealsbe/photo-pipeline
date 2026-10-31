@@ -1,9 +1,9 @@
-//! The indexing pass (plan §5.2), modelled on `analysis`: one job per shot
+//! The indexing pass, modelled on `analysis`: one job per shot
 //! (a pair's JPG, else the file), newest day first, sent to the helper in
 //! batches; results stream back as [`Batch`]es; cancellable; it yields
 //! while the grid waits for thumbnails; if the library stops answering it
 //! stops and says so; if the card fails it stops and says what failed, and
-//! nothing moves to the processor (decision 3).
+//! nothing moves to the processor.
 //!
 //! The pass owns no files: the engine plans it from the library index and
 //! the path map ([`plan`]) and writes what comes back.
@@ -41,7 +41,7 @@ pub struct Job {
     pub mtime: MTime,
     pub day: NaiveDate,
     /// Faces already found in it, to recognise again with the chosen
-    /// model (a face-model change, phase 3); `None` in every other pass.
+    /// model (a face-model change); `None` in every other pass.
     pub known: Option<Vec<FaceSpot>>,
 }
 
@@ -109,7 +109,7 @@ pub struct Request {
     /// Shots in the library, for the progress line.
     pub total: usize,
     /// What the helper gives for each shot: the search vector, and the
-    /// faces when they are on (phase 3).
+    /// faces when they are on.
     pub want: Want,
 }
 

@@ -57,5 +57,4 @@ capture-time tests for little privacy gain.
 Take only the header (`head -c 4096 photo.ARW > headers/<name>.head`, or
 more when it runs further, as the A7 V ARW's XMP packet makes it).  Before
 committing, blank any serial number, owner name or GPS data in place,
-keeping every length, and run `scripts/check-private.sh`: it rejects XMP
-and EXIF IDs that aren't zero.  Add a row above.
+keeping every length, and zero any XMP or EXIF IDs.  Add a row above.

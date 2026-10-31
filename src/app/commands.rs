@@ -43,7 +43,7 @@ pub enum Cmd {
     StackBursts,
     AdvanceAfterMark,
     Preferences,
-    /// Analyse the working folder (only ever when asked: decision 2).
+    /// Analyse the working folder (only ever when asked).
     Analyse,
     /// Keep the selected frame, prune the rest of its burst still to
     /// review (asks first).

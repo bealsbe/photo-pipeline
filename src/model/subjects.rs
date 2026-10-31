@@ -1,5 +1,5 @@
-//! People, fursuits and pets as the app knows them (plan §5.1, §6.5,
-//! §7.2 and §7a.5): the types the *Subjects* page shows, the user's own
+//! People, fursuits and pets as the app knows them: the types the
+//! *Subjects* page shows, the user's own
 //! file of names and decisions, and the pure rules for grouping faces,
 //! ordering a subject's photos clearest first and offering suggestions.
 //! Nothing here does I/O except [`SubjectsFile::load`] and
@@ -11,17 +11,18 @@
 //! this person" answers — points at detections, not at group numbers, and
 //! lives in `~/.local/share/photo-pipeline/subjects.json`, kept apart from
 //! the caches and never cleared with them.  A face-model change or a
-//! rebuild keeps every one of them (§6.5).
+//! rebuild keeps every one of them.
 //!
-//! **Kinds never mix** (decision 12, UI 3).  Each [`Subject`] and each
+//! **Kinds never mix.**  Each [`Subject`] and each
 //! group has a [`Kind`]; a merge, a move, a suggestion or a query across
 //! kinds is refused here ([`Refused::MixedKinds`]), and a test holds it.
-//! Phase 3 has people only; fursuits and pets exist in the types and have
+//! People came first; fursuits and pets exist in the types and have
 //! no detections yet.
 //!
-//! **Privacy** (§10): the file is written readable by the user alone
+//! **Privacy**: the file is written readable by the user alone
 //! (0600 in a 0700 folder); names never leave the app.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::hash::{Hash, Hasher};
@@ -33,6 +34,7 @@ use md5::{Digest, Md5};
 use serde::{Deserialize, Serialize};
 
 use crate::search::index::Key;
+use crate::search::query::{dot, f16_to_f32, normalise_in_place};
 
 /// The file's format version as written when it holds one of the
 /// optional lists added after the first ([`SubjectsFile::not_same`],
@@ -55,7 +57,7 @@ pub const REMOVED_IOU: f32 = 0.6;
 pub const UNDO_DEPTH: usize = 50;
 
 /// What kind of subject: people come from the face step, fursuits from
-/// the head step (phase 4), pets from their own step (phase 5).  Never
+/// the head step, pets from their own step.  Never
 /// combined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -123,7 +125,7 @@ pub enum GroupId {
 
 /// One detection: a photo (by content key) and a box in it, as fractions
 /// 0..1 of the oriented preview (`[x, y, width, height]`), rounded to
-/// 1/1000 so the same face found again is the same detection (§6.5).
+/// 1/1000 so the same face found again is the same detection.
 /// Equal and hashed by key and the rounded box.
 #[derive(Debug, Clone, Copy)]
 pub struct FaceRef {
@@ -343,7 +345,7 @@ pub enum Framing {
 /// Why an operation on the subjects was refused.  Nothing is changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refused {
-    /// Two kinds in one operation: never (decision 12).
+    /// Two kinds in one operation: never.
     MixedKinds,
     /// No such subject.
     NoSuchSubject(SubjectId),
@@ -610,7 +612,7 @@ pub fn box_noun(kind: Kind) -> &'static str {
     }
 }
 
-/// One subject in the user's file (§6.5).
+/// One subject in the user's file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Subject {
     pub id: SubjectId,
@@ -1169,7 +1171,7 @@ fn dedup(faces: Vec<FaceRef>) -> Vec<FaceRef> {
     faces.into_iter().filter(|f| seen.insert(*f)).collect()
 }
 
-/// `chmod 600`: biometric-like data is the user's alone (§10).
+/// `chmod 600`: biometric-like data is the user's alone.
 pub fn private_file(path: &Path) {
     #[cfg(unix)]
     {
@@ -1202,8 +1204,8 @@ pub struct Cutoffs {
     pub strict: f32,
 }
 
-/// The face cut-offs per model: the study's (AuraFace 0.6, SFace 0.5;
-/// InsightFace as Immich's 0.5), to be moved by phase 0's comparison;
+/// The face cut-offs per model (AuraFace 0.6, SFace 0.5; InsightFace as
+/// Immich's 0.5), to be moved by a comparison;
 /// *Find more* at three quarters of it.  Fursuit heads have their own,
 /// in whitened distance (`search::heads::CUTOFFS`, v2).
 pub fn cutoff_for(model: crate::ml::models::ModelId) -> Cutoffs {
@@ -1246,13 +1248,18 @@ impl Rows<'_> {
         }
     }
 
-    /// Row `i` as f32.
-    pub fn row_vec(&self, i: usize) -> Vec<f32> {
+    /// Row `i` as f32: borrowed from f32 rows, converted from f16 ones.
+    pub fn row(&self, i: usize) -> Cow<'_, [f32]> {
         let dim = self.dim();
         match self {
-            Rows::F32 { data, .. } => data[i * dim..(i + 1) * dim].to_vec(),
-            Rows::F16 { data, .. } => data[i * dim..(i + 1) * dim].iter().map(|&h| crate::search::query::f16_to_f32(h)).collect(),
+            Rows::F32 { data, .. } => Cow::Borrowed(&data[i * dim..(i + 1) * dim]),
+            Rows::F16 { data, .. } => Cow::Owned(data[i * dim..(i + 1) * dim].iter().map(|&h| f16_to_f32(h)).collect()),
         }
+    }
+
+    /// Row `i` as an owned f32 vector.
+    pub fn row_vec(&self, i: usize) -> Vec<f32> {
+        self.row(i).into_owned()
     }
 
     /// The dot product of row `i` with `v`.
@@ -1260,7 +1267,7 @@ impl Rows<'_> {
         let dim = self.dim();
         match self {
             Rows::F32 { data, .. } => dot(&data[i * dim..(i + 1) * dim], v),
-            Rows::F16 { data, .. } => data[i * dim..(i + 1) * dim].iter().zip(v).map(|(&h, y)| crate::search::query::f16_to_f32(h) * y).sum(),
+            Rows::F16 { data, .. } => data[i * dim..(i + 1) * dim].iter().zip(v).map(|(&h, y)| f16_to_f32(h) * y).sum(),
         }
     }
 
@@ -1275,7 +1282,7 @@ impl Rows<'_> {
             }
             Rows::F16 { data, .. } => {
                 for (s, &h) in sum.iter_mut().zip(&data[i * dim..(i + 1) * dim]) {
-                    *s += crate::search::query::f16_to_f32(h);
+                    *s += f16_to_f32(h);
                 }
             }
         }
@@ -1285,7 +1292,7 @@ impl Rows<'_> {
     pub fn to_f32(&self) -> Vec<f32> {
         match self {
             Rows::F32 { data, .. } => data.to_vec(),
-            Rows::F16 { data, .. } => data.iter().map(|&h| crate::search::query::f16_to_f32(h)).collect(),
+            Rows::F16 { data, .. } => data.iter().map(|&h| f16_to_f32(h)).collect(),
         }
     }
 }
@@ -1299,21 +1306,15 @@ pub struct Cluster {
     pub centroid: Vec<f32>,
 }
 
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
-}
-
+/// `v` at unit length (see [`normalise_in_place`]).
 fn unit(mut v: Vec<f32>) -> Vec<f32> {
-    let n = dot(&v, &v).sqrt();
-    if n > 0.0 {
-        v.iter_mut().for_each(|x| *x /= n);
-    }
+    normalise_in_place(&mut v);
     v
 }
 
 /// How a kind's rows are grouped into the automatic groups.  People use
 /// [`Linkage::Centroid`] with the merge pass, as the first grouping did;
-/// a kind whose heads vary more under the lights (fursuits, phase 4)
+/// a kind whose heads vary more under the lights (fursuits)
 /// chooses what its labels support.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Linkage {
@@ -1332,7 +1333,7 @@ pub enum Linkage {
     /// the user's 160 merges were of groups already under the cut).
     Average { join: Option<f32> },
     /// As [`Linkage::Average`], but every member must lie within the cut.
-    #[allow(dead_code)] // Scored in the phase 4 tune (`heads.rs` tests); no kind uses it.
+    #[allow(dead_code)] // Scored in the fursuit head tune (`heads.rs` tests); no kind uses it.
     Complete,
 }
 
@@ -1739,7 +1740,7 @@ pub fn candidates(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f3
             if i >= rows.len() {
                 return None;
             }
-            let d = distance_to_members(rows, members, &rows.row_vec(i))?;
+            let d = distance_to_members(rows, members, &rows.row(i))?;
             (d <= cutoff).then_some((i, d))
         })
         .collect();
@@ -1747,7 +1748,7 @@ pub fn candidates(rows: &Rows<'_>, members: &[usize], pool: &[usize], cutoff: f3
     out
 }
 
-/// One suggestion per burst (UI 6): `items` nearest first, each with its
+/// One suggestion per burst: `items` nearest first, each with its
 /// burst (`None`: a frame on its own); frames of one burst are gathered
 /// under the first (nearest) of them, keeping their order.
 pub fn per_burst<T>(items: Vec<(T, Option<u64>)>) -> Vec<Vec<T>> {
@@ -1864,7 +1865,7 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(a);
         assert!(set.contains(&b));
-        // JSON as §6.5 spells it, and back.
+        // JSON in the file's shape, and back.
         let json = serde_json::to_string(&a).unwrap();
         assert!(json.starts_with(r#"{"key":"01010101"#) && json.contains(r#""box":[0.412,0.188,0.506,0.331]"#), "{json}");
         assert_eq!(serde_json::from_str::<FaceRef>(&json).unwrap(), a);
@@ -2112,7 +2113,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Decision 12: people, fursuits and pets are never combined, by
+    /// People, fursuits and pets are never combined, by
     /// merge or by move; the file refuses it and changes nothing.
     #[test]
     fn kinds_never_mix_in_the_file() {
@@ -2134,7 +2135,7 @@ mod tests {
         assert_eq!(Kind::Fursuit.plural(), "Fursuits");
     }
 
-    /// A version 1 file (as phase 3 and 4 wrote it) loads as it was, with
+    /// A version 1 file (from before labels) loads as it was, with
     /// no labels, and saves back as version 1 in the same shape: nothing
     /// a label added shows in a file that was never labelled.
     #[test]

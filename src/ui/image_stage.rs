@@ -249,7 +249,7 @@ struct SheetZoom {
 
 impl SheetZoom {
     fn t(&self, now: Instant) -> f32 {
-        (now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 / burst_sheet::ZOOM_MS).clamp(0.0, 1.0)
+        paint::progress(self.start, now, burst_sheet::ZOOM_MS)
     }
 
     /// The photo's rectangle and the sheet's opacity now.
@@ -504,10 +504,7 @@ impl State {
     /// How far the sheet is scrolled now (part-way through a glide).
     fn scroll_at(&self, now: Instant) -> f32 {
         match self.sheet_glide {
-            Some((from, start)) => {
-                let t = (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / GLIDE_MS).clamp(0.0, 1.0);
-                paint::lerp(from, self.sheet_scroll, paint::out_cubic(t))
-            }
+            Some((from, start)) => paint::Tween { from, to: self.sheet_scroll, start, ms: GLIDE_MS }.value(now),
             None => self.sheet_scroll,
         }
     }
@@ -653,15 +650,14 @@ impl State {
             Some((from, since)) => {
                 // Kept on the sheet (it scrolls under the ring).
                 let from = rect(from.x, from.y - self.scroll_at(now), from.width, from.height);
-                let t = (now.saturating_duration_since(since).as_secs_f32() * 1000.0 / t::MOTION_MS).clamp(0.0, 1.0);
-                paint::lerp_rect(from, to, paint::out_cubic(t))
+                paint::lerp_rect(from, to, paint::out_cubic(paint::progress(since, now, t::MOTION_MS)))
             }
             None => to,
         })
     }
 
     fn tile_hover_amount(&self, i: usize, now: Instant) -> f32 {
-        let k = |since: Instant| (now.saturating_duration_since(since).as_secs_f32() * 1000.0 / t::MOTION_FAST_MS).clamp(0.0, 1.0);
+        let k = |since: Instant| paint::progress(since, now, t::MOTION_FAST_MS);
         match (self.tile_hover, self.tile_hover_prev) {
             (Some((h, since)), _) if h == i => paint::out_cubic(k(since)),
             (_, Some((p, left))) if p == i => 1.0 - paint::out_cubic(k(left)),
@@ -709,8 +705,7 @@ impl State {
     fn transform_at(&self, l: &Live, now: Instant) -> (f32, Vector) {
         let vp = self.viewport;
         if let Some(z) = self.zoom {
-            let t = (now.saturating_duration_since(z.start).as_secs_f32() * 1000.0 / ZOOM_MS).clamp(0.0, 1.0);
-            let e = paint::out_cubic(t);
+            let e = paint::out_cubic(paint::progress(z.start, now, ZOOM_MS));
             let s = paint::lerp(z.s0, z.s1, e);
             let c = Point::new(paint::lerp(z.c0.x, z.c1.x, e), paint::lerp(z.c0.y, z.c1.y, e));
             let off = Vector::new(vp.width / 2.0 - c.x * s, vp.height / 2.0 - c.y * s);
@@ -751,8 +746,7 @@ impl State {
 
     fn finish_zoom(&mut self, now: Instant) {
         if let (Some(z), Some(l)) = (self.zoom, self.live.clone()) {
-            let t = now.saturating_duration_since(z.start).as_secs_f32() * 1000.0 / ZOOM_MS;
-            if t >= 1.0 {
+            if paint::done(z.start, now, ZOOM_MS) {
                 let (s, off) = self.transform_at(&l, now);
                 self.zoom = None;
                 if let Some(l) = self.live.as_mut() {
@@ -792,12 +786,11 @@ impl State {
 }
 
 fn slide_progress(s: &SlideAnim, now: Instant) -> f32 {
-    let t = (now.saturating_duration_since(s.start).as_secs_f32() * 1000.0 / s.ms.max(1.0)).clamp(0.0, 1.0);
-    paint::lerp(s.from, s.to, paint::out_cubic(t))
+    paint::Tween { from: s.from, to: s.to, start: s.start, ms: s.ms }.value(now)
 }
 
 fn slide_done(s: &SlideAnim, now: Instant) -> bool {
-    now.saturating_duration_since(s.start).as_secs_f32() * 1000.0 >= s.ms
+    paint::done(s.start, now, s.ms)
 }
 
 impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Message> {
@@ -1104,14 +1097,14 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                     }
                 }
                 if let Some((_, since)) = st.ring_from {
-                    if now.saturating_duration_since(since).as_secs_f32() * 1000.0 >= t::MOTION_MS {
+                    if paint::done(since, now, t::MOTION_MS) {
                         st.ring_from = None;
                     } else {
                         shell.request_redraw();
                     }
                 }
                 if let Some((_, start)) = st.sheet_glide {
-                    if now.saturating_duration_since(start).as_secs_f32() * 1000.0 >= GLIDE_MS {
+                    if paint::done(start, now, GLIDE_MS) {
                         st.sheet_glide = None;
                     } else {
                         shell.request_redraw();
@@ -1134,7 +1127,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for ImageStage<'a, Mess
                     let hovering = [st.tile_hover, st.tile_hover_prev]
                         .iter()
                         .flatten()
-                        .any(|(_, since)| now.saturating_duration_since(*since).as_secs_f32() * 1000.0 < t::MOTION_FAST_MS);
+                        .any(|(_, since)| !paint::done(*since, now, t::MOTION_FAST_MS));
                     if fading || hovering {
                         shell.request_redraw();
                     }

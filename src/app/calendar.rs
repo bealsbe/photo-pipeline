@@ -128,9 +128,8 @@ pub struct Calendar {
     checked_at: Option<Instant>,
     active: bool,
     job: u64,
-    running: Option<Scan>,
-    cancel: Option<Arc<AtomicBool>>,
-    indexing: bool,
+    /// The job under way, with its cancel flag.
+    running: Option<(Scan, Arc<AtomicBool>)>,
     /// Bumped when loaded days go stale; day loads started before are ignored.
     generation: u64,
     /// The day on screen changed on disk; reload it, keeping it up meanwhile.
@@ -216,8 +215,6 @@ impl Calendar {
             active: false,
             job: 0,
             running: None,
-            cancel: None,
-            indexing: false,
             generation: 0,
             reload_shown: None,
             progress: 0,
@@ -269,7 +266,7 @@ impl Calendar {
 
     /// The library is being (re)read.
     pub fn is_indexing(&self) -> bool {
-        self.indexing
+        self.running.is_some()
     }
 
     pub fn animating(&self) -> bool {
@@ -323,8 +320,8 @@ impl Calendar {
             self.index.as_ref().map(|i| i.len()).unwrap_or(0),
             self.index.as_ref().map(|i| i.total_files).unwrap_or(0),
             self.index.as_ref().map(|i| i.days.values().flat_map(|d| &d.files).map(|f| f.size).sum::<u64>()).unwrap_or(0),
-            self.indexing,
-            self.running,
+            self.running.is_some(),
+            self.running.as_ref().map(|r| r.0),
             self.stale,
             self.checked_at.is_some(),
             self.error,
@@ -341,7 +338,7 @@ impl Calendar {
     pub fn activate(&mut self, _workers: &ThumbWorkers) {
         self.active = true;
         if self.root.is_some() && (self.stale || self.checked_at.is_none_or(|t| t.elapsed() >= RECHECK)) {
-            match self.running {
+            match self.running.as_ref().map(|r| r.0) {
                 None => self.start_index(self.wanted_scan()),
                 // Only loading the saved tree: check the disk after it.
                 Some(Scan::Load) => self.stale = true,
@@ -452,24 +449,20 @@ impl Calendar {
 
     /// Start the check asked for while a job ran or the calendar was hidden.
     fn run_queued(&mut self) {
-        if self.active && self.stale && self.cancel.is_none() && self.root.is_some() {
+        if self.active && self.stale && self.running.is_none() && self.root.is_some() {
             self.start_index(self.wanted_scan());
         }
     }
 
     fn cancel_worker(&mut self) {
-        if let Some(c) = self.cancel.take() {
+        if let Some((_, c)) = self.running.take() {
             c.store(true, Ordering::Relaxed);
         }
-        self.running = None;
-        self.indexing = false;
     }
 
     /// The job ended.  A check or deep read that succeeded vouches for the index.
     fn finish_job(&mut self, succeeded: bool) {
-        self.cancel = None;
-        self.indexing = false;
-        if succeeded && matches!(self.running, Some(Scan::Check | Scan::Deep)) {
+        if succeeded && matches!(self.running, Some((Scan::Check | Scan::Deep, _))) {
             self.checked_at = Some(Instant::now());
         }
         self.running = None;
@@ -489,9 +482,7 @@ impl Calendar {
         self.job += 1;
         let job = self.job;
         let cancel = Arc::new(AtomicBool::new(false));
-        self.cancel = Some(cancel.clone());
-        self.running = Some(kind);
-        self.indexing = true;
+        self.running = Some((kind, cancel.clone()));
         self.error = None;
         self.progress = 0;
         let bus = self.bus.clone();
@@ -1401,7 +1392,7 @@ fn choice_layer(cal: &Calendar) -> Option<Element<'_, Message>> {
 fn choice_menu<'a>(cal: &'a Calendar, ch: &'a Choice) -> Element<'a, Message> {
     let d = ch.date;
     let head = format!("{}, {} {} is in {} folders", d.format("%a"), MONTH_ABBR[d.month0() as usize], d.day(), ch.folders.len());
-    let mut col = column![container(text(head).size(t::T_SMALL).color(t::INK3)).height(CHOICE_HEAD).padding(Padding::from([0.0, t::S2])).center_y(CHOICE_HEAD)];
+    let mut col = column![container(kit::caption(head)).height(CHOICE_HEAD).padding(Padding::from([0.0, t::S2])).center_y(CHOICE_HEAD)];
     let root = cal.index.as_ref().map(|ix| ix.root.as_path());
     for (i, f) in ch.folders.iter().enumerate() {
         let name = crate::util::file_name(&f.path);
@@ -1411,7 +1402,7 @@ fn choice_menu<'a>(cal: &'a Calendar, ch: &'a Choice) -> Element<'a, Message> {
             Some(p) => format!("In {}", p.display()),
             None => String::new(),
         };
-        let words = column![text(name).size(t::T_BODY).color(t::INK), text(place).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill);
+        let words = column![text(name).size(t::T_BODY).color(t::INK), kit::caption(place)].spacing(1).width(Length::Fill);
         let line = row![icons::view(Glyph::Folder, 16.0, t::INK2), words, text(plural(f.shots as u64, "photo")).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK2)]
             .spacing(t::S2)
             .align_y(Alignment::Center);
@@ -1423,7 +1414,7 @@ fn choice_menu<'a>(cal: &'a Calendar, ch: &'a Choice) -> Element<'a, Message> {
         let line = row![
             icons::view(Glyph::Photos, 16.0, t::INK2),
             text("Show the day's photos").size(t::T_BODY).color(t::INK).width(Length::Fill),
-            text("Alt+click").size(t::T_SMALL).color(t::INK3),
+            kit::caption("Alt+click"),
         ]
         .spacing(t::S2)
         .align_y(Alignment::Center);
@@ -1653,7 +1644,7 @@ fn message_page(cal: &Calendar) -> Element<'_, Message> {
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(Glyph::Calendar, 48.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+    col = col.push(kit::title(title));
     if !body.is_empty() {
         col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     }

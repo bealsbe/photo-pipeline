@@ -431,7 +431,6 @@ pub struct App {
     pub library: Option<PathBuf>,
     scan: Option<ScanHandle>,
     scan_seq: u64,
-    pub scanning: bool,
     scan_dirty: bool,
     last_refresh: Instant,
     /// When the current scan started (profiling).
@@ -570,7 +569,6 @@ impl App {
             library: None,
             scan: None,
             scan_seq: 0,
-            scanning: false,
             scan_dirty: false,
             last_refresh: Instant::now(),
             scan_started: Instant::now(),
@@ -752,7 +750,7 @@ impl App {
     }
 
     fn update_status_count(&mut self) {
-        if self.view.is_library() || self.coll.is_empty() || self.scanning {
+        if self.view.is_library() || self.coll.is_empty() || self.scanning() {
             return;
         }
         let total = self.coll.len();
@@ -772,7 +770,7 @@ impl App {
         let state = self.filter.state();
         // Bursts change only when files come, go or pair up (not on marks);
         // they are found once the scan has paired the folder.
-        if self.scanning {
+        if self.scanning() {
             if !self.bursts.is_empty() {
                 self.bursts = Bursts::default();
             }
@@ -806,7 +804,7 @@ impl App {
         };
         // Pairs form when the scan completes; counting shots before then
         // would count every file.
-        self.derived.progress = if self.scanning { filter::Progress::default() } else { filter::progress(&self.coll) };
+        self.derived.progress = if self.scanning() { filter::Progress::default() } else { filter::progress(&self.coll) };
         self.derived.key = self.derived.key.wrapping_add(1);
         self.keep_grid_selection();
         self.last_refresh = Instant::now();
@@ -866,9 +864,19 @@ impl App {
         covers
     }
 
+    /// A scan of the working folder is under way.
+    pub fn scanning(&self) -> bool {
+        self.scan.is_some()
+    }
+
     /// `id` is a stacked burst's tile in the grid (its cover photo).
     pub fn is_stack(&self, id: RecordId) -> bool {
-        self.bursts.of(id).is_some_and(|b| self.stack_covers().get(&b) == Some(&id))
+        self.is_stack_among(&self.stack_covers(), id)
+    }
+
+    /// `is_stack` with the covers already gathered, for a run of tiles.
+    fn is_stack_among(&self, covers: &HashMap<crate::model::bursts::BurstId, RecordId>, id: RecordId) -> bool {
+        self.bursts.of(id).is_some_and(|b| covers.get(&b) == Some(&id))
     }
 
     /// What P or M on a stacked burst says instead of marking.
@@ -975,7 +983,6 @@ impl App {
         self.refresh_views();
         self.scan_seq += 1;
         self.scan_started = Instant::now();
-        self.scanning = true;
         self.scan_dirty = false;
         let _ = self.show_status("Scanning…", 0);
         let net = network::folder_changed(self, &path, true);
@@ -986,7 +993,6 @@ impl App {
     fn on_scan_complete(&mut self, count: usize) -> Task<Message> {
         crate::profile::record(("scan", "open to complete"), self.scan_started.elapsed());
         let _t = crate::profile::span("scan", "finishing on the UI thread");
-        self.scanning = false;
         self.scan_dirty = false;
         // Every RAW+JPG with the same name in the same folder is a pair.
         self.coll.build_pairs();
@@ -1160,7 +1166,7 @@ impl App {
         }
         self.calendar.deactivate();
         let mut t = Task::none();
-        if self.coll.is_empty() && !self.scanning {
+        if self.coll.is_empty() && !self.scanning() {
             t = self.show_status("Ready — open a folder to begin", 0);
         }
         self.update_status_count();
@@ -1273,7 +1279,8 @@ impl App {
             View::Grid => {
                 let selected: Vec<RecordId> =
                     self.derived.tiles.iter().copied().filter(|id| self.grid.selection.contains(id)).collect();
-                let open: Vec<RecordId> = selected.iter().copied().filter(|&id| !self.is_stack(id)).collect();
+                let covers = self.stack_covers();
+                let open: Vec<RecordId> = selected.iter().copied().filter(|&id| !self.is_stack_among(&covers, id)).collect();
                 if open.len() < selected.len() {
                     hint = self.stack_mark_hint();
                 }
@@ -2160,7 +2167,7 @@ impl App {
                 }
                 BgEvent::ScanError { scan, message } => {
                     if scan == self.scan_seq {
-                        self.scanning = false;
+                        self.scan = None;
                         tasks.push(self.show_status(format!("Scan error: {message}"), 0));
                         tasks.push(network::on_scan_error(self, &message));
                     }

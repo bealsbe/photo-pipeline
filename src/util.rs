@@ -78,6 +78,30 @@ pub fn s(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
+/// `"a photo"` / `"3 photos"`: a count read aloud.
+pub fn a_or_n(n: usize, word: &str) -> String {
+    if n == 1 { format!("a {word}") } else { format!("{n} {word}s") }
+}
+
+/// `"1,234 of 5,678"`: progress as the status bar quotes it.
+pub fn of(done: u64, total: u64) -> String {
+    format!("{} of {}", thousands(done), thousands(total))
+}
+
+/// `done / total` as a fraction, 0 when there is nothing to do.
+pub fn frac(done: usize, total: usize) -> f32 {
+    if total == 0 { 0.0 } else { done as f32 / total as f32 }
+}
+
+/// A path with the home folder shortened to `~`.
+pub fn tilde(p: &Path) -> String {
+    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rel) if rel.as_os_str().is_empty() => "~".into(),
+        Some(rel) => format!("~/{}", rel.display()),
+        None => p.display().to_string(),
+    }
+}
+
 const THIN: char = '\u{202f}';
 
 /// File size with one decimal: `"7.9 MB"` (narrow no-break space).

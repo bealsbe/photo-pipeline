@@ -114,9 +114,9 @@ pub struct Trashed {
 
 #[derive(Debug, Clone)]
 pub enum Kind {
-    Marks { field: Field, changes: Vec<Change> },
-    /// Mark changes made by one action (a confirmed bulk action that
-    /// prunes some frames and keeps one): undone and redone together.
+    /// Mark changes made by one action: one part for a press, several for
+    /// a confirmed bulk action (prune some frames and keep one), undone
+    /// and redone together.
     Batch { parts: Vec<(Field, Vec<Change>)> },
     Sort { moves: Vec<Moved> },
     /// `window`: when the trash operation ran (unix seconds).
@@ -131,7 +131,6 @@ impl Kind {
             }
         };
         match self {
-            Kind::Marks { changes, .. } => changes.iter_mut().for_each(|c| fix(&mut c.id)),
             Kind::Batch { parts } => parts.iter_mut().flat_map(|(_, c)| c.iter_mut()).for_each(|c| fix(&mut c.id)),
             Kind::Sort { moves } => moves.iter_mut().for_each(|m| fix(&mut m.id)),
             Kind::Trash { files, .. } => files.iter_mut().for_each(|f| fix(&mut f.id)),
@@ -281,7 +280,6 @@ impl History {
     /// how many records it reached and the fields whose sidecars change.
     fn restore(&mut self, coll: &mut Collection, kind: &Kind, dir: Dir) -> (usize, Vec<Field>) {
         let parts: Vec<(Field, &[Change])> = match kind {
-            Kind::Marks { field, changes } => vec![(*field, changes.as_slice())],
             Kind::Batch { parts } => parts.iter().map(|(f, c)| (*f, c.as_slice())).collect(),
             _ => return (0, Vec::new()),
         };
@@ -459,7 +457,7 @@ pub fn note(app: &mut App, field: Field, ids: &[RecordId]) {
         return;
     }
     let label = marks_label(&app.coll, field, &changes);
-    app.history.push(label, Kind::Marks { field, changes });
+    app.history.push(label, Kind::Batch { parts: vec![(field, changes)] });
 }
 
 /// Run `f` (which ends in `refresh_prune` / `refresh_mark`, once or more)
@@ -570,7 +568,7 @@ fn run(app: &mut App, dir: Dir) -> Task<Message> {
         return app.show_status(if dir == Dir::Undo { "Nothing to undo" } else { "Nothing to redo" }, 3000);
     };
     match (&step.kind, dir) {
-        (Kind::Marks { .. } | Kind::Batch { .. }, _) => apply_marks(app, dir, step),
+        (Kind::Batch { .. }, _) => apply_marks(app, dir, step),
         (Kind::Sort { .. }, _) => start_moves(app, dir, step),
         (Kind::Trash { .. }, Dir::Undo) => start_restore(app, step),
         (Kind::Trash { .. }, Dir::Redo) => start_retrash(app, step),
@@ -913,7 +911,7 @@ mod tests {
     }
 
     fn marks_step(h: &mut History, n: u64) -> u64 {
-        h.push(format!("step {n}"), Kind::Marks { field: Field::Prune, changes: Vec::new() })
+        h.push(format!("step {n}"), Kind::Batch { parts: vec![(Field::Prune, Vec::new())] })
     }
 
     #[test]
@@ -964,13 +962,13 @@ mod tests {
         let mut h = History::new();
         h.push(
             "x".into(),
-            Kind::Marks { field: Field::Prune, changes: vec![Change { id: 7, before: Marks::default(), after: Marks::default() }] },
+            Kind::Batch { parts: vec![(Field::Prune, vec![Change { id: 7, before: Marks::default(), after: Marks::default() }])] },
         );
         h.push("y".into(), Kind::Sort { moves: vec![Moved { id: 7, from: "/a".into(), to: "/b".into() }, Moved { id: 8, from: "/c".into(), to: "/d".into() }] });
         h.remap(&HashMap::from([(7, 70)]));
         match (&h.undo[0].kind, &h.undo[1].kind) {
-            (Kind::Marks { changes, .. }, Kind::Sort { moves }) => {
-                assert_eq!(changes[0].id, 70);
+            (Kind::Batch { parts }, Kind::Sort { moves }) => {
+                assert_eq!(parts[0].1[0].id, 70);
                 assert_eq!((moves[0].id, moves[1].id), (70, 8));
             }
             _ => panic!("kinds"),

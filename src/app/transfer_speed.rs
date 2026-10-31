@@ -19,7 +19,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use super::download_speed::{self, REFRESH, STEADY, WINDOW, Reading};
+use super::download_speed::{self, Reading};
 use crate::ops::Progress;
 use crate::search::estimate;
 
@@ -30,7 +30,7 @@ pub const STALL: Duration = download_speed::STALL;
 /// The speed of one copy run.
 #[derive(Debug, Default)]
 pub struct Speed {
-    /// (when, bytes transferred then), oldest first, back to [`STEADY`]
+    /// (when, bytes transferred then), oldest first, back to [`download_speed::STEADY`]
     /// and one before it.
     samples: VecDeque<(Instant, u64)>,
     /// When the run started, or the last file finished: the stall clock.
@@ -51,15 +51,7 @@ impl Speed {
     pub fn observe(&mut self, p: Progress, now: Instant) {
         self.active_at = Some(now);
         if p.transferred > self.last.transferred {
-            self.samples.push_back((now, p.transferred));
-            while self.samples.len() > 2 && self.samples[1].0 + STEADY <= now {
-                self.samples.pop_front();
-            }
-            if self.shown.is_none_or(|(at, _, _)| now.duration_since(at) >= REFRESH) {
-                if let (Some(fast), Some(steady)) = (self.rate_over(WINDOW), self.rate_over(STEADY)) {
-                    self.shown = Some((now, fast, steady));
-                }
-            }
+            download_speed::record(&mut self.samples, &mut self.shown, now, p.transferred);
         }
         self.last = p;
     }
@@ -79,10 +71,6 @@ impl Speed {
             Some((_, now, steady)) => Reading::Rate { now, steady },
             None => Reading::Starting,
         })
-    }
-
-    fn rate_over(&self, w: Duration) -> Option<f64> {
-        download_speed::rate_over(&self.samples, w)
     }
 }
 

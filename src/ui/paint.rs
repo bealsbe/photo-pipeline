@@ -8,6 +8,9 @@ use iced::advanced::text::{self, Paragraph as _, Renderer as _};
 use iced::alignment::Vertical;
 use iced::widget::canvas::{self, LineCap, Path, Stroke};
 use iced::{Border, Color, Font, Pixels, Point, Rectangle, Size, Vector, border, font};
+use std::time::Instant;
+
+use super::theme as t;
 
 pub type Renderer = iced::Renderer;
 
@@ -52,6 +55,53 @@ pub fn out_expo(t: f32) -> f32 {
 pub fn out_quad(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * (2.0 - t)
+}
+
+// ── motion ──────────────────────────────────────────────────────────────────
+
+/// How far (0–1) an animation of `ms` begun at `start` has come by `now`.
+pub fn progress(start: Instant, now: Instant, ms: f32) -> f32 {
+    (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / ms).clamp(0.0, 1.0)
+}
+
+/// Whether an animation of `ms` begun at `start` has run its course by `now`.
+pub fn done(start: Instant, now: Instant, ms: f32) -> bool {
+    now.saturating_duration_since(start).as_secs_f32() * 1000.0 >= ms
+}
+
+/// When a thumbnail landed → its fade-in (0–1).
+pub fn arrival(arrived: Instant, now: Instant) -> f32 {
+    out_cubic(progress(arrived, now, t::MOTION_MS))
+}
+
+/// A value moving from `from` to `to` over `ms`, begun at `start`.
+#[derive(Clone, Copy, Debug)]
+pub struct Tween {
+    pub from: f32,
+    pub to: f32,
+    pub start: Instant,
+    pub ms: f32,
+}
+
+impl Tween {
+    /// How far along (0–1), before easing.
+    pub fn progress(&self, now: Instant) -> f32 {
+        progress(self.start, now, self.ms)
+    }
+
+    /// The value now, eased with [`out_cubic`].
+    pub fn value(&self, now: Instant) -> f32 {
+        self.value_with(now, out_cubic)
+    }
+
+    /// The value now, eased with `ease`.
+    pub fn value_with(&self, now: Instant, ease: fn(f32) -> f32) -> f32 {
+        lerp(self.from, self.to, ease(self.progress(now)))
+    }
+
+    pub fn done(&self, now: Instant) -> bool {
+        done(self.start, now, self.ms)
+    }
 }
 
 // ── fonts ───────────────────────────────────────────────────────────────────

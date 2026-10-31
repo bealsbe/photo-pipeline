@@ -1,5 +1,5 @@
-//! The numbers the "Not indexed yet" page and the download dialog quote
-//! (plan §3.7 and §7a.4), as pure functions of the shot count.
+//! The numbers the "Not indexed yet" page and the download dialog quote,
+//! as pure functions of the shot count.
 
 use crate::ml::Device;
 use crate::ml::models::ModelId;
@@ -35,21 +35,21 @@ pub fn seconds(shots: usize, device: Device) -> f64 {
 }
 
 /// Faces per shot in this library: 8–21 k faces of at least 40 px in
-/// 56 710 shots (plan §3.3, sample L at YuNet score ≥ 0.9 gives ~0.14;
+/// 56 710 shots (sample L at YuNet score ≥ 0.9 gives ~0.14;
 /// event days hold more).
 pub const FACES_PER_SHOT: f64 = 0.25;
 /// Seconds of finding faces per shot on each device, beyond the read the
 /// search step already pays: the larger decode for the detector's canvas,
 /// the canvas, YuNet, and the full decode of the photos with faces.
-/// Measured on 200 previews (phase 3): 11.8 ms a photo on the processor
+/// Measured on 200 previews: 11.8 ms a photo on the processor
 /// with SFace (whose recognition is nearly free), ~10 ms on the card
 /// (15.4 ms with faces against 5.6 without).
 pub const DETECT_SECONDS_PER_SHOT_CPU: f64 = 0.0115;
 pub const DETECT_SECONDS_PER_SHOT_GPU: f64 = 0.010;
 
-/// Seconds per face for a face model on the processor (measured, phase
-/// 3, over the detection cost: AuraFace 12 ms, InsightFace 5 ms, SFace
-/// about 1 ms, at eight threads and batches of up to 32) and on the card
+/// Seconds per face for a face model on the processor (measured over
+/// the detection cost: AuraFace 12 ms, InsightFace 5 ms, SFace about
+/// 1 ms, at eight threads and batches of up to 32) and on the card
 /// (about a tenth).
 pub fn face_seconds_per_face(device: Device, model: ModelId) -> f64 {
     let cpu = match model {
@@ -103,12 +103,11 @@ pub fn face_model_change_seconds(shots_with_faces: usize, faces: usize, device: 
 
 /// Seconds per fursuit photo for the head step (OWLv2 over the preview,
 /// then DINOv2 on each head), **measured with the helper's own graphs**
-/// on the study's previews (2026-10-03, `ml::heads` ignored test): on the
+/// on the sample previews (2026-10-03, `ml::heads` ignored test): on the
 /// card 0.17 s for OWLv2 one photo at a time plus the heads' DINOv2; on
 /// the processor (8 threads) 4.0 s for OWLv2 and 4.5 s in all, three and
-/// a half times the study's PyTorch figure, so the library's ~42 000
-/// fursuit photos are about 50 hours there (decision 11: it asks every
-/// time).
+/// a half times the earlier PyTorch figure, so the library's ~42 000
+/// fursuit photos are about 50 hours there (it asks every time).
 pub const HEAD_SECONDS_PER_PHOTO_GPU: f64 = 0.3;
 pub const HEAD_SECONDS_PER_PHOTO_CPU: f64 = 4.5;
 
@@ -125,7 +124,7 @@ pub fn head_seconds(photos: usize, device: Device) -> f64 {
 /// Seconds for a head scan over `photos` fursuit photos already indexed
 /// (a catch-up, or new exports): the previews are read again and the two
 /// models run; inference dominates on both devices.  This is the number
-/// the Fursuits tab and the processor's question quote (decision 11).
+/// the Fursuits tab and the processor's question quote.
 pub fn head_catch_up_seconds(photos: usize, device: Device) -> f64 {
     let read = photos as f64 * SECONDS_PER_SHOT_GPU;
     let work = head_seconds(photos, device);
@@ -244,7 +243,7 @@ mod tests {
         assert_eq!(describe_seconds(15.0 * 3600.0), "about 15 hours");
     }
 
-    /// Measured (plan, "As built — phase 4"): about 50 hours on the
+    /// Measured: about 50 hours on the
     /// processor for the library's fursuit photos (74 % of 56 710 ≈
     /// 42 000), over four hours an event day; about 3.5 hours on the card.
     #[test]
@@ -258,9 +257,9 @@ mod tests {
         assert!(head_catch_up_seconds(100, Device::Gpu) >= head_seconds(100, Device::Gpu), "never under the work itself");
     }
 
-    /// Measured in phase 3: a catch-up over the library is about ten
-    /// minutes on the card (the extra decodes outweigh the read) and
-    /// 11–14 minutes on the processor; the plan's +7–14 minutes held.
+    /// Measured: a catch-up over the library is about ten minutes on the
+    /// card (the extra decodes outweigh the read) and 11–14 minutes on
+    /// the processor; the estimate of +7–14 minutes held.
     #[test]
     fn face_estimates_follow_the_measurements() {
         let n = 56_710;

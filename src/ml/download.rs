@@ -1,4 +1,4 @@
-//! Downloading models (plan §4.4): on a worker thread, with progress as
+//! Downloading models: on a worker thread, with progress as
 //! [`BgEvent::ModelDownload`], each file to a temporary name beside its
 //! destination, its SHA-256 checked against the registry, then renamed
 //! into place.  A mismatch deletes the file and says so; nothing that
@@ -188,7 +188,7 @@ pub fn fetch(f: &ModelFile, dest: &Path, cancel: &AtomicBool, report: &mut dyn F
             return Err(DownloadState::Mismatch { expected: expected_sha.to_string(), got: digest });
         }
         // An archive: take the one file out, check it too, and drop the
-        // archive (nothing of it is kept, §4.4).
+        // archive (nothing of it is kept).
         let ready = if f.archive.is_some() { unpack(f, &tmp, cancel)? } else { tmp.clone() };
         let _ = std::fs::remove_file(dest);
         fsutil::rename_noreplace(&ready, dest).map_err(|e| DownloadState::Failed(format!("can't put {} in place: {e}", f.file)))?;

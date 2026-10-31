@@ -18,10 +18,6 @@ use iced::{Color, Element, Event, Length, Rectangle, Size, Vector, window};
 use super::paint::{self, Renderer, rect};
 use super::theme as t;
 
-fn progress(start: Instant, now: Instant, ms: f32) -> f32 {
-    (now.saturating_duration_since(start).as_secs_f32() * 1000.0 / ms).clamp(0.0, 1.0)
-}
-
 // ── Appear ──────────────────────────────────────────────────────────────────
 
 pub struct Appear<'a, Message> {
@@ -95,7 +91,7 @@ impl<Message> Widget<Message, iced::Theme, Renderer> for Appear<'_, Message> {
         if let Event::Window(window::Event::RedrawRequested(now)) = event {
             let st = tree.state.downcast_mut::<AppearState>();
             let start = *st.start.get_or_insert(*now);
-            if progress(start, *now, t::MOTION_MS) < 1.0 {
+            if paint::progress(start, *now, t::MOTION_MS) < 1.0 {
                 shell.request_redraw();
             }
         }
@@ -117,7 +113,7 @@ impl<Message> Widget<Message, iced::Theme, Renderer> for Appear<'_, Message> {
         viewport: &Rectangle,
     ) {
         let st = tree.state.downcast_ref::<AppearState>();
-        let k = st.start.map(|s| paint::out_cubic(progress(s, Instant::now(), t::MOTION_MS))).unwrap_or(0.0);
+        let k = st.start.map(|s| paint::out_cubic(paint::progress(s, Instant::now(), t::MOTION_MS))).unwrap_or(0.0);
         if let Some(scrim) = self.scrim {
             paint::fill(renderer, layout.bounds(), Color { a: scrim.a * k, ..scrim });
         }
@@ -168,9 +164,9 @@ impl BarState {
         if self.active {
             // Already partly visible (switched back on mid-fade): no delay.
             let delay = if self.from > 0.0 { Duration::ZERO } else { DELAY };
-            self.from + (1.0 - self.from) * progress(self.changed + delay, now, t::MOTION_MS)
+            self.from + (1.0 - self.from) * paint::progress(self.changed + delay, now, t::MOTION_MS)
         } else {
-            self.from * (1.0 - progress(self.changed, now, t::MOTION_MS))
+            self.from * (1.0 - paint::progress(self.changed, now, t::MOTION_MS))
         }
     }
 }
@@ -310,11 +306,11 @@ const GLIDE_MS: f32 = 200.0;
 
 impl SmoothState {
     fn level(&self, now: Instant) -> f32 {
-        self.from + (self.to - self.from) * paint::out_cubic(progress(self.changed, now, GLIDE_MS))
+        self.from + (self.to - self.from) * paint::out_cubic(paint::progress(self.changed, now, GLIDE_MS))
     }
 
     fn settled(&self, now: Instant) -> bool {
-        progress(self.changed, now, GLIDE_MS) >= 1.0
+        paint::progress(self.changed, now, GLIDE_MS) >= 1.0
     }
 }
 
@@ -500,12 +496,12 @@ struct GlowState {
 
 impl GlowState {
     fn level(&self, now: Instant) -> f32 {
-        let k = paint::out_cubic(progress(self.changed, now, GLOW_MS));
+        let k = paint::out_cubic(paint::progress(self.changed, now, GLOW_MS));
         if self.over { self.from + (1.0 - self.from) * k } else { self.from * (1.0 - k) }
     }
 
     fn settled(&self, now: Instant) -> bool {
-        progress(self.changed, now, GLOW_MS) >= 1.0
+        paint::progress(self.changed, now, GLOW_MS) >= 1.0
     }
 }
 

@@ -1,4 +1,4 @@
-//! Fursuits as the pages see them (decision 11): the head step's state and
+//! Fursuits as the pages see them: the head step's state and
 //! costs (`crate::search::heads`, re-exported here), the head models' row
 //! for the download dialog, and, behind `PP_SEARCH_FAKE`, a stand-in that
 //! makes fursuits up.
@@ -38,8 +38,8 @@ pub fn missing_models(st: &Status) -> Vec<ModelId> {
 }
 
 /// The library's fursuit photos, for "for this library" costs: those the
-/// index tags, or before anything is indexed, the study's share (three
-/// shots in four).
+/// index tags, or before anything is indexed, the share found in a sample
+/// of the library (three shots in four).
 pub fn library_photos(h: &HeadsStatus, shots: usize) -> usize {
     if h.tagged > 0 { h.tagged } else { shots * 3 / 4 }
 }
@@ -84,7 +84,7 @@ pub fn judge_call_seconds(choice: crate::ml::judge::JudgeChoice) -> f64 {
 // people's stand-in, so a photo of a person and a fursuit is one photo),
 // drawn as grey cartoon heads (`fursuit_art`).  Heads are only on photos
 // "tagged" as fursuits; suits come in look-alike pairs, so automatic groups
-// mix a little, as the study found; named fursuits get their suggestions a
+// mix a little, as real ones do; named fursuits get their suggestions a
 // few at a time, and *Find more* (strict) lets the next few through,
 // look-alikes included.
 

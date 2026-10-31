@@ -4,7 +4,7 @@
 //! summary when it ends, and the banner when it stopped because the folder
 //! went away.
 //!
-//! Analysing only ever starts when asked (decision 2): from the menu, the
+//! Analysing only ever starts when asked: from the menu, the
 //! side rail, or the Hints menu.  What an earlier pass measured is shown as
 //! soon as a folder opens (from the cache, reading no photo).
 
@@ -58,7 +58,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
 /// Start analysing, or say why not (the Analyse command).
 pub fn analyse(app: &mut App) -> Task<Message> {
     app.quality.menu = false;
-    if app.scanning {
+    if app.scanning() {
         return app.show_status("The folder is still being read. Analyse it once the scan is done.", 5000);
     }
     if app.folder.is_none() || app.coll.is_empty() {
@@ -193,20 +193,15 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         return None;
     }
     let (done, total) = app.quality.progress.unwrap_or((0, 0));
-    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+    let frac = util::frac(done, total);
     let bar = SmoothBar::new(frac).length(BAR_W).colors(t::RAISED, t::FLOW);
-    let stop = button(container(icons::view(Glyph::Close, 11.0, t::INK2)).center(Length::Fill))
-        .width(20)
-        .height(20)
-        .padding(0)
-        .style(style::ghost().radius(4.0).style())
-        .on_press(Message::Hints(Msg::Stop));
+    let stop = kit::stop_btn(t::INK2, "Stop analysing. What is checked so far is kept.", Message::Hints(Msg::Stop));
     let words = row![
-        text("Analysing").size(t::T_SMALL).color(t::INK3),
-        text(format!("{} of {}", util::thousands(done as u64), util::thousands(total as u64))).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
+        kit::caption("Analysing"),
+        text(util::of(done as u64, total as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
     ]
     .spacing(4);
-    let slot = row![words, bar, tip(stop, "Stop analysing. What is checked so far is kept.", false)].spacing(t::S2).align_y(Alignment::Center);
+    let slot = row![words, bar, stop].spacing(t::S2).align_y(Alignment::Center);
     Some(row![slot, Space::new().width(t::S3), kit::vrule(12.0), Space::new().width(t::S3)].align_y(Alignment::Center).into())
 }
 
@@ -306,7 +301,7 @@ fn menu(app: &App) -> Element<'_, Message> {
             tip(kit::btn("Analyse again", style::ghost(), Some(Message::Hints(Msg::Analyse))), "Reads only photos that are new or changed since", true),
         )
     };
-    let foot = row![text(line).size(t::T_SMALL).color(t::INK3).width(Length::Fill), action].spacing(t::S2).align_y(Alignment::Center);
+    let foot = row![kit::caption(line).width(Length::Fill), action].spacing(t::S2).align_y(Alignment::Center);
     col = col.push(container(foot).padding(Padding { top: 0.0, bottom: t::S1, left: t::S2, right: t::S1 }));
     col.into()
 }
@@ -374,13 +369,13 @@ fn empty_state(app: &App, shots: usize) -> Element<'_, Message> {
         point(Glyph::HintSharp, "The sharpest frame of each burst"),
     ]
     .spacing(6);
-    let enabled = !app.scanning && !app.coll.is_empty();
+    let enabled = !app.scanning() && !app.coll.is_empty();
     let content = column![
-        text("Not analysed yet").size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+        kit::title("Not analysed yet"),
         text("Analysing reads each photo's preview and looks for:").size(t::T_BODY).color(t::INK2),
         points,
-        text(cost).size(t::T_SMALL).color(t::INK3),
-        text("Nothing is marked: hints only suggest. The bulk actions in the Prune menu always ask first.").size(t::T_SMALL).color(t::INK3),
+        kit::caption(cost),
+        kit::caption("Nothing is marked: hints only suggest. The bulk actions in the Prune menu always ask first."),
         row![Space::new().width(Length::Fill), kit::btn("Analyse this folder", style::primary(), enabled.then_some(Message::Hints(Msg::Analyse)))],
     ]
     .spacing(t::S2);
@@ -395,7 +390,7 @@ fn point<'a>(g: Glyph, words: &'a str) -> Element<'a, Message> {
 
 /// The hints filter is on and nothing passes it.
 pub fn filtered_empty(app: &App) -> bool {
-    app.filter.hint.is_some() && app.derived.visible.is_empty() && !app.scanning && !app.coll.is_empty()
+    app.filter.hint.is_some() && app.derived.visible.is_empty() && !app.scanning() && !app.coll.is_empty()
 }
 
 /// Say why the grid is empty, and how to see photos again.
@@ -413,7 +408,7 @@ pub fn filtered_empty_page(app: &App) -> Element<'_, Message> {
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(filter_glyph(f), 48.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK));
+    col = col.push(kit::title(title));
     col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     col = col.push(Space::new().height(t::S2));
     let mut buttons = row![kit::btn("Turn off the hints filter", style::secondary(), Some(Message::Filter(FilterMsg::Hint(None))))].spacing(t::S2);
@@ -446,8 +441,8 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
     );
     let words = column![
         text(head).size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
-        text(detail).size(t::T_SMALL).color(t::INK2),
-        text(error.clone()).size(t::T_SMALL).color(t::INK3),
+        kit::note(detail),
+        kit::caption(error.clone()),
     ]
     .spacing(2)
     .width(Length::Fill);

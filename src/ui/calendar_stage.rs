@@ -56,6 +56,16 @@ pub fn first_weekday() -> u32 {
 const DAY_SHORT: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const DAY_NARROW: [&str; 7] = ["M", "T", "W", "T", "F", "S", "S"];
 
+/// Day-of-month labels, so a day cell's number costs no allocation per frame.
+const DAY_LABELS: [&str; 32] = [
+    "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24",
+    "25", "26", "27", "28", "29", "30", "31",
+];
+
+fn day_label(d: NaiveDate) -> &'static str {
+    DAY_LABELS[d.day() as usize]
+}
+
 /// Python's `calendar.Calendar(first).monthdatescalendar(y, m)`: full weeks.
 pub fn month_weeks(year: i32, month: u32, first: u32) -> Vec<[NaiveDate; 7]> {
     let Some(start) = NaiveDate::from_ymd_opt(year, month, 1) else { return Vec::new() };
@@ -633,7 +643,7 @@ impl<'a, Message> CalendarStage<'a, Message> {
         let Some(index) = self.index else { return (need, false) };
         let mut visit = |fe: &FileEntry| match self.thumbs.get(&fe.path) {
             Some(t) => {
-                if now.saturating_duration_since(t.arrived).as_secs_f32() * 1000.0 < FADE_MS {
+                if !paint::done(t.arrived, now, FADE_MS) {
                     fading = true;
                 }
             }
@@ -704,8 +714,7 @@ impl Ctx<'_> {
     }
 
     fn fade(&self, arrived: Instant) -> f32 {
-        let t = self.now.saturating_duration_since(arrived).as_secs_f32() * 1000.0 / FADE_MS;
-        if t >= 1.0 { 1.0 } else { paint::out_quad(t) }
+        paint::out_quad(paint::progress(arrived, self.now, FADE_MS))
     }
 }
 
@@ -859,7 +868,7 @@ fn paint_month(r: &mut Renderer, size: Size, year: i32, month: u32, alpha: f32, 
         } else {
             t::INK4
         };
-        paint::text(r, &d.day().to_string(), num, 12.0, font, a(color), HAlign::Center, clip);
+        paint::text(r, day_label(*d), num, 12.0, font, a(color), HAlign::Center, clip);
 
         match day {
             Some(_) if !in_month => {
@@ -961,7 +970,7 @@ fn paint_year(r: &mut Renderer, size: Size, year: i32, alpha: f32, ctx: &Ctx<'_>
             } else {
                 t::INK3
             };
-            paint::text(r, &d.day().to_string(), cell, num_px, paint::SEMIBOLD, a(col), HAlign::Center, clip);
+            paint::text(r, day_label(*d), cell, num_px, paint::SEMIBOLD, a(col), HAlign::Center, clip);
         }
     }
     // Legend

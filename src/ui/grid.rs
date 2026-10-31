@@ -45,7 +45,7 @@ use iced::widget::image::FilterMethod;
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, touch, window};
 
 use super::icons::{self, Glyph};
-use super::paint::{self, HAlign, Renderer, rect};
+use super::paint::{self, HAlign, Renderer, Tween, rect};
 use super::theme as t;
 use crate::imaging::thumbs::ThumbCache;
 use crate::model::bursts::{BurstId, RunMark};
@@ -499,25 +499,6 @@ enum Hover {
     Scrollbar,
 }
 
-#[derive(Clone, Copy)]
-struct Anim {
-    from: f32,
-    to: f32,
-    start: Instant,
-    ms: f32,
-}
-
-impl Anim {
-    fn value(&self, now: Instant, ease: fn(f32) -> f32) -> f32 {
-        let t = (now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 / self.ms).clamp(0.0, 1.0);
-        paint::lerp(self.from, self.to, ease(t))
-    }
-
-    fn done(&self, now: Instant) -> bool {
-        now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 >= self.ms
-    }
-}
-
 struct Touch {
     fingers: HashMap<touch::Finger, Point>,
     last_y: f32,
@@ -531,15 +512,15 @@ struct Touch {
 
 pub struct State {
     scroll: f32,
-    scroll_anim: Option<Anim>,
+    scroll_anim: Option<Tween>,
     size: f32,
-    zoom: Option<Anim>,
+    zoom: Option<Tween>,
     last_target: f32,
     /// The name strip's height, animating when names are shown or hidden.
     label_h: f32,
-    label_anim: Option<Anim>,
+    label_anim: Option<Tween>,
     last_names: bool,
-    collapse: HashMap<NaiveDate, Anim>,
+    collapse: HashMap<NaiveDate, Tween>,
     last_collapsed: HashSet<NaiveDate>,
     hover: Hover,
     /// When the hovered cell was entered, and the one before it left: both
@@ -549,7 +530,7 @@ pub struct State {
     cursor: Point,
     hover_since: Instant,
     last_click: Option<amouse::Click>,
-    bar: Anim,
+    bar: Tween,
     last_select_mode: bool,
     sent_range: Option<(usize, usize, usize, usize, u64)>,
     settle_at: Option<Instant>,
@@ -557,7 +538,7 @@ pub struct State {
     elide: RefCell<HashMap<(RecordId, u32), String>>,
     viewport: Rectangle,
     drag_bar: Option<f32>,
-    kinetic: Option<Anim>,
+    kinetic: Option<Tween>,
     touch: Option<Touch>,
     last_frame: Instant,
     initialised: bool,
@@ -584,7 +565,7 @@ const PULSE_MS: f32 = 200.0;
 /// rects are in the new layout's content coordinates (the old ones moved by
 /// the scroll change that holds the focused tile still).
 struct Slide {
-    anim: Anim,
+    anim: Tween,
     /// Where each tile near the view was.
     from: HashMap<RecordId, Rectangle>,
     /// Where each stack was: frames opening out of it start there.
@@ -598,7 +579,7 @@ struct Slide {
 impl Slide {
     /// Progress, eased (0 → 1).
     fn t(&self, now: Instant) -> f32 {
-        self.anim.value(now, paint::out_cubic)
+        self.anim.value(now)
     }
 }
 
@@ -622,7 +603,7 @@ impl State {
             cursor: Point::ORIGIN,
             hover_since: now,
             last_click: None,
-            bar: Anim { from: 0.0, to: 0.0, start: now, ms: 180.0 },
+            bar: Tween { from: 0.0, to: 0.0, start: now, ms: 180.0 },
             last_select_mode: false,
             sent_range: None,
             settle_at: None,
@@ -666,20 +647,20 @@ impl State {
                 _ => {}
             }
         }
-        self.pulses.retain(|_, (at, _)| now.saturating_duration_since(*at).as_secs_f32() * 1000.0 < PULSE_MS);
+        self.pulses.retain(|_, (at, _)| !paint::done(*at, now, PULSE_MS));
         !self.pulses.is_empty()
     }
 
     /// A pulse under way on `id`: its progress (0–1) and tone.
     fn pulse(&self, id: RecordId, now: Instant) -> Option<(f32, Color)> {
         let (at, tone) = self.pulses.get(&id)?;
-        let k = now.saturating_duration_since(*at).as_secs_f32() * 1000.0 / PULSE_MS;
+        let k = paint::progress(*at, now, PULSE_MS);
         (k < 1.0).then_some((k, *tone))
     }
 
     fn openness(&self, date: NaiveDate, collapsed: &HashSet<NaiveDate>, now: Instant) -> f32 {
         match self.collapse.get(&date) {
-            Some(a) if !a.done(now) => a.value(now, paint::out_expo),
+            Some(a) if !a.done(now) => a.value_with(now, paint::out_expo),
             _ => {
                 if collapsed.contains(&date) {
                     0.0
@@ -696,7 +677,7 @@ impl State {
 
     /// 0–1: how far `id`'s mount has lit up under the cursor.
     fn hover_amount(&self, id: RecordId, now: Instant) -> f32 {
-        let k = |since: Instant| (now.saturating_duration_since(since).as_secs_f32() * 1000.0 / t::MOTION_FAST_MS).clamp(0.0, 1.0);
+        let k = |since: Instant| paint::progress(since, now, t::MOTION_FAST_MS);
         if self.hover == Hover::Cell(id) {
             return paint::out_cubic(k(self.hover_start));
         }
@@ -707,7 +688,7 @@ impl State {
     }
 
     fn hover_fading(&self, now: Instant) -> bool {
-        let busy = |since: Instant| now.saturating_duration_since(since).as_secs_f32() * 1000.0 < t::MOTION_FAST_MS;
+        let busy = |since: Instant| !paint::done(since, now, t::MOTION_FAST_MS);
         (matches!(self.hover, Hover::Cell(_)) && busy(self.hover_start)) || self.hover_prev.is_some_and(|(_, left)| busy(left))
     }
 
@@ -720,11 +701,6 @@ impl State {
         }
         self.hover = new;
     }
-}
-
-/// When a thumbnail landed → its fade-in (0–1).
-fn arrival(arrived: Instant, now: Instant) -> f32 {
-    paint::out_cubic((now.saturating_duration_since(arrived).as_secs_f32() * 1000.0 / t::MOTION_MS).clamp(0.0, 1.0))
 }
 
 /// The loading sweep's position, shared by every placeholder so they move
@@ -796,7 +772,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         s.last_select_mode = self.data.select_mode;
         s.restack_seq = self.data.restack.map_or(0, |r| r.seq);
         (s.reveal_seq, s.reveal) = self.reveal;
-        s.bar = Anim {
+        s.bar = Tween {
             from: if self.data.select_mode { 1.0 } else { 0.0 },
             to: if self.data.select_mode { 1.0 } else { 0.0 },
             start: Instant::now(),
@@ -811,13 +787,13 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
         // Zoom target moved: animate to it, chasing the latest value.
         if (self.thumb_target - st.last_target).abs() > 0.01 {
             let from = st.size;
-            st.zoom = Some(Anim { from, to: self.thumb_target, start: now, ms: 160.0 });
+            st.zoom = Some(Tween { from, to: self.thumb_target, start: now, ms: 160.0 });
             st.last_target = self.thumb_target;
         }
         // Names shown or hidden: the strip grows or shrinks, like a zoom.
         if st.last_names != self.data.show_names {
             let to = if self.data.show_names { LABEL_H } else { 0.0 };
-            st.label_anim = Some(Anim { from: st.label_h, to, start: now, ms: t::MOTION_MS });
+            st.label_anim = Some(Tween { from: st.label_h, to, start: now, ms: t::MOTION_MS });
             st.last_names = self.data.show_names;
         }
         // Sections collapsed / expanded.
@@ -825,16 +801,16 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             for d in st.last_collapsed.symmetric_difference(self.data.collapsed) {
                 let target = if self.data.collapsed.contains(d) { 0.0 } else { 1.0 };
                 let current = match st.collapse.get(d) {
-                    Some(a) if !a.done(now) => a.value(now, paint::out_expo),
+                    Some(a) if !a.done(now) => a.value_with(now, paint::out_expo),
                     _ => 1.0 - target,
                 };
-                st.collapse.insert(*d, Anim { from: current, to: target, start: now, ms: 110.0 });
+                st.collapse.insert(*d, Tween { from: current, to: target, start: now, ms: 110.0 });
             }
             st.last_collapsed = self.data.collapsed.clone();
         }
         if st.last_select_mode != self.data.select_mode {
-            let cur = st.bar.value(now, paint::out_cubic);
-            st.bar = Anim { from: cur, to: if self.data.select_mode { 1.0 } else { 0.0 }, start: now, ms: 180.0 };
+            let cur = st.bar.value(now);
+            st.bar = Tween { from: cur, to: if self.data.select_mode { 1.0 } else { 0.0 }, start: now, ms: 180.0 };
             st.last_select_mode = self.data.select_mode;
         }
         if st.scroll_seq != self.scroll_seq {
@@ -896,15 +872,13 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             locate(&m, data.sections, st_ref.scroll + bounds.height / 2.0)
         });
         advance(st, now);
-        if let Some(Some(anchor)) = anchor {
-            let st_ref: &State = st;
-            let m = Metrics::new(data.sections, bounds.width, st_ref.size, st_ref.label_h, &|d| st_ref.openness(d, collapsed, now));
-            st.scroll = anchor_y(&m, anchor) - bounds.height / 2.0;
-        }
         let metrics = {
             let st_ref: &State = st;
             Metrics::new(data.sections, bounds.width, st_ref.size, st_ref.label_h, &|d| st_ref.openness(d, collapsed, now)).with_footer(footer_h(&data))
         };
+        if let Some(Some(anchor)) = anchor {
+            st.scroll = anchor_y(&metrics, anchor) - bounds.height / 2.0;
+        }
         let max_scroll = (metrics.total - bounds.height).max(0.0);
         if !st.initialised {
             st.initialised = true;
@@ -931,13 +905,13 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                     || !st.bar.done(now);
                 // Thumbnails fading in, placeholders shimmering, a hover
                 // fade, a mark's pulse.
-                let (on_screen, _) = collect(&metrics, data, st.scroll, bounds.height, false);
-                let pulsing = st.note_marks(&on_screen, data.coll, now);
+                let (visible, _) = collect(&metrics, data, st.scroll, bounds.height, false);
+                let pulsing = st.note_marks(&visible, data.coll, now);
                 let lively = pulsing
                     || st.hover_fading(now)
-                    || on_screen.iter().filter_map(|id| data.coll.get(*id)).any(|r| match data.thumbs.get(&r.path) {
+                    || visible.iter().filter_map(|id| data.coll.get(*id)).any(|r| match data.thumbs.get(&r.path) {
                         None => true,
-                        Some(th) => arrival(th.arrived, now) < 1.0,
+                        Some(th) => paint::arrival(th.arrived, now) < 1.0,
                     });
                 if animating || lively {
                     shell.request_redraw();
@@ -947,7 +921,6 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
                 let key = (range.0, range.1, range.2, range.3, st.layout_key);
                 if st.sent_range != Some(key) {
                     st.sent_range = Some(key);
-                    let (visible, _) = collect(&metrics, data, st.scroll, bounds.height, false);
                     // Marks are remembered for the tiles on screen only.
                     st.marks.retain(|id, _| visible.contains(id));
                     let missing: Vec<RecordId> = visible
@@ -1165,7 +1138,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Grid<'a, Message> {
             pulse: &pulse,
             now,
             opacity: 1.0,
-            bar: st.bar.value(now, paint::out_cubic),
+            bar: st.bar.value(now),
             scrollbar_active: st.drag_bar.is_some(),
             openness: &|d| st.openness(d, self.data.collapsed, now),
             elide: Some(&st.elide),
@@ -1218,21 +1191,21 @@ fn current_modifiers() -> keyboard::Modifiers {
 
 fn advance(st: &mut State, now: Instant) {
     if let Some(z) = st.zoom {
-        st.size = z.value(now, paint::out_quint);
+        st.size = z.value_with(now, paint::out_quint);
         if z.done(now) {
             st.size = z.to;
             st.zoom = None;
         }
     }
     if let Some(a) = st.label_anim {
-        st.label_h = a.value(now, paint::out_cubic);
+        st.label_h = a.value(now);
         if a.done(now) {
             st.label_h = a.to;
             st.label_anim = None;
         }
     }
     if let Some(a) = st.scroll_anim {
-        st.scroll = a.value(now, paint::out_cubic);
+        st.scroll = a.value(now);
         if a.done(now) {
             st.scroll = a.to;
             st.scroll_anim = None;
@@ -1317,7 +1290,7 @@ fn start_slide(st: &mut State, data: &GridData<'_>, r: Restack<'_>, now: Instant
     // Where the tiles around the view were (a screen either side: tiles
     // slide in from off screen), moved by the scroll change.
     let mut slide = Slide {
-        anim: Anim { from: 0.0, to: 1.0, start: now, ms: t::MOTION_MS },
+        anim: Tween { from: 0.0, to: 1.0, start: now, ms: t::MOTION_MS },
         from: HashMap::new(),
         stack_from: HashMap::new(),
         gone: Vec::new(),
@@ -1380,7 +1353,7 @@ fn smooth_scroll_to(st: &mut State, target: f32, max_scroll: f32, now: Instant) 
         st.scroll_anim = None;
         return;
     }
-    st.scroll_anim = Some(Anim { from: cur, to: end, start: now, ms: 180.0 });
+    st.scroll_anim = Some(Tween { from: cur, to: end, start: now, ms: 180.0 });
 }
 
 /// Where content-space `y` falls: (section, item index, fraction of a row),
@@ -1664,7 +1637,7 @@ fn handle_touch<Message>(
                         }
                     }
                 } else if t.velocity.abs() > 150.0 {
-                    st.kinetic = Some(Anim { from: -t.velocity, to: 0.0, start: now, ms: 1500.0 });
+                    st.kinetic = Some(Tween { from: -t.velocity, to: 0.0, start: now, ms: 1500.0 });
                     shell.request_redraw();
                 }
             }
@@ -2125,7 +2098,7 @@ fn paint_cell(
             let (w, h) = ((tw * s).round(), (th_h * s).round());
             let ir = rect(thumb_rect.x + ((ts - w) / 2.0).floor(), thumb_rect.y + ((ts - h) / 2.0).floor(), w, h);
             let level = th.level_for(w.max(h) * data.scale_factor);
-            let fade = arrival(th.arrived, now);
+            let fade = paint::arrival(th.arrived, now);
             if fade < 1.0 {
                 paint::rounded(r, thumb_rect, 2.0, c(t::alpha(t::PHOTO_GROUND, 1.0 - fade)));
             }

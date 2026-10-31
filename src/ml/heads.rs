@@ -1,4 +1,4 @@
-//! Fursuit heads (phase 4, decision 11; vectors as v2 left them): OWLv2
+//! Fursuit heads: OWLv2
 //! finds them in a photo by the words "a fursuit head", and the search
 //! model's image tower (SigLIP2) turns each head's crop into a vector that
 //! tells one suit from another once whitened (`crate::search::whiten`).
@@ -6,10 +6,9 @@
 //! preprocessing, the box decoding and the crops.  What is kept and how
 //! suits are grouped is `crate::search::heads`.
 //!
-//! **Measured against the study** (`docs/library-search-plan.md` §3.4): on
-//! its previews the ONNX graph gives the same heads with scores within
-//! 0.02 of the PyTorch run.  **The head vector** (v2, "As built — v2") is
-//! the installed SigLIP2 B/16 tower on the same crop the research
+//! **Measured**: on the research previews the ONNX graph gives the same
+//! heads with scores within 0.02 of the PyTorch run.  **The head vector**
+//! (v2) is the installed SigLIP2 B/16 tower on the same crop the research
 //! harness used (the box widened 12 % each side, square, black beyond the
 //! edge), through the search step's own input (squashed to 256, mean and
 //! std 0.5): whitened over the library's heads it beat DINOv2 on every
@@ -35,6 +34,7 @@ use crate::imaging::decode::{self, Pixels};
 use crate::imaging::libraw::{Raw, Thumbnail};
 use crate::model::record::FileType;
 use crate::search::index::{KEY_HEAD_BYTES, Key};
+use crate::search::query::normalised;
 
 /// OWLv2's input edge: the preview is fitted into this square.
 pub const OWL_INPUT: u32 = 960;
@@ -42,7 +42,7 @@ pub const OWL_INPUT: u32 = 960;
 pub const PROMPT: &str = "a fursuit head";
 /// OWLv2's text context (CLIP's, padded).
 pub const TOKENS: usize = 16;
-/// A head's lowest score (the study's; its sheets were made at this).
+/// A head's lowest score (the research sheets were made at this).
 pub const SCORE_MIN: f32 = 0.3;
 /// A large head needs less certainty: a box at least [`BIG_SIDE`] of the
 /// preview's long edge is kept from this score.  Round 2 (2026-10-17): a
@@ -322,11 +322,6 @@ fn compare(a: &[f32], b: &[f32]) -> (f32, f32) {
     (cos, diff)
 }
 
-fn normalised(v: &[f32]) -> Vec<f32> {
-    let n = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if n > 0.0 && n.is_finite() { v.iter().map(|x| x / n).collect() } else { v.to_vec() }
-}
-
 /// RGB (or grey) pixels of `px` at (x, y), as 0..1 per channel.
 fn rgb_at(px: &Pixels, x: u32, y: u32) -> [f32; 3] {
     let c = px.channels as usize;
@@ -419,7 +414,7 @@ pub fn nms(mut dets: Vec<Det>, overlap: f32) -> Vec<Det> {
 
 /// The square crop around a box: centred on it, its side the box's longer
 /// side widened by `margin` on each side; what falls outside the preview
-/// is black (as the study's crops were), so a head at the edge keeps its
+/// is black (as the research crops were), so a head at the edge keeps its
 /// scale.
 pub fn crop_square(px: &Pixels, bbox: [f32; 4], margin: f32) -> Pixels {
     let (w, h) = (px.width as f32, px.height as f32);
@@ -791,12 +786,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// The real models on the study's previews: boxes against the study's
-    /// detections and the cost per photo.  `PP_MODEL_DIR=<models folder>`
-    /// (with `owlv2-b16-ensemble/` and `siglip2-b16-256/`), `PP_HEADS_PREVIEWS=
-    /// <folder of JPEGs>`, `PP_HEADS_DEVICE=gpu|cpu` (cpu by default),
+    /// The real models on the research previews: boxes against the
+    /// reference detections and the cost per photo.  `PP_MODEL_DIR=<models
+    /// folder>` (with `owlv2-b16-ensemble/` and `siglip2-b16-256/`),
+    /// `PP_HEADS_PREVIEWS=<folder of JPEGs>`, `PP_HEADS_DEVICE=gpu|cpu` (cpu
+    /// by default),
     /// `PP_HEADS_N=<photos>` (16).  Prints per-photo times; `PP_HEADS_REF=
-    /// <det_owlv2_*.json>` compares with the study.
+    /// <det_owlv2_*.json>` compares with the reference detections.
     #[test]
     #[ignore = "needs the downloaded models and previews (PP_MODEL_DIR, PP_HEADS_PREVIEWS)"]
     fn the_real_models_find_the_studys_heads() {
@@ -877,7 +873,7 @@ mod tests {
         }
         let per = imgs.len() as f64;
         eprintln!(
-            "{} photos on {:?} (chunk {chunk}): OWLv2 {:.0} ms a photo (of which the input {prep_ms:.0} ms), with crops and their vectors {:.0} ms a photo; {heads} heads, {matched} of them match the study's {studied}",
+            "{} photos on {:?} (chunk {chunk}): OWLv2 {:.0} ms a photo (of which the input {prep_ms:.0} ms), with crops and their vectors {:.0} ms a photo; {heads} heads, {matched} of them match the reference's {studied}",
             imgs.len(),
             device,
             owl_ms / per,

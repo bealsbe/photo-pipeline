@@ -34,6 +34,7 @@
 
 use std::sync::Arc;
 
+use super::query::dot;
 use crate::model::subjects::{Face, FaceRef, GroupId, Rows};
 
 /// Head pairs asked of the judge for one pair of groups, at most.
@@ -147,10 +148,6 @@ pub fn means(rows: &Rows<'_>, groups: &[&[usize]]) -> Vec<Vec<f32>> {
             sum
         })
         .collect()
-}
-
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
 /// Pairs of groups (by index) whose average linkage `1 − mean_a·mean_b`

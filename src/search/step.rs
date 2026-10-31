@@ -1,7 +1,7 @@
-//! The per-kind extension point (plan §5.1, §6.5): what a kind's step
-//! (faces for people; heads for fursuits in phase 4; pets' own step in
-//! phase 5) supplies, and the grouping the engine runs over it, the same
-//! for every kind and never across kinds.
+//! The per-kind extension point: what a kind's step (faces for people;
+//! heads for fursuits; pets' own step later) supplies, and the grouping
+//! the engine runs over it, the same for every kind and never across
+//! kinds.
 //!
 //! A [`KindStep`] owns a kind's detections and vectors (its own cache
 //! files) and answers for them: the refs, the vectors as rows, each
@@ -12,6 +12,7 @@
 //! (`SubjectsFile`) is shared by every kind and held by `faces::People`;
 //! its operations check kinds themselves.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::model::subjects::{self, Apart, Cluster, Cutoffs, FaceRef, Kind, Linkage, Removed, Rows, SubjectsFile};
@@ -233,12 +234,11 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
     // Confirmed rows: how sure against the subject's other members.
     let by_ref: HashMap<FaceRef, usize> = j.refs.iter().take(n).enumerate().map(|(i, r)| (*r, i)).collect();
     let mut suggestion_counts = HashMap::new();
-    let pool: Vec<usize> = order.clone();
     for s in j.file.subjects.iter().filter(|s| s.kind == j.kind) {
         let members: Vec<usize> = s.members.iter().filter_map(|r| by_ref.get(r).copied()).collect();
         for &m in &members {
             let others: Vec<usize> = members.iter().copied().filter(|&o| o != m).collect();
-            if let Some(d) = subjects::distance_to_members(&rows, &others, &rows.row_vec(m)) {
+            if let Some(d) = subjects::distance_to_members(&rows, &others, &rows.row(m)) {
                 sureness[m] = subjects::sureness(d, j.cutoffs.suggest);
             }
         }
@@ -246,7 +246,8 @@ pub fn regroup(j: &RegroupJob) -> Regrouped {
             continue;
         }
         let rejected: HashSet<usize> = s.rejected.iter().filter_map(|r| by_ref.get(r).copied()).collect();
-        let open: Vec<usize> = pool.iter().copied().filter(|i| !rejected.contains(i)).collect();
+        let open: Cow<'_, [usize]> =
+            if rejected.is_empty() { Cow::Borrowed(&order) } else { Cow::Owned(order.iter().copied().filter(|i| !rejected.contains(i)).collect()) };
         let count = subjects::candidates(&rows, &members, &open, j.cutoffs.suggest).len();
         suggestion_counts.insert(s.id.clone(), count);
     }

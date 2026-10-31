@@ -2,9 +2,8 @@
 //! merging, stage 3): what the pages need to show the heads that look
 //! least like the rest, and to propose a split the user confirms.
 //!
-//! Measured on the user's labels (`docs/library-search-plan.md`, "As built
-//! — splitting mixed fursuit groups"): a group's strays sit at its far
-//! end.  Ranked by distance to the group's mean, one head of two seen in
+//! Measured on the user's labels: a group's strays sit at its far end.
+//! Ranked by distance to the group's mean, one head of two seen in
 //! one photo (so of two suits) is among the 5 farthest in 29 of 40 such
 //! pairs (whitened grouping), against 17 of 178 labelled same pairs.  A
 //! fixed distance does much worse (3 of 40 at the group cut), so the

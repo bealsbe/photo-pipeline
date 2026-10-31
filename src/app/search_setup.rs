@@ -372,13 +372,13 @@ fn model_row<'a>(mi: &models::ModelInfo, ready: bool) -> Element<'a, Message> {
     let top = row![
         text(mi.name).size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
         Space::new().width(Length::Fill),
-        text(if ready { "Downloaded".to_string() } else { size(mi.bytes()) }).size(t::T_SMALL).color(t::INK2),
+        kit::note(if ready { "Downloaded".to_string() } else { size(mi.bytes()) }),
     ]
     .align_y(Alignment::Center);
     let col = column![
         top,
-        text(mi.what).size(t::T_SMALL).color(t::INK2),
-        text(format!("Licence: {}, {}. From {}.", mi.licence, mi.licence_plain, mi.publisher)).size(t::T_SMALL).color(t::INK3),
+        kit::note(mi.what),
+        kit::caption(format!("Licence: {}, {}. From {}.", mi.licence, mi.licence_plain, mi.publisher)),
     ]
     .spacing(2);
     container(col).padding(Padding::from([7.0, 12.0])).width(Length::Fill).into()
@@ -398,9 +398,9 @@ fn group<'a>(rows: Vec<Element<'a, Message>>) -> Element<'a, Message> {
 fn fact<'a>(k: &'a str, v: String, sub: Option<&'a str>) -> Element<'a, Message> {
     let mut words = column![text(v).size(t::T_BODY).color(t::INK)].spacing(2).width(Length::Fill);
     if let Some(sub) = sub {
-        words = words.push(text(sub).size(t::T_SMALL).color(t::INK3));
+        words = words.push(kit::caption(sub));
     }
-    row![text(k).size(t::T_SMALL).color(t::INK3).width(84), words].spacing(t::S3).padding(Padding::from([8.0, 12.0])).into()
+    row![kit::caption(k).width(84), words].spacing(t::S3).padding(Padding::from([8.0, 12.0])).into()
 }
 
 /// A radio's dot.
@@ -596,7 +596,7 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         .padding(Padding::from([0.0, 4.0]))
         .style(style::link().style())
         .on_press(d(DialogMsg::Sums));
-    let dir = models::models_dir().map(|p| tilde(&p)).unwrap_or_default();
+    let dir = models::models_dir().map(|p| util::tilde(&p)).unwrap_or_default();
     col = col.push(
         row![
             kit::caption(format!("Each file is checked against its SHA-256 before it's used, and deleted if it doesn't match. Saved in {dir}.")).width(Length::Fill),
@@ -613,8 +613,8 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
                     rows.push(
                         column![
                             text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
-                            text(f.url).size(t::T_SMALL).color(t::INK3),
-                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                            kit::caption(f.url),
+                            kit::caption(format!("SHA-256 {}", f.sha256)),
                         ]
                         .spacing(1)
                         .padding(Padding::from([6.0, 12.0]))
@@ -629,8 +629,8 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
                     rows.push(
                         column![
                             text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
-                            text(f.url).size(t::T_SMALL).color(t::INK3),
-                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                            kit::caption(f.url),
+                            kit::caption(format!("SHA-256 {}", f.sha256)),
                         ]
                         .spacing(1)
                         .padding(Padding::from([6.0, 12.0]))
@@ -645,8 +645,8 @@ fn ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
                     rows.push(
                         column![
                             text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
-                            text(f.url).size(t::T_SMALL).color(t::INK3),
-                            text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                            kit::caption(f.url),
+                            kit::caption(format!("SHA-256 {}", f.sha256)),
                         ]
                         .spacing(1)
                         .padding(Padding::from([6.0, 12.0]))
@@ -719,7 +719,7 @@ fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
         .padding(Padding::from([0.0, 4.0]))
         .style(style::link().style())
         .on_press(d(DialogMsg::Sums));
-    let dir = models::models_dir().map(|p| tilde(&p)).unwrap_or_default();
+    let dir = models::models_dir().map(|p| util::tilde(&p)).unwrap_or_default();
     col = col.push(
         row![kit::caption(format!("Each file is checked against its SHA-256 before it's used, and deleted if it doesn't match. Saved in {dir}.")).width(Length::Fill), sums_link]
             .spacing(t::S2)
@@ -732,8 +732,8 @@ fn judge_ask_view<'a>(app: &'a App, dl: &'a Dialog) -> Element<'a, Message> {
             .map(|f| {
                 column![
                     text(format!("{}: {}", mi.name, f.file)).size(t::T_SMALL).color(t::INK),
-                    text(f.url).size(t::T_SMALL).color(t::INK3),
-                    text(format!("SHA-256 {}", f.sha256)).size(t::T_SMALL).color(t::INK3),
+                    kit::caption(f.url),
+                    kit::caption(format!("SHA-256 {}", f.sha256)),
                 ]
                 .spacing(1)
                 .padding(Padding::from([6.0, 12.0]))
@@ -845,11 +845,11 @@ fn progress_view(app: &App) -> Element<'_, Message> {
             let frac = if x.total == 0 { 0.0 } else { x.done as f32 / x.total as f32 };
             let state: Element<'_, Message> = match &x.state {
                 DownloadState::Checked => row![icons::view(Glyph::Check, 14.0, t::KEEP), text("Checked").size(t::T_SMALL).color(t::KEEP)].spacing(4).align_y(Alignment::Center).into(),
-                DownloadState::Checking => text("Checking…").size(t::T_SMALL).color(t::INK2).into(),
-                DownloadState::Waiting => text("Waiting").size(t::T_SMALL).color(t::INK3).into(),
-                DownloadState::Cancelled => text("Stopped").size(t::T_SMALL).color(t::INK3).into(),
-                DownloadState::Downloading => text(speed::with_speed(progress_bytes(x.done, x.total), reading)).size(t::T_SMALL).color(t::INK2).into(),
-                _ => text(progress_bytes(x.done, x.total)).size(t::T_SMALL).color(t::INK2).into(),
+                DownloadState::Checking => kit::note("Checking…").into(),
+                DownloadState::Waiting => kit::caption("Waiting").into(),
+                DownloadState::Cancelled => kit::caption("Stopped").into(),
+                DownloadState::Downloading => kit::note(speed::with_speed(progress_bytes(x.done, x.total), reading)).into(),
+                _ => kit::note(progress_bytes(x.done, x.total)).into(),
             };
             row![
                 text(format!("{role}: {name}")).size(t::T_BODY).color(t::INK).width(190),
@@ -906,23 +906,12 @@ fn bar<'a>(frac: f32, width: Option<f32>) -> Element<'a, Message> {
 pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     let s = &app.search;
     let st = &s.status;
-    let words = |w: String| text(w).size(t::T_SMALL).color(t::INK3);
-    let stop = |hint: &'static str| {
-        tip(
-            button(container(icons::view(Glyph::Close, 11.0, t::INK2)).center(Length::Fill))
-                .width(20)
-                .height(20)
-                .padding(0)
-                .style(style::ghost().radius(4.0).style())
-                .on_press(m(Msg::Stop)),
-            hint,
-            false,
-        )
-    };
-    let link = |label: &'static str, msg: Msg| button(text(label).size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([2.0, 6.0])).style(style::link().style()).on_press(m(msg));
+    let words = |w: String| kit::caption(w);
+    let stop = |hint: &'static str| kit::stop_btn(t::INK2, hint, m(Msg::Stop));
+    let link = |label: &'static str, msg: Msg| kit::link_btn(label, [2.0, 6.0], Some(m(msg)));
     let slot: Element<'_, Message> = if s.downloading() {
         let (done, total) = s.downloads.iter().fold((0u64, 0u64), |(a, b), x| (a + x.done, b + x.total));
-        let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+        let frac = util::frac(done as usize, total as usize);
         let reading = s.speed_now();
         let mut content = row![
             words(if judge_downloads(&s.downloads) {
@@ -973,13 +962,13 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     } else if let Some(p) = &st.pass {
         // New exports count their own photos; the rest, the library's.
         let (done, total) = if p.kind == PassKind::NewExports { new_photos(p, s.pass_start) } else { (p.done, p.total) };
-        let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-        let of = format!("{} of {}", util::thousands(done as u64), util::thousands(total as u64));
+        let frac = util::frac(done as usize, total as usize);
+        let of = util::of(done as u64, total as u64);
         match p.kind {
             PassKind::NewExports => {
                 // Quiet: no ×, a grey bar.
                 let b = SmoothBar::new(frac).length(48).girth(3.0).colors(t::RAISED, t::INK3);
-                row![words("Adding new photos to search".into()), text(of).size(t::T_SMALL).color(t::INK2), b].spacing(t::S2).align_y(Alignment::Center).into()
+                row![words("Adding new photos to search".into()), kit::note(of), b].spacing(t::S2).align_y(Alignment::Center).into()
             }
             kind => {
                 let label = match kind {
@@ -1056,7 +1045,7 @@ pub fn pass_ended(p: &PassProgress, start: Option<PassStart>, st: &Status) -> Op
 }
 
 /// The indexing steps, over the status bar's right (a click on the
-/// progress).  Phase 1 has one: search.
+/// progress): one step, named for the pass.
 pub fn steps_layer(app: &App) -> Option<Element<'_, Message>> {
     let s = &app.search;
     let p = s.status.pass.as_ref().filter(|p| p.kind != PassKind::NewExports && s.steps)?;
@@ -1072,7 +1061,7 @@ pub fn steps_layer(app: &App) -> Option<Element<'_, Message>> {
     };
     let step = row![
         icons::view(glyph, 16.0, t::INK3),
-        column![text(what).size(t::T_BODY).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
+        column![text(what).size(t::T_BODY).color(t::INK), kit::caption(detail)].spacing(1).width(Length::Fill),
         bar(frac, Some(80.0)),
     ]
     .spacing(t::S3)
@@ -1082,7 +1071,7 @@ pub fn steps_layer(app: &App) -> Option<Element<'_, Message>> {
         container(kit::heading("Indexing the library")).padding(Padding { top: t::S2, bottom: 2.0, left: 10.0, right: 10.0 }),
         step,
         container(kit::hairline()).padding(Padding::from([2.0, 0.0])),
-        container(text("Search works on whatever is done.").size(t::T_SMALL).color(t::INK3)).padding(Padding { top: 4.0, bottom: t::S2, left: 10.0, right: 10.0 }),
+        container(kit::caption("Search works on whatever is done.")).padding(Padding { top: 4.0, bottom: t::S2, left: 10.0, right: 10.0 }),
     ];
     let panel = crate::ui::motion::Appear::new(container(panel).width(380).padding(t::S1).style(style::floating())).rise(6.0);
     let catcher = opaque(mouse_area(container(space()).width(Length::Fill).height(Length::Fill)).on_press(m(Msg::Steps(false))));
@@ -1156,7 +1145,7 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
         }
         Stopped::Cancelled => return None,
     };
-    let words = column![text(head).size(t::T_BODY).font(paint::MEDIUM).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill);
+    let words = column![text(head).size(t::T_BODY).font(paint::MEDIUM).color(t::INK), kit::note(detail)].spacing(2).width(Length::Fill);
     let dismiss = tip(kit::icon_btn(Glyph::Close, t::INK2, style::ghost(), Some(m(Msg::HideBanner))), "Hide this message (the status bar keeps the way back)", true);
     let mut content =
         row![icons::view(glyph, 18.0, t::WARN), words].spacing(t::S3).align_y(Alignment::Center).padding(Padding { top: t::S2, bottom: t::S2, left: 12.0, right: 4.0 });
@@ -1169,13 +1158,6 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
 }
 
 /// `~/…` for a path in the home folder.
-fn tilde(p: &std::path::Path) -> String {
-    match dirs::home_dir().and_then(|h| p.strip_prefix(h).ok().map(std::path::Path::to_path_buf)) {
-        Some(rel) => format!("~/{}", rel.display()),
-        None => p.display().to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

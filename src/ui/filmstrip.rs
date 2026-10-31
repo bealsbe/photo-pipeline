@@ -23,7 +23,7 @@ use iced::mouse::{self, Cursor, ScrollDelta};
 use iced::widget::image::FilterMethod;
 use iced::{Color, Element, Event, Length, Point, Rectangle, Size, window};
 
-use super::paint::{self, Renderer, rect};
+use super::paint::{self, Renderer, Tween, rect};
 use super::theme as t;
 use crate::imaging::thumbs::ThumbCache;
 use crate::model::bursts::BurstId;
@@ -110,26 +110,9 @@ impl Strip {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Glide {
-    from: f32,
-    to: f32,
-    start: Instant,
-}
-
-impl Glide {
-    fn progress(&self, now: Instant) -> f32 {
-        (now.saturating_duration_since(self.start).as_secs_f32() * 1000.0 / GLIDE_MS).clamp(0.0, 1.0)
-    }
-
-    fn value(&self, now: Instant) -> f32 {
-        paint::lerp(self.from, self.to, paint::out_cubic(self.progress(now)))
-    }
-}
-
 struct State {
     scroll: f32,
-    glide: Option<Glide>,
+    glide: Option<Tween>,
     current: usize,
     n: usize,
     width: f32,
@@ -156,12 +139,12 @@ impl State {
             self.scroll = to;
             self.glide = None;
         } else {
-            self.glide = Some(Glide { from: self.scroll, to, start: now });
+            self.glide = Some(Tween { from: self.scroll, to, start: now, ms: GLIDE_MS });
         }
     }
 
     fn hover_amount(&self, i: usize, now: Instant) -> f32 {
-        let k = |since: Instant| (now.saturating_duration_since(since).as_secs_f32() * 1000.0 / t::MOTION_FAST_MS).clamp(0.0, 1.0);
+        let k = |since: Instant| paint::progress(since, now, t::MOTION_FAST_MS);
         match (self.hover, self.hover_prev) {
             (Some((h, since)), _) if h == i => paint::out_cubic(k(since)),
             (_, Some((p, left))) if p == i => 1.0 - paint::out_cubic(k(left)),
@@ -170,7 +153,7 @@ impl State {
     }
 
     fn hover_fading(&self, now: Instant) -> bool {
-        let busy = |since: Instant| now.saturating_duration_since(since).as_secs_f32() * 1000.0 < t::MOTION_FAST_MS;
+        let busy = |since: Instant| !paint::done(since, now, t::MOTION_FAST_MS);
         self.hover.is_some_and(|(_, s)| busy(s)) || self.hover_prev.is_some_and(|(_, s)| busy(s))
     }
 
@@ -183,11 +166,6 @@ impl State {
         }
         self.hover = i.map(|i| (i, now));
     }
-}
-
-/// When a thumbnail landed → its fade-in (0–1).
-fn arrival(arrived: Instant, now: Instant) -> f32 {
-    paint::out_cubic((now.saturating_duration_since(arrived).as_secs_f32() * 1000.0 / t::MOTION_MS).clamp(0.0, 1.0))
 }
 
 pub struct Filmstrip<'a, Message> {
@@ -343,7 +321,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Filmstrip<'a, Messa
                 crate::profile::frame("filmstrip", *at);
                 let range = strip.visible(st.scroll);
                 let fading = range.clone().any(|i| match self.record(i) {
-                    Some(r) => self.thumbs.get(&r.path).is_some_and(|th| arrival(th.arrived, now) < 1.0),
+                    Some(r) => self.thumbs.get(&r.path).is_some_and(|th| paint::arrival(th.arrived, now) < 1.0),
                     None => false,
                 });
                 if st.glide.is_some() && self.interactive {
@@ -493,7 +471,7 @@ impl<'a, Message> Widget<Message, iced::Theme, Renderer> for Filmstrip<'a, Messa
                         r.draw_image(
                             iced::advanced::image::Image::new(level.handle.clone())
                                 .filter_method(FilterMethod::Linear)
-                                .opacity(arrival(th.arrived, now)),
+                                .opacity(paint::arrival(th.arrived, now)),
                             ir,
                             b,
                         );

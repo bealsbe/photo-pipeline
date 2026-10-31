@@ -8,9 +8,9 @@
 //! Where models run is the user's choice; the engine starts a helper for
 //! image work on the chosen device only.  If the card fails, the pass
 //! stops and the status says what failed; nothing is sent to the
-//! processor unless the user picks it (decision 3, held by the tests at
-//! the end).  Queries always run their text on the processor (plan §4.2):
-//! after a card failure they go through a text-only helper.
+//! processor unless the user picks it (held by the tests at the end).
+//! Queries always run their text on the processor: after a card failure
+//! they go through a text-only helper.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -73,7 +73,7 @@ enum Cmd {
     DeleteModels,
     Query { seq: u64, text: String, closeness: f32, subjects: Vec<GroupId> },
     Busy(usize),
-    // People (phase 3).
+    // People.
     SetFindFaces(bool),
     SetFaceModel(ModelId),
     FindFaces,
@@ -106,7 +106,7 @@ enum Cmd {
     Drawn(Box<DrawnDone>),
     /// A regroup finished on its worker (either kind; `kind` says).
     Regrouped(Box<super::step::Regrouped>),
-    // Fursuits (phase 4, decision 11).  Sent by the fursuit API, which
+    // Fursuits.  Sent by the fursuit API, which
     // the pages call once they switch from their stand-in.
     SetFindHeads(bool),
     FindHeads,
@@ -251,7 +251,7 @@ struct Shared {
     subjects: Mutex<Arc<Subjects>>,
     /// The face tiles' index, for `Engine::crop` on any thread.
     tiles: Mutex<Option<Arc<Mutex<super::faces::TileIndex>>>>,
-    /// The head tiles, likewise (phase 4).
+    /// The head tiles, likewise.
     head_tiles: Mutex<Option<Arc<Mutex<heads::HeadTiles>>>>,
 }
 
@@ -353,15 +353,13 @@ impl Engine {
                     restrict: None,
                     face_pass_pending: None,
                     subjects_sent: None,
-                    regroup_running: false,
-                    regroup_wanted: false,
+                    regroup: Latch::default(),
                     find_heads,
                     fursuits: Fursuits::new(find_heads),
                     scan: None,
                     head_scan_pending: None,
                     embedder_has_heads: false,
-                    heads_regroup_running: false,
-                    heads_regroup_wanted: false,
+                    heads_regroup: Latch::default(),
                     fitting: false,
                     judge_factory: crate::ml::judge_client::factory(),
                     judge_choice: JudgeChoice::Off,
@@ -438,7 +436,7 @@ impl Engine {
     }
 }
 
-/// The people API (phase 3): what the *Subjects* page calls.
+/// The people API: what the *Subjects* page calls.
 impl Engine {
     /// The *Subjects* page's state as last built (a cheap clone; no I/O).
     /// Also sent as `BgEvent::Subjects` whenever it changes.
@@ -461,7 +459,7 @@ impl Engine {
     }
 
     /// *Find faces in the N photos indexed*: the catch-up over an
-    /// already-indexed library, only when asked (plan §5.2 step 3).
+    /// already-indexed library, only when asked.
     /// Downloads the detector and the chosen model first if need be.
     pub fn find_faces(&self) {
         self.send(Cmd::FindFaces);
@@ -535,7 +533,7 @@ impl Engine {
     /// The viewer's labels for a photo: `BgEvent::PhotoLabels { seq, .. }`
     /// with its faces and fursuit heads, named or not.  A photo whose key
     /// the index doesn't hold answers with no key (nothing was looked for
-    /// in it: decision 14).  A library file's key comes from the path
+    /// in it).  A library file's key comes from the path
     /// map; any other file's head is read on a worker, never here.
     pub fn photo_labels(&self, seq: u64, target: LabelTarget) {
         self.send(Cmd::PhotoLabels { seq, target });
@@ -597,7 +595,7 @@ impl Engine {
 
 }
 
-/// The fursuit API (phase 4, decision 11): what the Fursuits tab,
+/// The fursuit API: what the Fursuits tab,
 /// Preferences and the review call.
 impl Engine {
     /// Preferences ▸ People ▸ *Forget all people* (or Fursuits ▸ *Forget
@@ -860,7 +858,7 @@ pub fn storage(library_root: Option<&Path>) -> Storage {
 }
 
 /// [`storage`] for an index folder and a models folder.  Every model
-/// folder counts, ones no longer used too (phase 4's DINOv2 stays
+/// folder counts, ones no longer used too (the old DINOv2 stays
 /// counted until *Delete* removes it); the judges' folders are counted
 /// apart.
 pub fn storage_in(index_dir: Option<&Path>, models_dir: Option<&Path>) -> Storage {
@@ -973,10 +971,9 @@ struct Worker {
     face_pass_pending: Option<bool>,
     /// When the *Subjects* snapshot was last sent (throttled in a pass).
     subjects_sent: Option<Instant>,
-    /// A regroup is on its worker; another was asked for meanwhile.
-    regroup_running: bool,
-    regroup_wanted: bool,
-    /// Preferences ▸ *Find fursuit heads* (phase 4).
+    /// A face regroup on its worker, and one asked for meanwhile.
+    regroup: Latch,
+    /// Preferences ▸ *Find fursuit heads*.
     find_heads: bool,
     /// The fursuit step: its cache, its grouping, what waits for the user.
     fursuits: Fursuits,
@@ -987,8 +984,8 @@ struct Worker {
     head_scan_pending: Option<(HeadWhy, bool)>,
     /// The running helper was started with the head models.
     embedder_has_heads: bool,
-    heads_regroup_running: bool,
-    heads_regroup_wanted: bool,
+    /// A fursuit regroup on its worker, and one asked for meanwhile.
+    heads_regroup: Latch,
     /// A whitening fit is on its worker (v2).
     fitting: bool,
     /// The close-call judge (v2): the choice, its runner (none until a
@@ -1060,6 +1057,34 @@ struct HeadScan {
 }
 
 const TEXT_CACHE: usize = 64;
+
+/// One piece of work at a time on a worker, with a second request
+/// remembered while it runs (a regroup asked for mid-regroup runs after).
+#[derive(Default)]
+struct Latch {
+    running: bool,
+    wanted: bool,
+}
+
+impl Latch {
+    /// Take the latch: `true` to start now; `false` when one is running
+    /// (then another is wanted when it finishes).
+    fn try_start(&mut self) -> bool {
+        if self.running {
+            self.wanted = true;
+            false
+        } else {
+            self.running = true;
+            true
+        }
+    }
+
+    /// The work finished: whether another was asked for meanwhile.
+    fn finish(&mut self) -> bool {
+        self.running = false;
+        std::mem::take(&mut self.wanted)
+    }
+}
 /// While a pass runs, *Things* is sent at most this often.
 const THINGS_EVERY: Duration = Duration::from_secs(2);
 /// How often the idle engine looks whether built memory can go (the
@@ -1214,7 +1239,7 @@ impl Worker {
                     if let Some(ix) = &mut self.index {
                         let _ = ix.clear();
                     }
-                    // Unnamed detections are cache and go with it (§10);
+                    // Unnamed detections are cache and go with it;
                     // the user's file stays.
                     if let Some(store) = &mut self.people.store {
                         store.forget_all();
@@ -1465,7 +1490,7 @@ impl Worker {
                         self.fursuits.status.regrouping = true;
                         self.start_heads_regroup();
                         // Nothing to group (no heads with vectors yet): done.
-                        if !self.heads_regroup_running {
+                        if !self.heads_regroup.running {
                             self.fursuits.status.regrouping = false;
                         }
                         self.publish_subjects();
@@ -1545,7 +1570,7 @@ impl Worker {
                                 Kind::Person => self.start_regroup(),
                                 Kind::Fursuit => {
                                     self.start_heads_regroup();
-                                    self.fursuits.status.regrouping = self.heads_regroup_running;
+                                    self.fursuits.status.regrouping = self.heads_regroup.running;
                                     self.publish_heads();
                                 }
                                 Kind::Pet => {}
@@ -1651,7 +1676,7 @@ impl Worker {
                 }
                 Cmd::Regrouped(r) => match r.kind {
                     Kind::Fursuit => {
-                        self.heads_regroup_running = false;
+                        let again = self.heads_regroup.finish();
                         if self.fursuits.apply_regroup(*r, &self.people.file) {
                             self.people.set_other_clusters(Kind::Fursuit, self.fursuits.clusters());
                             self.publish_subjects();
@@ -1659,16 +1684,16 @@ impl Worker {
                                 self.publish_heads();
                             }
                         }
-                        if std::mem::take(&mut self.heads_regroup_wanted) {
+                        if again {
                             self.start_heads_regroup();
                         }
                     }
                     _ => {
-                        self.regroup_running = false;
+                        let again = self.regroup.finish();
                         if self.people.apply_regroup(*r) {
                             self.publish_subjects();
                         }
-                        if std::mem::take(&mut self.regroup_wanted) {
+                        if again {
                             self.start_regroup();
                         }
                     }
@@ -1789,12 +1814,13 @@ impl Worker {
     /// with `Kind::Fursuit` brings the result); the head vectors are
     /// built in memory for it if they weren't.
     fn start_heads_regroup(&mut self) {
-        if self.heads_regroup_running {
-            self.heads_regroup_wanted = true;
+        if !self.heads_regroup.try_start() {
             return;
         }
-        let Some(job) = self.fursuits.regroup_job(&self.people.file) else { return };
-        self.heads_regroup_running = true;
+        let Some(job) = self.fursuits.regroup_job(&self.people.file) else {
+            self.heads_regroup.finish();
+            return;
+        };
         let me = self.me.clone();
         std::thread::Builder::new()
             .name("fursuits-regroup".into())
@@ -1839,7 +1865,7 @@ impl Worker {
     // ---- the viewer's labels ----
 
     /// The index holds this photo (its faces and heads were looked for
-    /// there, decision 14).
+    /// there).
     /// A box is a detection (found or drawn) of `kind`.
     fn is_detection(&self, kind: Kind, f: &FaceRef) -> bool {
         match kind {
@@ -2584,7 +2610,7 @@ impl Worker {
     }
 
     /// Photos want a head scan (the first index or new exports ended, or
-    /// the tab asked): decision 11's rule decides whether it starts now
+    /// the tab asked): the device decides whether it starts now
     /// or waits for the user.  Never while a pass or a scan runs.
     fn offer_head_scan(&mut self, why: HeadWhy, asked: bool) {
         if !self.find_heads || self.pass.is_some() || self.scan.is_some() || !self.heads_ready() {
@@ -2728,12 +2754,13 @@ impl Worker {
     /// the result); one at a time, the next asked for meanwhile running
     /// after.
     fn start_regroup(&mut self) {
-        if self.regroup_running {
-            self.regroup_wanted = true;
+        if !self.regroup.try_start() {
             return;
         }
-        let Some(job) = self.people.regroup_job() else { return };
-        self.regroup_running = true;
+        let Some(job) = self.people.regroup_job() else {
+            self.regroup.finish();
+            return;
+        };
         let me = self.me.clone();
         std::thread::Builder::new()
             .name("subjects-regroup".into())
@@ -3102,12 +3129,12 @@ impl Worker {
             ix.set_first_index_asked();
             let _ = ix.save_paths();
         }
-        // The dialog's face choice (decision 10): a face model among the
+        // The dialog's face choice: a face model among the
         // rows means faces on with that model; none means faces unticked.
         let face_model = models::face_model_in(&wanted);
         self.find_faces = face_model.is_some();
-        // The dialog's *Fursuits* pair ticked means heads on (decision 11;
-        // on the processor the scan still asks when it would start).
+        // The dialog's *Fursuits* pair ticked means heads on (on the
+        // processor the scan still asks when it would start).
         self.find_heads = models::fursuits_in(&wanted);
         self.fursuits.status.on = self.find_heads;
         if let Some(m) = face_model {
@@ -3291,8 +3318,8 @@ impl Worker {
                 self.maybe_index_new();
                 // The head step comes after search (and faces): once the
                 // first index or a new-exports pass ran to its end, the
-                // fursuit photos it indexed are considered (decision 11:
-                // the card starts, the processor asks).  A pass that
+                // fursuit photos it indexed are considered (the card
+                // starts, the processor asks).  A pass that
                 // started just above has the slot, and the step waits for
                 // that pass's end in turn.
                 // A rebuild forgot the heads with the rest, so its end is
@@ -3845,8 +3872,8 @@ mod tests {
         (factory, asked)
     }
 
-    /// Decision 3: a card that fails stops the work and never sends it to
-    /// the processor; the processor indexes only once it is chosen.
+    /// A card that fails stops the work and never sends it to the
+    /// processor; the processor indexes only once it is chosen.
     #[test]
     fn a_failing_card_never_creates_a_processor_embedder() {
         let (bus, rx) = crate::bus::channel();
@@ -5911,7 +5938,7 @@ mod tests {
         (Arc::new(ix), d)
     }
 
-    /// Storage counts every model folder, phase 4's DINOv2 too until
+    /// Storage counts every model folder, the old DINOv2 too until
     /// *Delete* removes it, and the judges' apart; the head cache counts
     /// its old vector file; Delete keeps the judge's folder (its own row).
     #[test]
@@ -5937,7 +5964,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Decision 11 through the engine.  On the processor: the first
+    /// The head step's rule through the engine.  On the processor: the first
     /// index's end puts the fursuit photos to the user (`Step::Asking`),
     /// nothing scans on its own, a skip is remembered, and the tab's
     /// catch-up starts and finds the heads; the snapshot then holds

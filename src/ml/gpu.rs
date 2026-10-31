@@ -1,4 +1,4 @@
-//! Which graphics card the helper runs on (decision 3).
+//! Which graphics card the helper runs on.
 //!
 //! ONNX Runtime's WebGPU provider asks Dawn for "an adapter" and never
 //! says which one it got; on a machine with a discrete card, an integrated

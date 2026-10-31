@@ -14,7 +14,7 @@
 //! global score calls portraits blurry; the sharpest tiles are where the
 //! plane of focus is.  Tiles with blown highlights (lights, glints, bokeh
 //! discs) are set aside for that: a clipped disc has steep edges however
-//! far out of focus it is, and on the quality plan's shoot A they made frames shot
+//! far out of focus it is, and on a test shoot they made frames shot
 //! inside the lens's minimum focus distance look as sharp as good night
 //! shots.  [`Features::local`] averages the three sharpest remaining tiles.
 //!

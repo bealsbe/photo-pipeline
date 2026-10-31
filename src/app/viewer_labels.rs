@@ -20,9 +20,9 @@
 //!   and the engine refuses a mix.
 //! - **Marks are untouched.**  Nothing here prunes or marks; it works the
 //!   same in a read-only viewer (search results, the library).
-//! - **Which photos.**  Faces and heads are found in the library only
-//!   (decision 14); a working-folder photo identical to a library copy
-//!   has its labels, any other says so.
+//! - **Which photos.**  Faces and heads are found in the library only; a
+//!   working-folder photo identical to a library copy has its labels, any
+//!   other says so.
 //!
 //! Behind `PP_SEARCH_FAKE` the stand-in ([`FakeLabels`]) answers with the
 //! made-up people's and fursuits' boxes.

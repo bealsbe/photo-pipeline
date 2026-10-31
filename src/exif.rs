@@ -590,12 +590,19 @@ fn exif_thumbnail_span(head: &[u8]) -> Option<(usize, usize)> {
 /// caller can take the primary image's orientation from it.
 pub fn jpeg_preview_bytes(path: &Path, min_edge: u32) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut f = open_for_header(path).ok()?;
-    let mut head = read_head(&mut f, PREVIEW_HEAD)?;
+    jpeg_preview_bytes_from(&mut f, min_edge)
+}
+
+/// [`jpeg_preview_bytes`] from a file already open with
+/// [`open_for_header`] and positioned at its start (a caller that wants
+/// the size too opens once).
+pub fn jpeg_preview_bytes_from(f: &mut File, min_edge: u32) -> Option<(Vec<u8>, Vec<u8>)> {
+    let mut head = read_head(f, PREVIEW_HEAD)?;
     if head.get(..2) != Some(&[0xFF, 0xD8]) {
         return None;
     }
     if head.len() == PREVIEW_HEAD && !preview_index_settled(&head) {
-        let rest = read_head(&mut f, HEADER_BYTES - PREVIEW_HEAD).unwrap_or_default();
+        let rest = read_head(f, HEADER_BYTES - PREVIEW_HEAD).unwrap_or_default();
         head.extend_from_slice(&rest);
     }
     let (offset, length) = mpf_preview_span(&head).or_else(|| exif_thumbnail_span(&head))?;
@@ -605,7 +612,7 @@ pub fn jpeg_preview_bytes(path: &Path, min_edge: u32) -> Option<(Vec<u8>, Vec<u8
     let data = if offset + length <= head.len() {
         head[offset..offset + length].to_vec()
     } else {
-        let mut src = FileSource(&mut f);
+        let mut src = FileSource(f);
         let d = src.read_at(offset as u64, length);
         if d.len() != length {
             return None;

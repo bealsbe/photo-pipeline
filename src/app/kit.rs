@@ -1,7 +1,7 @@
 //! Shared building blocks for the views: text roles, buttons, tooltips and
 //! rules, all on the design tokens.
 
-use iced::widget::{Button, Space, Text, button, container, row, text, tooltip};
+use iced::widget::{Button, Space, Text, button, column, container, row, text, tooltip};
 use iced::{Alignment, Color, Element, Length, Padding};
 
 use super::Message;
@@ -23,6 +23,28 @@ pub fn caption<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
 
 pub fn title<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
     text(s).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK)
+}
+
+/// A small line in the second ink: a note under a control, a detail.
+pub fn note<'a>(s: impl text::IntoFragment<'a>) -> Text<'a> {
+    text(s).size(t::T_SMALL).color(t::INK2)
+}
+
+/// A page with nothing to show yet: a title and a line under it, set high
+/// on the photos' grey.
+pub fn quiet<'a>(title: String, body: Option<String>) -> Element<'a, Message> {
+    let centred = iced::alignment::Horizontal::Center;
+    let mut col = column![Space::new().height(Length::FillPortion(2)), text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK).align_x(centred)];
+    if let Some(body) = body {
+        col = col.push(text(body).size(t::T_BODY).color(t::PHOTO_INK2).align_x(centred));
+    }
+    col = col.push(Space::new().height(Length::FillPortion(5)));
+    container(col.spacing(t::S2).align_x(Alignment::Center).max_width(480))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .style(style::fill(t::PHOTO_GROUND))
+        .into()
 }
 
 /// A group heading inside a panel or dialog.
@@ -109,6 +131,18 @@ pub fn icon_text_btn<'a>(glyph: Glyph, label: impl Into<String>, color: Color, l
         .style(look.style())
         .on_press_maybe(on);
     glow(b, &look, enabled)
+}
+
+/// A link: small medium text, no frame.  `pad` is [vertical, horizontal];
+/// `on` None draws it dim.
+pub fn link_btn<'a>(label: impl Into<String>, pad: [f32; 2], on: Option<Message>) -> Element<'a, Message> {
+    button(text(label.into()).size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from(pad)).style(style::link().style()).on_press_maybe(on).into()
+}
+
+/// The 20 px × that stops a job from the status bar, with its tip.
+pub fn stop_btn<'a>(ink: Color, hint: impl Into<String>, on: Message) -> Element<'a, Message> {
+    let b = button(container(icons::view(Glyph::Close, 11.0, ink)).center(Length::Fill)).width(20).height(20).padding(0).style(style::ghost().radius(4.0).style()).on_press(on);
+    tip(b, hint, false)
 }
 
 /// Options of a segmented control, joined on one recessed track.

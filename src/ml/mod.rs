@@ -1,6 +1,6 @@
 //! Machine-learning models for library search (and later people, fursuits
 //! and pets): where they come from, where they run, and the helper process
-//! that runs them.  `docs/library-search-plan.md` §4 and §5 are the design.
+//! that runs them.
 //!
 //! - [`models`]: the registry (pinned URLs, SHA-256, sizes, licences) and
 //!   where downloaded files live (`~/.cache/photo_pipeline/models/`).
@@ -13,7 +13,7 @@
 //!   restart rule, and reports card failures.
 //! - [`prep`]: a photo's preview as the model's input.
 //!
-//! **The device rule** (decision 3): where models run is the user's choice
+//! **The device rule**: where models run is the user's choice
 //! ([`Device`]), the graphics card by default.  A card that fails, in any
 //! way, stops the work and is reported ([`CardFailure`]); nothing here ever
 //! moves work to the processor on its own.
@@ -81,7 +81,7 @@ pub enum CardFailure {
 }
 
 impl CardFailure {
-    /// The banner's first line (§7a.4).
+    /// The banner's first line.
     pub fn title(&self) -> &'static str {
         match self {
             CardFailure::NoCard => "Indexing stopped: there's no graphics card Photo Pipeline can use",
@@ -130,9 +130,9 @@ pub struct DeviceStatus {
 
 /// The closest two unit vectors may be and still count as the same answer
 /// from the two devices, and the largest difference in any one component.
-/// Measured on this machine: cosine 1.000000, largest difference 2.7e-5
-/// (plan §3.7); the tolerance leaves room for other drivers and for fp16
-/// weights.  *Provisional* until phase 0 measures the fp16 models.
+/// Measured on a development machine: cosine 1.000000, largest difference 2.7e-5;
+/// the tolerance leaves room for other drivers and for fp16 weights.
+/// *Provisional* until the fp16 models are measured.
 pub const SELF_CHECK_MIN_COSINE: f32 = 0.995;
 pub const SELF_CHECK_MAX_DIFF: f32 = 0.02;
 
@@ -161,7 +161,7 @@ mod tests {
     fn devices_serialise_as_short_words() {
         assert_eq!(serde_json::to_string(&Device::Gpu).unwrap(), "\"gpu\"");
         assert_eq!(serde_json::from_str::<Device>("\"cpu\"").unwrap(), Device::Cpu);
-        assert_eq!(Device::default(), Device::Gpu, "the graphics card is the default (decision 3)");
+        assert_eq!(Device::default(), Device::Gpu, "the graphics card is the default");
     }
 
     #[test]

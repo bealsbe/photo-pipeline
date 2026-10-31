@@ -96,9 +96,9 @@ pub enum BgEvent {
     /// closeness, and how many shots were searched.  `error` is set when
     /// the query couldn't run (no helper, no index); `hits` is then
     /// empty.  `understood` is the query as the engine applied it (its
-    /// words, exclusions, dates; `names` are recognised and not searched
-    /// in phase 2: with no words beside them nothing runs and `hits` is
-    /// empty without an error).  Dates with no words browse the period:
+    /// words, exclusions, dates; `names` are recognised and not searched:
+    /// with no words beside them nothing runs and `hits` is empty without
+    /// an error).  Dates with no words browse the period:
     /// every indexed shot of those days in shooting order, oldest first,
     /// `score` 0, minus what a search for each `-word` would show.  When
     /// the query names a real animal and
@@ -106,12 +106,12 @@ pub enum BgEvent {
     /// contrast left out come in `fursuits`, best first, never
     /// overlapping `hits` (the page's *Show fursuits too* section needs
     /// no second query); otherwise `fursuits` is empty and `animal`
-    /// `None`.  `subjects` are the groups the query was narrowed to
-    /// (phase 3): those passed to `Engine::query` and the `@name`s that
+    /// `None`.  `subjects` are the groups the query was narrowed to:
+    /// those passed to `Engine::query` and the `@name`s that
     /// resolved to a named subject; a name that resolved to nobody is
     /// absent (the page tells by comparing with `understood.names`).
-    /// With subjects and no words, `hits` come clearest first (UI 12),
-    /// `score` the clarity.
+    /// With subjects and no words, `hits` come clearest first, `score`
+    /// the clarity.
     SearchResults {
         seq: u64,
         hits: Arc<Vec<crate::search::Hit>>,

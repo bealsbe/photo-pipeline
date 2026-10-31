@@ -1,5 +1,5 @@
 //! Taking one file out of a zip archive (InsightFace's `buffalo_l.zip`,
-//! of which the app keeps the recognition model, §4.4).  Enough of the
+//! of which the app keeps the recognition model).  Enough of the
 //! format for that: the end-of-central-directory record, the central
 //! directory's entries, a local header, and stored or deflated data,
 //! streamed out so the 174 MB member is never held whole in memory.

@@ -1,6 +1,6 @@
-//! The analysis as the app holds it: starting a pass (only when asked,
-//! decision 2), taking its results in, and the suggestions worked out from
-//! them (`model::hints::Hints`) for the views to show.  The views are in
+//! The analysis as the app holds it: starting a pass (only when asked),
+//! taking its results in, and the suggestions worked out from them
+//! (`model::hints::Hints`) for the views to show.  The views are in
 //! `hints_ui` (the main window's Hints control, progress and banner),
 //! `ui::hint_plate` (plates and words on photos) and `bulk` (the bulk
 //! actions).  Opening a folder shows what an earlier pass cached
@@ -140,7 +140,7 @@ pub fn start_cached(app: &mut App) -> Task<Message> {
 
 fn start_with(app: &mut App, mode: Mode) -> Task<Message> {
     let Some(root) = app.folder.clone() else { return Task::none() };
-    if app.scanning || app.coll.is_empty() {
+    if app.scanning() || app.coll.is_empty() {
         return Task::none();
     }
     cancel(app);
@@ -237,7 +237,7 @@ pub fn on_batch(app: &mut App, run: u64, batch: Arc<Batch>) -> Task<Message> {
 /// `App::refresh_views`.  Returns whether they changed.
 pub fn refresh(app: &mut App) -> bool {
     let q = &app.quality;
-    if app.scanning || !q.has_results() {
+    if app.scanning() || !q.has_results() {
         if !q.hints.is_empty() {
             app.quality.hints = Hints::default();
             return true;

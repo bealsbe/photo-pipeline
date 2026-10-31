@@ -21,12 +21,11 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use iced::widget::{Space, button, column, container, row, text};
+use iced::widget::{Space, column, container, row, text};
 use iced::{Alignment, Background, Border, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
 use super::people::{Face, FaceRef, GroupId, Kind};
-use super::style;
 use super::subjects::{self as subj};
 use super::{App, Message};
 use crate::ui::motion::SmoothBar;
@@ -298,15 +297,11 @@ pub(super) fn bar<'a>(frac: f32, w: f32, ground: iced::Color) -> Element<'a, Mes
 }
 
 pub(super) fn stop_btn<'a>(ink: iced::Color) -> Element<'a, Message> {
-    tip(
-        button(container(icons::view(Glyph::Close, 11.0, ink)).center(Length::Fill)).width(20).height(20).padding(0).style(style::ghost().radius(4.0).style()).on_press(m(Msg::Stop)),
-        "Stop checking close calls. Those checked are kept.",
-        false,
-    )
+    kit::stop_btn(ink, "Stop checking close calls. Those checked are kept.", m(Msg::Stop))
 }
 
 pub(super) fn link_btn<'a>(label: impl Into<String>, msg: Message) -> Element<'a, Message> {
-    button(text(label.into()).size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([1.0, 0.0])).style(style::link().style()).on_press(msg).into()
+    kit::link_btn(label, [1.0, 0.0], Some(msg))
 }
 
 /// Over the review's strip, on the photos' grey: what the judge is doing
@@ -342,7 +337,7 @@ pub fn review_line<'a>(app: &'a App, group: &GroupId, seq: u64, left_out_shown: 
             // kept; the rest is one calm line.
             r = if failed { r.push(column![title, detail].spacing(1).width(Length::Fill)) } else { r.push(title).push(detail) };
             if let JudgeState::Judging { done, total, .. } = j.state {
-                r = r.push(bar(if total == 0 { 0.0 } else { done as f32 / total as f32 }, 72.0, t::PHOTO_RAISED));
+                r = r.push(bar(util::frac(done, total), 72.0, t::PHOTO_RAISED));
             }
             match &j.state {
                 JudgeState::Failed(f) => {
@@ -466,8 +461,8 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         JudgeState::Judging { group, done, total } => row![
             icons::view(Glyph::CloseCall, 13.0, t::INK3),
             words(format!("Checking close calls for {}", name(group)), t::INK3),
-            text(format!("{} of {}", util::thousands(*done as u64), util::thousands(*total as u64))).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
-            status_bar(if *total == 0 { 0.0 } else { *done as f32 / *total as f32 }),
+            text(util::of(*done as u64, *total as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
+            status_bar(util::frac(*done, *total)),
             stop_btn(t::INK2),
         ]
         .spacing(t::S2)
@@ -476,8 +471,8 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
         JudgeState::Comparing { done, total } => row![
             icons::view(Glyph::CloseCall, 13.0, t::INK3),
             words("Comparing possible merges".into(), t::INK3),
-            text(format!("{} of {}", util::thousands(*done as u64), util::thousands(*total as u64))).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
-            status_bar(if *total == 0 { 0.0 } else { *done as f32 / *total as f32 }),
+            text(util::of(*done as u64, *total as u64)).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK),
+            status_bar(util::frac(*done, *total)),
             stop_btn(t::INK2),
         ]
         .spacing(t::S2)

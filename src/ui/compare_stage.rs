@@ -430,9 +430,9 @@ struct State {
     reported: Size,
 }
 
+/// An `ms` animation begun at `start`: its eased progress and whether it is over.
 fn ease(start: Instant, ms: f32, now: Instant) -> (f32, bool) {
-    let t = now.saturating_duration_since(start).as_secs_f32() * 1000.0 / ms;
-    (paint::out_cubic(t), t >= 1.0)
+    (paint::out_cubic(paint::progress(start, now, ms)), paint::done(start, now, ms))
 }
 
 impl State {

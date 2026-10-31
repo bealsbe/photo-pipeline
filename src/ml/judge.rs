@@ -1,5 +1,5 @@
-//! The fursuit close-call judge (v2, `docs/library-search-plan.md` "As
-//! built — v2"): a vision language model that looks at two head crops
+//! The fursuit close-call judge (v2): a vision language model that looks
+//! at two head crops
 //! the whitened vectors can't tell apart and says whether they show the
 //! same suit.  This module is the choice and the state the pages read;
 //! the model itself runs in the judge helper (`judge_worker`), a process

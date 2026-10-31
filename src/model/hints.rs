@@ -8,8 +8,7 @@
 //! for it (as in `Bursts`), and a hint applies to both halves.
 //!
 //! Thresholds are for the ~1616-px embedded preview and were set on an A7 V
-//! event day (see `docs/image-quality-plan.md`, "Phase 2 engine as
-//! built").  Other bodies use them too (decision 9: best effort).
+//! event day.  Other bodies use them too (best effort).
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -237,7 +236,7 @@ impl HintFilter {
 
 pub type MomentId = u32;
 
-/// Presses of one scene (decision 3): consecutive presses merged when they
+/// Presses of one scene: consecutive presses merged when they
 /// follow within [`MOMENT_GAP_MS`] and look alike.  One press of two or
 /// more frames is a moment too, so after an analysis every burst has one.
 #[derive(Debug, Clone, PartialEq)]
@@ -270,7 +269,7 @@ pub struct Summary {
     pub duplicate_copies: usize,
 }
 
-/// Records to mark, as a bulk action would (decision 5).  Prunes are shot
+/// Records to mark, as a bulk action would.  Prunes are shot
 /// representatives (a pair's JPG); marks applied through
 /// `App::refresh_prune` / `refresh_mark` reach the other half of a pair.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -292,6 +291,8 @@ pub struct Hints {
     reps: Vec<RecordId>,
     /// Per shot: hint (None when not measured).
     hints: Vec<Option<ShotHint>>,
+    /// How many of `hints` are measured.
+    measured: usize,
     /// Per shot: moment, or NONE.
     moment_of: Vec<u32>,
     moments: Vec<Moment>,
@@ -429,6 +430,7 @@ impl Hints {
                 rank_press(&mut out.hints, &shots, &idx[start..end], &order);
             }
         }
+        out.measured = out.hints.iter().flatten().count();
         out
     }
 
@@ -531,7 +533,7 @@ impl Hints {
 
     /// Shots measured and shots in all (how far an analysis got).
     pub fn coverage(&self) -> (usize, usize) {
-        (self.hints.iter().flatten().count(), self.reps.len())
+        (self.measured, self.reps.len())
     }
 
     pub fn summary(&self) -> Summary {
@@ -550,7 +552,7 @@ impl Hints {
         }
     }
 
-    // ── bulk actions (decision 5): what each would mark ──────────────────
+    // ── bulk actions: what each would mark ───────────────────────────────
 
     /// *Keep this, prune the rest*: `chosen` is marked to keep, and every
     /// frame of `frames` (a burst or moment) still to review is pruned.

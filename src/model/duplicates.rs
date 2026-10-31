@@ -21,7 +21,7 @@
 //!   metadata and the analysis, at no extra I/O.
 //!
 //! In each group one copy is kept and the others are *suggested* for
-//! pruning (decision 7b): a copy-like name first ("copy", "(1)", a "_1"
+//! pruning: a copy-like name first ("copy", "(1)", a "_1"
 //! added to another copy's name); then, between exports into the library
 //! (`YYYYMMDD_HHMM_NNNN`), the later export, which has the higher number;
 //! otherwise the newer file.  Nothing is marked: the suggestion is shown,

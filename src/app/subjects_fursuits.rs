@@ -1,7 +1,7 @@
-//! The Fursuits tab's own states, and the head step wherever it shows
-//! (decision 11, §7a.4–7a.5).  Groups, naming, the review, merging,
-//! splitting and hiding are the subjects pages' own, on this kind's data;
-//! this module supplies what only fursuits have:
+//! The Fursuits tab's own states, and the head step wherever it shows.
+//! Groups, naming, the review, merging, splitting and hiding are the
+//! subjects pages' own, on this kind's data; this module supplies what
+//! only fursuits have:
 //!
 //! - **The catch-up offer.**  A library indexed before heads were looked
 //!   for (or with scans skipped) says what finding them costs, on the
@@ -19,11 +19,11 @@
 //!   were told apart by the search model need its vectors once.  The tab
 //!   and Preferences say what that costs; it runs only when asked.
 
-use iced::widget::{Space, button, column, container, row, scrollable, text};
+use iced::widget::{Space, column, container, row, scrollable, text};
 use iced::{Alignment, Element, Length, Padding, Task};
 
 use super::fursuits::{self, HeadsStatus, Offer, Step, Why};
-use super::kit::{self, tip};
+use super::kit;
 use super::people::Kind;
 use super::style;
 use super::subjects::{self as subj};
@@ -408,7 +408,7 @@ pub fn status_card(app: &App, over_groups: bool) -> Option<Element<'_, Message>>
     match &h.step {
         Step::Scanning { why: Why::Vectors, done, total } => {
             let left = estimate::describe_seconds(fursuits::vector_seconds(total.saturating_sub(*done), device));
-            let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
+            let frac = util::frac(*done, *total);
             Some(progress(
                 format!("Updating fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
                 format!("{} left {}. Their groups and suggestions come back as they're updated.", super::search_setup::capital(&left), on_device(device)),
@@ -417,7 +417,7 @@ pub fn status_card(app: &App, over_groups: bool) -> Option<Element<'_, Message>>
         }
         Step::Scanning { done, total, .. } => {
             let left = estimate::describe_seconds(fursuits::head_seconds(total.saturating_sub(*done), device));
-            let frac = if *total == 0 { 0.0 } else { *done as f32 / *total as f32 };
+            let frac = util::frac(*done, *total);
             Some(progress(
                 format!("Finding fursuit heads: {} of {}", util::thousands(*done as u64), util::plural(*total as u64, "photo")),
                 format!("{} left {}. Groups appear as they are found, newest days first.", super::search_setup::capital(&left), on_device(device)),
@@ -485,7 +485,7 @@ pub fn ask_strip(app: &App) -> Option<Element<'_, Message>> {
         return None;
     }
     let (title, detail) = ask_words(o);
-    let words = column![text(title).size(t::T_BODY).font(paint::MEDIUM).color(t::INK), text(detail).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill);
+    let words = column![text(title).size(t::T_BODY).font(paint::MEDIUM).color(t::INK), kit::note(detail)].spacing(2).width(Length::Fill);
     let content = row![
         icons::view(Glyph::Fursuit, 18.0, t::INK2),
         words,
@@ -508,19 +508,15 @@ pub fn status_slot(app: &App) -> Option<Element<'_, Message>> {
     if app.search.status.pass.is_some() {
         return None;
     }
-    let of = format!("{} of {}", util::thousands(done as u64), util::thousands(total as u64));
+    let of = util::of(done as u64, total as u64);
     let label = match why {
         Why::NewExports => "Finding fursuit heads in them",
         Why::Vectors => "Updating fursuit heads",
         _ => "Finding fursuit heads",
     };
-    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
-    let content = row![text(label).size(t::T_SMALL).color(t::INK3), text(of).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK), bar(frac, 56.0, t::RAISED)].spacing(t::S2).align_y(Alignment::Center);
-    let stop = tip(
-        button(container(icons::view(Glyph::Close, 11.0, t::INK2)).center(Length::Fill)).width(20).height(20).padding(0).style(style::ghost().radius(4.0).style()).on_press(m(Msg::Stop)),
-        if why == Why::Vectors { "Stop updating fursuit heads. Those updated are kept." } else { "Stop looking for fursuit heads. What was found is kept." },
-        false,
-    );
+    let frac = util::frac(done, total);
+    let content = row![kit::caption(label), text(of).size(t::T_SMALL).font(paint::MEDIUM).color(t::INK), bar(frac, 56.0, t::RAISED)].spacing(t::S2).align_y(Alignment::Center);
+    let stop = kit::stop_btn(t::INK2, if why == Why::Vectors { "Stop updating fursuit heads. Those updated are kept." } else { "Stop looking for fursuit heads. What was found is kept." }, m(Msg::Stop));
     Some(row![content, stop, Space::new().width(t::S3), kit::vrule(12.0), Space::new().width(t::S3)].spacing(t::S1).align_y(Alignment::Center).into())
 }
 

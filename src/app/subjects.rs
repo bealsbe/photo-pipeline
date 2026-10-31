@@ -35,7 +35,7 @@ use iced::widget::{Space, button, column, container, opaque, row, scrollable, st
 use iced::{Alignment, Background, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{self, Face, FaceRef, Framing, Group, GroupId, KINDS, Kind, KindWords, Subjects as Found};
+use super::people::{self, Face, FaceRef, Framing, Group, GroupId, KINDS, Kind, Subjects as Found};
 use super::results_pane::Pane;
 use super::style;
 use super::subjects_person::{self as person, Person};
@@ -730,7 +730,7 @@ pub fn update(app: &mut App, msg: Msg) -> Task<Message> {
                 s.picked.clear();
                 s.focus = None;
                 s.select_mode = false;
-                app.settings.subjects_tab = k.index();
+                app.settings.subjects_tab = people::kind_index(k);
                 app.settings.save_in_background();
             }
             to_overview(app)
@@ -1150,7 +1150,7 @@ fn tabs(app: &App) -> Element<'_, Message> {
     let seg = |k: Kind| -> Element<'_, Message> {
         let on = k == current;
         let fg = if on { t::INK } else { t::INK2 };
-        let content = row![icons::view(kind_glyph(k), 15.0, fg), text(k.title()).size(t::T_BODY).font(paint::MEDIUM)].spacing(6).align_y(Alignment::Center);
+        let content = row![icons::view(kind_glyph(k), 15.0, fg), text(k.plural()).size(t::T_BODY).font(paint::MEDIUM)].spacing(6).align_y(Alignment::Center);
         button(container(content).center_y(Length::Fill))
             .height(t::CONTROL_H - 4.0)
             .padding(Padding { left: 9.0, right: 12.0, top: 0.0, bottom: 0.0 })
@@ -1181,7 +1181,7 @@ fn header(app: &App) -> Element<'_, Message> {
         Kind::Fursuit => super::subjects_fursuits::caption(app),
         Kind::Pet => String::new(),
     };
-    let mut title = column![text(kind.title()).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(1);
+    let mut title = column![text(kind.plural()).size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(1);
     if !caption.is_empty() {
         title = title.push(kit::caption(caption));
     }
@@ -1332,7 +1332,7 @@ pub(super) fn message<'a>(glyph: Glyph, title: &'a str, body: String, primary: O
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(glyph, 44.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK).align_x(iced::alignment::Horizontal::Center));
+    col = col.push(kit::title(title).align_x(iced::alignment::Horizontal::Center));
     if !body.is_empty() {
         col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     }
@@ -1353,9 +1353,9 @@ pub(super) fn message<'a>(glyph: Glyph, title: &'a str, body: String, primary: O
 pub(super) fn fact<'a>(k: &'a str, v: String, sub: Option<String>) -> Element<'a, Message> {
     let mut words = column![text(v).size(t::T_BODY).color(t::INK)].spacing(2).width(Length::Fill);
     if let Some(sub) = sub {
-        words = words.push(text(sub).size(t::T_SMALL).color(t::INK3));
+        words = words.push(kit::caption(sub));
     }
-    row![text(k).size(t::T_SMALL).color(t::INK3).width(88), words].spacing(t::S3).padding(Padding::from([10.0, 14.0])).into()
+    row![kit::caption(k).width(88), words].spacing(t::S3).padding(Padding::from([10.0, 14.0])).into()
 }
 
 /// The library was indexed before faces were looked for: what finding them
@@ -1404,7 +1404,7 @@ fn catch_up(app: &App) -> Element<'_, Message> {
         row![icons::view(Glyph::Person, 26.0, t::INK), text("Find the people in your photos").size(t::T_HEAD).font(paint::SEMIBOLD).color(t::INK)].spacing(t::S3).align_y(Alignment::Center),
         text(about).size(t::T_BODY).color(t::INK2),
         container(group).width(Length::Fill).style(style::group()),
-        text("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ People.").size(t::T_SMALL).color(t::INK3),
+        kit::caption("After this, faces in new exports are found as they are added. Finding faces can be turned off in Preferences ▸ People."),
         action,
     ]
     .spacing(14)
@@ -1453,7 +1453,7 @@ fn progress_strip(app: &App, kind: Kind, over_groups: bool) -> Option<Element<'_
         _ => return None,
     };
     let left = estimate::describe_seconds(estimate::seconds(total.saturating_sub(done), st.device.chosen));
-    let frac = if total == 0 { 0.0 } else { done as f32 / total as f32 };
+    let frac = util::frac(done, total);
     let bar = crate::ui::motion::SmoothBar::new(frac).length(if over_groups { 96 } else { 120 }).colors(t::PHOTO_RAISED, t::SIGNAL);
     if over_groups {
         return Some(super::subjects_fursuits::quiet_line(Glyph::Person, line, format!("{} left. Groups appear as they are found.", super::search_setup::capital(&left)), bar.into()));
@@ -1536,7 +1536,7 @@ pub fn tile_badge(g: &Group) -> Option<Glyph> {
 /// A tile's tooltip: what it is and what a click or a drag does.
 pub fn tile_hint(g: &Group) -> String {
     match &g.name {
-        None => format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.one()),
+        None => format!("Open to name this {} (F2). Drag it onto another group to merge them.", g.kind.noun()),
         Some(n) => format!("{n}: seen on {}, {}, {}. Drag onto another group to merge them.", util::plural(g.days as u64, "day"), util::plural(g.bursts as u64, "burst"), util::plural(g.photos as u64, "photo")),
     }
 }
@@ -1684,7 +1684,7 @@ const PAIR_CROP: f32 = 112.0;
 /// its name.
 fn merge_pair_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
     let s = &app.subjects;
-    let one = s.tab.one();
+    let one = s.tab.noun();
     let asks = mg.asks_name(&s.all);
     let card = |id: &'a GroupId| -> Element<'a, Message> {
         let Some(g) = s.group(id) else { return Space::new().into() };
@@ -1693,7 +1693,7 @@ fn merge_pair_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message>
         let mut col = column![
             crop,
             text(g.name.clone().unwrap_or_else(|| "Unnamed group".into())).size(t::T_BODY).font(paint::MEDIUM).color(if g.name.is_some() { t::INK } else { t::INK2 }),
-            text(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"))).size(t::T_SMALL).color(t::INK3),
+            kit::caption(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"))),
         ]
         .spacing(6)
         .width(Length::Fill)
@@ -1730,7 +1730,7 @@ fn merge_pair_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message>
         super::dialogs::header(format!("Merge these two groups into one {one}?"), None),
         kit::secondary(format!("Their photos become one {one}, and suggestions come from all of them. {says}")),
         container(cards).width(Length::Fill).center_x(Length::Fill).padding(Padding::from([t::S2, 0.0])),
-        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
+        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", people::crops(s.tab))),
         Space::new().height(t::S1),
         super::dialogs::footer(vec![], vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::MergeCancel))).into(), kit::btn(go, style::primary(), Some(m(Msg::MergeGo))).into()]),
     ]
@@ -1743,7 +1743,7 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
         return merge_pair_dialog(app, mg);
     }
     let s = &app.subjects;
-    let one = s.tab.one();
+    let one = s.tab.noun();
     let mut list = column![].spacing(2).padding(4);
     for id in &mg.groups {
         let Some(g) = s.group(id) else { continue };
@@ -1756,7 +1756,7 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
         let crop = tile::crop(s.crops.get(&g.cover.face, px(app, 40.0), Framing::Face), 40.0, shape(g.kind));
         let words = column![
             text(g.name.clone().unwrap_or_else(|| "Unnamed group".into())).size(t::T_BODY).font(paint::MEDIUM).color(if g.name.is_some() { t::INK } else { t::INK2 }),
-            text(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"))).size(t::T_SMALL).color(t::INK3)
+            kit::caption(format!("{} over {}", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day")))
         ]
         .spacing(1);
         let r = row![dot, crop, words].spacing(12).align_y(Alignment::Center);
@@ -1789,7 +1789,7 @@ fn merge_dialog<'a>(app: &'a App, mg: &'a MergeAsk) -> Element<'a, Message> {
             (None, false) => format!("Their photos become one {one}, and suggestions come from all of them. None is named yet, so it stays unnamed."),
         }),
         container(list).width(Length::Fill).style(style::group()),
-        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", s.tab.crops())),
+        kit::caption(format!("Ctrl+Z undoes it. A photo that doesn't belong can be moved out later, from {} on the {one}'s page.", people::crops(s.tab))),
         Space::new().height(t::S1),
         super::dialogs::footer(vec![], vec![kit::btn("Cancel", style::secondary(), Some(m(Msg::MergeCancel))).into(), kit::btn(go, style::primary(), Some(m(Msg::MergeGo))).into()]),
     ]

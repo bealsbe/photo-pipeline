@@ -677,7 +677,7 @@ pub fn banner(app: &App) -> Option<Element<'_, Message>> {
     );
     let words = column![
         text(head).size(t::T_BODY).font(paint::MEDIUM).color(t::INK),
-        text(detail).size(t::T_SMALL).color(t::INK2),
+        kit::note(detail),
     ]
     .spacing(2)
     .width(Length::Fill);
@@ -784,7 +784,7 @@ pub fn quit_overlay(app: &App) -> Option<Element<'_, Message>> {
         foot = foot.push(b);
     }
     let content = column![
-        text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+        kit::title(title),
         text(body).size(t::T_BODY).color(t::INK2),
         Space::new().height(t::S2),
         foot,

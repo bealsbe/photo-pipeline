@@ -1,4 +1,4 @@
-//! Faces in the helper (plan §3.3, §5.2): YuNet's boxes and five
+//! Faces in the helper: YuNet's boxes and five
 //! landmarks decoded from its raw outputs, the quality gate, the ArcFace
 //! alignment every recognition model expects, and each face model's
 //! input.  Pure arithmetic on pixels and tensors; the sessions themselves
@@ -9,14 +9,14 @@
 //! objectness, a box (centre offset and log size, in strides) and five
 //! landmarks (right eye, left eye, nose tip, right and left mouth
 //! corner).  The score is the geometric mean of the two; boxes are kept
-//! above [`MIN_SCORE`] (the study's quality gate, Immich's reason too),
+//! above [`MIN_SCORE`] (the quality gate, Immich's reason too),
 //! merged by non-maximum suppression at [`NMS_IOU`], and only faces of at
 //! least [`MIN_FACE_PX`] on the full preview are recognised.
 //!
 //! The detector runs on a fixed square canvas ([`DET_SIZE`]): the preview
 //! is scaled to fit (about two thirds of a 1 616-px preview) and padded
 //! with black, so every photo has the same tensor shape and a chunk can
-//! be batched on the card.  Measured on 200 of the study's previews
+//! be batched on the card.  Measured on 200 previews
 //! (faces of score ≥ 0.9 and ≥ 40 px): a 640 canvas found 49, 832 55,
 //! **1 024 61**, 1 280 64 at twice the cost, and the full preview 59
 //! (large faces score lower); 1 024 is the knee.
@@ -25,7 +25,7 @@ use crate::imaging::decode::{self, Pixels};
 
 /// The detector's canvas edge (a multiple of 32).
 pub const DET_SIZE: u32 = 1024;
-/// Faces below this YuNet score are ignored (the study: 0.8 let blurred
+/// Faces below this YuNet score are ignored (measured: 0.8 let blurred
 /// faces of different people share groups; 0.9 didn't).
 pub const MIN_SCORE: f32 = 0.9;
 /// Boxes overlapping more than this with a better one are dropped.
@@ -361,7 +361,7 @@ pub fn face_input(crop: &Pixels, norm: Norm) -> Vec<f32> {
 }
 
 /// How sharp an aligned crop is: the variance of its Laplacian on the
-/// luma (the study's measure), for clearest-first ordering.
+/// luma, for clearest-first ordering.
 pub fn sharpness(crop: &Pixels) -> f32 {
     let (w, h, c) = (crop.width as usize, crop.height as usize, crop.channels as usize);
     let luma = |x: usize, y: usize| -> f32 {

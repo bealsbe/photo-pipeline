@@ -747,7 +747,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let s = &app.subjects;
     let Some(r) = s.merges.as_ref() else { return Space::new().into() };
     let body: Element<'_, Message> = if !r.loaded && r.list.is_empty() && !judge_running(app, r) {
-        quiet("Finding pairs of groups to check…".into())
+        kit::quiet("Finding pairs of groups to check…".into(), None)
     } else if r.list.is_empty() || (r.at_end() && r.len() == 0) {
         waiting_page(app, r)
     } else if r.at_end() {
@@ -780,11 +780,6 @@ pub fn view(app: &App) -> Element<'_, Message> {
 
 fn judge_running(app: &App, r: &MergeReview) -> bool {
     r.judging && r.run.as_ref().is_some_and(|x| !x.finished()) && super::fursuit_judge::active(&app.search.status)
-}
-
-fn quiet<'a>(title: String) -> Element<'a, Message> {
-    let col = column![Space::new().height(Length::FillPortion(2)), text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK), Space::new().height(Length::FillPortion(5))].align_x(Alignment::Center);
-    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).into()
 }
 
 fn header<'a>(app: &'a App, r: &'a MergeReview) -> Element<'a, Message> {
@@ -956,7 +951,7 @@ fn judge_line<'a>(app: &'a App, r: &'a MergeReview) -> Option<Element<'a, Messag
             let detail = text(detail).size(t::T_SMALL).color(t::PHOTO_INK3);
             line = if failed { line.push(column![title, detail].spacing(1).width(Length::Fill)) } else { line.push(title).push(detail) };
             if let JudgeState::Comparing { done, total } = j.state {
-                line = line.push(super::fursuit_judge::bar(if total == 0 { 0.0 } else { done as f32 / total as f32 }, 72.0, t::PHOTO_RAISED));
+                line = line.push(super::fursuit_judge::bar(util::frac(done, total), 72.0, t::PHOTO_RAISED));
             }
             match &j.state {
                 JudgeState::Failed(f) => {

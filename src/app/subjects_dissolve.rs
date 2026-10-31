@@ -25,7 +25,8 @@ use iced::widget::{Space, column, container, row, text};
 use iced::{Alignment, Element, Length, Padding, Task};
 
 use super::kit::{self, tip};
-use super::people::{Face, Framing, GroupId, Kind, KindWords};
+use super::people::{Face, Framing, GroupId, Kind};
+use super::subjects_remove::{count, nouns};
 use super::style;
 use super::subjects::{self as subj, m, px, shape};
 use super::{App, Message};
@@ -78,19 +79,6 @@ pub enum Msg {
     Ask(From),
     Go,
     Cancel,
-}
-
-/// "fursuit heads", "faces".
-fn nouns(kind: Kind) -> &'static str {
-    super::subjects_remove::nouns(kind)
-}
-
-/// "a fursuit head", "23 faces".
-fn count(kind: Kind, n: usize) -> String {
-    match n {
-        1 => format!("a {}", nouns(kind).trim_end_matches('s')),
-        _ => format!("{} {}", util::thousands(n as u64), nouns(kind)),
-    }
 }
 
 /// The action's name, the same on the button, in the menu and in the
@@ -253,7 +241,7 @@ pub fn dialog(app: &App) -> Option<Element<'_, Message>> {
 pub fn debug_state(app: &App) -> String {
     match &app.subjects.dissolve {
         None => "none".into(),
-        Some(a) => format!("kind={} name={:?} heads={} waiting={} arranged={} from={:?}", a.kind.one(), a.name, a.faces.len(), a.waiting.is_some(), a.arranged, a.from),
+        Some(a) => format!("kind={} name={:?} heads={} waiting={} arranged={} from={:?}", a.kind.noun(), a.name, a.faces.len(), a.waiting.is_some(), a.arranged, a.from),
     }
 }
 

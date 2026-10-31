@@ -672,7 +672,7 @@ pub fn view<'a>(app: &'a App, c: &'a Compare) -> Element<'a, Message> {
     let mut top = row![
         Space::new().width(t::S1),
         icons::view(Glyph::Compare, 18.0, t::INK2),
-        text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+        kit::title(title),
         kit::caption(caption),
         Space::new().width(Length::Fill),
     ]

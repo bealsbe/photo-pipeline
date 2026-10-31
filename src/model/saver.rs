@@ -76,15 +76,11 @@ pub struct Report {
     pub set_aside: Vec<(PathBuf, Kind, PathBuf)>,
 }
 
-type WriteFn = Arc<dyn Fn() -> io::Result<()> + Send + Sync>;
-
+/// A sidecar's new text, or `None` to remove it.
 #[derive(Clone)]
-enum Payload {
-    /// A sidecar's new text, or `None` to remove it.
-    Text { file: Arc<str>, text: Option<Arc<str>> },
-    /// Written by a closure: can be retried, not read back or kept locally.
-    #[allow(dead_code)] // through `Saver::save`; the app's sidecars are text
-    Func(WriteFn),
+struct Payload {
+    file: Arc<str>,
+    text: Option<Arc<str>>,
 }
 
 type Key = (PathBuf, Kind);
@@ -175,43 +171,36 @@ fn write_text(folder: &Path, target: &Path, text: Option<&str>) -> io::Result<()
 }
 
 enum Outcome {
-    /// Done; the digest of what the sidecar now holds (`None` for a closure).
-    Written(Option<String>),
+    /// Done; the digest of what the sidecar now holds.
+    Written(String),
     /// A restored copy the folder's sidecar has moved on from.
     Superseded,
     Failed(SaveError),
 }
 
 fn attempt(folder: &Path, payload: &Payload, restored: Option<&Option<String>>) -> Outcome {
-    match payload {
-        Payload::Func(f) => match f() {
-            Ok(()) => Outcome::Written(None),
-            Err(e) => Outcome::Failed(SaveError::from_io(&e)),
-        },
-        Payload::Text { file, text } => {
-            let target = folder.join(&**file);
-            let want = text_digest(text.as_deref());
-            if let Some(base) = restored {
-                let disk = match fs::read(&target) {
-                    Ok(b) => digest(&b),
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::metadata(folder) {
-                        Ok(_) => ABSENT.to_string(),
-                        Err(e) => return Outcome::Failed(SaveError::from_io(&e)),
-                    },
-                    Err(e) => return Outcome::Failed(SaveError::from_io(&e)),
-                };
-                if disk == want {
-                    return Outcome::Written(Some(want));
-                }
-                if base.as_ref().is_some_and(|b| *b != disk) {
-                    return Outcome::Superseded;
-                }
-            }
-            match write_text(folder, &target, text.as_deref()) {
-                Ok(()) => Outcome::Written(Some(want)),
-                Err(e) => Outcome::Failed(SaveError::from_io(&e)),
-            }
+    let Payload { file, text } = payload;
+    let target = folder.join(&**file);
+    let want = text_digest(text.as_deref());
+    if let Some(base) = restored {
+        let disk = match fs::read(&target) {
+            Ok(b) => digest(&b),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => match fs::metadata(folder) {
+                Ok(_) => ABSENT.to_string(),
+                Err(e) => return Outcome::Failed(SaveError::from_io(&e)),
+            },
+            Err(e) => return Outcome::Failed(SaveError::from_io(&e)),
+        };
+        if disk == want {
+            return Outcome::Written(want);
         }
+        if base.as_ref().is_some_and(|b| *b != disk) {
+            return Outcome::Superseded;
+        }
+    }
+    match write_text(folder, &target, text.as_deref()) {
+        Ok(()) => Outcome::Written(want),
+        Err(e) => Outcome::Failed(SaveError::from_io(&e)),
     }
 }
 
@@ -340,7 +329,7 @@ impl Saver {
                 state.entries.insert(
                     key.clone(),
                     Entry {
-                        payload: Payload::Text { file: r.file.into(), text: r.text.map(Into::into) },
+                        payload: Payload { file: r.file.into(), text: r.text.map(Into::into) },
                         generation: state.generation,
                         error: Some(error),
                         queued: true,
@@ -357,17 +346,10 @@ impl Saver {
         Self { shared, thread }
     }
 
-    /// Queue `write` as the new contents of `folder`'s `kind` sidecar.  It
-    /// may run more than once (a failed save is tried again).  Prefer
-    /// [`Saver::save_text`]: only text can be read back and kept locally.
-    #[allow(dead_code)]
-    pub fn save(&self, folder: PathBuf, kind: Kind, write: impl Fn() -> io::Result<()> + Send + Sync + 'static) {
-        self.put(folder, kind, Payload::Func(Arc::new(write)));
-    }
-
     /// Queue `text` as the new contents of `folder/file`; `None` removes it.
+    /// The write may run more than once (a failed save is tried again).
     pub fn save_text(&self, folder: PathBuf, kind: Kind, file: &str, text: Option<String>) {
-        self.put(folder, kind, Payload::Text { file: file.into(), text: text.map(Into::into) });
+        self.put(folder, kind, Payload { file: file.into(), text: text.map(Into::into) });
     }
 
     fn put(&self, folder: PathBuf, kind: Kind, payload: Payload) {
@@ -455,10 +437,7 @@ impl Saver {
     /// waiting to be saved, else what is on disk.  `Ok(None)`: no sidecar.
     pub fn read(&self, folder: &Path, kind: Kind, file: &str) -> io::Result<Option<String>> {
         let key = (folder.to_path_buf(), kind);
-        let waiting = match self.shared.state.lock().entries.get(&key) {
-            Some(Entry { payload: Payload::Text { text, .. }, .. }) => Some(text.as_deref().map(str::to_string)),
-            _ => None,
-        };
+        let waiting = self.shared.state.lock().entries.get(&key).map(|e| e.payload.text.as_deref().map(str::to_string));
         if let Some(text) = waiting {
             return Ok(text);
         }
@@ -494,22 +473,17 @@ impl Saver {
     /// this thread: before quitting while saves fail or hang.  `Ok(n)`: n
     /// sidecars kept (0 if nothing was waiting).
     pub fn secure(&self) -> Result<usize, String> {
-        let (items, closures) = {
+        let items = {
             let s = self.shared.state.lock();
             let mut items = Vec::new();
-            let mut closures = Vec::new();
             for ((folder, kind), e) in &s.entries {
-                match &e.payload {
-                    Payload::Text { file, text } => {
-                        let base = s.known.get(&folder.join(&**file)).cloned();
-                        items.push((folder.clone(), *kind, file.clone(), text.clone(), base, e.generation));
-                    }
-                    Payload::Func(_) => closures.push(kind.label()),
-                }
+                let Payload { file, text } = &e.payload;
+                let base = s.known.get(&folder.join(&**file)).cloned();
+                items.push((folder.clone(), *kind, file.clone(), text.clone(), base, e.generation));
             }
-            (items, closures)
+            items
         };
-        if items.is_empty() && closures.is_empty() {
+        if items.is_empty() {
             return Ok(0);
         }
         let Some(j) = &self.shared.journal else { return Err("there is no folder on this computer to keep them in".into()) };
@@ -525,9 +499,6 @@ impl Saver {
                 }
                 Err(e) => error = Some(e.to_string()),
             }
-        }
-        if let Some(label) = closures.first() {
-            error.get_or_insert_with(|| format!("{label} can't be kept on this computer"));
         }
         match error {
             Some(e) => Err(e),
@@ -580,15 +551,12 @@ fn finish(shared: &Shared, on_report: &dyn Fn(Report), key: Key, generation: u64
     let op = {
         let mut s = shared.state.lock();
         let current = s.entries.get(&key).is_some_and(|e| e.generation == generation);
-        let target = |s: &State| match s.entries.get(&key).map(|e| &e.payload) {
-            Some(Payload::Text { file, .. }) => Some(key.0.join(&**file)),
-            _ => None,
-        };
+        let target = |s: &State| s.entries.get(&key).map(|e| key.0.join(&*e.payload.file));
         match outcome {
             Outcome::Written(digest) => {
                 let t = target(&*s);
-                if let (Some(d), Some(t)) = (digest, &t) {
-                    s.known.insert(t.clone(), d);
+                if let Some(t) = &t {
+                    s.known.insert(t.clone(), digest);
                 }
                 if current {
                     if s.entries.remove(&key).is_some_and(|e| e.error.is_some()) {
@@ -616,17 +584,12 @@ fn finish(shared: &Shared, on_report: &dyn Fn(Report), key: Key, generation: u64
                     // what to keep.
                     Some(e) => {
                         e.error = Some(err);
-                        match &e.payload {
-                            Payload::Text { file, text } => {
-                                // A restored copy keeps the base it came with.
-                                let base = match &e.restored {
-                                    Some(b) => b.clone(),
-                                    None => known,
-                                };
-                                JournalOp::Put { file: file.clone(), text: text.clone(), base, generation: e.generation }
-                            }
-                            Payload::Func(_) => JournalOp::None,
-                        }
+                        // A restored copy keeps the base it came with.
+                        let base = match &e.restored {
+                            Some(b) => b.clone(),
+                            None => known,
+                        };
+                        JournalOp::Put { file: e.payload.file.clone(), text: e.payload.text.clone(), base, generation: e.generation }
                     }
                     None => JournalOp::None,
                 }
@@ -694,7 +657,7 @@ impl Drop for Saver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::sidecar::{EXPORT_FILE, PRUNE_FILE, prune_text, read_export_marks, read_prune_marks, write_export_marks, write_prune_marks};
+    use crate::model::sidecar::{CROPS_FILE, EXPORT_FILE, PRUNE_FILE, export_text, prune_text, read_export_marks, read_prune_marks};
     use crossbeam_channel::{Receiver, unbounded};
 
     fn tmpdir(name: &str) -> PathBuf {
@@ -723,11 +686,10 @@ mod tests {
         let d = tmpdir("newest");
         let (saver, rx) = saver(None);
         for n in 1..=50 {
-            let (folder, paths) = (d.clone(), vec![d.join(format!("IMG_{n:04}.JPG"))]);
-            saver.save(d.clone(), Kind::Prune, move || write_prune_marks(&folder, paths.iter().map(|p| p.as_path())));
+            saver.save_text(d.clone(), Kind::Prune, PRUNE_FILE, Some(prune(&d, &[format!("IMG_{n:04}.JPG").as_str()])));
         }
-        let (folder, paths) = (d.clone(), vec![d.join("A.JPG")]);
-        saver.save(d.clone(), Kind::Export, move || write_export_marks(&folder, paths.iter().map(|p| p.as_path())));
+        let a = d.join("A.JPG");
+        saver.save_text(d.clone(), Kind::Export, EXPORT_FILE, Some(export_text(&d, [a.as_path()].into_iter())));
         assert!(saver.flush());
         assert_eq!(read_prune_marks(&d), Some([d.join("IMG_0050.JPG")].into()));
         assert_eq!(read_export_marks(&d), Some([d.join("A.JPG")].into()));
@@ -736,8 +698,7 @@ mod tests {
         // A failing save is reported and kept; dropping the saver writes
         // what's queued.
         let gone = d.join("missing-folder");
-        let g = gone.clone();
-        saver.save(gone, Kind::Crops, move || write_prune_marks(&g, std::iter::empty()));
+        saver.save_text(gone.clone(), Kind::Crops, CROPS_FILE, Some(prune(&gone, &[])));
         saver.save_text(d.clone(), Kind::Prune, PRUNE_FILE, Some(prune(&d, &["LAST.JPG"])));
         drop(saver);
         assert_eq!(read_prune_marks(&d), Some([d.join("LAST.JPG")].into()));
@@ -793,20 +754,41 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// A write that blocks in the kernel for ~800 ms, as one on a dead
+    /// mount does: the temp sibling the atomic write opens is a FIFO (its
+    /// `File::create` waits for a reader) in a folder the saver can't
+    /// unlink it from.  Needs an ordinary user: root ignores the folder's
+    /// mode.
     #[test]
+    #[cfg(unix)]
     fn flush_is_bounded_when_a_write_hangs() {
+        use std::os::unix::fs::PermissionsExt;
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipped: root can unlink from a read-only folder");
+            return;
+        }
         let d = tmpdir("hang");
+        let fifo = crate::ops::fsutil::tmp_sibling(&d.join(PRUNE_FILE));
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0, "mkfifo");
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o555)).unwrap();
+        let reader = {
+            let fifo = fifo.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(800));
+                let _ = fs::read(&fifo);
+            })
+        };
         let (saver, _rx) = saver(None);
-        saver.save(d.clone(), Kind::Prune, || {
-            std::thread::sleep(Duration::from_millis(800));
-            Ok(())
-        });
+        saver.save_text(d.clone(), Kind::Prune, PRUNE_FILE, Some(prune(&d, &["A.ARW"])));
         let t = Instant::now();
         assert!(!saver.flush_for(Duration::from_millis(100)));
         assert!(t.elapsed() < Duration::from_millis(600));
         assert_eq!(saver.stuck(Duration::from_millis(50)), Some(d.clone()));
         assert_eq!(saver.stuck(Duration::from_secs(60)), None);
         assert!(saver.flush_for(Duration::from_secs(5)));
+        reader.join().unwrap();
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o755)).unwrap();
         let _ = fs::remove_dir_all(&d);
     }
 

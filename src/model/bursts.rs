@@ -498,8 +498,8 @@ mod tests {
 
     #[test]
     fn a_folder_exported_twice_keeps_its_presses_whole() {
-        // Every frame twice under two names (as on day D of the image-quality
-        // plan): in capture order the copies interleave, 0001, 3356, 0002,
+        // Every frame twice under two names (as on one test day): in
+        // capture order the copies interleave, 0001, 3356, 0002,
         // 3357 …  They must not split the press into pairs.
         let mut recs = Vec::new();
         for (i, ms) in [(1u16, 784u16), (2, 117), (3, 450), (4, 783)] {

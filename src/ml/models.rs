@@ -1,9 +1,9 @@
 //! The model registry: every model the app can download, pinned by URL and
-//! SHA-256, with its size, licence and publisher (decision 13), and where
+//! SHA-256, with its size, licence and publisher, and where
 //! downloaded files live.
 //!
-//! Phase 1 lists search alone: SigLIP2 ViT-B/16 at 256 px, the checkpoint
-//! the feasibility study measured, as the ONNX export Hugging Face's
+//! Search: SigLIP2 ViT-B/16 at 256 px, the checkpoint the feasibility
+//! study measured, as the ONNX export Hugging Face's
 //! `onnx-community` maintains for transformers.js.  The image tower is the
 //! fp32 file (372 MB): measured here, the fp16 one gives wrong answers on
 //! WebGPU (cosine 0.61 against the processor; the self-check refuses it)
@@ -11,7 +11,7 @@
 //! (565 MB against 1 130 MB): its answers equal fp32's (cosine 1.000) and
 //! a query takes ~50 ms on the processor against ~30.
 //!
-//! Phase 3 adds faces (decision 10): YuNet finds them for every choice,
+//! Faces: YuNet finds them for every choice,
 //! and the user picks one of three recognition models in the download
 //! dialog — AuraFace (pre-selected), InsightFace's `buffalo_l`
 //! recognition model (non-commercial research licence; downloaded only
@@ -46,7 +46,7 @@ pub enum ModelId {
     /// SFace (OpenCV Zoo, 2021 December): the smallest and fastest.
     SFace,
     /// OWLv2 B/16 (ensemble checkpoint): finds fursuit heads by the words
-    /// "a fursuit head" (phase 4, decision 11).  The image tower, the text
+    /// "a fursuit head".  The image tower, the text
     /// tower and the box head in one graph, with its CLIP tokenizer.
     Owlv2,
     /// Gemma 4 26B-A4B-it (Unsloth's UD-Q4_K_M GGUF with its vision
@@ -78,7 +78,7 @@ impl ModelId {
         matches!(self, ModelId::AuraFace | ModelId::InsightFace | ModelId::SFace)
     }
 
-    /// One of the fursuit head step's models (phase 4): the detector.
+    /// One of the fursuit head step's models: the detector.
     /// The head vectors come from the search model (v2), which is always
     /// in place.
     pub fn is_fursuit_model(self) -> bool {
@@ -91,16 +91,15 @@ impl ModelId {
     }
 }
 
-/// The fursuit head step's models (phase 4, v2): OWLv2 finds the heads;
+/// The fursuit head step's models (v2): OWLv2 finds the heads;
 /// their vectors come from the search model, so nothing else is needed.
-/// DINOv2 (phase 4's head vectors) is no longer listed: a folder left from
+/// DINOv2 (the earlier head vectors) is no longer listed: a folder left from
 /// then is counted and removed with the rest by Preferences ▸ Storage.
 pub const FURSUIT_MODELS: [ModelId; 1] = [ModelId::Owlv2];
 
 /// The face detector every face model uses.
 pub const FACE_DETECTOR: ModelId = ModelId::Yunet;
-/// The face model pre-selected in the dialog (decision 10; phase 0's
-/// comparison may move it).
+/// The face model pre-selected in the dialog (a comparison may move it).
 pub const FACE_MODEL_DEFAULT: ModelId = ModelId::AuraFace;
 
 /// A file packed inside the downloaded archive (InsightFace ships a zip
@@ -136,7 +135,7 @@ impl ModelFile {
     }
 }
 
-/// A row of the download dialog (§7a.7), and what the helper loads.
+/// A row of the download dialog, and what the helper loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ModelInfo {
     pub id: ModelId,
@@ -157,7 +156,7 @@ pub struct ModelInfo {
     pub required: bool,
     pub files: &'static [ModelFile],
     /// Version of the preprocessing that goes with these weights; part of
-    /// the index's identity (a change means a new index file, §6.3).
+    /// the index's identity (a change means a new index file).
     pub preprocess_version: u32,
     /// The radio group this row belongs to (`"face"` for the three face
     /// models: the dialog offers one of them); `None` for a row of its
@@ -262,7 +261,7 @@ const GEMMA4_BASE: &str = "https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGU
 
 /// OWLv2 B/16 ensemble as the transformers.js export Hugging Face's staff
 /// maintain of Google's `owlv2-base-patch16-ensemble` (Apache-2.0): the
-/// fp32 graph (measured here against the study's PyTorch boxes: the same
+/// fp32 graph (measured here against the reference PyTorch boxes: the same
 /// heads, scores within 0.02) and its CLIP tokenizer.  Pinned 2026-10-02.
 pub const OWLV2_FILES: &[ModelFile] = &[
     ModelFile {
@@ -472,7 +471,7 @@ pub fn search_models() -> &'static [ModelInfo] {
 }
 
 /// The face-recognition choices, the recommended one first (the dialog's
-/// radio group, decision 10).
+/// radio group).
 pub fn face_models() -> impl Iterator<Item = &'static ModelInfo> {
     ALL.iter().filter(|m| m.choice == Some("face"))
 }
@@ -497,7 +496,7 @@ pub fn face_model_in(ids: &[ModelId]) -> Option<ModelId> {
     ids.iter().copied().find(|id| id.is_face_model())
 }
 
-/// The fursuit head step's rows (the dialog's *Fursuits* row, phase 4).
+/// The fursuit head step's rows (the dialog's *Fursuits* row).
 pub fn fursuit_models() -> impl Iterator<Item = &'static ModelInfo> {
     ALL.iter().filter(|m| m.id.is_fursuit_model())
 }
@@ -515,7 +514,7 @@ pub fn judge_models() -> impl Iterator<Item = &'static ModelInfo> {
 
 /// Preferences ▸ Storage ▸ Downloaded models ▸ Delete: every model
 /// folder in `dir` goes (folders of models no longer used too, such as
-/// phase 4's `dinov2-base`), except the close-call judges', which have a
+/// the earlier `dinov2-base`), except the close-call judges', which have a
 /// row of their own.
 pub fn delete_all_but_judges(dir: &Path) {
     let keep: Vec<&str> = judge_models().map(|m| m.id.dir_name()).collect();
@@ -592,7 +591,7 @@ mod tests {
         assert_eq!(search_models().len(), 1);
     }
 
-    /// Decision 10: three face choices, AuraFace recommended, InsightFace
+    /// Three face choices, AuraFace recommended, InsightFace
     /// restricted and never recommended, from its publisher's release.
     #[test]
     fn the_face_models_are_a_choice_with_insightface_restricted() {
@@ -618,7 +617,7 @@ mod tests {
         assert_eq!(info(ModelId::AuraFace).bytes() / 1_000_000, 260);
     }
 
-    /// Decision 11 and 13, as v2 left it: the fursuit head step is one row
+    /// The fursuit head step is one row
     /// (OWLv2, Apache-2.0, a maintained ONNX export, pinned); the head
     /// vectors come from the search model, so DINOv2 is gone from the
     /// registry.

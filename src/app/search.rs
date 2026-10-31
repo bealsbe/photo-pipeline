@@ -24,7 +24,7 @@
 //!   says what was applied besides the words (dates, words left out, a
 //!   name it can't search yet).  Dates alone show every photo from them in
 //!   the order taken, and the heading, count and end line say so.
-//! - **Animal words** (decision 12b): the fursuits the engine left out are
+//! - **Animal words**: the fursuits the engine left out are
 //!   counted at the end, with *Show fursuits too*; shown, they are a list
 //!   of their own after the real animals, never mixed in, with *Hide
 //!   fursuits* on its heading.  The viewer steps through one list only.
@@ -98,13 +98,13 @@ pub struct Dialog {
     /// indexed already).
     pub faces_only: bool,
     /// *Find people's faces* is ticked (on unless turned off in
-    /// Preferences, decision 9).
+    /// Preferences).
     pub faces: bool,
-    /// The face model picked (decision 10): the one in the settings (the
+    /// The face model picked: the one in the settings (the
     /// recommended one until the user picks another).
     pub face_model: ModelId,
     /// *Find fursuit heads* is ticked: on as Preferences says, but unticked
-    /// to start with when the processor is chosen (§7a.4: about 15 hours).
+    /// to start with when the processor is chosen (about 15 hours).
     pub fursuits: bool,
     /// Asked from the Fursuits tab: only the head models (the library is
     /// indexed already).
@@ -341,7 +341,7 @@ fn m(msg: Msg) -> Message {
     Message::Search(msg)
 }
 
-/// The models search needs (phase 1: the search model).
+/// The models search itself needs: the search model.
 pub fn search_models() -> Vec<ModelId> {
     crate::ml::models::search_models().iter().map(|m| m.id).collect()
 }
@@ -407,7 +407,7 @@ pub fn open_day(app: &mut App) -> Task<Message> {
 // ── searching ───────────────────────────────────────────────────────────────
 
 /// The kinds whose names the field offers and understands: those whose
-/// step exists (people, and fursuits from phase 4), each under its own
+/// step exists (people and fursuits), each under its own
 /// heading, never mixed.
 pub const NAMED_KINDS: &[super::people::Kind] = &[super::people::Kind::Person, super::people::Kind::Fursuit];
 
@@ -1235,7 +1235,7 @@ fn completions_layer(app: &App) -> Element<'_, Message> {
     let w = field_width(app);
     let mut list = column![].spacing(2);
     let typed = s.query.trim();
-    let quiet = |line: String| container(text(line).size(t::T_SMALL).color(t::INK3)).padding(Padding::from([t::S2, 10.0]));
+    let quiet = |line: String| container(kit::caption(line)).padding(Padding::from([t::S2, 10.0]));
     if offer.naming && offer.picks.is_empty() {
         let line = if app.subjects.all.named(super::people::Kind::Person).next().is_none() {
             "No one is named yet. Name people on the People tab (Ctrl+4), then find them here.".to_string()
@@ -1279,7 +1279,7 @@ fn completion_row<'a>(app: &'a App, pick: &Pick, i: usize, hot: bool, stem: &str
             // A name: its crop in its kind's shape, then the name.
             let g = app.subjects.group(id);
             let avatar = crate::ui::subject_tile::crop(g.and_then(|g| app.subjects.crops.get(&g.cover.face, super::subjects::px(app, 22.0), super::people::Framing::Face)), 22.0, super::subjects::shape(*kind));
-            let line = row![avatar, container(highlighted(name.clone(), stem)).width(Length::Fill), text(util::plural(*photos as u64, "photo")).size(t::T_SMALL).color(t::INK3)].spacing(10).align_y(Alignment::Center);
+            let line = row![avatar, container(highlighted(name.clone(), stem)).width(Length::Fill), kit::caption(util::plural(*photos as u64, "photo"))].spacing(10).align_y(Alignment::Center);
             return pick_button(line.into(), hot, i);
         }
         Pick::Thing { word, photos, minus: false } => (Glyph::Search, word.clone(), util::plural(*photos as u64, "photo"), stem.to_string()),
@@ -1289,7 +1289,7 @@ fn completion_row<'a>(app: &'a App, pick: &Pick, i: usize, hot: bool, stem: &str
     };
     let mut line = row![icons::view(glyph, 15.0, t::INK3), container(highlighted(words, &mark)).width(Length::Fill)].spacing(10).align_y(Alignment::Center);
     if !count.is_empty() {
-        line = line.push(text(count).size(t::T_SMALL).color(t::INK3));
+        line = line.push(kit::caption(count));
     }
     pick_button(line.into(), hot, i)
 }
@@ -1314,7 +1314,7 @@ fn pick_button<'a>(line: Element<'a, Message>, hot: bool, i: usize) -> Element<'
 
 /// The list's footer: the syntax, taught by example.
 fn syntax_footer<'a>() -> Element<'a, Message> {
-    let item = |cap: &'a str, about: &'a str| row![keycap(cap), text(about).size(t::T_SMALL).color(t::INK3)].spacing(6).align_y(Alignment::Center);
+    let item = |cap: &'a str, about: &'a str| row![keycap(cap), kit::caption(about)].spacing(6).align_y(Alignment::Center);
     container(row![item("-word", "leaves a word out"), item("@name", "someone you named"), item("jun 2024", "only those dates")].spacing(t::S4).align_y(Alignment::Center))
         .padding(Padding { top: t::S2, bottom: 6.0, left: 10.0, right: 10.0 })
         .into()
@@ -1369,11 +1369,11 @@ fn partial_strip(app: &App) -> Element<'_, Message> {
                     .width(Length::Fill),
             );
             if matches!(st.stopped, Some(Stopped::Cancelled)) {
-                r = r.push(button(text("Index the rest").size(t::T_SMALL).font(paint::MEDIUM)).padding(Padding::from([2.0, 6.0])).style(style::link().style()).on_press(m(Msg::IndexRest)));
+                r = r.push(kit::link_btn("Index the rest", [2.0, 6.0], Some(m(Msg::IndexRest))));
             }
         }
         _ => {
-            r = r.push(text(format!("Searching the {n} photos indexed so far, newest first. Results fill in as indexing reaches older days.")).size(t::T_SMALL).color(t::INK2));
+            r = r.push(kit::note(format!("Searching the {n} photos indexed so far, newest first. Results fill in as indexing reaches older days.")));
         }
     }
     column![container(r.padding(Padding::from([t::S2, t::S3]))).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into()
@@ -1392,7 +1392,7 @@ fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     if dates.is_none() && leave.is_none() && r.unknown.is_empty() && also.is_empty() {
         return None;
     }
-    let item = |g: Glyph, words: String| row![icons::view(g, 14.0, t::INK3), text(words).size(t::T_SMALL).color(t::INK2)].spacing(6).align_y(Alignment::Center);
+    let item = |g: Glyph, words: String| row![icons::view(g, 14.0, t::INK3), kit::note(words)].spacing(6).align_y(Alignment::Center);
     let mut r = row![].spacing(t::S5).align_y(Alignment::Center);
     if let Some(d) = dates {
         r = r.push(item(Glyph::Calendar, d));
@@ -1407,10 +1407,7 @@ fn understood_strip(app: &App) -> Option<Element<'_, Message>> {
     // A typed name both a person and a fursuit have searched the person:
     // the fursuit is offered here, never mixed into the results.
     for (name, id) in also {
-        let link = button(text("Search for the fursuit instead").size(t::T_SMALL).font(paint::MEDIUM))
-            .padding(Padding::from([0.0, 4.0]))
-            .style(style::link().style())
-            .on_press(m(Msg::AlsoFursuit(id.clone())));
+        let link = kit::link_btn("Search for the fursuit instead", [0.0, 4.0], Some(m(Msg::AlsoFursuit(id.clone()))));
         r = r.push(row![item(Glyph::Fursuit, format!("There's also a fursuit called {name}.")), link].spacing(t::S1).align_y(Alignment::Center));
     }
     Some(column![container(r.wrap().vertical_spacing(t::S1)).padding(Padding::from([t::S2, t::S3])).width(Length::Fill).style(style::fill(t::GROUND)), kit::hairline()].into())
@@ -1568,7 +1565,7 @@ fn message_page<'a>(glyph: Glyph, title: &'a str, body: String, primary: Option<
     col = col.push(Space::new().height(Length::FillPortion(3)));
     col = col.push(icons::view(glyph, 48.0, t::INK4));
     col = col.push(Space::new().height(t::S2));
-    col = col.push(text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK).align_x(iced::alignment::Horizontal::Center));
+    col = col.push(kit::title(title).align_x(iced::alignment::Horizontal::Center));
     if !body.is_empty() {
         col = col.push(text(body).size(t::T_BODY).color(t::INK2).align_x(iced::alignment::Horizontal::Center));
     }
@@ -1603,9 +1600,9 @@ fn no_card_page(app: &App) -> Element<'_, Message> {
 fn fact<'a>(k: &'a str, v: String, sub: Option<&'a str>) -> Element<'a, Message> {
     let mut words = column![text(v).size(t::T_BODY).color(t::INK)].spacing(2).width(Length::Fill);
     if let Some(sub) = sub {
-        words = words.push(text(sub).size(t::T_SMALL).color(t::INK3));
+        words = words.push(kit::caption(sub));
     }
-    row![text(k).size(t::T_SMALL).color(t::INK3).width(88), words].spacing(t::S3).padding(Padding::from([10.0, 14.0])).into()
+    row![kit::caption(k).width(88), words].spacing(t::S3).padding(Padding::from([10.0, 14.0])).into()
 }
 
 /// Before the first index: what search does, what indexing costs, and the
@@ -1707,7 +1704,7 @@ fn explained<'a>(title: &'a str, about: &'a str, facts: Option<Element<'a, Messa
     if let Some(f) = facts {
         col = col.push(f);
     }
-    col = col.push(text(note.to_string()).size(t::T_SMALL).color(t::INK3));
+    col = col.push(kit::caption(note.to_string()));
     col = col.push(action);
     container(scrollable(container(col).center_x(Length::Fill).padding(Padding { top: 40.0, bottom: t::S5, left: t::S5, right: t::S5 })).style(style::scroll))
         .width(Length::Fill)

@@ -78,7 +78,7 @@ pub struct Settings {
     /// at start; `PP_NO_GLOBAL_MENU` in the environment overrides it.
     pub global_menu: bool,
 
-    // Library search (docs/library-search-plan.md §7a.8).
+    // Library search.
     /// Preferences ▸ Search ▸ *Run models on*: the graphics card (the
     /// default) or the processor.  Never changed by the app itself.
     pub search_device: crate::ml::Device,
@@ -89,23 +89,23 @@ pub struct Settings {
     /// Preferences ▸ Search ▸ *Index new exports* (on): after the first
     /// index, each export is added to search on its own.
     pub search_index_exports: bool,
-    /// The last [`RECENT_SEARCHES`] queries, newest first (§7a.3).
+    /// The last [`RECENT_SEARCHES`] queries, newest first.
     /// *Forget them* in Preferences clears it.
     pub search_recent: Vec<String>,
 
-    // People and fursuits (§7a.5).
+    // People and fursuits.
     /// The tab People and fursuits opens on: 0 people, 1 fursuits,
     /// (2 was pets, now on hold: it opens people).
     pub subjects_tab: u8,
-    // People (phase 3, §7a.8 Preferences ▸ People).
-    /// *Find people's faces* (on by default, decision 9): faces are found
+    // People (Preferences ▸ People).
+    /// *Find people's faces* (on by default): faces are found
     /// as photos are indexed.  Off: no new faces are looked for.
     pub find_faces: bool,
-    /// *Face model*: the recognition model chosen in the download dialog
-    /// (decision 10); changing it recomputes the face vectors and keeps
-    /// names, members and rejections.
+    /// *Face model*: the recognition model chosen in the download dialog;
+    /// changing it recomputes the face vectors and keeps names, members
+    /// and rejections.
     pub face_model: crate::ml::models::ModelId,
-    // Fursuits (phase 4, decision 11).
+    // Fursuits.
     /// *Find fursuit heads* (on by default): heads are looked for in the
     /// photos the index tags as fursuits, after the search step.  With the
     /// processor chosen every scan asks first, whatever this says.
@@ -122,7 +122,7 @@ pub struct Settings {
     /// before the choice loads as Balanced.
     pub fursuit_grouping: crate::search::heads::Grouping,
     /// *Smallest group to show*: clusters with fewer photos fold under
-    /// *Smaller groups* (3, 5 or 10; §10 says 5).
+    /// *Smaller groups* (3, 5 or 10; 5 by default).
     pub people_min_photos: usize,
     /// *Keep a record of my corrections* (on by default, the user's
     /// request): merges, splits, answers and label edits are appended to
@@ -561,9 +561,9 @@ mod tests {
         assert!(text.contains(r#""search_device":"cpu""#));
     }
 
-    /// Decision 9 and 10: faces on by default, AuraFace pre-selected,
-    /// groups of five; odd values fall back.
-    /// Fursuit heads are looked for by default (decision 11), and a file
+    /// Faces on by default, AuraFace pre-selected, groups of five; odd
+    /// values fall back.
+    /// Fursuit heads are looked for by default, and a file
     /// from before fursuits keeps that.
     #[test]
     fn fursuit_heads_are_found_by_default() {

@@ -1,5 +1,4 @@
-//! PCA whitening of the fursuit head vectors (fursuit matching v2,
-//! `docs/library-search-plan.md` "As built — v2").
+//! PCA whitening of the fursuit head vectors (fursuit matching v2).
 //!
 //! The search model's image tower gives each head crop a 768-wide unit
 //! vector.  Raw, those vectors spend most of their length on what every
@@ -582,7 +581,7 @@ mod tests {
 
     /// The fit's cost at the research cohort's size (10 826 heads × 768)
     /// and the library's expected one (`PP_WHITEN_ROWS`, 68 000 by
-    /// default): the plan's bar is under 10 s on the processor.
+    /// default): the bar is under 10 s on the processor.
     #[test]
     #[ignore = "measures the fit at library scale (PP_WHITEN_ROWS)"]
     fn the_fit_takes_seconds_at_library_scale() {

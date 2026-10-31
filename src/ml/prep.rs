@@ -1,7 +1,7 @@
-//! A photo's preview as the models' input (plan §5.1 `prep`): the JPG's
+//! A photo's preview as the models' input: the JPG's
 //! MPF preview (else its own image at a DCT-reduced size), a RAW-only
 //! shot's smallest embedded preview of at least 300 px (1 000 px when
-//! faces are wanted, §7.3), decoded at the largest DCT reduction that
+//! faces are wanted), decoded at the largest DCT reduction that
 //! still covers the input, oriented as the photo is shown, squashed to
 //! [`INPUT_SIZE`] square (what SigLIP2's preprocessing does, so the whole
 //! frame is seen) and normalised to mean 0.5, std 0.5 in CHW order.
@@ -27,13 +27,13 @@ use crate::imaging::libraw::{Raw, Thumbnail};
 use crate::imaging::quality::{self, Plane, Source};
 use crate::model::hints;
 use crate::model::record::{FileType, ShotMeta};
-use crate::search::index::Key;
+use crate::search::index::{KEY_HEAD_BYTES, Key};
 
 /// The model's input edge, in pixels.
 pub const INPUT_SIZE: u32 = 256;
 /// Smaller previews aren't worth embedding.
 pub const PREVIEW_MIN_EDGE: u32 = 300;
-/// A RAW-only shot's preview for faces: at least this long (§7.3).
+/// A RAW-only shot's preview for faces: at least this long.
 pub const FACE_PREVIEW_MIN_EDGE: u32 = 1000;
 /// The decode for the detector keeps at least this on the long side, so
 /// the canvas (`face::DET_SIZE`) is filled rather than upscaled into.
@@ -90,18 +90,21 @@ impl FacePrep {
 }
 
 /// Read and prepare `path`; with `faces`, the detector's canvas too.
+/// One open gives the size, the header (the key, the capture info) and,
+/// for a JPG, the preview; a RAW's preview is LibRaw's own open.
 pub fn prepare(path: &Path, file_type: FileType, faces: bool) -> Result<Prepared, FileError> {
-    let size = std::fs::metadata(path).map_err(|e| FileError::io(&e))?.len();
+    let mut f = exif::open_for_header(path).map_err(|e| FileError::io(&e))?;
+    let size = f.metadata().map_err(|e| FileError::io(&e))?.len();
     match file_type {
-        FileType::Jpg => prepare_jpeg(path, size, faces),
-        FileType::Raw => prepare_raw(path, size, faces),
+        FileType::Jpg => prepare_jpeg(path, &mut f, size, faces),
+        FileType::Raw => prepare_raw(path, &mut f, size, faces),
     }
 }
 
-fn prepare_jpeg(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileError> {
+fn prepare_jpeg(path: &Path, f: &mut std::fs::File, size: u64, faces: bool) -> Result<Prepared, FileError> {
     // The MPF preview, with the header it was found in (≥ 64 KB unless the
     // file is shorter): the key and the capture info come from that.
-    if let Some((data, head)) = exif::jpeg_preview_bytes(path, PREVIEW_MIN_EDGE) {
+    if let Some((data, head)) = exif::jpeg_preview_bytes_from(f, PREVIEW_MIN_EDGE) {
         if decode::jpeg_dimensions(&data).is_some_and(|(w, h)| w.min(h) >= INPUT_SIZE) {
             let key = Key::of(size, &head);
             let (capture, meta) = exif::shot_from_jpeg_head(&head, true);
@@ -109,7 +112,8 @@ fn prepare_jpeg(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileErr
             return finish(data, orientation, Source::Mpf, key, capture, meta, faces);
         }
     }
-    // No usable preview: the image itself, at a reduced size.
+    // No usable preview: the image itself, at a reduced size (a fresh
+    // sequential read: the header handle has read-ahead turned off).
     let data = read_all(path)?;
     let key = Key::of(size, &data);
     let (capture, meta) = exif::shot_from_jpeg_head(&data[..data.len().min(256 * 1024)], true);
@@ -117,16 +121,17 @@ fn prepare_jpeg(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileErr
     finish(data, orientation, Source::Primary, key, capture, meta, faces)
 }
 
-fn prepare_raw(path: &Path, size: u64, faces: bool) -> Result<Prepared, FileError> {
+fn prepare_raw(path: &Path, f: &mut std::fs::File, size: u64, faces: bool) -> Result<Prepared, FileError> {
+    // The first 64 KB: the key, and the capture info (IFD0 and the EXIF
+    // IFD sit there; anything further is read in place from `f`).
     let head = {
         use std::io::Read;
-        let mut f = exif::open_for_header(path).map_err(|e| FileError::io(&e))?;
-        let mut buf = Vec::with_capacity(super::super::search::index::KEY_HEAD_BYTES);
-        f.by_ref().take(super::super::search::index::KEY_HEAD_BYTES as u64).read_to_end(&mut buf).map_err(|e| FileError::io(&e))?;
+        let mut buf = Vec::with_capacity(KEY_HEAD_BYTES);
+        f.by_ref().take(KEY_HEAD_BYTES as u64).read_to_end(&mut buf).map_err(|e| FileError::io(&e))?;
         buf
     };
     let key = Key::of(size, &head);
-    let (capture, meta) = exif::read_shot(path, true);
+    let (capture, meta) = exif::shot_from_raw_head(head, f, true);
     let mut raw = Raw::open(path).map_err(|e| FileError::other(format!("RAW: {e}")))?;
     let flip = raw.exif_orientation();
     let min_edge = if faces { FACE_PREVIEW_MIN_EDGE } else { PREVIEW_MIN_EDGE };

@@ -11,7 +11,6 @@ use chrono::NaiveDate;
 
 use super::collection::{Collection, RecordId};
 use super::record::{FileType, PhotoRecord};
-use crate::util::canonical_parent;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SortKey {
@@ -218,20 +217,19 @@ pub fn sort_ids(ids: &mut [RecordId], coll: &Collection, key: SortKey, asc: bool
 
 /// Every record the filter accepts, in sorted order.
 pub fn visible_sorted(coll: &Collection, state: &FilterState) -> Vec<RecordId> {
-    let mut ids: Vec<RecordId> = coll.ids().to_vec();
+    let mut ids: Vec<RecordId> = coll.ids().iter().copied().filter(|&id| coll.get(id).is_some_and(|r| state.accept(r))).collect();
     sort_ids(&mut ids, coll, state.sort_key, state.sort_asc);
-    ids.retain(|&id| coll.get(id).is_some_and(|r| state.accept(r)));
     ids
 }
 
 /// Drop the RAW of a pair when its JPG is also in the list — the grid and
 /// viewer show one tile per shot.
 pub fn dedup_pairs(ids: &[RecordId], coll: &Collection) -> Vec<RecordId> {
-    let mut jpg_keys = std::collections::HashSet::new();
+    let mut jpg_keys: std::collections::HashSet<(&std::path::Path, &str)> = Default::default();
     for &id in ids {
         if let Some(r) = coll.get(id) {
             if let (Some(stem), FileType::Jpg) = (&r.pair_stem, r.file_type) {
-                jpg_keys.insert((canonical_parent(&r.path), stem.clone()));
+                jpg_keys.insert((shot_parent(&r.path), stem.as_str()));
             }
         }
     }
@@ -240,9 +238,7 @@ pub fn dedup_pairs(ids: &[RecordId], coll: &Collection) -> Vec<RecordId> {
         .filter(|&id| {
             let Some(r) = coll.get(id) else { return false };
             match (&r.pair_stem, r.file_type) {
-                (Some(stem), FileType::Raw) => {
-                    !jpg_keys.contains(&(canonical_parent(&r.path), stem.clone()))
-                }
+                (Some(stem), FileType::Raw) => !jpg_keys.contains(&(shot_parent(&r.path), stem.as_str())),
                 _ => true,
             }
         })

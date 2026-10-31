@@ -849,11 +849,11 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
         },
         "scan-wait" => {
             let left: u64 = arg.parse().unwrap_or(60_000);
-            if app.scanning && left > 0 {
+            if app.scanning() && left > 0 {
                 app.script[i] = format!("scan-wait {}", left.saturating_sub(200));
                 return Task::perform(tokio::time::sleep(Duration::from_millis(200)), move |_| Message::Script(i));
             }
-            eprintln!("[analysis] scan done: scanning={} records={}", app.scanning, app.coll.len());
+            eprintln!("[analysis] scan done: scanning={} records={}", app.scanning(), app.coll.len());
             Task::none()
         }
         "engine-wait" => {
@@ -1059,7 +1059,7 @@ pub fn step(app: &mut App, i: usize) -> Task<Message> {
                 app.derived.visible.len(),
                 app.status.text,
                 app.thumbs.len(),
-                app.scanning,
+                app.scanning(),
                 app.view,
                 app.window_size_width(),
             );

@@ -26,6 +26,7 @@ use iced::advanced::renderer::Renderer as _;
 use iced::widget::image::FilterMethod;
 use iced::{Color, Point, Rectangle, Size};
 
+pub use super::paint::arrival;
 use super::paint::{self, HAlign, Renderer, rect};
 use super::theme as t;
 use crate::imaging::loader::FullImage;
@@ -418,11 +419,6 @@ impl Look<'_> {
             None => r,
         }
     }
-}
-
-/// A thumbnail's fade-in (0–1), from when it arrived.
-pub fn arrival(arrived: Instant, now: Instant) -> f32 {
-    paint::out_cubic((now.saturating_duration_since(arrived).as_secs_f32() * 1000.0 / t::MOTION_MS).clamp(0.0, 1.0))
 }
 
 /// Draw the sheet into `clip`: mounts and photos in one layer, everything

@@ -1,15 +1,15 @@
-//! The vocabulary: plain generic words search treats specially (plan
-//! §3.2, decisions 8 and 12b).  Each word has a kind — an object, a scene,
-//! or one of the subject kinds (people, fursuits, real animals) — a
-//! display form (the plural the lists show) and the prompt its hidden tag
-//! is derived from.  Nothing personal lives here: the words are the
-//! generic things an event, home, travel and nature library holds.
+//! The vocabulary: plain generic words search treats specially.  Each
+//! word has a kind — an object, a scene, or one of the subject kinds
+//! (people, fursuits, real animals) — a display form (the plural the
+//! lists show) and the prompt its hidden tag is derived from.  Nothing
+//! personal lives here: the words are the generic things an event, home,
+//! travel and nature library holds.
 //!
-//! **Kinds never mix** (decision 12, UI 3): the *Things* list shows
-//! objects and scenes only; people, fursuits and real animals get pages
-//! of their own in later phases, and a real animal's results never carry
-//! fursuits.  [`Kind::is_subject`] is the one place that says which kinds
-//! are kept out, and the tests at the end hold it.
+//! **Kinds never mix**: the *Things* list shows objects and scenes only;
+//! people, fursuits and real animals get pages of their own, and a real
+//! animal's results never carry fursuits.  [`Kind::is_subject`] is the
+//! one place that says which kinds are kept out, and the tests at the end
+//! hold it.
 
 /// What a vocabulary word names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -19,11 +19,11 @@ pub enum Kind {
     Object,
     /// A place or a scene: a stage, a beach, fireworks, a sunset.
     Scene,
-    /// People (phase 3 gives them their own pages).
+    /// People (they have pages of their own).
     Person,
-    /// Fursuits (phase 4).
+    /// Fursuits.
     Fursuit,
-    /// Real animals: pets (phase 5).  To the models, many of these words
+    /// Real animals: pets.  To the models, many of these words
     /// mean fursuits in this library ([`Word::must_beat`]).
     Animal,
 }
@@ -49,7 +49,7 @@ pub struct Word {
     /// A vocabulary word this one must beat for a photo to count (the
     /// measured contrast), in tags and in search alike, unless the query
     /// names that word itself.  `"fursuit"` for what fursuits are taken
-    /// for: the animals (decision 12b: a real animal's query also puts
+    /// for: the animals (a real animal's query also puts
     /// the fursuits in a list of their own) and the things the sample
     /// confused with them (a stuffed animal: 139 of 148 tagged were
     /// fursuits before the contrast, every one left after it a real plush
@@ -62,7 +62,7 @@ pub struct Word {
     pub prompt: Option<&'static str>,
     /// The match probability ([`super::query::match_probability`]) a
     /// photo needs to carry the word as a hidden tag.  Calibrated on the
-    /// phase 0 sample (see `tags.rs`); `None` is the vocabulary's default.
+    /// labelled sample (see `tags.rs`); `None` is the vocabulary's default.
     pub threshold: Option<f32>,
 }
 
@@ -412,8 +412,7 @@ pub fn names_fursuits(text: &str) -> bool {
 }
 
 /// The real animal the query names (the first animal word fursuits are
-/// taken for), when it doesn't name fursuits: decision 12b's contrast
-/// applies.
+/// taken for), when it doesn't name fursuits: the contrast applies.
 pub fn animal_in(text: &str) -> Option<&'static Word> {
     if names_fursuits(text) {
         return None;

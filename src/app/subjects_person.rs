@@ -19,7 +19,7 @@ use iced::widget::{Space, button, column, container, pin, row, scrollable, stack
 use iced::{Alignment, Background, Border, Element, Length, Padding, Point, Task};
 
 use super::kit::{self, tip};
-use super::people::{self, Face, FaceRef, Framing, Group, GroupId, Kind, KindWords};
+use super::people::{self, Face, FaceRef, Framing, Group, GroupId, Kind};
 use super::results_pane::{Ask, Pane};
 use super::search::Reply;
 use super::search_results::Results;
@@ -761,7 +761,7 @@ pub fn view(app: &App, keyboard_ok: bool) -> Element<'_, Message> {
             None => container(Space::new()).width(Length::Fill).height(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into(),
             Some(r) if r.found.is_empty() => {
                 let (title, line) = super::search_results::nothing_found(r, None);
-                quiet(title, line)
+                kit::quiet(title, Some(line))
             }
             Some(_) => {
                 let keyboard = keyboard_ok && app.quicklook.is_none() && p.menu.is_none() && p.naming.is_none();
@@ -811,19 +811,6 @@ pub fn overlay(_app: &App) -> Option<Element<'_, Message>> {
     None
 }
 
-fn quiet<'a>(title: String, body: String) -> Element<'a, Message> {
-    let col = column![
-        Space::new().height(Length::FillPortion(2)),
-        text(title).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::PHOTO_INK).align_x(iced::alignment::Horizontal::Center),
-        text(body).size(t::T_BODY).color(t::PHOTO_INK2).align_x(iced::alignment::Horizontal::Center),
-        Space::new().height(Length::FillPortion(5)),
-    ]
-    .spacing(t::S2)
-    .align_x(Alignment::Center)
-    .max_width(480);
-    container(col).width(Length::Fill).height(Length::Fill).center_x(Length::Fill).style(style::fill(t::PHOTO_GROUND)).into()
-}
-
 /// The chip in the field: the person's crop and name, × to leave.
 fn chip<'a>(app: &'a App, g: Option<&'a Group>, kind: Kind) -> (Element<'a, Message>, f32) {
     let name = g.and_then(|g| g.name.clone()).unwrap_or_else(|| "Unnamed".into());
@@ -846,7 +833,7 @@ fn field_width(app: &App) -> f32 {
 fn header<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let s = &app.subjects;
     let g = s.group(&p.group);
-    let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, p.kind.title(), t::INK2, style::secondary(), Some(pm(Msg::Back))), format!("Back to the {}  (Esc)", p.kind.title().to_lowercase()), true);
+    let back = tip(kit::icon_text_btn(Glyph::ChevronLeft, p.kind.plural(), t::INK2, style::secondary(), Some(pm(Msg::Back))), format!("Back to the {}  (Esc)", p.kind.plural().to_lowercase()), true);
     // The field: the magnifier, the chip, then the words.
     let w = field_width(app);
     let (chip, chip_w) = chip(app, g, p.kind);
@@ -902,7 +889,7 @@ fn header<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
 fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
     let s = &app.subjects;
     let Some(g) = s.group(&p.group) else { return Space::new().into() };
-    let one = p.kind.one();
+    let one = p.kind.noun();
     let crop = tile::crop(s.crops.get(&g.cover.face, subj::px(app, 44.0), Framing::Face), 44.0, subj::shape(p.kind));
     let counts = format!("{} over {}.", util::plural(g.photos as u64, "photo"), util::plural(g.days as u64, "day"));
     let mut r = row![crop].spacing(14).align_y(Alignment::Center);
@@ -928,7 +915,7 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
             } else {
                 format!("{counts} Grouped by look, so it may hold more than one {one}: check it before naming, or after.")
             };
-            r = r.push(column![input, text(about).size(t::T_SMALL).color(t::INK2)].spacing(4).width(Length::Fill));
+            r = r.push(column![input, kit::note(about)].spacing(4).width(Length::Fill));
             if g.name.is_none() {
                 let label = row![text("Check this group").size(t::T_BODY).font(paint::MEDIUM), quiet_keycap("Y")].spacing(8).align_y(Alignment::Center);
                 let b = button(container(label).center_y(Length::Fill)).height(t::CONTROL_H).padding(Padding::from([0.0, t::S4])).style(style::secondary().style()).on_press(pm(Msg::Review));
@@ -936,7 +923,7 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
             }
         }
         None => {
-            let name = button(row![text(g.name.clone().unwrap_or_default()).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK), icons::view(Glyph::Pencil, 14.0, t::INK3)].spacing(8).align_y(Alignment::Center))
+            let name = button(row![kit::title(g.name.clone().unwrap_or_default()), icons::view(Glyph::Pencil, 14.0, t::INK3)].spacing(8).align_y(Alignment::Center))
                 .padding(0)
                 .style(|_t, _s| button::Style::default())
                 .on_press(pm(Msg::Rename));
@@ -946,12 +933,12 @@ fn band<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
                 n => format!(" {} more photos may show this {one}.", util::thousands(n as u64)),
             };
             let left_out = super::fursuit_judge::band_words(app, &p.group).unwrap_or_default();
-            r = r.push(column![tip(name, "Rename  (F2)", true), text(format!("{counts}{more_line}{left_out}")).size(t::T_SMALL).color(t::INK2)].spacing(2).width(Length::Fill));
+            r = r.push(column![tip(name, "Rename  (F2)", true), kit::note(format!("{counts}{more_line}{left_out}"))].spacing(2).width(Length::Fill));
         }
     }
     let seg = kit::segmented(vec![
         kit::segment("Photos", p.show == Show::Photos, None, pm(Msg::Show(Show::Photos))),
-        kit::segment(p.kind.crops(), p.show == Show::Faces, None, pm(Msg::Show(Show::Faces))),
+        kit::segment(people::crops(p.kind), p.show == Show::Faces, None, pm(Msg::Show(Show::Faces))),
     ]);
     r = r.push(seg);
     // Fursuits are matched strictly: more come a few at a time, asked for.
@@ -994,7 +981,7 @@ fn name_list<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
     if options.is_empty() {
         return None;
     }
-    let one = p.kind.one();
+    let one = p.kind.noun();
     let mut list = column![].spacing(2);
     for (i, o) in options.iter().enumerate() {
         let hot = i == p.name_hi;
@@ -1021,8 +1008,8 @@ fn name_list<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         };
         let line = row![
             container(lead).width(22).center_x(22),
-            column![title, text(detail).size(t::T_SMALL).color(t::INK3)].spacing(1).width(Length::Fill),
-            text(tag).size(t::T_SMALL).color(t::INK3)
+            column![title, kit::caption(detail)].spacing(1).width(Length::Fill),
+            kit::caption(tag)
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -1060,7 +1047,7 @@ fn menu_row<'a>(lead: Element<'a, Message>, label: String, trail: String, on: Op
     let line = row![
         container(lead).width(22).center_x(22),
         text(label).size(t::T_BODY).color(if enabled { t::INK } else { t::INK4 }).width(Length::Fill),
-        text(trail).size(t::T_SMALL).color(t::INK3)
+        kit::caption(trail)
     ]
     .spacing(10)
     .align_y(Alignment::Center);
@@ -1095,7 +1082,7 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
     let menu = p.menu?;
     let s = &app.subjects;
     let g = s.group(&p.group)?;
-    let one = p.kind.one();
+    let one = p.kind.noun();
     let page_w = app.window_size_width() - RAIL_W;
     let (panel, x, y, w) = match menu {
         Menu::More => {
@@ -1127,7 +1114,7 @@ fn menu_layer<'a>(app: &'a App, p: &'a Person) -> Option<Element<'a, Message>> {
         }
         Menu::MergeInto => {
             let rows = other_groups(app, p, |id| pm(Msg::MergeInto(id)));
-            let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.title().to_lowercase()), String::new(), None)] } else { rows };
+            let rows = if rows.is_empty() { vec![menu_row(Space::new().into(), format!("No other {} yet", p.kind.plural().to_lowercase()), String::new(), None)] } else { rows };
             (menu_panel(Some(format!("Merge {} into", g.name.clone().unwrap_or_else(|| "this group".into()))), rows, 280.0), page_w - 280.0 - 12.0, subj::HEADER_H + BAND_H - 6.0, 280.0)
         }
     };
@@ -1183,7 +1170,7 @@ fn faces_view<'a>(app: &'a App, p: &'a Person) -> Element<'a, Message> {
         // Fursuits: least like the rest first, or clearest first.
         column![super::subjects_split::order_bar(p, faces.len())]
     } else {
-        column![subj::heading(p.kind.crops(), format!("{}, clearest first. Pick the ones that aren't them.", util::thousands(faces.len() as u64)))]
+        column![subj::heading(people::crops(p.kind), format!("{}, clearest first. Pick the ones that aren't them.", util::thousands(faces.len() as u64)))]
     };
     let small = subj::px(app, tile::SMALL_CROP);
     let mut r = row![].spacing(8);

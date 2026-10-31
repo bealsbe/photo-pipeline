@@ -1451,10 +1451,7 @@ fn path_row<'a>(glyph: Glyph, label: &'a str, path: Option<&PathBuf>, link: Opti
     let mut r = row![icons::view(glyph, 16.0, t::INK2), kit::caption(label).width(104), path_text].spacing(t::S2).align_y(Alignment::Center);
     if let Some(m) = link {
         r = r.push(
-            button(text(if path.is_some() { "Change" } else { "Choose…" }).size(t::T_SMALL).font(paint::MEDIUM))
-                .padding(Padding::from([2.0, 4.0]))
-                .style(style::link().style())
-                .on_press(d(m)),
+            kit::link_btn(if path.is_some() { "Change" } else { "Choose…" }, [2.0, 4.0], Some(d(m))),
         );
     }
     r.height(t::CONTROL_H).into()
@@ -1468,7 +1465,7 @@ fn group_box<'a>(content: Element<'a, Message>) -> Element<'a, Message> {
 fn mode_btn<'a>(title: &'a str, sub: &'a str, selected: bool, m: Mode, enabled: bool) -> Element<'a, Message> {
     let content = column![
         text(title).size(t::T_BODY).font(paint::SEMIBOLD).color(if selected { t::INK } else { t::INK2 }),
-        text(sub).size(t::T_SMALL).color(t::INK3),
+        kit::caption(sub),
     ]
     .spacing(2)
     .width(Length::Fill);
@@ -1535,10 +1532,7 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
             check("Only files marked for export", ex.marked_only, t::KEEP, (ex.has_marked && !locked).then_some(Msg::ExMarkedOnly as fn(bool) -> Msg)),
             Space::new().width(Length::Fill),
             // Clear all marks: only while there are marks to clear.
-            button(text(if ex.has_marked { "Clear all marks" } else { "" }).size(t::T_SMALL).font(paint::MEDIUM))
-                .padding(Padding::from([2.0, 4.0]))
-                .style(style::link().style())
-                .on_press_maybe((ex.has_marked && !locked).then_some(d(Msg::ExClearMarks))),
+            kit::link_btn(if ex.has_marked { "Clear all marks" } else { "" }, [2.0, 4.0], (ex.has_marked && !locked).then_some(d(Msg::ExClearMarks))),
         ]
         .align_y(Alignment::Center),
         check("Include pruned files", ex.include_pruned, t::SIGNAL, lock(Msg::ExPruned)),
@@ -1602,7 +1596,7 @@ fn export_view<'a>(app: &'a App, ex: &'a Export, w: f32, h: f32) -> Element<'a, 
         let tone = if fail > 0 { t::WARN } else { t::KEEP };
         let mut col = column![row![
             icons::view(if fail > 0 { Glyph::Warning } else { Glyph::Check }, 18.0, tone),
-            text(format!("{} {verb}", plural(ok as u64, "file"))).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+            kit::title(format!("{} {verb}", plural(ok as u64, "file"))),
             kit::secondary(if fail > 0 { format!("{fail} failed") } else { String::new() }),
         ]
         .spacing(t::S2)
@@ -1742,11 +1736,7 @@ fn profile_rows<'a>(ec: &'a EditCopy, locked: bool) -> Element<'a, Message> {
         kit::segment_maybe("No profile", ec.raws && kind == ProfileKind::None, on(ProfileKind::None)),
     ]);
     let choose = |label: &'a str| -> Element<'a, Message> {
-        button(text(label).size(t::T_SMALL).font(paint::MEDIUM))
-            .padding(Padding::from([2.0, 4.0]))
-            .style(style::link().style())
-            .on_press_maybe(open.then(|| d(Msg::EcProfileBrowse)))
-            .into()
+        kit::link_btn(label, [2.0, 4.0], open.then(|| d(Msg::EcProfileBrowse)))
     };
     // An example of the name, from the first RAW of the plan.
     let example = ec
@@ -1986,7 +1976,7 @@ fn edit_copy_view<'a>(app: &'a App, ec: &'a EditCopy, w: f32, h: f32) -> Element
             container(
                 row![
                     icons::view(if tone == t::KEEP { Glyph::Check } else { Glyph::Warning }, 18.0, tone),
-                    text(format!("{} copied", plural(report.copied.len() as u64, noun))).size(t::T_TITLE).font(paint::SEMIBOLD).color(t::INK),
+                    kit::title(format!("{} copied", plural(report.copied.len() as u64, noun))),
                     kit::secondary(extra.join(", ")),
                 ]
                 .spacing(t::S2)
@@ -2253,7 +2243,7 @@ fn prune_view<'a>(app: &'a App, pr: &'a Prune, w: f32, h: f32) -> Element<'a, Me
                     row![
                         text(r.filename()).size(t::T_BODY).color(t::INK).width(Length::Fill),
                         kit::caption(parent),
-                        text(util::fmt_size(r.file_size)).size(t::T_SMALL).color(t::INK2).width(70).align_x(iced::alignment::Horizontal::Right),
+                        kit::note(util::fmt_size(r.file_size)).width(70).align_x(iced::alignment::Horizontal::Right),
                     ]
                     .spacing(t::S3)
                     .align_y(Alignment::Center),

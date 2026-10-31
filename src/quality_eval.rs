@@ -8,7 +8,7 @@
 //! decisions) and prints what it found and what it cost.  When the folder
 //! has prune and keep sidecars, it scores the hints against them: a pruned
 //! shot (P) is taken as soft or accidental, a kept one (M) as the best of
-//! its burst.  This stands in for hand-labelling (Phase 0).
+//! its burst.  This stands in for hand-labelling.
 //!
 //! Read-only for the folder.  `PP_EVAL_CACHE=<file>` uses (and updates) a
 //! cache file there, and runs the pass twice, cold then warm; without it

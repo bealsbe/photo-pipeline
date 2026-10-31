@@ -16,7 +16,7 @@ use crate::model::bursts::RunMark;
 use crate::model::collection::{Collection, RecordId};
 use crate::model::library_index::FileEntry;
 use crate::search::parse::DateRange;
-use super::people::{GroupId, Kind, KindWords};
+use super::people::{GroupId, Kind};
 use crate::search::{Hit, Parsed, Thing, parse};
 use crate::ui::grid::Section;
 
@@ -50,7 +50,7 @@ pub struct Results {
     pub coll: Arc<Collection>,
     /// Best first.
     pub found: Vec<Found>,
-    /// The fursuits an animal word left out (decision 12b), best first:
+    /// The fursuits an animal word left out, best first:
     /// never in `found`, shown only as a list of their own.
     pub fursuits: Vec<Found>,
     /// The animal word that left them out, singular ("dog").
@@ -380,7 +380,7 @@ impl Pick {
             Pick::Thing { minus: true, .. } => "Leave out",
             Pick::Date { .. } => "Dates",
             Pick::Recent(_) => "Recent searches",
-            Pick::Name { kind, .. } => kind.title(),
+            Pick::Name { kind, .. } => kind.plural(),
         }
     }
 }
